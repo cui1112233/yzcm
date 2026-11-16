@@ -1,0 +1,286 @@
+{
+  "objective": "每完一个对比一个，直至完整复刻",
+  "runtime_commit": "52b7f03be0820cfefdeb879a4b4db281bda41829",
+  "scope_complete": false,
+  "cases": [
+    {
+      "id": "EPI-001",
+      "name": "独立分集标题与生成前内容检查",
+      "original": {
+        "source": "01-readable-frontend/pretty/index-DszfAkKD.js",
+        "lines": [
+          476398,
+          476590,
+          478714
+        ],
+        "observed": "原版创建支持中文章集识别，格式示例为第一集/1-1场次；原生解析及所有格式未实测"
+      },
+      "cm": {
+        "result": "普通/Markdown/中文数字集标题支持；原集号/前言/空集保留；重复和空正文提交前拒绝",
+        "evidence": [
+          "archive/07-parity-execution/zip-reconstruction-20261116/episodes",
+          "07-parity-execution/zip-reconstruction-20261116/frontend-final.log",
+          "07-parity-execution/zip-reconstruction-20261116/core-final.log",
+          "07-parity-execution/zip-reconstruction-20261116/runtime-verification.json"
+        ]
+      },
+      "comparison": "original_static_compared_cm_verified",
+      "remaining": "原版同输入实际导入、空集与取消状态逐项对照；无分隔连写标题尚不自动猜测",
+      "full_parity_passed": false
+    },
+    {
+      "id": "REF-001",
+      "name": "分镜参考图消费的完整名称及类型对应",
+      "original": {
+        "source": "01-readable-frontend/pretty/index-DszfAkKD.js",
+        "lines": [
+          439143,
+          439150,
+          439172
+        ],
+        "observed": "原版有明确名单拆分和清理；这些函数不独自证明原生最终图片引用行为"
+      },
+      "cm": {
+        "result": "References与ReferenceIDs共用完整名称/类型规则；短名字不串入，同类型重名不猜，旧分隔符保留",
+        "evidence": [
+          "07-parity-execution/zip-reconstruction-20261116/references",
+          "07-parity-execution/zip-reconstruction-20261116/runtime-verification.json"
+        ]
+      },
+      "comparison": "cm_real_service_verified_original_final_request_pending",
+      "remaining": "原版最终引用请求对照及资产ID关系迁移；别名和描述句不猜测",
+      "full_parity_passed": false
+    },
+    {
+      "id": "G12-CAT-001",
+      "name": "角色库分类独立持久化与选择创建删除",
+      "original": {
+        "source": "asset-library-original/manager/source-excerpts/character-editor.txt",
+        "lines": [
+          40,
+          97,
+          367
+        ],
+        "controlled_replay": "library-categories-20261116/original-category-replay.json",
+        "controlled_cases": 6
+      },
+      "cm": {
+        "result": "独立分类持久化，取消角色不回滚，内置不可删，慢响应阻止旧稿应用，Enter与输入法处理",
+        "evidence": [
+          "library-categories-20261116/mysql-result.json",
+          "library-categories-20261116/actual-4001-result.json",
+          "library-categories-20261116/frontend/enter-create-regression.log",
+          "library-categories-20261116/runtime-verification.json"
+        ]
+      },
+      "comparison": "original_static_and_controlled_functions_compared_cm_dom_http_mysql_runtime_verified",
+      "remaining": "原桌面真实编辑与同视口像素对照尚待验证；错误提示为已说明的CM改进",
+      "full_parity_passed": false
+    },
+    {
+      "id": "G12-BULK-001",
+      "name": "原V2角色归档互通及整库导入导出清空",
+      "original": {
+        "native_module_sha256": "297ec8b0c40be9653cb9d96ea6c6c895f2439048c0810e930d3e94967b3c186c",
+        "source_metadata": "api.py declared lines 11227/11297/11489, not recovered author source",
+        "controlled_cases": 12,
+        "evidence": [
+          "library-bulk-20261116/native-bulk-matrix.json",
+          "library-bulk-20261116/native-file-portability.json"
+        ]
+      },
+      "cm": {
+        "commit": "0f657442e02a26dcc3a85cf46923e104d42330df",
+        "actual_mysql_checks": 31,
+        "actual_4001_http_checks": 16,
+        "evidence": [
+          "library-bulk-20261116/backend/mysql-result.json",
+          "library-bulk-20261116/actual-4001-result.json",
+          "library-bulk-20261116/live-to-native-import-result.json",
+          "library-bulk-20261116/runtime-verification.json",
+          "library-bulk-20261116/frontend/recovery-final.log"
+        ]
+      },
+      "comparison": "original_compiled_methods_and_bidirectional_archive_compared_cm_dom_mysql_http_4001_verified",
+      "remaining": "原桌面逐按钮与同视口像素、真实登录浏览器未验证；整页刷新恢复未实现；不把配置媒体检查冒称TOS",
+      "full_parity_passed": false
+    },
+    {
+      "id": "G12-SUBJECT-001",
+      "name": "主体存档编辑复制与普通库选用项目角色",
+      "original": {
+        "source": "01-readable-frontend/pretty/index-DszfAkKD.js",
+        "lines": [
+          65204,
+          65366,
+          178096,
+          178106
+        ],
+        "controlled_editor_cases": 7,
+        "native_upload_declaration": "api.py:10320 metadata, not recovered source",
+        "evidence": [
+          "library-subject-20261116/original-editor-replay.json",
+          "library-subject-20261116/frontend-sora-consumers.txt",
+          "library-subject-20261116/ANALYSIS.md"
+        ]
+      },
+      "cm": {
+        "commit": "23bbdd92e0677d2156c0c0906f56bf2328b1101a",
+        "actual_mysql_checks": 28,
+        "actual_4001_http_checks": 16,
+        "evidence": [
+          "library-subject-20261116/backend/mysql-result.json",
+          "library-subject-20261116/frontend/RESULTS.md",
+          "library-subject-20261116/actual-4001-result.json",
+          "library-subject-20261116/native-live-subject-archive-result.json",
+          "library-subject-20261116/runtime-verification.json"
+        ]
+      },
+      "comparison": "original_recovered_editor_and_binding_rules_compared_cm_dom_mysql_http_4001_verified",
+      "remaining": "真人上传、原视频最终消费未实现；原桌面点击/同视口像素及实际登录浏览器未通过；主动textarea编辑按LF保存",
+      "full_parity_passed": false
+    },
+    {
+      "id": "G12-UPLOAD-001",
+      "name": "自有配置真人素材上传、核对与角色应用",
+      "original": {
+        "module_sha256": "297ec8b0c40be9653cb9d96ea6c6c895f2439048c0810e930d3e94967b3c186c",
+        "declaration": "api.py:10320 metadata, not author source",
+        "evidence": [
+          "library-subject-20261116/native-upload-boundaries-fire.json",
+          "subject-upload-20261116/provider/native-deyunai-processing.json"
+        ]
+      },
+      "cm": {
+        "commit": "865e15683bd1384531951d6fc09dcab65a7c3109",
+        "actual_mysql_redis_checks": 66,
+        "actual_4001_http_checks": 11,
+        "provider_execution": "controlled fake HTTP/Runner only, actual supplier calls zero",
+        "evidence": [
+          "subject-upload-20261116/backend/actual-result.json",
+          "subject-upload-20261116/frontend/routes-frontend-green.log",
+          "subject-upload-20261116/actual-4001-result.json",
+          "subject-upload-20261116/native-live-archive-result.json",
+          "subject-upload-20261116/runtime-verification.json"
+        ]
+      },
+      "comparison": "native_request_and_signature_compared_cm_dom_real_mysql_redis_and_4001_controlled_result_verified",
+      "remaining": "实际供应商/原桌面像素/其它渠道/最终视频消费未通过；不跨页面刷新恢复File；storage既存缺ProjectRetention预期失败有前后对照",
+      "full_parity_passed": false
+    },
+    {
+      "id": "G12-VIDEO-001",
+      "name": "主体存档进入自有视频协议与中断核对",
+      "original": {
+        "evidence": [
+          "subject-video-20261116/",
+          "subject-video-query-20261116/"
+        ]
+      },
+      "cm": {
+        "commit": "7f2fd9060143293546aac5bf156593ed45a207dd",
+        "actual_4001_http_checks": 16,
+        "real_mysql_runner_adapter_checks": 18,
+        "evidence": [
+          "subject-video-runtime-20261116/actual-config-result.json",
+          "subject-video-runtime-20261116/full-chain-result.json",
+          "subject-video-runtime-20261116/runtime-verification.json"
+        ],
+        "provider_execution": "final HTTP transport controlled; real supplier calls zero"
+      },
+      "comparison": "original_request_and_query_contract_compared_real_local_chain_controlled_HTTP",
+      "remaining": "actual supplier and original desktop pixels remain unverified",
+      "full_parity_passed": false
+    },
+    {
+      "id": "G20-COVERAGE-001",
+      "name": "规划完成器220组输出逐项一致",
+      "original": {
+        "declaration": "works.episode_coverage.evaluate_plan:185 compiled metadata, not source",
+        "evidence": [
+          "planning-native-20261116/planning-rule-cases.json",
+          "planning-native-20261116/planning-coverage-matrix.json"
+        ]
+      },
+      "cm": {
+        "original_golden_cases": 220,
+        "evidence": [
+          "backend/internal/screenplay/testdata/storyboard_plan_coverage_original.json.gz",
+          "35-planning-coverage-results.md",
+          "planning-coverage-runtime-20261116/mysql-http-result.json",
+          "planning-coverage-runtime-20261116/runtime-verification.json"
+        ],
+        "commit": "13b208764f8319fe6c5fd0bc4df931acf37bcdd4",
+        "real_mysql_and_actual_4001_checks": 5
+      },
+      "comparison": "all completion fields and reason compared; service persistence and controlled browser duplicate-click checked",
+      "remaining": "four guide bodies, eight-round continuation and full planning chain still pending; no paid provider or original desktop pixel acceptance",
+      "full_parity_passed": false
+    },
+    {
+      "id": "G20-PLAN-002",
+      "name": "原生四档规划正文、8轮续写与自有模型链",
+      "original": {
+        "declaration": "creation_agent.py:3166,3102,3081,3072; storyboard_plan_guide.py:498; compiled metadata not source",
+        "evidence": [
+          "planning-native-20261116/planning-generation-boundary.json",
+          "planning-native-20261116/planning-generation-extended.json",
+          "planning-native-20261116/planning-previous-excerpts.json",
+          "planning-native-20261116/planning-continuation-tail.json"
+        ]
+      },
+      "cm": {
+        "commit": "6a2e7ca2d96a62e7ac7b2883c53966b74b1c6304",
+        "native_generation_cases": 15,
+        "guide_variants": 8,
+        "continue_message_cases": 16,
+        "append_cases": 60,
+        "actual_mysql_provider_4001_checks": 9,
+        "real_supplier_calls": 0,
+        "evidence": [
+          "37-planning-continuation-results.md",
+          "planning-continuation-runtime-20261116/runtime-verification.json",
+          "planning-continuation-runtime-20261116/mysql-http-result.json"
+        ]
+      },
+      "comparison": "message texts, accumulated output and rounds compared; configured channel and real persistence readback controlled final HTTP verified",
+      "remaining": "native streaming/progress events, explicit continue-existing entry, complex asset context, original pixels and138storyboard continuation pending",
+      "full_parity_passed": false
+    },
+    {
+      "id": "G20-PROGRESS-003",
+      "name": "章节规划逐轮真实进度与Redis空记录边界",
+      "original": {
+        "declaration": "creation_agent.py:3121,3166; compiled metadata, not recovered author source; installed JS440515",
+        "evidence": [
+          "planning-native-20261116/planning-generation-progress.json",
+          "planning-native-20261116/planning-continue-existing.json",
+          "planning-native-20261116/planning-guide-empty-boundaries.json"
+        ],
+        "progress_cases": 4,
+        "progress_events": 8,
+        "continue_existing_cases": 5,
+        "guide_boundary_cases": 3
+      },
+      "cm": {
+        "commit": "3a3ec8182eecb197975a60f7855af31cad62ebda",
+        "actual_mysql_redis_4001_checks": 12,
+        "browser_progress_checks": 5,
+        "page_regression_checks": 4,
+        "real_supplier_calls": 0,
+        "evidence": [
+          "39-planning-progress-results.md",
+          "planning-progress-runtime-20261116/runtime-verification.json",
+          "planning-progress-runtime-20261116/mysql-http-result.json",
+          "planning-progress-browser-20261116/final-source-progress.log",
+          "planning-progress-browser-20261116/final-source-page.log",
+          "planning-progress-browser-20261116/final-source-partial-recheck.log"
+        ]
+      },
+      "comparison": "Exact native round events matched; real Redis/MySQL producer and actual4001 readback verify pending/final/missing states, isolation and no repeat generation. Browser partial regression required isolated rerun after inspection timeout; one earlier HTTP timeout remains unexplained and retained.",
+      "remaining": "Existing-plan continuation, works-page separate11-call planning, native streaming,138storyboard continuation and original full UI/icon pixel parity remain pending.",
+      "full_parity_passed": false
+    }
+  ],
+  "latest_runtime_commit": "3a3ec8182eecb197975a60f7855af31cad62ebda"
+}

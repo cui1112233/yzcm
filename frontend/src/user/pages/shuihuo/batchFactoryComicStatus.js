@@ -1,0 +1,57 @@
+// 列表行漫画页的展示语义。后端已经返回 promptStatus/imageStatus/generationState，
+// 前端不再只用“有没有主图”判断，否则「生成中」「生成失败」「还没提取提示词」
+// 都会被渲染成同一句“暂无漫画页”，无法区分“没生成”和“生成失败/取不到”。
+export function comicInlinePresentation({ page, selectedVideo, loading, error, hasPrimary }) {
+  if (hasPrimary) return { statusText: '当前主图', stateText: '已选主图', placeholder: '', tone: 'ready', retry: false };
+  if (error) return { statusText: '读取失败', stateText: '读取失败', placeholder: '漫画页读取失败，点击重试', tone: 'error', retry: true };
+  if (!page) {
+    if (loading) return { statusText: '读取中', stateText: '读取中', placeholder: '正在读取漫画页…', tone: '', retry: false };
+    const hasPrompt = String(selectedVideo?.comicPrompt || '').trim().length > 0;
+    return hasPrompt
+      ? { statusText: '等待生成图片', stateText: '待生成', placeholder: '漫画页尚未生成，点击打开媒体库', tone: '', retry: false }
+      : { statusText: '等待提取漫画提示词', stateText: '待分析', placeholder: '尚未提取漫画提示词', tone: '', retry: false };
+  }
+  if (page.generationState === 'generating') return { statusText: '生成中', stateText: '生成中', placeholder: '漫画页生成中…', tone: 'busy', retry: false };
+  if (page.generationState === 'failed') return { statusText: '生成失败', stateText: '失败', placeholder: comicPageErrorHeadline(page) || '漫画页生成失败，点击查看', tone: 'error', retry: false };
+  if (page.promptStatus === 'missing') return { statusText: '提示词缺失', stateText: '待分析', placeholder: '尚未提取漫画提示词', tone: '', retry: false };
+  if (page.imageStatus === 'candidates') return { statusText: '已有候选图', stateText: '待选主图', placeholder: '已有候选图，打开媒体库选主图', tone: '', retry: false };
+  if (page.imageStatus === 'none' && page.status === 'generation_failed') return { statusText: '生成失败', stateText: '失败', placeholder: comicPageErrorHeadline(page) || '漫画页生成失败，点击查看', tone: 'error', retry: false };
+  return { statusText: '等待生成图片', stateText: '待生成', placeholder: '等待生成漫画页图片', tone: '', retry: false };
+}
+
+// 页级失败文案是“中文主文案 + \n上游原文：”两段式；列表行只取第一行，
+// 原文交给 BatchFactoryErrorNotice 折叠区，不把英文原文顶到主文案。
+export function comicPageErrorHeadline(page) {
+  const text = String(page?.generationError || '').trim();
+  if (!text) return '';
+  const [headline] = text.split('\n上游原文：');
+  return headline.trim();
+}
+
+// 列表行/缩略图格优先取服务端缩略图；没有 thumbnailUrl 时回落到原图。
+// 详情、放大预览必须传 original，保证看到的仍是原图。
+export function resolveComicImageSources(image) {
+  const original = String(image?.url || '');
+  const thumbnail = String(image?.thumbnailUrl || '') || original;
+  return { thumbnail, original };
+}
+
+// 详情页先显示小图，再在后台替换成原图；列表只读小图，避免一打开同时下载大量原图。
+export function comicImageLoadPlan(image, preview = false) {
+  const { thumbnail, original } = resolveComicImageSources(image);
+  const plan = [];
+  if (thumbnail) plan.push(thumbnail);
+  if (preview && original && original !== thumbnail) plan.push(original);
+  return plan;
+}
+
+// 漫画输出卡首屏只挂 4 张。35 页原图一次性挂载会同时发起 35 个 3MB 级请求，
+// 滚动到尾部哨兵后再按批追加，交互（点击看原图、下载本页）保持不变。
+export const COMIC_OUTPUT_FIRST_SCREEN = 4;
+
+export function nextComicOutputVisibleCount(current, total) {
+  const maximum = Math.max(0, Number(total) || 0);
+  if (maximum === 0) return 0;
+  const visible = Math.max(0, Number(current) || 0);
+  return Math.min(maximum, visible + COMIC_OUTPUT_FIRST_SCREEN);
+}

@@ -1,0 +1,208 @@
+[data-bf-v11-ui='final'] {
+  /* 本地色板全部指向全局语义变量，深浅主题由 global.css 统一提供。 */
+  --bf11-bg: var(--surface-base);
+  --bf11-panel: var(--surface-panel);
+  --bf11-soft: var(--surface-2);
+  --bf11-input: var(--surface-input);
+  --bf11-line: var(--border-default);
+  --bf11-line-strong: var(--border-strong);
+  --bf11-text: var(--text-primary);
+  --bf11-text-secondary: var(--text-secondary);
+  --bf11-muted: var(--text-tertiary);
+  --bf11-disabled: var(--text-disabled);
+  /* 保留页面品牌色：批量工厂 v11 用珊瑚红强调，与外壳主色一致。 */
+  --bf11-accent: var(--theme-primary);
+  --bf11-success: var(--text-success);
+  --bf11-danger: var(--text-danger);
+  min-height: 100%;
+  box-sizing: border-box;
+  padding: 10px;
+  background: var(--bf11-bg);
+  color: var(--bf11-text);
+  color-scheme: dark;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench {
+  background: var(--bf11-bg);
+  color: var(--bf11-text);
+}
+
+[data-theme='light'] [data-bf-v11-ui='final'] {
+  background: var(--bf11-bg);
+  color: var(--bf11-text);
+  color-scheme: light;
+}
+
+[data-bf-v11-ui='final'] .bf11-status-row,
+[data-bf-v11-ui='final'] .bf11-workspace-grid {
+  background: transparent;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-typography,
+[data-bf-v11-ui='final'] .bf11-workbench .ant-empty-description,
+[data-bf-v11-ui='final'] .bf11-workbench strong {
+  color: var(--text-primary) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-typography-secondary,
+[data-bf-v11-ui='final'] .bf11-content-section > p,
+[data-bf-v11-ui='final'] .bf11-video-detail .ant-typography,
+[data-bf-v11-ui='final'] .bf11-unified-player span,
+[data-bf-v11-ui='final'] .bf11-unified-player small,
+[data-bf-v11-ui='final'] .bf11-tool-status small {
+  color: var(--text-secondary) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-card-title small,
+[data-bf-v11-ui='final'] .bf11-book-copy small,
+[data-bf-v11-ui='final'] .bf11-book-index,
+[data-bf-v11-ui='final'] .bf11-region-heading span,
+[data-bf-v11-ui='final'] .bf11-content-section > header span,
+[data-bf-v11-ui='final'] .bf11-assets b,
+[data-bf-v11-ui='final'] .bf11-video-list button small,
+[data-bf-v11-ui='final'] .bf11-filter-results > small {
+  color: var(--text-tertiary) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-input,
+[data-bf-v11-ui='final'] .bf11-workbench .ant-input-affix-wrapper,
+[data-bf-v11-ui='final'] .bf11-workbench .ant-select-selector {
+  color: var(--bf11-text) !important;
+  background: var(--bf11-input) !important;
+  border-color: var(--bf11-line) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-input::placeholder,
+[data-bf-v11-ui='final'] .bf11-workbench .ant-input-affix-wrapper input::placeholder {
+  color: var(--bf11-muted) !important;
+  opacity: 1;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-input-affix-wrapper-focused,
+[data-bf-v11-ui='final'] .bf11-workbench .ant-input:focus,
+[data-bf-v11-ui='final'] .bf11-workbench .ant-select-focused .ant-select-selector {
+  border-color: var(--bf11-accent) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--bf11-accent) 18%, transparent) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-btn-default:not(:disabled) {
+  color: var(--bf11-text-secondary) !important;
+  background: color-mix(in srgb, var(--bf11-panel) 86%, var(--bf11-soft)) !important;
+  border-color: var(--bf11-line) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-btn-default:not(:disabled):hover {
+  color: var(--bf11-text) !important;
+  border-color: var(--bf11-accent) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-btn:disabled,
+[data-bf-v11-ui='final'] .bf11-workbench .ant-btn-disabled {
+  color: var(--bf11-disabled) !important;
+  background: color-mix(in srgb, var(--bf11-input) 76%, transparent) !important;
+  border-color: color-mix(in srgb, var(--bf11-line) 72%, transparent) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-segmented {
+  color: var(--bf11-text-secondary) !important;
+  background: var(--bf11-input) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-segmented-item {
+  color: var(--bf11-text-secondary) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-segmented-item-selected {
+  color: var(--bf11-text) !important;
+  background: var(--bf11-soft) !important;
+  box-shadow: inset 0 0 0 1px var(--bf11-line) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-preview-tabs button {
+  color: var(--bf11-text-secondary) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-preview-tabs button.is-active {
+  color: var(--bf11-text) !important;
+  border-color: var(--bf11-accent) !important;
+  background: color-mix(in srgb, var(--bf11-accent) 16%, transparent) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-tag {
+  color: var(--bf11-text-secondary) !important;
+  background: var(--tag-bg) !important;
+  border-color: var(--bf11-line) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-tag-red,
+[data-bf-v11-ui='final'] .bf11-workbench .ant-tag-error {
+  color: var(--text-danger) !important;
+  background: var(--surface-panel) !important;
+  border-color: var(--border-default) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-tag-purple {
+  color: var(--tag-purple-text) !important;
+  background: var(--tag-purple-bg) !important;
+  border-color: var(--tag-purple-border) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-tag-green {
+  color: var(--text-success) !important;
+  background: var(--status-success-bg) !important;
+  border-color: var(--status-success-border) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-tag-blue,
+[data-bf-v11-ui='final'] .bf11-workbench .ant-tag-processing,
+[data-bf-v11-ui='final'] .bf11-workbench .ant-tag-geekblue {
+  color: var(--tag-blue-text) !important;
+  background: var(--tag-blue-bg) !important;
+  border-color: var(--tag-blue-border) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-tag-gold {
+  color: var(--text-warning) !important;
+  background: var(--status-warning-bg) !important;
+  border-color: var(--status-warning-border) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-tag-cyan {
+  color: var(--tag-blue-text) !important;
+  background: var(--tag-blue-bg) !important;
+  border-color: var(--tag-blue-border) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-status-cards button {
+  color: var(--bf11-text-secondary) !important;
+  background: color-mix(in srgb, var(--bf11-panel) 84%, transparent);
+}
+
+[data-bf-v11-ui='final'] .bf11-status-cards button:hover,
+[data-bf-v11-ui='final'] .bf11-status-cards button.is-active,
+[data-bf-v11-ui='final'] .bf11-book-row.is-selected,
+[data-bf-v11-ui='final'] .bf11-video-list button.is-selected {
+  border-color: var(--bf11-accent) !important;
+  background: color-mix(in srgb, var(--bf11-accent) 14%, transparent) !important;
+}
+
+/* 视频预览画布固定深色：媒体预览区不随主题翻转，保持画面外框与视频黑边一致。 */
+[data-bf-v11-ui='final'] .bf11-unified-player {
+  background: linear-gradient(145deg, #08111f, #0d1726) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-player-track {
+  background: #314056 !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-player-track i {
+  background: var(--bf11-accent) !important;
+}
+
+[data-bf-v11-ui='final'] .bf11-workbench .ant-progress-text {
+  color: var(--bf11-text-secondary) !important;
+}
+
+@media (max-width: 900px) {
+  [data-bf-v11-ui='final'] { padding: 8px; }
+}

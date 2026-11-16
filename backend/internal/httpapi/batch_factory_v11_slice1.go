@@ -1,0 +1,832 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"qiantie/backend/internal/auth"
+	"qiantie/backend/internal/batchfactoryv11"
+	"qiantie/backend/internal/prompt"
+)
+
+type batchRuntimeIndexReader interface {
+	GetBatchRuntimeIndex(context.Context, string, string) (batchfactoryv11.Batch, error)
+}
+
+type batchRecoveryIndexLister interface {
+	ListBatchRecoveryIndex(context.Context, string) ([]batchfactoryv11.Batch, error)
+}
+
+type batchSummaryIndexLister interface {
+	ListBatchSummaryIndex(context.Context, string) ([]batchfactoryv11.Batch, error)
+}
+
+// validBatchFactorySourceBookID 校验用户手工修正的外部书城书号：纯数字 3-20 位。
+func validBatchFactorySourceBookID(value string) bool {
+	if len(value) < 3 || len(value) > 20 {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func deleteRetentionDays(r *http.Request) int {
+	value, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("retentionDays")))
+	if err != nil {
+		return batchfactoryv11.DefaultLocalMergedArtifactRetentionDays
+	}
+	switch value {
+	case 3, 7, 14, 30:
+		return value
+	default:
+		return batchfactoryv11.DefaultLocalMergedArtifactRetentionDays
+	}
+}
+
+func deleteBookWithRetention(ctx context.Context, store batchfactoryv11.Store, owner, batchID, bookID string, days int) error {
+	if retentionStore, ok := store.(batchfactoryv11.RetentionDeletingStore); ok {
+		return retentionStore.DeleteBookWithRetention(ctx, owner, batchID, bookID, days)
+	}
+	return store.DeleteBook(ctx, owner, batchID, bookID)
+}
+
+func deleteBatchWithRetention(ctx context.Context, store batchfactoryv11.Store, owner, batchID string, days int) error {
+	if retentionStore, ok := store.(batchfactoryv11.RetentionDeletingStore); ok {
+		return retentionStore.DeleteBatchWithRetention(ctx, owner, batchID, days)
+	}
+	return store.DeleteBatch(ctx, owner, batchID)
+}
+
+func registerSliceOneRoutes(mux *http.ServeMux, store batchfactoryv11.Store, catalog *prompt.Catalog) {
+	registerPrivateCustomizationComicRoute(mux, store, catalog)
+	mux.HandleFunc("POST /api/batch-factory/v11/intakes/manual", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		var input batchfactoryv11.ManualIntakeInput
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if input.ContentRangeLines <= 0 {
+			input.ContentRangeLines = 5
+		}
+		if input.ContentRangeLines > 500 {
+			writeStoreError(w, batchfactoryv11.ErrInvalid)
+			return
+		}
+		if input.ComicAnalysisCharacters <= 0 {
+			input.ComicAnalysisCharacters = 2000
+		}
+		if input.ComicAnalysisCharacters < 100 || input.ComicAnalysisCharacters > 100000 {
+			writeStoreError(w, batchfactoryv11.ErrInvalid)
+			return
+		}
+		if input.ContentCaptureCharacters <= 0 {
+			input.ContentCaptureCharacters = 4000
+		}
+		if input.ContentCaptureCharacters < 100 || input.ContentCaptureCharacters > 100000 {
+			writeStoreError(w, batchfactoryv11.ErrInvalid)
+			return
+		}
+		queueStatus := "manual_pending"
+		if strings.TrimSpace(input.ScheduledAt) != "" {
+			if _, err := time.Parse(time.RFC3339, input.ScheduledAt); err != nil {
+				writeStoreError(w, batchfactoryv11.ErrInvalid)
+				return
+			}
+			queueStatus = "scheduled_waiting"
+		}
+		grouped := len(input.Groups) > 0
+		var books []batchfactoryv11.CreateBookInput
+		var err error
+		if grouped {
+			books, err = batchfactoryv11.ParseGroupedManualBookLists(input)
+		} else {
+			books, err = batchfactoryv11.ParseManualBookList(input)
+		}
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		if len(books) > 50 {
+			writeStoreError(w, batchfactoryv11.ErrInvalid)
+			return
+		}
+		for index := range books {
+			if books[index].SourceMetadata == nil {
+				books[index].SourceMetadata = map[string]any{}
+			}
+			books[index].SourceMetadata["contentRangeLines"] = input.ContentRangeLines
+			books[index].SourceMetadata["comicAnalysisCharacters"] = input.ComicAnalysisCharacters
+			books[index].SourceMetadata["contentCaptureCharacters"] = input.ContentCaptureCharacters
+			books[index].SourceMetadata["scheduledAt"] = strings.TrimSpace(input.ScheduledAt)
+			books[index].SourceMetadata["queueStatus"] = queueStatus
+			if !grouped {
+				books[index].SourceMetadata["platformName"] = strings.TrimSpace(input.PlatformName)
+			}
+		}
+		intake, err := store.CreateIntake(r.Context(), owner, batchfactoryv11.NovelFetchIntakeInput{
+			Books: books,
+			Metadata: map[string]any{
+				"sourceMode": "manual_original", "platformId": input.PlatformID, "platformName": strings.TrimSpace(input.PlatformName), "parseMode": input.ParseMode,
+				"columnPresetId": input.ColumnPresetID, "columnOrder": input.ColumnOrder, "inputText": input.InputText,
+				"contentRangeLines": input.ContentRangeLines, "comicAnalysisCharacters": input.ComicAnalysisCharacters, "contentCaptureCharacters": input.ContentCaptureCharacters, "scheduledAt": strings.TrimSpace(input.ScheduledAt), "queueStatus": queueStatus,
+				"groupCount": len(input.Groups),
+			},
+		})
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		batch, err := store.CreateBatchFromIntake(r.Context(), owner, intake.ID, batchfactoryv11.CreateBatchInput{Title: input.Title, InitialBatchSettings: input.InitialBatchSettings})
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"batch": batch, "intake": intake})
+	})
+	mux.HandleFunc("POST /api/batch-factory/v11/intakes/novel-fetch", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		var input batchfactoryv11.NovelFetchIntakeInput
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		intake, err := store.CreateIntake(r.Context(), owner, input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"intake": intake})
+	})
+	mux.HandleFunc("GET /api/batch-factory/v11/intakes/{intakeId}", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		intake, err := store.GetIntake(r.Context(), owner, r.PathValue("intakeId"))
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"intake": intake})
+	})
+	mux.HandleFunc("POST /api/batch-factory/v11/intakes/{intakeId}/batches", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		var input batchfactoryv11.CreateBatchInput
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		batch, err := store.CreateBatchFromIntake(r.Context(), owner, r.PathValue("intakeId"), input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"batch": batch})
+	})
+	mux.HandleFunc("POST /api/batch-factory/v11/batches/{batchId}/intakes/{intakeId}/books", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		var input struct {
+			AllowDuplicate bool `json:"allowDuplicate"`
+		}
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		batch, err := store.AppendBooksFromIntake(r.Context(), owner, r.PathValue("batchId"), r.PathValue("intakeId"), input.AllowDuplicate)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"batch": batch})
+	})
+	mux.HandleFunc("GET /api/batch-factory/v11/batches", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		batches, err := store.ListBatches(r.Context(), owner)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"batches": batches})
+	})
+	mux.HandleFunc("GET /api/batch-factory/v11/batches/summary-index", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		var batches []batchfactoryv11.Batch
+		var err error
+		if lister, ok := store.(batchSummaryIndexLister); ok {
+			batches, err = lister.ListBatchSummaryIndex(r.Context(), owner)
+		} else {
+			batches, err = store.ListBatches(r.Context(), owner)
+		}
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"batches": batches})
+	})
+	mux.HandleFunc("POST /api/batch-factory/v11/batches", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		var input batchfactoryv11.CreateBatchInput
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		batch, err := store.CreateBatch(r.Context(), owner, input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"batch": batch})
+	})
+	mux.HandleFunc("GET /api/batch-factory/v11/batches/recovery-index", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		var batches []batchfactoryv11.Batch
+		var err error
+		if lister, ok := store.(batchRecoveryIndexLister); ok {
+			batches, err = lister.ListBatchRecoveryIndex(r.Context(), owner)
+		} else {
+			batches, err = store.ListBatches(r.Context(), owner)
+		}
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"batches": batches})
+	})
+	mux.HandleFunc("GET /api/batch-factory/v11/batches/{batchId}/runtime-index", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		var batch batchfactoryv11.Batch
+		var err error
+		if reader, ok := store.(batchRuntimeIndexReader); ok {
+			batch, err = reader.GetBatchRuntimeIndex(r.Context(), owner, r.PathValue("batchId"))
+		} else {
+			batch, err = store.GetBatch(r.Context(), owner, r.PathValue("batchId"))
+		}
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"batch": batch})
+	})
+	mux.HandleFunc("GET /api/batch-factory/v11/batches/{batchId}", func(w http.ResponseWriter, r *http.Request) {
+		identity, ok := BridgeIdentityFromContext(r.Context())
+		if !ok || identity.Username == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		owner := identity.Username
+		batch, err := store.GetBatch(r.Context(), owner, r.PathValue("batchId"))
+		if err != nil {
+			if errors.Is(err, batchfactoryv11.ErrNotFound) {
+				writeBatchAccessError(w, r, store, identity)
+				return
+			}
+			writeStoreError(w, err)
+			return
+		}
+		payload := map[string]any{"batch": batch}
+		// 管理员只读查看其他账号的批次时，明确标出真实归属账号。
+		if batchOwner := batchReadThroughOwner(r.Context()); batchOwner != "" {
+			payload["ownerUsername"] = batchOwner
+		}
+		if readiness := comicReadinessByBook(r.Context(), store, catalog, owner, batch); len(readiness) > 0 {
+			payload["comicReadiness"] = readiness
+		}
+		writeJSON(w, http.StatusOK, payload)
+	})
+	mux.HandleFunc("DELETE /api/batch-factory/v11/batches/{batchId}/books/{bookId}", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		if err := deleteBookWithRetention(r.Context(), store, owner, r.PathValue("batchId"), r.PathValue("bookId"), deleteRetentionDays(r)); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("DELETE /api/batch-factory/v11/batches/{batchId}", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		if err := deleteBatchWithRetention(r.Context(), store, owner, r.PathValue("batchId"), deleteRetentionDays(r)); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("PUT /api/batch-factory/v11/batches/{batchId}/settings", settingsHandler(store, catalog, batchfactoryv11.ScopeBatch))
+	mux.HandleFunc("PUT /api/batch-factory/v11/batches/{batchId}/books/{bookId}/metadata", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		var input struct {
+			Metadata         map[string]any `json:"metadata"`
+			MetadataPatch    map[string]any `json:"metadataPatch,omitempty"`
+			Title            string         `json:"title,omitempty"`
+			SourceBookID     string         `json:"sourceBookId,omitempty"`
+			ExpectedRevision int64          `json:"expectedRevision"`
+		}
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		sourceBookID := strings.TrimSpace(input.SourceBookID)
+		if sourceBookID != "" && !validBatchFactorySourceBookID(sourceBookID) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": batchfactoryv11.SourceBookIDValidationMessage})
+			return
+		}
+		if input.MetadataPatch != nil {
+			batch, err := store.GetBatch(r.Context(), owner, r.PathValue("batchId"))
+			if err != nil {
+				writeStoreError(w, err)
+				return
+			}
+			var current *batchfactoryv11.Book
+			for index := range batch.Books {
+				if batch.Books[index].ID == r.PathValue("bookId") {
+					current = &batch.Books[index]
+					break
+				}
+			}
+			if current == nil {
+				writeStoreError(w, batchfactoryv11.ErrNotFound)
+				return
+			}
+			input.Metadata = make(map[string]any, len(current.SourceMetadata)+len(input.MetadataPatch))
+			for key, value := range current.SourceMetadata {
+				input.Metadata[key] = value
+			}
+			for key, value := range input.MetadataPatch {
+				input.Metadata[key] = value
+			}
+		}
+		book, err := store.UpdateBookMetadata(r.Context(), owner, r.PathValue("batchId"), r.PathValue("bookId"), batchfactoryv11.UpdateBookMetadataInput{
+			Metadata:         input.Metadata,
+			Title:            input.Title,
+			SourceBookID:     sourceBookID,
+			ExpectedRevision: input.ExpectedRevision,
+		})
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		// 书信息里的 bookId 就是来源书号；额外返回 sourceBookId，方便调用方
+		// 不用理解旧字段命名也能确认书号已经更新。
+		writeJSON(w, http.StatusOK, map[string]any{"book": book, "sourceBookId": book.BookID})
+	})
+	mux.HandleFunc("PUT /api/batch-factory/v11/batches/{batchId}/books/{bookId}/source", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		var input batchfactoryv11.CaptureBookSourceInput
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		book, err := store.CaptureBookSource(r.Context(), owner, r.PathValue("batchId"), r.PathValue("bookId"), input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"book": book})
+	})
+	mux.HandleFunc("PUT /api/batch-factory/v11/batches/{batchId}/books/{bookId}/override", settingsHandler(store, catalog, batchfactoryv11.ScopeBook))
+	mux.HandleFunc("PUT /api/batch-factory/v11/batches/{batchId}/books/{bookId}/videos/{videoId}/override", settingsHandler(store, catalog, batchfactoryv11.ScopeVideo))
+	mux.HandleFunc("POST /api/batch-factory/v11/batches/{batchId}/change-impact", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		var input batchfactoryv11.SettingsUpdate
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		impact, err := store.ChangeImpact(r.Context(), owner, r.PathValue("batchId"), input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, impact)
+	})
+	mux.HandleFunc("GET /api/batch-factory/v11/config-versions", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		versions, err := store.ConfigVersions(r.Context(), owner)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"configVersions": versions})
+	})
+	mux.HandleFunc("POST /api/batch-factory/v11/config-versions", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		var input batchfactoryv11.ConfigVersion
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		version, err := store.CreateConfigVersion(r.Context(), owner, input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"configVersion": version})
+	})
+	mux.HandleFunc("PUT /api/batch-factory/v11/config-versions/{versionId}", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		var input batchfactoryv11.RenameConfigVersionInput
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		version, err := store.RenameConfigVersion(r.Context(), owner, r.PathValue("versionId"), input.Name)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"configVersion": version})
+	})
+	mux.HandleFunc("GET /api/batch-factory/v11/prompts", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		prompts, err := store.ListPrompts(r.Context(), owner, r.URL.Query().Get("kind"))
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"prompts": prompts})
+	})
+	mux.HandleFunc("POST /api/batch-factory/v11/prompts", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		var input batchfactoryv11.Prompt
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if strings.TrimSpace(input.Name) == "" || strings.TrimSpace(input.Content) == "" {
+			writeStoreError(w, batchfactoryv11.ErrInvalid)
+			return
+		}
+		prompt, err := store.CreatePrompt(r.Context(), owner, input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"prompt": prompt})
+	})
+	mux.HandleFunc("GET /api/batch-factory/v11/drafts", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		q := r.URL.Query()
+		draft, err := store.GetDraft(r.Context(), owner, q.Get("key"), q.Get("kind"), q.Get("scope"))
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"draft": draft})
+	})
+	mux.HandleFunc("PUT /api/batch-factory/v11/drafts", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		var input batchfactoryv11.Draft
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if strings.TrimSpace(input.Key) == "" {
+			writeStoreError(w, batchfactoryv11.ErrInvalid)
+			return
+		}
+		draft, err := store.SaveDraft(r.Context(), owner, input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"draft": draft})
+	})
+}
+
+func settingsHandler(store batchfactoryv11.Store, catalog *prompt.Catalog, kind batchfactoryv11.ScopeKind) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		var input batchfactoryv11.SettingsUpdate
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if raw, exists := input.Patch["aiPromptConfig"]; exists {
+			var hydrated json.RawMessage
+			var err error
+			if kind == batchfactoryv11.ScopeBatch {
+				batch, getErr := store.GetBatch(r.Context(), owner, r.PathValue("batchId"))
+				if getErr != nil {
+					writeStoreError(w, getErr)
+					return
+				}
+				if isPrivateCustomizationComicBatch(batch) {
+					hydrated, err = hydratePrivateCustomizationComicPromptConfig(catalog, raw)
+				} else {
+					hydrated, err = hydrateBatchFactoryPromptConfig(catalog, raw)
+				}
+			} else {
+				hydrated, err = hydrateBatchFactoryPromptConfig(catalog, raw)
+			}
+			if err != nil {
+				writeStoreError(w, fmt.Errorf("%w: %v", batchfactoryv11.ErrInvalid, err))
+				return
+			}
+			input.Patch["aiPromptConfig"] = hydrated
+		}
+		if raw, exists := input.Patch["productionMode"]; exists {
+			var mode string
+			if err := json.Unmarshal(raw, &mode); err != nil {
+				writeStoreError(w, fmt.Errorf("%w: 生产模式格式不正确", batchfactoryv11.ErrInvalid))
+				return
+			}
+			normalized, err := normalizeBatchFactoryProductionMode(mode)
+			if err != nil {
+				writeStoreError(w, fmt.Errorf("%w: %v", batchfactoryv11.ErrInvalid, err))
+				return
+			}
+			encoded, _ := json.Marshal(normalized)
+			input.Patch["productionMode"] = encoded
+		}
+		ref := batchfactoryv11.ScopeRef{Kind: kind, BatchID: r.PathValue("batchId"), BookID: r.PathValue("bookId"), VideoID: r.PathValue("videoId")}
+		result, err := store.SaveSettings(r.Context(), owner, ref, input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		// settings_patches 同样可以写入页提示词；写入成功后必须让修复版缓存
+		// 立即失效，避免旧的自动改写版继续压住数据库版本。
+		if comicSettingsPatchTouchesPrompt(input.Patch) {
+			switch kind {
+			case batchfactoryv11.ScopeVideo:
+				invalidateShuihuoRepairedPrompt(ref.BatchID, ref.BookID, ref.VideoID)
+			case batchfactoryv11.ScopeBook:
+				invalidateShuihuoRepairedPrompt(ref.BatchID, ref.BookID, "")
+			default:
+				invalidateShuihuoRepairedPrompt(ref.BatchID, "", "")
+			}
+		}
+		writeJSON(w, http.StatusOK, result)
+	}
+}
+
+// batchOwnerLookup 是批次详情的可选存储能力，用来在不扩大 Store 接口的
+// 前提下区分“批次不存在”和“批次属于其他账号”。
+type batchOwnerLookup interface {
+	BatchOwner(context.Context, string) (string, error)
+}
+
+// writeBatchAccessError 把按 owner 过滤后的 ErrNotFound 拆成可读结果：
+//   - 批次存在但归属其他账号：403 + batch_forbidden；
+//   - 批次确实不存在：404 + batch_not_found。
+//
+// 归属账号名只对系统 owner 展示，普通账号只拿到通用文案，避免账号枚举。
+func writeBatchAccessError(w http.ResponseWriter, r *http.Request, store any, identity BridgeIdentity) {
+	lookup, ok := store.(batchOwnerLookup)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "批次不存在或已被删除", "code": "batch_not_found"})
+		return
+	}
+	actualOwner, err := lookup.BatchOwner(r.Context(), r.PathValue("batchId"))
+	if err != nil && !errors.Is(err, batchfactoryv11.ErrNotFound) {
+		writeStoreError(w, err)
+		return
+	}
+	if err == nil && actualOwner != "" && !strings.EqualFold(actualOwner, identity.Username) {
+		payload := map[string]string{
+			"error": "该批次属于其他账号，请用对应账号登录查看",
+			"code":  "batch_forbidden",
+		}
+		if identity.IsOwner {
+			payload["error"] = fmt.Sprintf("该批次属于账号 %s，请用该账号登录查看", actualOwner)
+			payload["owner"] = actualOwner
+		}
+		writeJSON(w, http.StatusForbidden, payload)
+		return
+	}
+	writeJSON(w, http.StatusNotFound, map[string]string{"error": "批次不存在或已被删除", "code": "batch_not_found"})
+}
+
+func bridgeOwner(r *http.Request) (string, bool) {
+	identity, ok := BridgeIdentityFromContext(r.Context())
+	return identity.Username, ok && identity.Username != ""
+}
+
+type batchReadThroughOwnerKey struct{}
+
+// adminBatchReadThrough 允许管理员/DEV 只读查看其他账号的批次。
+// 仅对 GET/HEAD 生效：命中后把请求身份临时切换为批次归属账号，让下游所有
+// 按 owner 过滤的只读接口正常返回；写操作不切换，仍然按原账号处理。
+func adminBatchReadThrough(next http.Handler, store any, profiles *MemberProfileStore, accounts auth.Store) http.Handler {
+	lookup, ok := store.(batchOwnerLookup)
+	if !ok {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			next.ServeHTTP(w, r)
+			return
+		}
+		batchID := batchIDFromAPIPath(r.URL.Path)
+		if batchID == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		identity, ok := BridgeIdentityFromContext(r.Context())
+		if !ok {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if canManage, _ := configManagementState(identity, profiles, accounts); !canManage {
+			next.ServeHTTP(w, r)
+			return
+		}
+		owner, err := lookup.BatchOwner(r.Context(), batchID)
+		if err != nil || owner == "" || strings.EqualFold(owner, identity.Username) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		ctx := context.WithValue(r.Context(), batchReadThroughOwnerKey{}, owner)
+		ctx = context.WithValue(ctx, bridgeIdentityKey{}, BridgeIdentity{Username: owner, IsOwner: identity.IsOwner})
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func batchReadThroughOwner(ctx context.Context) string {
+	owner, _ := ctx.Value(batchReadThroughOwnerKey{}).(string)
+	return owner
+}
+
+func batchIDFromAPIPath(path string) string {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	for index, segment := range segments {
+		if segment == "batches" && index+1 < len(segments) && strings.HasPrefix(segments[index+1], "batch_") {
+			return segments[index+1]
+		}
+	}
+	return ""
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+	if r.Body == nil {
+		return true
+	}
+	if !limitRequestBody(w, r, maxJSONBodyBytes) {
+		return false
+	}
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(target); err != nil {
+		if isBodyTooLarge(err) {
+			writePayloadTooLarge(w, maxJSONBodyBytes)
+			return false
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return false
+	}
+	return true
+}
+
+func writeStoreError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, batchfactoryv11.ErrNotFound):
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "目标数据不存在，请刷新列表后重试"})
+	case errors.Is(err, batchfactoryv11.ErrConfigRequired):
+		// Missing, user-fixable selection: return the plain action text without
+		// the sentinel prefix so the UI never shows a fake revision conflict.
+		message := strings.TrimSpace(err.Error())
+		if message == "" || message == batchfactoryv11.ErrConfigRequired.Error() {
+			message = "请先在设置中完成所需配置后重试"
+		}
+		writeJSON(w, http.StatusConflict, map[string]string{"error": message})
+	case errors.Is(err, batchfactoryv11.ErrDirectorRevisionRequired):
+		// 缺导演分镜是可执行的业务前置条件，不是版本冲突：原样返回动作文案。
+		message := strings.TrimSpace(strings.TrimPrefix(err.Error(), batchfactoryv11.ErrDirectorRevisionRequired.Error()+": "))
+		if message == "" || message == batchfactoryv11.ErrDirectorRevisionRequired.Error() {
+			message = batchfactoryv11.DirectorRevisionRequiredMessage
+		}
+		writeJSON(w, http.StatusConflict, map[string]string{"error": message})
+	case errors.Is(err, batchfactoryv11.ErrConflict):
+		message := strings.TrimSpace(strings.TrimPrefix(err.Error(), batchfactoryv11.ErrConflict.Error()+": "))
+		// ErrConflict 只表示真正的版本/并发冲突：裸哨兵（没有具体原因）回退到
+		// 通用重试文案，带原因的消息一律原样返回。不能按关键词（例如消息里是否
+		// 含 revision）改写，否则业务前置条件会被误报成版本冲突。
+		if message == "" || message == batchfactoryv11.ErrConflict.Error() {
+			message = "数据版本冲突，请重试"
+		}
+		writeJSON(w, http.StatusConflict, map[string]string{"error": message})
+	case errors.Is(err, batchfactoryv11.ErrInvalid):
+		message := strings.TrimSpace(err.Error())
+		if message == "" || message == batchfactoryv11.ErrInvalid.Error() {
+			message = "请求参数无效，请检查后重试"
+		}
+		// Keep validation failures actionable without returning an unbounded
+		// provider/config payload to the browser.
+		if len([]rune(message)) > 240 {
+			runes := []rune(message)
+			message = string(runes[:240]) + "..."
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": message})
+	case errors.Is(err, batchfactoryv11.ErrUnavailable):
+		message := strings.TrimSpace(strings.TrimPrefix(err.Error(), batchfactoryv11.ErrUnavailable.Error()+": "))
+		if message == "" || message == batchfactoryv11.ErrUnavailable.Error() {
+			message = "当前能力暂不可用，请检查相关配置后重试"
+		}
+		// code 是新增字段：前端据此显示“缺什么 → 去哪配 → 怎么开”，
+		// error 文案保持原样以兼容旧调用方。
+		payload := map[string]string{"error": message}
+		if code := errorCodeOf(err); code != "" {
+			payload["code"] = code
+		}
+		writeJSON(w, http.StatusServiceUnavailable, payload)
+	case errors.Is(err, batchfactoryv11.ErrUpstream):
+		message := strings.TrimSpace(strings.TrimPrefix(err.Error(), batchfactoryv11.ErrUpstream.Error()+": "))
+		if message == "" || message == batchfactoryv11.ErrUpstream.Error() {
+			message = "上游服务暂时不可用，请稍后重试"
+		}
+		payload := map[string]string{"error": message}
+		if code := errorCodeOf(err); code != "" {
+			payload["code"] = code
+		}
+		writeJSON(w, http.StatusServiceUnavailable, payload)
+	default:
+		// 未知错误必须留下可检索的日志，否则线上只能看到 500 而无法定位来源。
+		log.Printf("store error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "服务内部错误，请稍后重试", "code": "INTERNAL"})
+	}
+}

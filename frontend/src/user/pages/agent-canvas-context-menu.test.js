@@ -1,0 +1,478 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  appendReferenceAsset, attachImageAsset, copyCanvasSelection,
+  createLinkedNode,
+  createNodeAt,
+  readableAssetRequestError,
+  pasteCanvasSelection,
+  removeCanvasNodes,
+  shouldOpenConnectionDrop,
+  syncNodeReferencesFromEdges
+} from './agent-canvas-context-menu.js';
+
+const dirname = path.dirname(fileURLToPath(import.meta.url));
+const canvasSource = fs.readFileSync(path.resolve(dirname, '../components/AgentCanvas.jsx'), 'utf8');
+const composerSource = fs.readFileSync(path.resolve(dirname, '../components/AgentNodeComposer.jsx'), 'utf8');
+const canvasStyles = fs.readFileSync(path.resolve(dirname, '../../shared/styles/agent-workspace.css'), 'utf8');
+
+const imageNode = {
+  id: 'image-1', type: 'agent', position: { x: 20, y: 40 }, selected: true,
+  data: { type: 'image', title: '封面', summary: '', version: 1, sourceNodeIds: [], status: 'confirmed', assetRef: { id: 'asset-1', kind: 'image' } }
+};
+const videoNode = {
+  id: 'video-1', type: 'agent', position: { x: 260, y: 80 }, selected: true,
+  data: { type: 'video', title: '预告', summary: '', version: 1, sourceNodeIds: ['image-1'], status: 'draft', assetRef: { id: 'asset-2', kind: 'video' } }
+};
+const externalNode = {
+  id: 'text-1', type: 'agent', position: { x: 0, y: 0 }, selected: false,
+  data: { type: 'text', title: '文案', summary: '正文', version: 1, sourceNodeIds: [], status: 'draft', assetRef: null }
+};
+const internalEdge = { id: 'edge-image-video', source: 'image-1', target: 'video-1', data: { relation: 'reference' } };
+const externalEdge = { id: 'edge-text-image', source: 'text-1', target: 'image-1', data: { relation: 'reference' } };
+
+test('connection drop menu opens only for a genuine empty-canvas drop', () => {
+  assert.equal(shouldOpenConnectionDrop({ sourceID: '', connectionCompleted: false, droppedOnHandle: false }), false);
+  assert.equal(shouldOpenConnectionDrop({ sourceID: 'image-1', connectionCompleted: true, droppedOnHandle: false }), false);
+  assert.equal(shouldOpenConnectionDrop({ sourceID: 'image-1', connectionCompleted: false, droppedOnHandle: true }), false);
+  assert.equal(shouldOpenConnectionDrop({ sourceID: 'image-1', connectionCompleted: false, droppedOnHandle: false }), true);
+});
+
+test('asset request failures use clear Chinese actions instead of browser network text', () => {
+  assert.equal(readableAssetRequestError(new Error('Failed to fetch'), 'upload'), '图片上传连接中断，请重试');
+  assert.equal(readableAssetRequestError(new Error('Network request failed'), 'load'), '素材读取连接中断，请重试');
+  assert.equal(readableAssetRequestError(new Error('素材存储尚未配置'), 'upload'), '素材存储尚未配置');
+});
+
+test('pasting a copied pair recreates only its internal edge at the click position', () => {
+  const clipboard = copyCanvasSelection({ nodes: [imageNode, videoNode, externalNode], edges: [internalEdge, externalEdge], selectedIds: ['image-1', 'video-1'] });
+  const pasted = pasteCanvasSelection({ clipboard, position: { x: 500, y: 240 }, nextID: value => `copy-${value}` });
+  assert.deepEqual(pasted.nodes.map(node => node.id), ['copy-image-1', 'copy-video-1']);
+  assert.deepEqual(pasted.nodes[0].position, { x: 500, y: 240 });
+  assert.equal(pasted.nodes[0].data.title, '封面副本');
+  assert.equal(pasted.edges.length, 1);
+  assert.equal(pasted.edges[0].source, 'copy-image-1');
+  assert.equal(pasted.edges[0].target, 'copy-video-1');
+});
+
+test('removing a node also removes every attached edge', () => {
+  const result = removeCanvasNodes({ nodes: [externalNode, imageNode, videoNode], edges: [externalEdge, internalEdge], ids: ['image-1'] });
+  assert.deepEqual(result.nodes.map(node => node.id), ['text-1', 'video-1']);
+  assert.deepEqual(result.edges, []);
+});
+
+test('removing an upstream node clears only its automatic downstream reference', () => {
+  const source = createNodeAt({
+    id: 'source-image',
+    kind: 'image',
+    position: { x: 0, y: 0 },
+    asset: { id: 'auto-image', kind: 'image', name: '连线图片.png' }
+  });
+  const target = createNodeAt({ id: 'target-video', kind: 'video', position: { x: 300, y: 0 } });
+  target.data.config = {
+    ...target.data.config,
+    referenceAssets: [
+      { id: 'manual-image', kind: 'image', name: '手工图片.png' },
+      { id: 'auto-image', kind: 'image', name: '连线图片.png' }
+    ],
+    manualReferences: [{ id: 'manual-image', kind: 'image', name: '手工图片.png' }],
+    autoReferenceAssetIDs: ['auto-image'],
+    edgeReferences: [{ assetId: 'auto-image', sourceNodeId: 'source-image', relation: 'first_frame' }]
+  };
+
+  const result = removeCanvasNodes({
+    nodes: [source, target],
+    edges: [{ id: 'edge-source-target', source: 'source-image', target: 'target-video', data: { relation: 'first_frame' } }],
+    ids: ['source-image']
+  });
+
+  assert.deepEqual(result.nodes.map(node => node.id), ['target-video']);
+  assert.deepEqual(result.edges, []);
+  assert.deepEqual(result.nodes[0].data.config.referenceAssets.map(asset => asset.id), ['manual-image']);
+  assert.deepEqual(result.nodes[0].data.config.autoReferenceAssetIDs, []);
+});
+
+test('creating a media node keeps only a serializable asset reference', () => {
+  const node = createNodeAt({ id: 'node-1', kind: 'image', position: { x: 12, y: 18 }, asset: { id: 'asset-1', name: '封面.png', kind: 'image', url: '/api/agent/assets/asset-1/content' } });
+  assert.deepEqual(node.position, { x: 12, y: 18 });
+  assert.equal(node.data.type, 'image');
+  assert.equal(node.data.title, '封面.png');
+  assert.equal(node.data.assetRef.id, 'asset-1');
+  assert.equal(node.data.status, 'draft');
+});
+
+test('creating an audio asset node keeps the source for playback and processing', () => {
+  const node = createNodeAt({ id: 'audio-node', kind: 'audio', position: { x: 12, y: 18 }, asset: { id: 'audio-1', name: '旁白.mp3', kind: 'audio', url: '/api/agent/assets/audio-1/content' } });
+  assert.equal(node.data.type, 'audio');
+  assert.equal(node.data.title, '旁白.mp3');
+  assert.equal(node.data.assetRef.id, 'audio-1');
+});
+
+test('audio processing references accept audio only and follow audio connections', () => {
+  const sourceAudio = createNodeAt({ id: 'source-audio', kind: 'audio', position: { x: 0, y: 0 }, asset: { id: 'asset-audio', kind: 'audio', name: '旁白.mp3' } });
+  const targetAudio = createNodeAt({ id: 'target-audio', kind: 'audio', position: { x: 0, y: 0 } });
+  const withAudio = appendReferenceAsset({ node: targetAudio, asset: sourceAudio.data.assetRef });
+  const withImage = appendReferenceAsset({ node: withAudio, asset: { id: 'asset-image', kind: 'image', name: '封面.png' } });
+  assert.deepEqual(withImage.data.config.referenceAssets.map(asset => asset.id), ['asset-audio']);
+
+  const synced = syncNodeReferencesFromEdges({
+    nodes: [sourceAudio, targetAudio],
+    edges: [{ id: 'edge-audio-audio', source: 'source-audio', target: 'target-audio' }]
+  });
+  assert.deepEqual(synced.find(node => node.id === 'target-audio').data.config.referenceAssets.map(asset => asset.id), ['asset-audio']);
+});
+
+test('creating a blank image node keeps the complete generation settings ready', () => {
+  const node = createNodeAt({ id: 'image-blank', kind: 'image', position: { x: 12, y: 18 } });
+  assert.equal(node.data.type, 'image');
+  assert.equal(node.data.assetRef, null);
+  assert.equal(node.data.config.prompt, '');
+  assert.equal(node.data.config.modelId, '');
+  assert.deepEqual(node.data.config.parameters, { ratio: '16:9', quality: 'standard', resolution: '2K', count: 1 });
+  assert.deepEqual(node.data.config.referenceAssets, []);
+});
+
+test('creating a script node keeps the workflow starting state instead of falling back to text', () => {
+  const node = createNodeAt({ id: 'script-1', kind: 'script', position: { x: 12, y: 18 } });
+  assert.equal(node.data.type, 'script');
+  assert.equal(node.data.title, '新剧本');
+  assert.deepEqual(node.data.config, { sourceText: '', splitModelId: '', splitState: { state: 'idle', errorMessage: '' } });
+});
+
+test('adding image references keeps image assets only, deduplicates them, and caps the set at ten', () => {
+  const image = index => ({ id: `image-${index}`, kind: 'image', name: `参考图 ${index}`, url: `/assets/${index}.png` });
+  const node = createNodeAt({ id: 'image-node', kind: 'image', position: { x: 0, y: 0 } });
+  const withFirst = appendReferenceAsset({ node, asset: image(1) });
+  const repeated = appendReferenceAsset({ node: withFirst, asset: image(1) });
+  const withVideo = appendReferenceAsset({ node: repeated, asset: { id: 'video-1', kind: 'video', name: '不应加入.mp4' } });
+  const complete = Array.from({ length: 12 }, (_, index) => image(index + 2))
+    .reduce((current, asset) => appendReferenceAsset({ node: current, asset }), withVideo);
+
+  assert.deepEqual(withFirst.data.config.referenceAssets.map(asset => asset.id), ['image-1']);
+  assert.deepEqual(repeated.data.config.referenceAssets.map(asset => asset.id), ['image-1']);
+  assert.deepEqual(withVideo.data.config.referenceAssets.map(asset => asset.id), ['image-1']);
+  assert.equal(complete.data.config.referenceAssets.length, 10);
+  assert.equal(complete.data.config.referenceAssets.at(-1).id, 'image-10');
+});
+
+test('connecting existing media automatically fills eligible generation references without losing manual selections', () => {
+  const sourceImage = createNodeAt({ id: 'source-image', kind: 'image', position: { x: 0, y: 0 }, asset: { id: 'asset-image', kind: 'image', name: '熊猫.png', url: '/assets/panda.png' } });
+  const sourceVideo = createNodeAt({ id: 'source-video', kind: 'video', position: { x: 0, y: 0 }, asset: { id: 'asset-video', kind: 'video', name: '熊猫.mp4', url: '/assets/panda.mp4' } });
+  const targetVideo = createNodeAt({ id: 'target-video', kind: 'video', position: { x: 0, y: 0 } });
+  const withManualReference = {
+    ...targetVideo,
+    data: {
+      ...targetVideo.data,
+      config: { ...targetVideo.data.config, referenceAssets: [{ id: 'asset-manual', kind: 'image', name: '手动.png', url: '/assets/manual.png' }] }
+    }
+  };
+  const synced = syncNodeReferencesFromEdges({
+    nodes: [sourceImage, sourceVideo, withManualReference],
+    edges: [
+      { id: 'edge-image-video', source: 'source-image', target: 'target-video' },
+      { id: 'edge-video-video', source: 'source-video', target: 'target-video' }
+    ]
+  });
+
+  assert.deepEqual(synced.find(node => node.id === 'target-video').data.config.referenceAssets.map(asset => asset.id), ['asset-manual', 'asset-image', 'asset-video']);
+  assert.deepEqual(synced.find(node => node.id === 'target-video').data.config.autoReferenceAssetIDs, ['asset-image', 'asset-video']);
+});
+
+test('image generation ignores connected video assets while accepting connected images', () => {
+  const sourceImage = createNodeAt({ id: 'source-image', kind: 'image', position: { x: 0, y: 0 }, asset: { id: 'asset-image', kind: 'image', name: '熊猫.png' } });
+  const sourceVideo = createNodeAt({ id: 'source-video', kind: 'video', position: { x: 0, y: 0 }, asset: { id: 'asset-video', kind: 'video', name: '熊猫.mp4' } });
+  const targetImage = createNodeAt({ id: 'target-image', kind: 'image', position: { x: 0, y: 0 } });
+  const synced = syncNodeReferencesFromEdges({
+    nodes: [sourceImage, sourceVideo, targetImage],
+    edges: [
+      { id: 'edge-image-image', source: 'source-image', target: 'target-image' },
+      { id: 'edge-video-image', source: 'source-video', target: 'target-image' }
+    ]
+  });
+
+  assert.deepEqual(synced.find(node => node.id === 'target-image').data.config.referenceAssets.map(asset => asset.id), ['asset-image']);
+});
+
+test('selecting a material from the image card fills the image node without turning it into a reference image', () => {
+  const node = createNodeAt({ id: 'image-node', kind: 'image', position: { x: 0, y: 0 } });
+  const asset = { id: 'asset-cover', kind: 'image', name: '封面.png', url: '/assets/cover.png' };
+  const result = attachImageAsset({ node, asset });
+
+  assert.equal(result.data.assetRef.id, 'asset-cover');
+  assert.equal(result.data.title, '封面.png');
+  assert.deepEqual(result.data.config.referenceAssets, []);
+  assert.equal(attachImageAsset({ node, asset: { id: 'video-1', kind: 'video' } }), node);
+});
+
+test('quick adding from a node creates one linked downstream node without mutating the source', () => {
+  const source = createNodeAt({ id: 'source-image', kind: 'image', position: { x: 80, y: 140 } });
+  const result = createLinkedNode({ source, id: 'next-video', kind: 'video' });
+
+  assert.equal(result.node.id, 'next-video');
+  assert.equal(result.node.data.type, 'video');
+  assert.deepEqual(result.node.position, { x: 336, y: 140 });
+  assert.deepEqual(result.edge, {
+    id: 'edge-source-image-next-video-reference',
+    source: 'source-image',
+    target: 'next-video',
+    data: { relation: 'reference' }
+  });
+  assert.deepEqual(source.position, { x: 80, y: 140 });
+});
+
+test('creating an audio node keeps generation-ready business defaults', () => {
+  const node = createNodeAt({ id: 'audio-1', kind: 'audio', position: { x: 12, y: 18 } });
+  assert.equal(node.data.type, 'audio');
+  assert.equal(node.data.title, '新音频');
+  assert.equal(node.data.config.voice, '');
+  assert.deepEqual(node.data.config.parameters, { operation: 'speech', speed: 1, pitch: 0, emotion: 'neutral', format: 'mp3' });
+});
+
+test('creating a video node is allowed before any video asset exists', () => {
+  const node = createNodeAt({ id: 'video-1', kind: 'video', position: { x: 12, y: 18 } });
+  assert.equal(node.data.type, 'video');
+  assert.equal(node.data.title, '新视频');
+  assert.equal(node.data.assetRef, null);
+  assert.equal(node.data.config.modelId, '');
+  assert.deepEqual(node.data.config.parameters, { ratio: '16:9', resolution: '720P', durationSeconds: 5, count: 1, generateAudio: false });
+  assert.deepEqual(node.data.config.referenceAssets, []);
+});
+
+test('text nodes can bind project assets selected from an at mention', () => {
+  const node = createNodeAt({ id: 'text-mention', kind: 'text', position: { x: 12, y: 18 } });
+  const image = { id: 'image-mention', kind: 'image', name: 'night.png' };
+  const withMention = appendReferenceAsset({ node, asset: image });
+  const repeated = appendReferenceAsset({ node: withMention, asset: image });
+
+  assert.deepEqual(repeated.data.config.referenceAssets.map(asset => asset.id), ['image-mention']);
+});
+
+test('creating a director desk keeps image references in the same persisted node config', () => {
+  const node = createNodeAt({ id: 'director-1', kind: 'director', position: { x: 12, y: 18 } });
+  const withScene = appendReferenceAsset({ node, asset: { id: 'scene-1', kind: 'image', name: '夜景.png' } });
+
+  assert.equal(node.data.type, 'director');
+  assert.equal(node.data.config.directorDesk.rendererVersion, '2.5d-v1');
+  assert.deepEqual(withScene.data.config.referenceAssets.map(asset => asset.id), ['scene-1']);
+});
+
+test('canvas registers pane and node context-menu handlers', () => {
+  assert.match(canvasSource, /onPaneContextMenu=\{handlePaneContextMenu\}/);
+  assert.match(canvasSource, /onNodeContextMenu=\{handleNodeContextMenu\}/);
+  assert.match(canvasSource, /handleContextPaste/);
+  assert.match(canvasSource, /handleContextDelete/);
+});
+
+test('canvas loads or uploads a project asset before committing a media node', () => {
+  assert.match(canvasSource, /listAgentAssets\(taskId, assetKind\)/);
+  assert.match(canvasSource, /uploadAgentAsset\(taskId, file\)/);
+  assert.match(canvasSource, /createNodeAt\(\{[\s\S]*asset/);
+  assert.match(canvasSource, /!assetLoading && !assetError && !assets\.length/);
+});
+
+test('canvas exposes a standalone video node action alongside asset video import', () => {
+  assert.match(canvasSource, /handleContextCreate\('video'\)/);
+  assert.match(canvasSource, /新建视频/);
+  assert.match(canvasSource, /新建导演台/);
+  assert.match(canvasSource, /从资产库添加/);
+  assert.match(canvasSource, /openAssetPanel\('video'\)/);
+});
+
+test('canvas groups new node choices before paste and history actions', () => {
+  assert.match(canvasSource, /新建节点/);
+  assert.match(canvasSource, /新建图片/);
+  assert.match(canvasSource, /新建视频/);
+  assert.match(canvasSource, /从资产库添加/);
+  assert.match(canvasSource, /本地上传/);
+  assert.match(canvasSource, /contextMenuSubmenu/);
+});
+
+test('toolrail add starts a script workflow rather than silently adding generic text', () => {
+  assert.match(canvasSource, /function addNode\(kind = 'script'\)/);
+  assert.match(canvasSource, /const nextNode = createNodeAt\(\{ id: nextCanvasID\(kind\), kind, position, config: inheritedModelSelection\(nodesRef\.current, kind\) \}\)/);
+  assert.match(canvasSource, /<IconTool label="添加节点" onClick=\{\(\) => addNode\('script'\)\}/);
+  assert.doesNotMatch(canvasSource, /const nextNode = createCanvasNode\(`node-\$\{Date\.now\(\)\}-\$\{nodeSequenceRef\.current\}`/);
+});
+
+test('clicking a context-menu parent keeps its child choices open', () => {
+  assert.match(canvasSource, /onClick=\{\(\) => setContextMenuSubmenu\('create'\)\}/);
+  assert.match(canvasSource, /onClick=\{\(\) => setContextMenuSubmenu\('assets'\)\}/);
+  assert.match(canvasSource, /onClick=\{\(\) => setContextMenuSubmenu\('upload'\)\}/);
+  assert.doesNotMatch(canvasSource, /current => current === 'create'/);
+});
+
+test('node plus control is a real source handle for dragging a connection', () => {
+  assert.match(canvasSource, /className="agent-canvas-node-preview-shell"[\s\S]*?<Handle type="source" position=\{Position\.Right\} className="agent-canvas-node-quick-add" aria-label="拖出连接" \/>/);
+  assert.doesNotMatch(canvasSource, /onQuickAdd=/);
+  assert.doesNotMatch(canvasSource, /createLinkedNode\(/);
+  assert.match(canvasStyles, /\.agent-page \.agent-canvas-node-quick-add::before \{ content: '\+';/);
+  assert.match(canvasStyles, /\.agent-page \.agent-canvas-node-quick-add\s*\{[^}]*opacity:\s*0[^}]*pointer-events:\s*none/);
+});
+
+test('empty connection drops describe creation of a following node instead of a reference picker', () => {
+  assert.match(canvasSource, /onConnectStart=\{handleConnectStart\}/);
+  assert.match(canvasSource, /onConnectEnd=\{handleConnectEnd\}/);
+  assert.match(canvasSource, /新建后续节点/);
+  assert.match(canvasSource, /connectionDropChoices\(nodes\.find\(sourceNode => sourceNode\.id === connectionDropMenu\.sourceID\)\)/);
+  assert.match(canvasSource, /handleConnectionDropCreate\(choice\.kind\)/);
+});
+
+test('canvas exposes preview-bound target ports only while connecting and keeps a forgiving hit area', () => {
+  assert.match(canvasSource, /className="agent-canvas-node-preview-shell"[\s\S]*?<Handle type="target" position=\{Position\.Left\} className="agent-canvas-node-target" aria-label="连接到此节点" \/>/);
+  assert.match(canvasSource, /connectionRadius=\{24\}/);
+  assert.match(canvasSource, /isValidConnection=\{isValidCanvasConnection\}/);
+  assert.match(canvasStyles, /\.agent-page \.agent-canvas-node-target\s*\{[^}]*opacity:\s*0[^}]*pointer-events:\s*none/);
+  assert.match(canvasStyles, /\.agent-page \.agent-canvas\.is-connecting \.agent-canvas-node-target\s*\{[^}]*pointer-events:\s*auto/);
+});
+
+test('successful connections are remembered so the empty-drop menu does not also open', () => {
+  assert.match(canvasSource, /connectionCompletedRef/);
+  assert.match(canvasSource, /shouldOpenConnectionDrop\(\{ sourceID, connectionCompleted, droppedOnHandle \}\)/);
+  assert.match(canvasSource, /setConnectingSourceID\(''\)/);
+});
+
+test('text image video and audio generation controls use the shared composer', () => {
+  assert.match(canvasSource, /<AgentNodeComposer/);
+  assert.match(composerSource, /\['text', 'image', 'video', 'audio'\]\.includes\(kind\)/);
+  assert.doesNotMatch(composerSource, /暂未接入生成执行器/);
+});
+
+test('opened media editors expose direct prompt, reference, and setting controls below their preview', () => {
+  assert.match(canvasSource, /const composer = isEditorOpen/);
+  assert.match(canvasSource, /\{composer\}/);
+  assert.match(composerSource, /agent-node-composer/);
+  assert.match(composerSource, /aria-label="添加参考素材"/);
+  assert.match(composerSource, /onPickReferenceAsset/);
+  assert.match(composerSource, /图片提示词/);
+  assert.match(composerSource, /视频提示词/);
+  assert.match(canvasSource, /onNodeConfigChange/);
+  assert.match(canvasStyles, /\.agent-page \.agent-node-composer/);
+});
+
+test('opened media editors use the wide reference-style panel instead of compact form controls', () => {
+  assert.match(composerSource, /agent-node-composer__references/);
+  assert.match(composerSource, /agent-node-composer__prompt/);
+  assert.match(composerSource, /agent-node-composer__toolbar/);
+  assert.match(composerSource, /agent-node-composer__submit/);
+  assert.match(canvasStyles, /\.agent-page \.agent-node-composer/);
+  assert.match(canvasStyles, /\.agent-page \.agent-node-composer__references/);
+});
+
+test('generation panel uses the workspace palette with restrained spacing instead of the copied green treatment', () => {
+  const panelRule = canvasStyles.match(/\.agent-page \.agent-node-composer \{([\s\S]*?)\n\}/);
+  assert.ok(panelRule, 'generation panel rule should exist');
+  assert.match(panelRule[1], /background:[^;]*var\(--agent-panel\)/);
+  assert.match(panelRule[1], /border-radius:\s*8px/);
+  assert.doesNotMatch(panelRule[1], /#193727|#315b43/);
+  assert.match(canvasStyles, /color:\s*var\(--agent-accent\)/);
+});
+
+test('connecting edges synchronizes upstream media into node reference panels before saving', () => {
+  assert.match(canvasSource, /createTypedCanvasEdge/);
+  assert.match(canvasSource, /syncCanvasEffectiveReferences/);
+  assert.match(canvasSource, /const typedEdge = createTypedCanvasEdge\(connection, nodesRef\.current\)/);
+});
+
+test('generated media refreshes connected downstream references before rendering the returned canvas', () => {
+  assert.match(
+    canvasSource,
+    /const mappedNodes = \(serverCanvas\.nodes \|\| \[\]\)\.map\(toFlowNode\);[\s\S]*?const nextNodes = syncCanvasEffectiveReferences\(mappedNodes, nextEdges\);/
+  );
+  assert.match(
+    canvasSource,
+    /onChange\?\.\(toCanvas\(nextNodes, nextEdges, serverCanvas\.revision, nextViewport, nextAppearance, serverCanvas\.viewState \|\| currentCanvas\.viewState\)\);/
+  );
+});
+
+test('loading a saved canvas restores references from its existing edges', () => {
+  assert.match(
+    canvasSource,
+    /const mappedNodes = \(currentCanvas\.nodes \|\| \[\]\)\.map\(toFlowNode\);[\s\S]*?const nextNodes = syncCanvasEffectiveReferences\(mappedNodes, nextEdges\);/
+  );
+});
+
+test('context-menu submenus are allowed to extend beyond the parent menu', () => {
+  const rule = canvasStyles.match(/\.agent-page \.agent-canvas-context-menu \{([\s\S]*?)\n\}/);
+  assert.ok(rule, 'context menu CSS rule should exist');
+  assert.match(rule[1], /overflow:\s*visible;/);
+});
+
+test('canvas opens the manual editor on text double click and saves node content through commit', () => {
+  assert.match(canvasSource, /onNodeDoubleClick=\{handleNodeDoubleClick\}/);
+  assert.match(canvasSource, /if \(normalizeCanvasNodeType\(node\.data\?\.type\) !== 'text'\) return;/);
+  assert.match(canvasSource, /handleManualNodeSave/);
+  assert.match(canvasSource, /title="手动编辑节点"/);
+});
+
+test('opened media editor saves generation settings directly by node type', () => {
+  assert.match(composerSource, /node\.data\?\.config \|\| \{\}/);
+  assert.match(composerSource, /图片提示词/);
+  assert.match(composerSource, /AgentNodeParameterPopover/);
+  assert.match(composerSource, /AgentNodeSettingsPanel/);
+  assert.match(composerSource, /文字生成要求/);
+  assert.match(canvasSource, /onNodeConfigChange/);
+});
+
+test('canvas keeps media asset actions in the opened editor instead of the manual modal', () => {
+  assert.match(composerSource, /node\.data\?\.assetRef\?\.url \? '更换当前图片' : '从收藏添加图片'/);
+  assert.match(canvasSource, /assetPanel\.mode === 'image-source'/);
+  assert.doesNotMatch(canvasSource, /manualNode\?\.data\?\.type === 'image'/);
+  assert.doesNotMatch(canvasSource, /manualNode\?\.data\?\.type === 'video'/);
+  assert.doesNotMatch(canvasSource, /manualNode\?\.data\?\.type === 'audio'/);
+});
+
+test('expanded video editor exposes create cancel retry confirm and per-node errors', () => {
+  assert.match(canvasSource, /const videoJob = videoJobs\[props\.id\]\?\.projectId === taskId/);
+  assert.match(canvasSource, /videoJob=\{videoJob\}/);
+  assert.match(canvasSource, /videoState=\{videoNodeViewState\(videoJob\)\}/);
+  assert.match(canvasSource, /videoBusy=\{videoJobsLoadedTaskID !== taskId \|\| Boolean\(videoBusyByNode\[props\.id\]\)\}/);
+  assert.match(canvasSource, /videoActionError=\{videoActionErrors\[props\.id\] \|\| \(videoJobsLoadedTaskID !== taskId \? videoJobsLoadError : ''\)\}/);
+  assert.match(composerSource, /aria-label=\{`生成\$\{kind/);
+  assert.match(composerSource, /onCancelVideo\?\.\(node\.id\)/);
+  assert.match(composerSource, /onRetryVideo\?\.\(node\.id\)/);
+  assert.match(composerSource, /onConfirmVideo\?\.\(node\.id\)/);
+  assert.doesNotMatch(canvasSource, /const activeVideoJob = manualNode/);
+});
+
+test('expanded video editor previews only unapplied results and reports provider failures', () => {
+  assert.match(composerSource, /videoResultPreview\(videoJob\)/);
+  assert.match(composerSource, /videoResult && !node\.data\?\.assetRef\?\.url/);
+  assert.match(composerSource, /<AuthenticatedAgentVideo source=\{videoResult\.url\}/);
+  assert.match(composerSource, /videoJob\?\.errorMessage/);
+});
+
+test('formal and pending Agent videos use the authenticated media component', () => {
+  assert.match(canvasSource, /import \{ AuthenticatedAgentVideo \}/);
+  assert.match(composerSource, /<AuthenticatedAgentVideo/);
+  assert.doesNotMatch(canvasSource, /<video className="agent-canvas-(?:node-media|generation-result)"/);
+});
+
+test('node images, reference thumbnails, and material thumbnails use authenticated media', () => {
+  assert.match(canvasSource, /import \{ AuthenticatedAgentImage \}/);
+  assert.match(composerSource, /<AuthenticatedAgentImage/);
+  assert.ok((canvasSource.match(/<AuthenticatedAgentImage/g) || []).length >= 2);
+  assert.doesNotMatch(canvasSource, /<img\s+src=\{(?:data\.assetRef|asset)\.url\}/);
+});
+
+test('canvas keeps middle mouse panning and implements selected-item deletion', () => {
+  assert.match(canvasSource, /panOnDrag=\{interactionMode === 'pan' \? \[0, 1\] : \[1\]\}/);
+  assert.match(canvasSource, /case 'undo':\s*case 'redo':/);
+  assert.doesNotMatch(canvasSource, /aria-label="快捷键"/);
+  assert.doesNotMatch(canvasSource, /title="快捷键操作"/);
+  assert.doesNotMatch(canvasSource, /case 'select_all':/);
+  assert.doesNotMatch(canvasSource, /case 'copy':/);
+  assert.match(canvasSource, /case 'delete':[\s\S]*?deleteCanvasEdges\(\)/);
+  assert.doesNotMatch(canvasSource, /case 'focus_selection':/);
+});
+
+test('canvas reads text image and video models from the shared API configuration instead of hard-coding its own catalog', () => {
+  assert.match(canvasSource, /\['text', 'image', 'video', 'audio'\]\.map\(kind => listAvailableModels\(kind\)\)/);
+  assert.match(canvasSource, /configuredTextModels/);
+  assert.match(canvasSource, /configuredImageModels/);
+  assert.match(canvasSource, /configuredVideoModels/);
+  assert.match(canvasSource, /models=\{models\}/);
+  assert.doesNotMatch(canvasSource, /value=\{imageConfig\.model \|\| 'seedream-5-flash-local'\}/);
+});

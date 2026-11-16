@@ -1,0 +1,69 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+
+const appPath = new URL('./App.jsx', import.meta.url);
+
+test('UserApp only preloads workbench pages after explicit navigation intent', async () => {
+  const source = await fs.readFile(appPath, 'utf8');
+  assert.match(source, /export function preloadRoute\(href\)/);
+  assert.doesNotMatch(source, /scheduleWorkbenchPreload/);
+  assert.doesNotMatch(source, /useEffect\(\(\) => scheduleWorkbenchPreload\(\), \[\]\)/);
+});
+
+test('workbench pages keep their asynchronous loading boundaries', async () => {
+  const [novelFetch, batchFactory] = await Promise.all([
+    fs.readFile(new URL('./pages/NovelFetchPage.jsx', import.meta.url), 'utf8'),
+    fs.readFile(new URL('./pages/ShuihuoProductionPage.jsx', import.meta.url), 'utf8')
+  ]);
+  assert.match(novelFetch, /export function LegacyNovelFetchPage/);
+  assert.match(novelFetch, /知识库/);
+  assert.match(novelFetch, /处理规则/);
+  assert.doesNotMatch(novelFetch, /batch-rewrite\/v2|<iframe/);
+  assert.match(batchFactory, /<ProjectsView/);
+});
+
+test('novel fetch uses the complete React workbench as its public entry', async () => {
+  const app = await fs.readFile(appPath, 'utf8');
+  const novelFetch = await fs.readFile(new URL('./pages/NovelFetchPage.jsx', import.meta.url), 'utf8');
+  assert.match(app, /const loadNovelFetchPage = \(\) => import\('\.\/pages\/NovelFetchPage'\)/);
+  assert.match(app, /'\/novel-fetch-react': NovelFetchPage/);
+  assert.match(novelFetch, /export function NovelFetchPage/);
+  assert.match(novelFetch, /return <LegacyNovelFetchPage \/>/);
+  assert.doesNotMatch(novelFetch, /effectiveTheme|onLoad=/);
+});
+
+test('all novel fetch entry routes use the same migrated React source', async () => {
+  const app = await fs.readFile(appPath, 'utf8');
+  assert.match(app, /'\/novel-fetch': NovelFetchPage/);
+  assert.match(app, /'\/novel-fetch-react': NovelFetchPage/);
+  assert.match(app, /'\/novel-fetch-workshop': NovelFetchPage/);
+});
+
+test('Batch Factory has one cover-library entry and retires the legacy home routes', async () => {
+  const [app, production] = await Promise.all([
+    fs.readFile(appPath, 'utf8'),
+    fs.readFile(new URL('./pages/ShuihuoProductionPage.jsx', appPath), 'utf8')
+  ]);
+
+  assert.match(app, /'\/batch-factory': ShuihuoProductionPage/);
+  assert.match(app, /'\/shuihuo-production': CanonicalBatchFactoryRedirect/);
+  assert.match(app, /'\/shuihuo-production\/creative': CanonicalBatchFactoryRedirect/);
+  assert.doesNotMatch(app, /'\/batch-factory': BatchFactoryWorkbenchPage/);
+  assert.match(production, /const clearHandoffQuery = \(\) => window\.history\.replaceState\(\{\}, '', '\/batch-factory'\)/);
+});
+
+test('novel fetch React source keeps the V78 processing controls', async () => {
+  const source = await fs.readFile(new URL('./pages/NovelFetchPage.jsx', import.meta.url), 'utf8');
+  for (const marker of ['批量原文改文系统', 'V78', '批量输入', '本次处理设置', 'AI1', 'AI5', '敏感处理', '启用敏感词 AI 修复']) {
+    assert.match(source, new RegExp(marker));
+  }
+  assert.doesNotMatch(source, /iframe|batch-rewrite\/index\.html/);
+});
+
+test('novel fetch React source exposes the public V78 batch actions and configuration sections', async () => {
+  const source = await fs.readFile(new URL('./pages/NovelFetchPage.jsx', import.meta.url), 'utf8');
+  for (const marker of ['版本配置', '同步批量后台配置', '查看日期', '进入批量工厂', '提交网络', '抓取并发', '自动补齐风格/男女频']) {
+    assert.match(source, new RegExp(marker));
+  }
+});

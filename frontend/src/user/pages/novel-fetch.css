@@ -1,0 +1,1026 @@
+.novel-fetch-page {
+  width: 100%;
+  max-width: 1100px;
+  padding: 24px;
+  color: var(--text-primary);
+}
+
+.novel-fetch-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+  padding: 16px;
+  border: 1px solid var(--legacy-border);
+  border-radius: 8px;
+  background: var(--legacy-card);
+  box-shadow: var(--legacy-shadow);
+}
+
+.novel-fetch-form .ant-form-item {
+  margin-bottom: 0;
+}
+
+.novel-fetch-results {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+}
+
+.novel-fetch-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 2px 12px;
+  border-bottom: 1px solid var(--legacy-border);
+}
+
+.novel-fetch-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--legacy-border);
+  border-radius: 6px;
+  background: var(--legacy-input);
+  font-size: 13px;
+  transition: border-color 0.18s ease;
+}
+
+.novel-fetch-row:hover {
+  border-color: var(--legacy-border-strong);
+}
+
+.novel-fetch-bookid {
+  color: var(--legacy-accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.novel-fetch-platform {
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.novel-fetch-status {
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.novel-fetch-status--loading {
+  color: var(--text-tertiary);
+  border: 1px solid var(--legacy-border);
+  background: var(--legacy-panel);
+}
+
+.novel-fetch-status--ok {
+  color: var(--text-success);
+  border: 1px solid var(--status-success-border);
+  background: var(--status-success-bg);
+}
+
+.novel-fetch-status--error {
+  color: var(--text-danger);
+  border: 1px solid var(--status-danger-border);
+  background: var(--status-danger-bg);
+}
+
+.novel-fetch-length {
+  min-width: 90px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.novel-fetch-actions {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.novel-fetch-preview {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+@media (max-width: 640px) {
+  .novel-fetch-page {
+    padding: 14px;
+  }
+
+  .novel-fetch-row {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .novel-fetch-actions {
+    margin-left: 0;
+  }
+}
+
+.novel-fetch-workbench {
+  min-width: 0;
+  max-width: none;
+  width: 100%;
+  /* 线上 V78 的工作区在公共侧栏后保留固定内边距；没有这层间距时，
+     标题、标签和两列工作卡会贴到边界，页面看起来像另一套旧工作台。 */
+  padding: 0 20px 28px;
+  background: var(--legacy-bg);
+  color: var(--text-primary);
+}
+
+/* 小说获取是长表单/任务台，公共壳层默认裁剪溢出；这里只让本页内容区滚动，避免影响其他工作台的固定布局。 */
+.legacy-content:has(.novel-fetch-workbench) {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.novel-fetch-public-title {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 0 16px;
+  text-align: center;
+}
+.novel-fetch-public-title .ant-typography { color: var(--text-primary); }
+
+.novel-fetch-original-workbench {
+  display: block;
+  width: 100%;
+  min-height: calc(100vh - 72px);
+  border: 0;
+  background: var(--legacy-bg);
+}
+
+.novel-fetch-frame-shell { position: relative; min-height: calc(100vh - 72px); background: var(--legacy-bg); }
+.novel-fetch-frame-shell .novel-fetch-original-workbench { opacity: 1; transition: opacity .12s ease; }
+
+.novel-fetch-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: calc(100vh - 72px);
+  color: var(--text-primary);
+  background: radial-gradient(circle at 50% 44%, var(--status-info-bg), transparent 34%), var(--legacy-bg);
+  text-align: center;
+}
+
+.novel-fetch-loading-overlay strong { font-size: 16px; letter-spacing: .02em; }
+.novel-fetch-loading-overlay > span:last-child { color: var(--text-secondary); font-size: 13px; }
+.novel-fetch-loader { position: relative; width: 180px; height: 92px; }
+.novel-fetch-loader-trace {
+  position: absolute;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, currentColor, transparent);
+  box-shadow: 0 0 9px currentColor;
+  animation: novel-fetch-loader-flow 2.1s ease-in-out infinite;
+}
+.novel-fetch-loader-trace--one { top: 31px; left: 3px; width: 174px; color: #00ccff; transform: rotate(-13deg); }
+.novel-fetch-loader-trace--two { top: 59px; left: 8px; width: 164px; color: #9b6cff; animation-delay: -.9s; transform: rotate(12deg); }
+.novel-fetch-loader-chip {
+  position: absolute;
+  top: 22px;
+  left: 50%;
+  width: 72px;
+  height: 48px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(143, 182, 255, .65);
+  border-radius: 14px;
+  background: linear-gradient(145deg, rgba(49, 69, 117, .76), rgba(23, 28, 61, .94));
+  box-shadow: 0 0 24px rgba(77, 137, 255, .26), inset 0 0 18px rgba(96, 147, 255, .15);
+}
+.novel-fetch-loader-chip::before,
+.novel-fetch-loader-chip::after {
+  content: '';
+  position: absolute;
+  top: 11px;
+  width: 8px;
+  height: 26px;
+  border-top: 2px solid #55698f;
+  border-bottom: 2px solid #55698f;
+}
+.novel-fetch-loader-chip::before { left: -6px; }
+.novel-fetch-loader-chip::after { right: -6px; }
+.novel-fetch-loader-chip-dot {
+  position: absolute;
+  top: 19px;
+  left: 22px;
+  width: 28px;
+  height: 8px;
+  border-radius: 99px;
+  background: #9bc9ff;
+  box-shadow: 0 0 12px #54a4ff;
+  animation: novel-fetch-loader-pulse 1.35s ease-in-out infinite;
+}
+@keyframes novel-fetch-loader-flow { 0%, 100% { opacity: .25; transform: translateX(-18px) rotate(-13deg); } 50% { opacity: 1; transform: translateX(18px) rotate(-13deg); } }
+@keyframes novel-fetch-loader-pulse { 0%, 100% { opacity: .55; transform: scaleX(.72); } 50% { opacity: 1; transform: scaleX(1); } }
+@media (prefers-reduced-motion: reduce) {
+  .novel-fetch-loader-trace,
+  .novel-fetch-loader-chip-dot { animation: none; }
+}
+
+[data-theme='light'] .novel-fetch-original-workbench { background: var(--legacy-bg); }
+
+.novel-fetch-summary,
+.novel-fetch-panel {
+  padding: 16px;
+  border: 1px solid var(--legacy-border);
+  border-radius: 8px;
+  background: var(--legacy-card);
+  box-shadow: var(--legacy-shadow);
+}
+
+.novel-fetch-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.novel-fetch-grid > * {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.novel-fetch-compare {
+  min-height: 280px;
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid var(--legacy-border);
+  border-radius: 8px;
+  background: var(--legacy-card);
+}
+
+.novel-fetch-compare .ant-input {
+  min-height: 220px;
+}
+
+.novel-fetch-workbench .ant-tabs-nav-wrap,
+.novel-fetch-workbench .ant-table-wrapper,
+.novel-fetch-workbench .ant-alert {
+  min-width: 0;
+}
+
+/* 线上标题占据左侧固定区域，业务标签从中部开始；否则 Ant Tabs 会
+   紧贴标题，形成“标题 + 标签挤在一起”的非 V78 布局。 */
+.novel-fetch-workbench > .ant-tabs > .ant-tabs-nav {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.novel-fetch-workbench > .ant-tabs > .ant-tabs-nav .ant-tabs-extra-content {
+  /* 线上标题只占一个窄的固定栏，业务标签紧跟其后；按比例分配会
+     在不同窗口宽度下把标签推到页面中部，造成明显的布局漂移。 */
+  flex: 0 0 230px;
+  min-width: 0;
+  text-align: left;
+}
+
+.novel-fetch-workbench > .ant-tabs > .ant-tabs-nav .ant-tabs-extra-content .ant-typography {
+  margin: 0;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.novel-fetch-workbench > .ant-tabs > .ant-tabs-nav .ant-tabs-nav-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* V78 workbench styling is kept in React source, rather than loading the
+   historical public bundle.  These tokens intentionally follow the server
+   reference palette while still using the application's theme variables. */
+.novel-fetch-public-workspace,
+.novel-fetch-public-result {
+  width: 100%;
+  padding: 16px;
+  border: 1px solid var(--legacy-border);
+  border-radius: 10px;
+  background: var(--legacy-card);
+  box-sizing: border-box;
+}
+.novel-fetch-public-heading { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:14px; }
+.novel-fetch-public-heading .ant-typography { margin:0; }
+.novel-fetch-version-badge { display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px; background:var(--theme-primary); color:var(--text-on-accent); font-size:12px; vertical-align:middle; }
+.novel-fetch-public-grid { display:grid; gap:12px; }
+.novel-fetch-public-grid--three { grid-template-columns: minmax(180px, 1fr) minmax(280px, 1.5fr); }
+.novel-fetch-public-grid--five { grid-template-columns: repeat(5, minmax(120px, 1fr)); margin-top:14px; }
+.novel-fetch-public-grid .ant-form-item, .novel-fetch-public-grid .novel-fetch-field { min-width:0; }
+.novel-fetch-field { display:flex; flex-direction:column; gap:5px; color:var(--text-primary); }
+.novel-fetch-field > span { font-size:12px; color:var(--text-secondary); }
+.novel-fetch-field small { color:var(--text-tertiary); font-size:11px; line-height:1.35; }
+.novel-fetch-public-input textarea, .novel-fetch-public-input { min-height:132px; }
+.novel-fetch-public-section { margin-top:16px; padding-top:14px; border-top:1px solid var(--legacy-border); }
+.novel-fetch-public-section .ant-typography { margin:0 0 8px; }
+.novel-fetch-version-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-top:8px; }
+.novel-fetch-version-option { display:flex; align-items:center; justify-content:center; gap:8px; min-height:52px; border:1px solid var(--legacy-border); border-radius:7px; background:var(--legacy-panel); color:var(--text-primary); cursor:pointer; }
+.novel-fetch-version-option.is-selected { border-color:var(--theme-primary); background:var(--legacy-accent-dim); }
+.novel-fetch-version-option input { accent-color:var(--theme-primary); }
+.novel-fetch-public-hint { margin-top:10px; color:var(--text-tertiary); font-size:12px; }
+.novel-fetch-content-limit { display:flex; align-items:flex-end; gap:12px; margin-top:12px; }
+.novel-fetch-content-limit .novel-fetch-field { width:190px; }
+.novel-fetch-content-limit .ant-input-number { width:100%; }
+.novel-fetch-content-limit > .ant-typography { padding-bottom:7px; font-size:12px; }
+.novel-fetch-sensitive { background:var(--surface-2); padding:12px; border:1px solid var(--legacy-border); border-radius:8px; }
+.novel-fetch-sensitive label { color:var(--text-primary); font-size:13px; }
+.novel-fetch-sensitive input { accent-color:var(--theme-primary); margin-right:8px; }
+.novel-fetch-auth-pair { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin-top:16px; }
+.novel-fetch-login-card { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:0; }
+.novel-fetch-login-card .ant-typography { margin:0; }
+.novel-fetch-public-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:16px; }
+.novel-fetch-public-result-title { font-weight:600; color:var(--text-primary); margin-bottom:8px; }
+.novel-fetch-public-result pre { margin:0; min-height:54px; max-height:220px; overflow:auto; color:var(--text-secondary); white-space:pre-wrap; font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
+.novel-fetch-preview-list { display:flex; flex-direction:column; gap:6px; margin:12px 0; padding:10px; border:1px solid var(--legacy-border); border-radius:8px; background:var(--legacy-panel); }
+.novel-fetch-preview-row { display:grid; grid-template-columns:24px minmax(120px,1fr) minmax(120px,1.2fr) 80px 100px; gap:8px; align-items:center; padding:7px 8px; border:1px solid transparent; border-radius:6px; color:var(--text-primary); font-size:12px; }
+.novel-fetch-preview-row:hover { border-color:var(--legacy-border-strong); background:var(--legacy-card); }
+.novel-fetch-preview-row input { accent-color:var(--theme-primary); }
+.novel-fetch-status-layout { display:grid; grid-template-columns:minmax(0, 1.5fr) minmax(260px, .8fr); gap:12px; width:100%; }
+.novel-fetch-process-grid { display:grid; grid-template-columns:minmax(0, 1.5fr) minmax(320px, 1fr); gap:12px; width:100%; align-items:stretch; }
+.novel-fetch-version-card { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:12px 0; padding:12px 14px; border:1px solid var(--border-default); border-radius:8px; background:var(--surface-2); }
+.novel-fetch-version-card > div { display:flex; flex-direction:column; gap:4px; }
+.novel-fetch-current-batch-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.novel-fetch-current-batch-heading h5 { margin:0; }
+.novel-fetch-process-main,
+.novel-fetch-process-side { min-width:0; }
+.novel-fetch-process-side { display:flex; flex-direction:column; min-height:100%; }
+.novel-fetch-automation-bar { margin-bottom:14px; padding:12px; border:1px solid var(--legacy-border); border-radius:8px; background:var(--legacy-panel); color:var(--text-primary); }
+.novel-fetch-automation-bar.is-enabled { border-color:color-mix(in srgb, var(--text-success) 48%, var(--legacy-border)); }
+.novel-fetch-automation-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.novel-fetch-automation-heading > div { display:flex; min-width:0; flex-direction:column; gap:2px; }
+.novel-fetch-automation-heading strong { font-size:14px; }
+.novel-fetch-automation-heading span { color:var(--text-secondary); font-size:12px; }
+.novel-fetch-automation-facts { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:1px; margin-top:12px; overflow:hidden; border:1px solid var(--legacy-border); border-radius:6px; background:var(--legacy-border); }
+.novel-fetch-automation-facts span { min-width:0; padding:8px; overflow-wrap:anywhere; background:var(--legacy-card); color:var(--text-secondary); font-size:11px; }
+.novel-fetch-automation-facts b { display:block; margin-top:2px; color:var(--text-primary); font-size:12px; font-weight:600; }
+.novel-fetch-automation-foot { display:flex; justify-content:space-between; gap:10px; margin-top:8px; color:var(--text-tertiary); font-size:11px; overflow-wrap:anywhere; }
+.novel-fetch-process-side .novel-fetch-status-layout { display:flex; flex-direction:column; gap:12px; flex:0 0 auto; }
+.novel-fetch-process-side .novel-fetch-public-result { min-height:0; }
+.novel-fetch-process-side .novel-fetch-live-log { flex:0 0 auto; }
+.novel-fetch-process-side .novel-fetch-live-log pre { min-height:180px; max-height:260px; overflow:auto; }
+.novel-fetch-progress-list { display:grid; gap:8px; margin:12px 0; }
+.novel-fetch-progress-title,
+.novel-fetch-live-log-title { margin: 6px 0 8px; color: var(--text-link); font-size: 13px; font-weight: 600; }
+.novel-fetch-progress-list > div { display:grid; grid-template-columns:92px minmax(0,1fr) auto; gap:8px; align-items:center; color:var(--text-secondary); font-size:12px; }
+.novel-fetch-progress-list > div::after { content:''; grid-column:2; grid-row:1; height:7px; border:1px solid var(--legacy-border-strong); border-radius:999px; background:linear-gradient(90deg, var(--text-success) 0 38%, transparent 38%); opacity:.9; }
+.novel-fetch-progress-list > div b { grid-column:3; grid-row:1; color:var(--text-primary); font-weight:500; }
+.novel-fetch-process-secondary-actions { margin-top:12px; justify-content:flex-end; }
+.novel-fetch-stat-grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:8px; margin:10px 0 12px; }
+.novel-fetch-stat-card { min-width:0; padding:10px 12px; border:1px solid var(--legacy-border); border-radius:7px; background:var(--legacy-panel); }
+.novel-fetch-stat-card span { display:block; color:var(--text-tertiary); font-size:11px; }
+.novel-fetch-stat-card strong { display:block; margin-top:4px; color:var(--text-primary); font-size:20px; line-height:1; }
+.novel-fetch-progress-row { display:flex; justify-content:space-between; gap:12px; padding:8px 10px; border:1px solid var(--legacy-border); border-radius:6px; color:var(--text-secondary); }
+.novel-fetch-progress-row b { color:var(--legacy-accent); }
+.novel-fetch-current-batch { min-width:0; overflow:hidden; }
+.novel-fetch-current-batch-table { min-width:0; }
+.novel-fetch-current-batch-table .ant-table-container { overflow-x:auto; }
+.novel-fetch-current-batch-table .ant-table-cell { white-space:nowrap; }
+.novel-fetch-live-log pre { min-height:190px; background:var(--legacy-input); border-radius:6px; padding:10px; }
+.novel-fetch-login-status { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px; padding:8px 10px; border:1px solid var(--legacy-border); border-radius:6px; color:var(--text-danger); background:var(--legacy-panel); }
+.novel-fetch-login-status.is-ready { color:var(--text-success); }
+.novel-fetch-config-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+.novel-fetch-config-grid .ant-form-item { margin-bottom:8px; }
+.novel-fetch-knowledge-summary { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+.novel-fetch-knowledge-layout { display:grid; grid-template-columns:minmax(280px,.9fr) minmax(420px,1.4fr); gap:12px; }
+.novel-fetch-knowledge-controls { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:10px; }
+.novel-fetch-knowledge-controls label,
+.novel-fetch-knowledge-fields label,
+.novel-fetch-knowledge-editor > label { display:flex; flex-direction:column; gap:5px; color:var(--text-secondary); font-size:12px; margin-bottom:10px; }
+.novel-fetch-knowledge-list { width:100%; min-height:320px; margin-bottom:10px; padding:6px; border:1px solid var(--legacy-border-strong); border-radius:6px; background:var(--legacy-input); color:var(--text-primary); }
+.novel-fetch-knowledge-list option { padding:8px 10px; border-radius:4px; }
+.novel-fetch-knowledge-list option:checked { background:var(--legacy-accent); color:var(--text-on-accent); }
+.novel-fetch-knowledge-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.novel-fetch-knowledge-editor .ant-alert { margin-bottom:10px; }
+@media (max-width: 760px) { .novel-fetch-config-grid { grid-template-columns:1fr; } }
+
+/* Pixel-parity layer for the V78 public workbench. Keep the palette inherited
+   from the application theme so the same React source matches both online
+   dark mode and the user's light-theme switch. */
+.novel-fetch-workbench .ant-tabs-nav { margin:0 0 16px; }
+.novel-fetch-workbench .ant-tabs-tab { padding:10px 14px; color:var(--text-secondary); }
+.novel-fetch-workbench .ant-tabs-tab-active .ant-tabs-tab-btn { color:var(--text-link) !important; font-weight:700; }
+.novel-fetch-workbench .ant-tabs-ink-bar { background:var(--theme-primary) !important; }
+.novel-fetch-workbench .novel-fetch-public-workspace > .ant-typography,
+.novel-fetch-workbench .novel-fetch-public-section > .ant-typography,
+.novel-fetch-workbench .novel-fetch-public-result > .ant-typography,
+.novel-fetch-workbench .novel-fetch-current-batch-heading > .ant-typography { color:var(--text-link); }
+.novel-fetch-workbench .ant-form-item-label > label { color:var(--text-primary); font-weight:600; }
+.novel-fetch-workbench .ant-input,
+.novel-fetch-workbench .ant-input-number,
+.novel-fetch-workbench .ant-select-selector { border-color:var(--legacy-border-strong) !important; border-radius:6px !important; background:var(--legacy-panel) !important; color:var(--text-primary) !important; }
+.novel-fetch-workbench .ant-input::placeholder { color:var(--text-tertiary); }
+.novel-fetch-workbench .ant-btn { border-color:var(--legacy-border-strong); border-radius:6px; color:var(--text-primary); background:var(--legacy-panel); box-shadow:none; }
+.novel-fetch-workbench .ant-btn-primary { color:var(--text-on-accent); border-color:var(--theme-primary); background:var(--theme-primary); }
+.novel-fetch-workbench .ant-btn-primary:hover,
+.novel-fetch-workbench .ant-btn-primary:focus { border-color:var(--theme-primary-hover); background:var(--theme-primary-hover); }
+.novel-fetch-workbench .novel-fetch-public-title .ant-typography { color:var(--text-primary); }
+.novel-fetch-workbench .novel-fetch-public-workspace,
+.novel-fetch-workbench .novel-fetch-public-result,
+.novel-fetch-workbench .novel-fetch-panel { border-color:var(--legacy-border); background:var(--legacy-card); box-shadow:none; }
+.novel-fetch-workbench .novel-fetch-panel { border:0; border-radius:0; background:transparent; }
+.novel-fetch-workbench .novel-fetch-public-section { border-top-color:var(--legacy-border); }
+.novel-fetch-workbench .novel-fetch-version-option { border-color:var(--legacy-border); background:var(--legacy-panel); color:var(--text-primary); }
+.novel-fetch-workbench .novel-fetch-version-option.is-selected { border-color:var(--theme-primary); background:var(--legacy-accent-dim); }
+.novel-fetch-workbench .novel-fetch-sensitive { background:var(--surface-2); border-color:var(--legacy-border); }
+.novel-fetch-workbench .novel-fetch-public-hint { color:var(--text-secondary); }
+.novel-fetch-workbench .ant-table { background:var(--legacy-card); color:var(--text-primary); }
+.novel-fetch-workbench .ant-table-thead > tr > th { background:var(--legacy-panel); color:var(--text-primary); border-bottom-color:var(--legacy-border); }
+.novel-fetch-workbench .ant-table-tbody > tr > td { border-bottom-color:var(--legacy-border); }
+.novel-fetch-rule-editor { display:flex; flex-direction:column; gap:12px; margin-top:14px; padding:14px; border:1px solid var(--legacy-border); border-radius:8px; background:var(--legacy-panel); }
+.novel-fetch-rule-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; align-items:end; }
+.novel-fetch-rule-grid label, .novel-fetch-rule-fields label, .novel-fetch-rule-manager > label { display:flex; flex-direction:column; gap:5px; color:var(--text-secondary); font-size:12px; }
+.novel-fetch-rule-grid input, .novel-fetch-rule-grid select, .novel-fetch-rule-fields input, .novel-fetch-rule-manager select, .novel-fetch-rule-editor textarea { min-height:34px; box-sizing:border-box; border:1px solid var(--legacy-border-strong); border-radius:6px; padding:7px 9px; background:var(--legacy-input); color:var(--text-primary); }
+.novel-fetch-rule-manager { display:grid; grid-template-columns:minmax(190px,.7fr) minmax(0,1.3fr); gap:12px; }
+.novel-fetch-rule-manager select { width:100%; min-height:180px; }
+.novel-fetch-rule-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; align-content:start; }
+.novel-fetch-rule-fields .ant-space { grid-column:1/-1; }
+.novel-fetch-check { display:flex !important; flex-direction:row !important; align-items:center; gap:7px; min-height:34px; }
+.novel-fetch-check input { accent-color:var(--theme-primary); min-height:auto !important; width:auto; }
+.novel-fetch-advanced-rule { margin-top:10px; color:var(--text-secondary); }
+.novel-fetch-advanced-rule summary { cursor:pointer; padding:8px 0; }
+@media (max-width: 900px) { .novel-fetch-public-grid--five { grid-template-columns:repeat(3,minmax(120px,1fr)); } }
+@media (max-width: 1100px) { .novel-fetch-process-grid { grid-template-columns:1fr; } .novel-fetch-process-side .novel-fetch-status-layout { display:flex; flex-direction:column; } }
+@media (max-width: 900px) { .novel-fetch-status-layout { grid-template-columns:1fr; } .novel-fetch-process-side .novel-fetch-status-layout { display:flex; flex-direction:column; } .novel-fetch-stat-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } }
+@media (max-width: 680px) { .novel-fetch-automation-facts { grid-template-columns:repeat(2,minmax(0,1fr)); } .novel-fetch-automation-foot { flex-direction:column; } }
+@media (max-width: 640px) { .novel-fetch-public-grid--three, .novel-fetch-public-grid--five { grid-template-columns:1fr; } .novel-fetch-version-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media (max-width: 760px) { .novel-fetch-auth-pair { grid-template-columns:1fr; } }
+@media (max-width: 900px) { .novel-fetch-knowledge-layout { grid-template-columns:1fr; } .novel-fetch-knowledge-fields { grid-template-columns:1fr; } }
+@media (max-width: 760px) { .novel-fetch-rule-grid, .novel-fetch-rule-manager, .novel-fetch-rule-fields { grid-template-columns:1fr; } }
+
+@media (max-width: 860px) {
+  .novel-fetch-summary,
+  .novel-fetch-panel,
+  .novel-fetch-compare {
+    padding: 12px;
+  }
+
+  .novel-fetch-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .novel-fetch-grid > * {
+    grid-column: auto;
+  }
+
+  .novel-fetch-workbench .ant-space {
+    max-width: 100%;
+  }
+
+  .novel-fetch-workbench .ant-table-wrapper {
+    overflow-x: auto;
+  }
+}
+
+/* 交互重排：把处理页做成“输入 → 处理策略 → 状态反馈”的工作台。
+   这里用窄栏、明确层级和固定节奏，避免长表单变成一整块没有重点的面板。 */
+.novel-fetch-workbench {
+  --workbench-gap: 14px;
+  max-width: 1360px;
+  margin: 0 auto;
+  padding: 0 20px 32px;
+}
+.novel-fetch-workbench > .ant-tabs { width: 100%; }
+.novel-fetch-workbench > .ant-tabs > .ant-tabs-nav {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  margin-bottom: 16px;
+  padding: 10px 0 0;
+  background: var(--legacy-bg);
+}
+.novel-fetch-workbench > .ant-tabs > .ant-tabs-nav .ant-tabs-tab {
+  min-height: 34px;
+  padding: 7px 14px;
+  border-radius: 6px 6px 0 0;
+  transition: color .2s ease, background .2s ease;
+}
+.novel-fetch-workbench > .ant-tabs > .ant-tabs-nav .ant-tabs-tab:hover { background: var(--surface-hover); }
+.novel-fetch-workbench .novel-fetch-public-workspace {
+  padding: 18px;
+  border-color: var(--legacy-border);
+  border-radius: 10px;
+  background: var(--legacy-card);
+  box-shadow: none;
+}
+.novel-fetch-public-heading {
+  align-items: flex-end;
+  margin: -2px 0 16px;
+  padding-bottom: 11px;
+  border-bottom: 1px solid var(--border-default);
+}
+.novel-fetch-public-heading .ant-typography { letter-spacing: .02em; }
+.novel-fetch-public-heading > .ant-typography { padding-bottom: 4px; }
+.novel-fetch-process-grid { grid-template-columns: minmax(0, 1fr) 320px; gap: var(--workbench-gap); }
+.novel-fetch-process-side { position: sticky; top: 62px; align-self: start; }
+.novel-fetch-public-section { margin-top: 18px; padding-top: 16px; }
+.novel-fetch-public-section > .ant-typography:first-child { font-size: 16px; letter-spacing: .02em; }
+.novel-fetch-content-limit { align-items: center; padding: 10px 12px; border: 1px solid var(--legacy-border); border-radius: 8px; background: var(--legacy-panel); }
+.novel-fetch-version-grid { gap: 8px; }
+.novel-fetch-version-option { min-height: 52px; border-radius: 8px; background: var(--legacy-panel); transition: border-color .18s ease, background .18s ease; }
+.novel-fetch-version-option:hover { border-color: var(--theme-primary-hover); background: var(--legacy-accent-dim); }
+.novel-fetch-version-option.is-selected { box-shadow: inset 3px 0 0 var(--theme-primary); }
+.novel-fetch-auth-pair { margin-top: 18px; }
+.novel-fetch-sensitive { min-height: 76px; display: flex; flex-direction: column; justify-content: center; gap: 6px; }
+.novel-fetch-version-card { min-height: 66px; margin: 18px 0 0; border-radius: 10px; }
+.novel-fetch-public-actions { align-items: center; margin-top: 14px; }
+.novel-fetch-public-actions .ant-btn { min-height: 34px; border-radius: 6px; }
+.novel-fetch-process-secondary-actions { padding: 10px 12px; border-top: 1px solid var(--legacy-border); border-bottom: 1px solid var(--legacy-border); background: transparent; }
+.novel-fetch-public-result { padding: 14px; border-radius: 10px; border-color: var(--legacy-border); background: var(--legacy-card); }
+.novel-fetch-stat-grid { gap: 8px; }
+.novel-fetch-stat-card { min-height: 60px; padding: 10px 11px; border-radius: 8px; background: var(--legacy-panel); }
+.novel-fetch-stat-card strong { font-size: 20px; }
+.novel-fetch-progress-list { gap: 10px; }
+.novel-fetch-progress-list > div { grid-template-columns: 108px minmax(0,1fr) auto; min-height: 18px; }
+.novel-fetch-progress-list > div::after { display: none; }
+.novel-fetch-progress-list > div i { grid-column: 2; grid-row: 1; display: block; height: 7px; overflow: hidden; border: 1px solid var(--border-default); border-radius: 999px; background: linear-gradient(90deg, var(--text-success) var(--progress), var(--surface-hover) var(--progress)); }
+.novel-fetch-live-log { margin-top: 2px; }
+.novel-fetch-live-log pre { min-height: 170px; padding: 12px; border: 1px solid var(--legacy-border); border-radius: 8px; background: var(--legacy-input); }
+.novel-fetch-current-batch { margin-top: var(--workbench-gap); padding: 14px; border: 1px solid var(--legacy-border); border-radius: 10px; background: var(--legacy-card); }
+.novel-fetch-current-batch-heading { padding-bottom: 12px; border-bottom: 1px solid var(--border-default); }
+.novel-fetch-current-batch-table { margin-top: 10px; }
+.novel-fetch-workbench .ant-table-container { border-radius: 10px; overflow: hidden; }
+@media (max-width: 1100px) {
+  .novel-fetch-process-side { position: static; }
+}
+@media (max-width: 640px) {
+  .novel-fetch-workbench { padding: 0 12px 28px; }
+  .novel-fetch-workbench .novel-fetch-public-workspace { padding: 15px; }
+  .novel-fetch-content-limit { align-items: stretch; flex-direction: column; }
+  .novel-fetch-content-limit .novel-fetch-field { width: 100%; }
+  .novel-fetch-stat-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+}
+
+/* 正式处理页采用与 v16 评审稿一致的液态玻璃节奏；业务数据和操作仍由上面的 React 组件提供。 */
+.novel-fetch-workbench {
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+  padding: 0 24px 32px;
+  background:
+    radial-gradient(circle at 6% 0%, var(--status-info-bg), transparent 34%),
+    radial-gradient(circle at 96% 4%, var(--status-info-bg), transparent 32%),
+    var(--legacy-bg);
+}
+
+.novel-fetch-workbench > .ant-tabs { width: 100%; }
+.novel-fetch-workbench > .ant-tabs > .ant-tabs-nav {
+  margin: 0 -24px 18px;
+  padding: 10px 24px 0;
+  background: var(--legacy-bg);
+  border-bottom: 1px solid var(--border-default);
+  backdrop-filter: blur(18px) saturate(125%);
+}
+.novel-fetch-workbench > .ant-tabs > .ant-tabs-content-holder { min-width: 0; }
+.novel-fetch-workbench .ant-tabs-tab { font-size: 14px; }
+
+.novel-fetch-process-grid {
+  grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+  gap: 16px;
+  align-items: stretch;
+}
+.novel-fetch-process-main,
+.novel-fetch-process-side { min-width: 0; }
+.novel-fetch-process-side { position: static; }
+.novel-fetch-workbench .novel-fetch-public-workspace,
+.novel-fetch-workbench .novel-fetch-public-result,
+.novel-fetch-workbench .novel-fetch-current-batch {
+  border: 1px solid var(--border-default);
+  border-radius: 16px;
+  background: var(--surface-panel);
+  box-shadow: inset 0 1px 0 var(--overlay-highlight), var(--shadow-1);
+  backdrop-filter: blur(22px) saturate(125%);
+}
+.novel-fetch-workbench .novel-fetch-public-workspace { padding: 18px; }
+.novel-fetch-public-heading { margin-bottom: 16px; }
+.novel-fetch-public-heading .ant-typography,
+.novel-fetch-public-section > .ant-typography,
+.novel-fetch-public-result-title,
+.novel-fetch-current-batch-heading .ant-typography { color: var(--text-primary); }
+.novel-fetch-public-grid--three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.novel-fetch-login-inline { display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:32px; padding:0 8px; border:1px solid var(--border-default); border-radius:7px; background:var(--surface-input); color:var(--text-secondary); }
+.novel-fetch-login-inline .is-ready { color:var(--text-success); }
+.novel-fetch-top-login .ant-btn { min-height:24px; padding-inline:8px; }
+.novel-fetch-public-input,
+.novel-fetch-public-input textarea { min-height: 132px !important; }
+.novel-fetch-public-input textarea { resize: vertical; }
+.novel-fetch-workbench .ant-input,
+.novel-fetch-workbench .ant-input-number,
+.novel-fetch-workbench .ant-select-selector {
+  background: var(--surface-input) !important;
+  border-color: var(--border-default) !important;
+}
+.novel-fetch-workbench .novel-fetch-public-section { border-top-color: var(--border-default); }
+.novel-fetch-workbench .novel-fetch-version-option {
+  min-height: 48px;
+  border-radius: 9px;
+  background: var(--surface-input);
+}
+.novel-fetch-workbench .novel-fetch-sensitive,
+.novel-fetch-workbench .novel-fetch-version-card {
+  background: var(--surface-2);
+  border-color: var(--border-default);
+}
+.novel-fetch-workbench .novel-fetch-public-actions { margin-top: 14px; }
+.novel-fetch-workbench .novel-fetch-public-actions .ant-btn { border-radius: 9px; }
+.novel-fetch-process-side .novel-fetch-status-layout { gap: 12px; }
+.novel-fetch-process-side .novel-fetch-public-result { padding: 16px; }
+.novel-fetch-stat-card { background: var(--surface-2); border-color: var(--border-default); }
+.novel-fetch-live-log pre { min-height: 168px; max-height: 240px; background: var(--surface-input); }
+.novel-fetch-process-secondary-actions {
+  margin-top: 12px;
+  padding: 0;
+  border: 0;
+  justify-content: flex-start;
+}
+.novel-fetch-current-batch { margin-top: 16px; padding: 16px; }
+
+@media (max-width: 960px) {
+  .novel-fetch-process-grid { grid-template-columns: 1fr; }
+  .novel-fetch-public-grid--three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .novel-fetch-workbench { padding: 0 12px 24px; }
+  .novel-fetch-workbench > .ant-tabs > .ant-tabs-nav { margin-left: -12px; margin-right: -12px; padding-left: 12px; padding-right: 12px; }
+  .novel-fetch-public-grid--three { grid-template-columns: 1fr; }
+}
+.novel-fetch-workbench-title{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding:0 4px 15px;border-bottom:1px solid var(--border-default)}
+.novel-fetch-workbench-title h2{font-size:24px;letter-spacing:-.02em}
+.novel-fetch-workbench-subpage{width:100%}
+.novel-fetch-workbench-subpage-header{display:flex;align-items:center;gap:14px;margin-bottom:14px;padding:0 4px 12px;border-bottom:1px solid var(--border-default)}
+.novel-fetch-workbench-shortcuts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:9px}
+.novel-fetch-workbench-shortcut{min-height:58px;padding:10px 12px;text-align:left;border:1px solid var(--border-default);border-radius:14px;background:var(--surface-elevated);box-shadow:inset 0 1px var(--overlay-highlight),var(--shadow-1);color:var(--text-primary);cursor:pointer;transition:transform .18s ease,border-color .18s ease,background .18s ease}
+.novel-fetch-workbench-shortcut:hover{transform:translateY(-2px);border-color:var(--theme-primary);background:var(--surface-hover)}
+.novel-fetch-workbench-shortcut strong{display:block;font-size:13px}
+.novel-fetch-workbench-shortcut span{display:block;margin-top:4px;color:var(--text-secondary);font-size:10px}
+@media(max-width:700px){.novel-fetch-workbench-title{align-items:flex-start;flex-direction:column}.novel-fetch-workbench-shortcuts{grid-template-columns:1fr}}
+.novel-fetch-readonly-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-input);
+  color: var(--text-primary);
+}
+
+.novel-fetch-readonly-field span {
+  color: var(--text-secondary);
+}
+
+.novel-fetch-process-policy-row { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.novel-fetch-methods { display: flex; flex-direction: column; gap: 8px; }
+.novel-fetch-method { display: flex; align-items: center; gap: 8px; }
+.novel-fetch-method > .ant-select { flex: 1; min-width: 0; }
+.novel-fetch-public-grid--two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.novel-fetch-input-format-row { align-items: end; margin-bottom: 12px; }
+.novel-fetch-input-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 34px; padding: 0 11px; border: 1px solid var(--legacy-border); border-radius: 7px; background: var(--legacy-panel); color: var(--text-secondary); font-size: 12px; }
+.novel-fetch-input-summary b { color: var(--text-primary); }
+.novel-fetch-input-summary .is-warning { color: var(--text-warning); }
+.novel-fetch-input-preview { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; margin: -4px 0 14px; padding: 8px 10px; border: 1px solid var(--legacy-border); border-radius: 7px; background: var(--legacy-input); }
+.novel-fetch-input-preview > div { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
+.novel-fetch-input-preview strong { color: var(--text-primary); font-size: 13px; }
+.novel-fetch-input-preview span { color: var(--text-secondary); font-size: 12px; }
+
+/* v16 设计稿在工作台宽度下保持六个版本同一行，便于一次性比较并选择。 */
+.novel-fetch-workbench .novel-fetch-version-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 5px;
+}
+
+/* 截取字数按设计稿作为普通字段，说明文字与字段同一行。 */
+.novel-fetch-workbench .novel-fetch-content-limit {
+  align-items: flex-end;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+/* v16 的右栏是一块完整玻璃面板，状态、日志、操作和入口只是其中的连续内容。 */
+.novel-fetch-workbench .novel-fetch-process-side {
+  padding: 17px;
+  border: 1px solid var(--border-default);
+  border-radius: 18px;
+  background: var(--surface-panel);
+  box-shadow: inset 0 1px var(--overlay-highlight), var(--shadow-1);
+  backdrop-filter: blur(24px) saturate(140%);
+}
+
+.novel-fetch-workbench .novel-fetch-process-side .novel-fetch-status-layout {
+  display: block;
+}
+
+.novel-fetch-workbench .novel-fetch-process-side .novel-fetch-status-layout > .novel-fetch-public-result,
+.novel-fetch-workbench .novel-fetch-process-side .novel-fetch-live-log {
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.novel-fetch-workbench .novel-fetch-process-side .novel-fetch-live-log pre {
+  min-height: 148px;
+  max-height: 220px;
+  margin-top: 13px;
+  padding: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  background: var(--surface-input);
+}
+
+.novel-fetch-workbench .novel-fetch-process-side .novel-fetch-workbench-shortcuts {
+  margin-top: 9px;
+}
+
+/* 处理页上方两块卡片保持同一条底边，当前批次在整行下方展开。 */
+.novel-fetch-workbench .novel-fetch-process-grid { align-items: stretch; }
+.novel-fetch-workbench .novel-fetch-process-main {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  min-height: 0;
+  gap: 0;
+}
+.novel-fetch-workbench .novel-fetch-process-main > .novel-fetch-public-workspace {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  min-width: 0;
+  margin-top: 0;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 17px;
+}
+.novel-fetch-workbench .novel-fetch-process-main > .novel-fetch-public-workspace > .novel-fetch-public-actions {
+  margin-top: auto;
+}
+.novel-fetch-workbench .novel-fetch-process-side {
+  align-self: stretch;
+  min-height: 100%;
+}
+
+/* 待处理清单保持固定可读高度，不随内容状态突然缩小。 */
+.novel-fetch-workbench .novel-fetch-public-input,
+.novel-fetch-workbench .novel-fetch-public-input textarea,
+.novel-fetch-workbench .novel-fetch-public-input.has-content,
+.novel-fetch-workbench .novel-fetch-public-input.has-content textarea {
+  height: 400px !important;
+  min-height: 400px !important;
+  max-height: 520px;
+  resize: vertical;
+}
+
+/* v16 在已有清单时只展示一行摘要；空清单才保留较大的输入区，避免两种状态占用同样高度。 */
+.novel-fetch-public-input.has-content,
+.novel-fetch-public-input.has-content textarea {
+  min-height: 67px !important;
+  height: 67px !important;
+}
+
+/* 与 v16 设计稿保持固定的主区/状态区比例，避免宽屏下右侧状态栏被挤窄。 */
+.novel-fetch-workbench .novel-fetch-process-grid {
+  grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr);
+  gap: 14px;
+}
+
+@media (max-width: 1100px) {
+  .novel-fetch-workbench .novel-fetch-process-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 截图目标布局对齐层：处理设置两列、紧凑字段、按钮单行 */
+.novel-fetch-workbench .novel-fetch-settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, .95fr) minmax(0, 2.05fr);
+  gap: 14px;
+  align-items: start;
+}
+.novel-fetch-workbench .novel-fetch-settings-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.novel-fetch-workbench .novel-fetch-settings-label { color: var(--text-secondary); font-size: 12px; line-height: 1; }
+.novel-fetch-workbench .novel-fetch-settings-row .novel-fetch-content-limit { margin-top: 0; }
+.novel-fetch-workbench .novel-fetch-limit-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-input);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.novel-fetch-workbench .novel-fetch-limit-chip .ant-input-number,
+.novel-fetch-workbench .novel-fetch-limit-chip .ant-input-number .ant-input-number-input {
+  width: 74px;
+  padding: 0;
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.novel-fetch-workbench .novel-fetch-limit-chip .ant-input-number-handler-wrap { display: none; }
+
+/* 版本按钮与截取字数同排视觉高度 */
+.novel-fetch-workbench .novel-fetch-settings-row .novel-fetch-version-grid { margin-top: 0; }
+.novel-fetch-workbench .novel-fetch-settings-row .novel-fetch-version-option { min-height: 34px; border-radius: 8px; font-size: 13px; }
+
+/* 敏感处理退化为普通字段：小标签在上、勾选行在下，与改文方式等高对齐 */
+.novel-fetch-workbench .novel-fetch-sensitive-field > span:first-child { font-size: 12px; color: var(--text-secondary); }
+.novel-fetch-workbench .novel-fetch-check-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.novel-fetch-workbench .novel-fetch-check-line input { accent-color: var(--theme-primary); margin: 0; }
+
+/* 处理状态卡片标题行：左标题、右批次小字 */
+.novel-fetch-workbench .novel-fetch-result-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.novel-fetch-workbench .novel-fetch-result-heading .novel-fetch-public-result-title { margin-bottom: 0; }
+.novel-fetch-workbench .novel-fetch-result-side { color: var(--text-tertiary); font-size: 12px; }
+
+/* 主操作保持紧凑；宽度不足时允许换行，避免最后一个按钮越过卡片边界。 */
+.novel-fetch-workbench .novel-fetch-public-actions {
+  width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.novel-fetch-workbench .novel-fetch-public-actions .ant-btn {
+  max-width: 100%;
+  padding-inline: 12px;
+  white-space: nowrap;
+}
+.novel-fetch-workbench .novel-fetch-process-secondary-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.novel-fetch-workbench .novel-fetch-process-secondary-actions .ant-btn {
+  width: 100%;
+  min-width: 0;
+  padding-inline: 6px;
+}
+.novel-fetch-factory-version-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.novel-fetch-factory-version-picker .ant-select { min-width: 150px; }
+.novel-fetch-factory-version-picker .ant-select-selector { min-height: 34px; }
+
+@media (max-width: 1100px) {
+  .novel-fetch-workbench .novel-fetch-public-actions { flex-wrap: wrap; }
+}
+@media (max-width: 640px) {
+  .novel-fetch-workbench .novel-fetch-settings-row { grid-template-columns: 1fr; }
+  .novel-fetch-workbench .novel-fetch-version-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+/* 视频管理系统登录与默认配置档放在同一个紧凑管理面板。 */
+.novel-fetch-upload-manager-modal .ant-modal-content {
+  border: 1px solid var(--border-default);
+  border-radius: 12px;
+  background: var(--surface-panel);
+}
+.novel-fetch-upload-manager-modal .ant-modal-header {
+  margin-bottom: 16px;
+  background: transparent;
+}
+.novel-fetch-upload-manager-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--status-danger-border);
+  border-radius: 8px;
+  background: var(--status-danger-bg);
+}
+.novel-fetch-upload-manager-status.is-ready {
+  border-color: var(--status-success-border);
+  background: var(--status-success-bg);
+}
+.novel-fetch-upload-manager-status strong,
+.novel-fetch-upload-manager-status span,
+.novel-fetch-upload-profile-heading strong,
+.novel-fetch-upload-profile-heading span { display: block; }
+.novel-fetch-upload-manager-status strong { color: var(--text-primary); font-size: 14px; }
+.novel-fetch-upload-manager-status span,
+.novel-fetch-upload-profile-heading span { margin-top: 3px; color: var(--text-secondary); font-size: 12px; }
+.novel-fetch-upload-manager-login {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--surface-input);
+}
+.novel-fetch-upload-manager-login-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.novel-fetch-upload-manager-login-fields .ant-form-item { margin-bottom: 12px; }
+.novel-fetch-upload-profile-section {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-default);
+}
+.novel-fetch-upload-profile-heading,
+.novel-fetch-upload-profile-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.novel-fetch-upload-profile-heading strong { color: var(--text-primary); font-size: 14px; }
+.novel-fetch-upload-profile-actions { justify-content: flex-start; flex-wrap: wrap; }
+.novel-fetch-upload-profile-actions .ant-btn-link { margin-left: auto; padding-inline: 0; }
+@media (max-width: 640px) {
+  .novel-fetch-upload-manager-login-fields { grid-template-columns: 1fr; gap: 0; }
+  .novel-fetch-upload-manager-status,
+  .novel-fetch-upload-profile-heading { align-items: flex-start; }
+  .novel-fetch-upload-profile-actions .ant-btn-link { width: 100%; margin-left: 0; text-align: left; }
+}
+
+/* 定时任务用明确的“新建 / 已保存”两段式结构，避免把空表格误认为可编辑区域。 */
+.novel-fetch-schedule-modal .ant-modal-content { overflow: hidden; border: 1px solid var(--border-default); border-radius: 18px; background: var(--surface-panel); box-shadow: var(--shadow-2), inset 0 1px var(--overlay-highlight); }
+.novel-fetch-schedule-modal .ant-modal-header { margin: 0; padding: 16px 20px 13px; border-bottom: 1px solid var(--border-default); background: linear-gradient(90deg, var(--status-info-bg), transparent 62%); }
+.novel-fetch-schedule-modal .ant-modal-body { padding: 16px 20px 18px; }
+.novel-fetch-schedule-modal .ant-modal-footer { margin: 0; padding: 12px 20px 15px; border-top: 1px solid var(--border-default); background: var(--surface-2); }
+.novel-fetch-schedule-title { display:flex; align-items:center; gap:11px; }
+.novel-fetch-schedule-title strong { display:block; color:var(--text-primary); font-size:17px; }
+.novel-fetch-schedule-title small { display:block; margin-top:3px; color:var(--text-secondary); font-size:11px; font-weight:400; }
+.novel-fetch-schedule-icon { display:grid; place-items:center; width:32px; height:32px; border:1px solid var(--status-info-border); border-radius:9px; color:var(--text-link); background:var(--status-info-bg); }
+.novel-fetch-schedule-note { display:grid; grid-template-columns:auto 1fr; align-items:center; column-gap:10px; margin-bottom:12px; padding:10px 12px; border:1px solid var(--status-info-border); border-radius:10px; background:var(--status-info-bg); color:var(--text-secondary); font-size:12px; }
+.novel-fetch-schedule-note strong { color:var(--text-primary); font-size:13px; }
+.novel-fetch-schedule-note span { color:var(--text-secondary); }
+.novel-fetch-schedule-create { padding:13px 14px 12px; border:1px solid var(--border-default); border-radius:11px; background:var(--surface-2); }
+.novel-fetch-schedule-create-heading, .novel-fetch-schedule-list-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+.novel-fetch-schedule-create-heading { margin-bottom:12px; }
+.novel-fetch-schedule-create-heading strong, .novel-fetch-schedule-list-heading strong { color:var(--text-primary); font-size:13px; }
+.novel-fetch-schedule-create-heading span, .novel-fetch-schedule-list-heading span { color:var(--text-secondary); font-size:11px; }
+.novel-fetch-schedule-timezone { padding:3px 7px; border:1px solid var(--border-default); border-radius:999px; color:var(--text-secondary) !important; }
+.novel-fetch-schedule-create .novel-fetch-field { gap:6px; }
+.novel-fetch-schedule-create .novel-fetch-field > span { color:var(--text-secondary); font-size:12px; }
+.novel-fetch-schedule-create .ant-input { height:40px; border-radius:8px; color:var(--text-primary); color-scheme:dark; }
+.novel-fetch-schedule-input-wrap { position:relative; }
+.novel-fetch-schedule-input-wrap .ant-input { padding-right:42px; }
+.novel-fetch-schedule-input-wrap input[type="datetime-local"]::-webkit-calendar-picker-indicator { opacity:0; cursor:pointer; }
+.novel-fetch-schedule-create input[type="datetime-local"]::-webkit-calendar-picker-indicator { opacity:1; filter: invert(86%) sepia(18%) saturate(1043%) hue-rotate(177deg) brightness(104%) contrast(102%); cursor:pointer; }
+.novel-fetch-schedule-input-icon { position:absolute; top:12px; right:13px; pointer-events:none; color:var(--text-link); }
+.novel-fetch-schedule-create input[type="datetime-local"]::-webkit-datetime-edit { color:var(--text-primary); }
+.novel-fetch-schedule-create input[type="datetime-local"]::-webkit-datetime-edit-fields-wrapper { color:var(--text-primary); }
+.novel-fetch-schedule-list-heading { margin:15px 0 8px; padding-bottom:7px; border-bottom:1px solid var(--border-default); }
+.novel-fetch-schedule-list { display:flex; flex-direction:column; gap:7px; max-height:220px; overflow:auto; }
+.novel-fetch-schedule-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; align-items:center; gap:12px; padding:10px 11px; border:1px solid var(--border-default); border-radius:9px; background:var(--surface-2); }
+.novel-fetch-schedule-row-actions { display:flex; align-items:center; }
+.novel-fetch-schedule-row-main { display:flex; align-items:center; gap:9px; min-width:0; color:var(--text-link); }
+.novel-fetch-schedule-row-main strong, .novel-fetch-schedule-row-main small { display:block; }
+.novel-fetch-schedule-row-main strong { color:var(--text-primary); font-size:12px; font-weight:600; }
+.novel-fetch-schedule-row-main small { margin-top:3px; color:var(--text-tertiary); font-size:10px; }
+.novel-fetch-schedule-status { padding:3px 8px; border-radius:999px; font-size:11px; white-space:nowrap; color:var(--text-secondary); background:var(--surface-2); }
+.novel-fetch-schedule-status.is-scheduled { color:var(--text-link); background:var(--status-info-bg); }
+.novel-fetch-schedule-status.is-running { color:var(--text-warning); background:var(--status-warning-bg); }
+.novel-fetch-schedule-status.is-completed { color:var(--text-success); background:var(--status-success-bg); }
+.novel-fetch-schedule-status.is-failed { color:var(--text-danger); background:var(--status-danger-bg); }
+.novel-fetch-schedule-empty { display:flex; flex-direction:column; align-items:center; gap:6px; padding:20px 12px 18px; border:1px dashed var(--border-default); border-radius:10px; color:var(--text-tertiary); background:var(--surface-2); text-align:center; }
+.novel-fetch-schedule-empty svg { color:var(--text-link); opacity:.8; }
+.novel-fetch-schedule-empty strong { color:var(--text-secondary); font-size:13px; }
+.novel-fetch-schedule-empty span { font-size:11px; }
+.novel-fetch-schedule-modal .ant-modal-footer .ant-btn { min-width:82px; border-radius:9px; }
+.novel-fetch-schedule-modal .ant-modal-footer .ant-btn-primary { min-width:124px; box-shadow:var(--shadow-1); }
+.novel-fetch-schedule-modal .ant-modal-close { top:14px; right:16px; color:var(--text-secondary); }
+.novel-fetch-schedule-modal .ant-modal-close:hover { color:var(--text-primary); background:var(--surface-hover); }
+@media (max-width: 600px) {
+  .novel-fetch-schedule-modal .ant-modal-body, .novel-fetch-schedule-modal .ant-modal-header, .novel-fetch-schedule-modal .ant-modal-footer { padding-left:14px; padding-right:14px; }
+  .novel-fetch-schedule-row { grid-template-columns:minmax(0,1fr) auto; }
+  .novel-fetch-schedule-row-actions { grid-column:2; grid-row:1; }
+  .novel-fetch-input-format-row { grid-template-columns: 1fr; }
+  .novel-fetch-input-preview { align-items: flex-start; flex-direction: column; }
+}

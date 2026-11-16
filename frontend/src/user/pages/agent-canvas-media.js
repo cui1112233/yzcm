@@ -1,0 +1,108 @@
+import { getAgentAssetBlob } from '../../shared/api/agent.js';
+
+export const AUTHENTICATED_MEDIA_AUTO_RETRY_LIMIT = 2;
+
+export function nextAuthenticatedMediaRetryAttempt(source, currentAttempt) {
+  if (!String(source || '').trim()) return null;
+  const attempt = Number.isInteger(currentAttempt) && currentAttempt >= 0 ? currentAttempt : 0;
+  return attempt < AUTHENTICATED_MEDIA_AUTO_RETRY_LIMIT ? attempt + 1 : null;
+}
+
+export function createAuthenticatedMediaStore({
+  loadBlob = getAgentAssetBlob,
+  createObjectUrl = blob => URL.createObjectURL(blob),
+  revokeObjectUrl = url => URL.revokeObjectURL(url)
+} = {}) {
+  const entries = new Map();
+
+  function removeEntry(source, entry) {
+    if (entries.get(source) === entry) entries.delete(source);
+  }
+
+  return {
+    acquire(value) {
+      const source = String(value || '').trim();
+      if (!source) return { promise: Promise.resolve(''), release() {} };
+
+      let entry = entries.get(source);
+      if (!entry) {
+        entry = { references: 0, objectUrl: '', promise: null };
+        entry.promise = Promise.resolve()
+          .then(() => loadBlob(source))
+          .then(blob => {
+            const objectUrl = createObjectUrl(blob);
+            entry.objectUrl = objectUrl;
+            if (entry.references === 0) {
+              revokeObjectUrl(objectUrl);
+              entry.objectUrl = '';
+              removeEntry(source, entry);
+            }
+            return objectUrl;
+          })
+          .catch(error => {
+            removeEntry(source, entry);
+            throw error;
+          });
+        entries.set(source, entry);
+      }
+
+      entry.references += 1;
+      let released = false;
+      return {
+        promise: entry.promise,
+        release() {
+          if (released) return;
+          released = true;
+          entry.references = Math.max(0, entry.references - 1);
+          if (entry.references === 0 && entry.objectUrl) {
+            revokeObjectUrl(entry.objectUrl);
+            entry.objectUrl = '';
+            removeEntry(source, entry);
+          }
+        }
+      };
+    }
+  };
+}
+
+export const agentCanvasMediaStore = createAuthenticatedMediaStore();
+
+export function createAuthenticatedMediaSession(source, { store = agentCanvasMediaStore, onState, loadErrorMessage = '媒体读取失败' } = {}) {
+  if (!source) {
+    onState?.({ url: '', loading: false, error: '' });
+    return { reportPlaybackError() {}, dispose() {} };
+  }
+
+  let active = true;
+  let released = false;
+  const lease = store.acquire(source);
+  const releaseLease = () => {
+    if (released) return false;
+    released = true;
+    lease.release();
+    return true;
+  };
+  onState?.({ url: '', loading: true, error: '' });
+  lease.promise
+    .then(url => {
+      if (active) onState?.({ url, loading: false, error: '' });
+    })
+    .catch(error => {
+      if (!active) return;
+      releaseLease();
+      onState?.({ url: '', loading: false, error: error?.message || loadErrorMessage });
+    });
+
+  return {
+    reportPlaybackError(message = '视频源无法播放') {
+      if (!active) return;
+      active = false;
+      releaseLease();
+      onState?.({ url: '', loading: false, error: String(message || '').trim() || '视频源无法播放' });
+    },
+    dispose() {
+      active = false;
+      releaseLease();
+    }
+  };
+}

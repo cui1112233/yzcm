@@ -1,0 +1,718 @@
+package httpapi
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"qiantie/backend/internal/agentworkspace"
+	"qiantie/backend/internal/batchfactoryv11"
+	"qiantie/backend/internal/localartifact"
+)
+
+type batchFactoryDeleteGuard struct {
+	*batchfactoryv11.MemoryStore
+	deleteBookAssetCalls int
+}
+
+type duplicateBindingRaceStore struct {
+	*agentworkspace.MemoryStore
+}
+
+func (s *duplicateBindingRaceStore) BindBatchFactoryProject(ctx context.Context, binding agentworkspace.BatchFactoryBinding) (agentworkspace.BatchFactoryBinding, error) {
+	if _, err := s.MemoryStore.BindBatchFactoryProject(ctx, binding); err != nil {
+		return agentworkspace.BatchFactoryBinding{}, err
+	}
+	// Match the MySQL unique-key race: another request has already persisted
+	// the deterministic binding, while this insert reports a duplicate.
+	return agentworkspace.BatchFactoryBinding{}, agentworkspace.ErrBatchFactoryBindingConflict
+}
+
+func (s *batchFactoryDeleteGuard) DeleteBookAsset(ctx context.Context, owner, batchID, bookID, assetID string) error {
+	s.deleteBookAssetCalls++
+	return s.MemoryStore.DeleteBookAsset(ctx, owner, batchID, bookID, assetID)
+}
+
+func TestBindBatchFactoryReturnsSameProjectForSameOwner(t *testing.T) {
+	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	batches := batchfactoryv11.NewMemoryStore()
+	batch, err := batches.CreateBatch(context.Background(), "alice", batchfactoryv11.CreateBatchInput{
+		Title: "private batch title", Books: []batchfactoryv11.CreateBookInput{{Title: "private book title", SourceText: "private source text"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects := agentworkspace.NewMemoryStore()
+	mux := http.NewServeMux()
+	RegisterAgentBatchFactoryBridge(mux, BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}, projects, batches, nil, func() time.Time { return now })
+
+	path := "/api/batch-factory/v11/batches/" + batch.ID + "/agent-project"
+	first := agentRequest(t, mux, now, http.MethodPost, path, "")
+	second := agentRequest(t, mux, now, http.MethodPost, path, "")
+	if first.Code != http.StatusOK || second.Code != http.StatusOK {
+		t.Fatalf("first=%d %s second=%d %s", first.Code, first.Body.String(), second.Code, second.Body.String())
+	}
+	var one, two agentBatchFactoryBindingResponse
+	if err := json.Unmarshal(first.Body.Bytes(), &one); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &two); err != nil {
+		t.Fatal(err)
+	}
+	if one.ProjectID == "" || one.ProjectID != two.ProjectID || one.State != "bound" || one.Source != "batch_factory" {
+		t.Fatalf("first=%+v second=%+v", one, two)
+	}
+	if _, err := projects.Project(context.Background(), "alice", one.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(first.Body.String(), "private batch title") || strings.Contains(first.Body.String(), "private book title") || strings.Contains(first.Body.String(), "private source text") {
+		t.Fatalf("binding leaked private Batch Factory fields: %s", first.Body.String())
+	}
+}
+
+func TestBindBatchFactoryProjectsEveryBookIntoTheOneAgentProject(t *testing.T) {
+	now := time.Date(2026, 10, 24, 7, 0, 0, 0, time.UTC)
+	batches := batchfactoryv11.NewMemoryStore()
+	batch, err := batches.CreateBatch(context.Background(), "alice", batchfactoryv11.CreateBatchInput{
+		Title: "batch",
+		Books: []batchfactoryv11.CreateBookInput{
+			{Title: "book one", SourceText: "one"},
+			{Title: "book two", SourceText: "two"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects := agentworkspace.NewMemoryStore()
+	mux := http.NewServeMux()
+	RegisterAgentBatchFactoryBridge(mux, BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}, projects, batches, nil, func() time.Time { return now })
+
+	response := agentRequest(t, mux, now, http.MethodPost, "/api/batch-factory/v11/batches/"+batch.ID+"/agent-project", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("bind status=%d body=%s", response.Code, response.Body.String())
+	}
+	var binding agentBatchFactoryBindingResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &binding); err != nil {
+		t.Fatal(err)
+	}
+	for _, book := range batch.Books {
+		origins, err := projects.BatchFactoryNodeOrigins(context.Background(), "alice", binding.ProjectID, book.ID)
+		if err != nil || len(origins) == 0 {
+			t.Fatalf("book %q was not projected into Agent: origins=%+v err=%v", book.ID, origins, err)
+		}
+	}
+	canvas, err := projects.Canvas(context.Background(), "alice", binding.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups := map[string]bool{}
+	for _, node := range canvas.Nodes {
+		groups[node.GroupID] = true
+	}
+	if len(groups) != len(batch.Books) {
+		t.Fatalf("canvas groups=%+v, want one group per book", groups)
+	}
+}
+
+func TestBindBatchFactoryRecreatesDeletedBoundProject(t *testing.T) {
+	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	batches := batchfactoryv11.NewMemoryStore()
+	batch, err := batches.CreateBatch(context.Background(), "alice", batchfactoryv11.CreateBatchInput{Title: "batch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects := agentworkspace.NewMemoryStore()
+	mux := http.NewServeMux()
+	RegisterAgentBatchFactoryBridge(mux, BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}, projects, batches, nil, func() time.Time { return now })
+
+	path := "/api/batch-factory/v11/batches/" + batch.ID + "/agent-project"
+	first := agentRequest(t, mux, now, http.MethodPost, path, "")
+	if first.Code != http.StatusOK {
+		t.Fatalf("first bind status=%d body=%s", first.Code, first.Body.String())
+	}
+	var original agentBatchFactoryBindingResponse
+	if err := json.Unmarshal(first.Body.Bytes(), &original); err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.DeleteProject(context.Background(), "alice", original.ProjectID, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	second := agentRequest(t, mux, now.Add(2*time.Minute), http.MethodPost, path, "")
+	if second.Code != http.StatusOK {
+		t.Fatalf("rebind status=%d body=%s", second.Code, second.Body.String())
+	}
+	var recreated agentBatchFactoryBindingResponse
+	if err := json.Unmarshal(second.Body.Bytes(), &recreated); err != nil {
+		t.Fatal(err)
+	}
+	if recreated.ProjectID == "" || recreated.ProjectID == original.ProjectID {
+		t.Fatalf("deleted project was returned again: original=%q recreated=%q", original.ProjectID, recreated.ProjectID)
+	}
+	if _, err := projects.Project(context.Background(), "alice", recreated.ProjectID); err != nil {
+		t.Fatalf("recreated project is not alive: %v", err)
+	}
+	binding, err := projects.BatchFactoryBinding(context.Background(), "alice", batch.ID)
+	if err != nil || binding.ProjectID != recreated.ProjectID {
+		t.Fatalf("binding=%+v err=%v, want recreated project", binding, err)
+	}
+	third := agentRequest(t, mux, now.Add(3*time.Minute), http.MethodPost, path, "")
+	var idempotent agentBatchFactoryBindingResponse
+	if third.Code != http.StatusOK || json.Unmarshal(third.Body.Bytes(), &idempotent) != nil || idempotent.ProjectID != recreated.ProjectID {
+		t.Fatalf("third bind status=%d body=%s recreated=%+v", third.Code, third.Body.String(), recreated)
+	}
+}
+
+func TestRouterProjectsPersistedBatchFactoryAudioForOwner(t *testing.T) {
+	now := time.Date(2026, 10, 23, 12, 3, 0, 0, time.UTC)
+	ctx := context.Background()
+	batches := batchfactoryv11.NewMemoryStore()
+	batch, err := batches.CreateBatch(ctx, "alice", batchfactoryv11.CreateBatchInput{Title: "batch", Books: []batchfactoryv11.CreateBookInput{{Title: "book"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	book := batch.Books[0]
+	const audioID = "tts-owner-audio"
+	if _, err := batches.SaveSettings(ctx, "alice", batchfactoryv11.ScopeRef{Kind: batchfactoryv11.ScopeBook, BatchID: batch.ID, BookID: book.ID}, batchfactoryv11.SettingsUpdate{
+		Patch: batchfactoryv11.SettingsPatch{
+			"ttsAudioArtifactId":   json.RawMessage(`"` + audioID + `"`),
+			"audioDurationSeconds": json.RawMessage(`7.4`),
+		},
+		ExpectedRevision: book.Revision,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := batches.CreateMergeJob(ctx, batchfactoryv11.MergeJob{Owner: "alice", BatchID: batch.ID, BookID: book.ID, RequestID: "merge-audio", AudioSource: "tts", AudioArtifactID: audioID, Status: batchfactoryv11.MergeSucceeded, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	files := localartifact.NewStore(t.TempDir(), 1024)
+	if _, err := files.SaveMedia(audioID, "audio/mpeg", "mp3", bytes.NewBufferString("persisted-audio")); err != nil {
+		t.Fatal(err)
+	}
+	projects := agentworkspace.NewMemoryStore()
+	api := NewRouter(RouterOptions{
+		BridgeSecret: "secret", Now: func() time.Time { return now }, Store: batches, AgentWorkspace: projects,
+		UserConfigStore: NewUserConfigStore(t.TempDir()), LocalArtifacts: files,
+	})
+	bound := agentRequest(t, api, now, http.MethodPost, "/api/batch-factory/v11/batches/"+batch.ID+"/agent-project", "")
+	if bound.Code != http.StatusOK {
+		t.Fatalf("bind status=%d body=%s", bound.Code, bound.Body.String())
+	}
+	var binding agentBatchFactoryBindingResponse
+	if err := json.Unmarshal(bound.Body.Bytes(), &binding); err != nil {
+		t.Fatal(err)
+	}
+	synced := agentRequest(t, api, now, http.MethodPost, "/api/agent/tasks/"+binding.ProjectID+"/batch-factory/books/"+book.ID+"/sync", "")
+	if synced.Code != http.StatusOK {
+		t.Fatalf("sync status=%d body=%s", synced.Code, synced.Body.String())
+	}
+	canvas, err := projects.Canvas(ctx, "alice", binding.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range canvas.Nodes {
+		if node.Type != "audio" {
+			continue
+		}
+		if node.AssetRef["id"] != audioID || node.Config["durationSeconds"] != 7.4 || node.AssetRef["url"] != nil {
+			t.Fatalf("audio node leaked or lost persisted metadata: %+v", node)
+		}
+		return
+	}
+	t.Fatalf("persisted owner-scoped audio was not projected: %+v", canvas.Nodes)
+}
+
+func TestBindBatchFactoryRecoversConcurrentDuplicateBinding(t *testing.T) {
+	now := time.Date(2026, 10, 23, 12, 1, 0, 0, time.UTC)
+	batches := batchfactoryv11.NewMemoryStore()
+	batch, err := batches.CreateBatch(context.Background(), "alice", batchfactoryv11.CreateBatchInput{Title: "batch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects := &duplicateBindingRaceStore{MemoryStore: agentworkspace.NewMemoryStore()}
+	mux := http.NewServeMux()
+	RegisterAgentBatchFactoryBridge(mux, BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}, projects, batches, nil, func() time.Time { return now })
+
+	path := "/api/batch-factory/v11/batches/" + batch.ID + "/agent-project"
+	start := make(chan struct{})
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	var group sync.WaitGroup
+	for range 2 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			req := httptest.NewRequest(http.MethodPost, path, nil)
+			SignBridgeRequest(req, "alice", true, now, "secret")
+			recorder := httptest.NewRecorder()
+			mux.ServeHTTP(recorder, req)
+			responses <- recorder
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(responses)
+	for response := range responses {
+		if response.Code != http.StatusOK {
+			t.Fatalf("concurrent bind status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+	projectsList, err := projects.ListProjects(context.Background(), "alice")
+	if err != nil || len(projectsList) != 1 {
+		t.Fatalf("projects=%+v err=%v", projectsList, err)
+	}
+}
+
+func TestBatchFactoryAgentBridgeRegistersThroughRouter(t *testing.T) {
+	now := time.Date(2026, 10, 23, 12, 2, 0, 0, time.UTC)
+	batches := batchfactoryv11.NewMemoryStore()
+	batch, err := batches.CreateBatch(context.Background(), "alice", batchfactoryv11.CreateBatchInput{Title: "batch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := NewRouter(RouterOptions{
+		BridgeSecret: "secret", Now: func() time.Time { return now }, Store: batches, AgentWorkspace: agentworkspace.NewMemoryStore(),
+		UserConfigStore: NewUserConfigStore(t.TempDir()),
+	})
+	response := agentRequest(t, api, now, http.MethodPost, "/api/batch-factory/v11/batches/"+batch.ID+"/agent-project", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestSyncBookRejectsAnotherOwnersBatch(t *testing.T) {
+	now := time.Date(2026, 10, 23, 12, 5, 0, 0, time.UTC)
+	batches := batchfactoryv11.NewMemoryStore()
+	batch, err := batches.CreateBatch(context.Background(), "bob", batchfactoryv11.CreateBatchInput{
+		Title: "bob private batch", Books: []batchfactoryv11.CreateBookInput{{Title: "bob private book", SourceText: "bob private source"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects := agentworkspace.NewMemoryStore()
+	project := agentworkspace.Project{ID: "agent-alice", Title: "Agent", CreatedAt: now, UpdatedAt: now, Canvas: agentworkspace.EmptyCanvas()}
+	if err := projects.CreateProject(context.Background(), "alice", project); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := projects.BindBatchFactoryProject(context.Background(), agentworkspace.BatchFactoryBinding{Owner: "alice", BatchID: batch.ID, ProjectID: project.ID, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	RegisterAgentBatchFactoryBridge(mux, BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}, projects, batches, nil, func() time.Time { return now })
+
+	response := agentRequest(t, mux, now, http.MethodPost, "/api/agent/tasks/"+project.ID+"/batch-factory/books/"+batch.Books[0].ID+"/sync", "")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "bob private batch") || strings.Contains(response.Body.String(), "bob private book") || strings.Contains(response.Body.String(), "bob private source") {
+		t.Fatalf("cross-owner response leaked Batch Factory fields: %s", response.Body.String())
+	}
+}
+
+func TestSyncBookDoesNotPersistSignedMediaURL(t *testing.T) {
+	now := time.Date(2026, 10, 23, 12, 7, 0, 0, time.UTC)
+	batches := batchfactoryv11.NewMemoryStore()
+	batch, err := batches.CreateBatch(context.Background(), "alice", batchfactoryv11.CreateBatchInput{Title: "batch", Books: []batchfactoryv11.CreateBookInput{{Title: "book"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	book := batch.Books[0]
+	asset, err := batches.CreateBookAsset(context.Background(), "alice", batch.ID, book.ID, batchfactoryv11.CreateBookAssetInput{Kind: "character", Name: "hero", Prompt: "portrait"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const signedURL = "https://media.example/image.png?X-Amz-Signature=private-signature&token=private-token"
+	if _, err := batches.CreateBookAssetImage(context.Background(), "alice", batch.ID, book.ID, asset.ID, batchfactoryv11.CreateBookAssetImageInput{URL: signedURL, MediaType: "image/png"}); err != nil {
+		t.Fatal(err)
+	}
+	projects := agentworkspace.NewMemoryStore()
+	mux := http.NewServeMux()
+	auth := BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}
+	RegisterAgentWorkspaceCompat(mux, auth, projects, "", nil, func() time.Time { return now })
+	RegisterAgentBatchFactoryBridge(mux, auth, projects, batches, nil, func() time.Time { return now })
+
+	bound := agentRequest(t, mux, now, http.MethodPost, "/api/batch-factory/v11/batches/"+batch.ID+"/agent-project", "")
+	if bound.Code != http.StatusOK {
+		t.Fatalf("bind status=%d body=%s", bound.Code, bound.Body.String())
+	}
+	var binding agentBatchFactoryBindingResponse
+	if err := json.Unmarshal(bound.Body.Bytes(), &binding); err != nil {
+		t.Fatal(err)
+	}
+	synced := agentRequest(t, mux, now, http.MethodPost, "/api/agent/tasks/"+binding.ProjectID+"/batch-factory/books/"+book.ID+"/sync", "")
+	if synced.Code != http.StatusOK {
+		t.Fatalf("sync status=%d body=%s", synced.Code, synced.Body.String())
+	}
+	stored, err := projects.Project(context.Background(), "alice", binding.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedJSON, _ := json.Marshal(stored)
+	if strings.Contains(string(storedJSON), "private-signature") || strings.Contains(string(storedJSON), "private-token") {
+		t.Fatalf("signed media URL persisted in canvas: %s", storedJSON)
+	}
+	read := agentRequest(t, mux, now, http.MethodGet, "/api/agent/tasks/"+binding.ProjectID, "")
+	if read.Code != http.StatusOK || strings.Contains(read.Body.String(), "private-signature") || strings.Contains(read.Body.String(), "private-token") {
+		t.Fatalf("task response leaked signed media URL: status=%d body=%s", read.Code, read.Body.String())
+	}
+}
+
+func TestBatchFactoryProjectionMediaReadUsesCanonicalBookID(t *testing.T) {
+	now := time.Date(2026, 10, 23, 19, 50, 0, 0, time.UTC)
+	batches := batchfactoryv11.NewMemoryStore()
+	batch, err := batches.CreateBatch(context.Background(), "alice", batchfactoryv11.CreateBatchInput{Title: "batch", Books: []batchfactoryv11.CreateBookInput{{
+		BookID: "2091926811672429633", Title: "legacy source book",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	book := batch.Books[0]
+	if book.ID == book.BookID || book.BookID != "2091926811672429633" {
+		t.Fatalf("fixture must keep distinct canonical and legacy book IDs: %+v", book)
+	}
+	asset, err := batches.CreateBookAsset(context.Background(), "alice", batch.ID, book.ID, batchfactoryv11.CreateBookAssetInput{Kind: "character", Name: "hero", Prompt: "portrait"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const mediaURL = "https://media.example/hero.png"
+	image, err := batches.CreateBookAssetImage(context.Background(), "alice", batch.ID, book.ID, asset.ID, batchfactoryv11.CreateBookAssetImageInput{URL: mediaURL, MediaType: "image/png", Source: "provider"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects := agentworkspace.NewMemoryStore()
+	mux := http.NewServeMux()
+	auth := BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}
+	RegisterAgentWorkspaceCompat(mux, auth, projects, "", nil, func() time.Time { return now })
+	RegisterAgentBatchFactoryBridge(mux, auth, projects, batches, nil, func() time.Time { return now })
+
+	bound := agentRequest(t, mux, now, http.MethodPost, "/api/batch-factory/v11/batches/"+batch.ID+"/agent-project", "")
+	if bound.Code != http.StatusOK {
+		t.Fatalf("bind status=%d body=%s", bound.Code, bound.Body.String())
+	}
+	var binding agentBatchFactoryBindingResponse
+	if err := json.Unmarshal(bound.Body.Bytes(), &binding); err != nil {
+		t.Fatal(err)
+	}
+	synced := agentRequest(t, mux, now, http.MethodPost, "/api/agent/tasks/"+binding.ProjectID+"/batch-factory/books/"+book.ID+"/sync", "")
+	if synced.Code != http.StatusOK {
+		t.Fatalf("sync status=%d body=%s", synced.Code, synced.Body.String())
+	}
+	canvas, err := projects.Canvas(context.Background(), "alice", binding.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nodeID string
+	for _, node := range canvas.Nodes {
+		if node.Config["resourceType"] == "book_asset" && node.Config["resourceId"] == asset.ID && node.AssetRef["id"] == image.ID {
+			nodeID = node.ID
+			break
+		}
+	}
+	if nodeID == "" {
+		t.Fatalf("missing projected image node: %+v", canvas.Nodes)
+	}
+	canvasResponse := agentRequest(t, mux, now, http.MethodGet, "/api/agent/tasks/"+binding.ProjectID+"/canvas", "")
+	wantMediaPath := "/api/agent/tasks/" + binding.ProjectID + "/batch-factory/nodes/" + nodeID + "/media"
+	if canvasResponse.Code != http.StatusOK || !strings.Contains(canvasResponse.Body.String(), wantMediaPath) || strings.Contains(canvasResponse.Body.String(), "/assets/"+image.ID+"/content") {
+		t.Fatalf("canvas response must expose the mapped media reader only: status=%d body=%s", canvasResponse.Code, canvasResponse.Body.String())
+	}
+
+	media := agentRequest(t, mux, now, http.MethodGet, "/api/agent/tasks/"+binding.ProjectID+"/batch-factory/nodes/"+nodeID+"/media", "")
+	if media.Code != http.StatusFound || media.Header().Get("Location") != mediaURL {
+		t.Fatalf("media status=%d location=%q body=%s", media.Code, media.Header().Get("Location"), media.Body.String())
+	}
+}
+
+func TestBatchFactoryProjectionMediaReadsMergeByCurrentMergeVersion(t *testing.T) {
+	ctx := context.Background()
+	batches := batchfactoryv11.NewMemoryStore()
+	batch, err := batches.CreateBatch(ctx, "alice", batchfactoryv11.CreateBatchInput{Title: "batch", Books: []batchfactoryv11.CreateBookInput{{Title: "book"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	book := batch.Books[0]
+	const mediaURL = "https://media.example/final.mp4"
+	merge, err := batches.CreateMergeJob(ctx, batchfactoryv11.MergeJob{
+		Owner: "alice", BatchID: batch.ID, BookID: book.ID, RequestID: "merge", Status: batchfactoryv11.MergeSucceeded, OutputURL: mediaURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	media, err := agentBatchFactoryProjectionMediaURL(ctx, batches, "alice", batch.ID, book.ID,
+		agentworkspace.BatchFactoryNodeOrigin{ResourceType: "merge", ResourceID: book.ID},
+		agentworkspace.Node{AssetRef: map[string]any{"id": merge.ID}},
+	)
+	if err != nil || media != mediaURL {
+		t.Fatalf("media=%q err=%v, want current merge output %q", media, err, mediaURL)
+	}
+}
+
+func TestBatchFactoryProjectionMergeMediaStreamsLocalArtifact(t *testing.T) {
+	now := time.Date(2026, 10, 24, 9, 30, 0, 0, time.UTC)
+	ctx := context.Background()
+	batches := batchfactoryv11.NewMemoryStore()
+	batch, err := batches.CreateBatch(ctx, "alice", batchfactoryv11.CreateBatchInput{Title: "batch", Books: []batchfactoryv11.CreateBookInput{{Title: "book"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	book := batch.Books[0]
+	files := localartifact.NewStore(t.TempDir(), 1024)
+	const artifactID = "merged-final"
+	const media = "0000ftypisom-canvas-final-video"
+	if _, err := files.SaveMedia(artifactID, "video/mp4", "mp4", bytes.NewBufferString(media)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := batches.CreateMergeJob(ctx, batchfactoryv11.MergeJob{
+		Owner: "alice", BatchID: batch.ID, BookID: book.ID, RequestID: "merge", Status: batchfactoryv11.MergeSucceeded,
+		OutputURL: "/api/batch-factory/v12/batches/" + batch.ID + "/merge-media/" + artifactID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	projects := agentworkspace.NewMemoryStore()
+	api := NewRouter(RouterOptions{
+		BridgeSecret: "secret", Now: func() time.Time { return now }, Slice: 5,
+		Store: batches, AgentWorkspace: projects, UserConfigStore: NewUserConfigStore(t.TempDir()),
+		Merge: &batchfactoryv11.MergeService{Store: batches, Enabled: true}, LocalArtifacts: files,
+	})
+
+	bound := agentRequest(t, api, now, http.MethodPost, "/api/batch-factory/v11/batches/"+batch.ID+"/agent-project", "")
+	if bound.Code != http.StatusOK {
+		t.Fatalf("bind status=%d body=%s", bound.Code, bound.Body.String())
+	}
+	var binding agentBatchFactoryBindingResponse
+	if err := json.Unmarshal(bound.Body.Bytes(), &binding); err != nil {
+		t.Fatal(err)
+	}
+	canvas, err := projects.Canvas(ctx, "alice", binding.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nodeID string
+	for _, node := range canvas.Nodes {
+		if node.Config["resourceType"] == "merge" && node.AssetRef["id"] != nil {
+			nodeID = node.ID
+			break
+		}
+	}
+	if nodeID == "" {
+		t.Fatalf("missing projected merge node: %+v", canvas.Nodes)
+	}
+
+	response := agentRequest(t, api, now, http.MethodGet, "/api/agent/tasks/"+binding.ProjectID+"/batch-factory/nodes/"+nodeID+"/media", "")
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "video/mp4" || response.Body.String() != media {
+		t.Fatalf("merge media status=%d type=%q body=%q", response.Code, response.Header().Get("Content-Type"), response.Body.String())
+	}
+}
+
+func TestBatchFactoryProjectionMediaReadsLocalExecutorImageArtifact(t *testing.T) {
+	now := time.Date(2026, 10, 23, 21, 55, 0, 0, time.UTC)
+	batches := batchfactoryv11.NewMemoryStore()
+	batch, err := batches.CreateBatch(context.Background(), "alice", batchfactoryv11.CreateBatchInput{Title: "batch", Books: []batchfactoryv11.CreateBookInput{{Title: "book"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	book := batch.Books[0]
+	asset, err := batches.CreateBookAsset(context.Background(), "alice", batch.ID, book.ID, batchfactoryv11.CreateBookAssetInput{Kind: "character", Name: "hero", Prompt: "portrait"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := batches.CreateBookAssetImage(context.Background(), "alice", batch.ID, book.ID, asset.ID, batchfactoryv11.CreateBookAssetImageInput{
+		StorageRef: "lea_local_hero.png", MediaType: "image/png", Source: batchfactoryv11.VideoProviderDoubaoLocal,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects := agentworkspace.NewMemoryStore()
+	mux := http.NewServeMux()
+	auth := BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}
+	RegisterAgentWorkspaceCompat(mux, auth, projects, "", nil, func() time.Time { return now })
+	RegisterAgentBatchFactoryBridge(mux, auth, projects, batches, nil, func() time.Time { return now })
+
+	bound := agentRequest(t, mux, now, http.MethodPost, "/api/batch-factory/v11/batches/"+batch.ID+"/agent-project", "")
+	if bound.Code != http.StatusOK {
+		t.Fatalf("bind status=%d body=%s", bound.Code, bound.Body.String())
+	}
+	var binding agentBatchFactoryBindingResponse
+	if err := json.Unmarshal(bound.Body.Bytes(), &binding); err != nil {
+		t.Fatal(err)
+	}
+	if synced := agentRequest(t, mux, now, http.MethodPost, "/api/agent/tasks/"+binding.ProjectID+"/batch-factory/books/"+book.ID+"/sync", ""); synced.Code != http.StatusOK {
+		t.Fatalf("sync status=%d body=%s", synced.Code, synced.Body.String())
+	}
+	canvas, err := projects.Canvas(context.Background(), "alice", binding.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nodeID string
+	for _, node := range canvas.Nodes {
+		if node.Config["resourceType"] == "book_asset" && node.Config["resourceId"] == asset.ID && node.AssetRef["id"] == image.ID {
+			nodeID = node.ID
+			break
+		}
+	}
+	if nodeID == "" {
+		t.Fatalf("missing projected image node: %+v", canvas.Nodes)
+	}
+
+	media := agentRequest(t, mux, now, http.MethodGet, "/api/agent/tasks/"+binding.ProjectID+"/batch-factory/nodes/"+nodeID+"/media", "")
+	if media.Code != http.StatusFound || media.Header().Get("Location") != "/api/shuihuo-production/local-executor-artifacts/lea_local_hero" {
+		t.Fatalf("media status=%d location=%q body=%s", media.Code, media.Header().Get("Location"), media.Body.String())
+	}
+}
+
+func TestBatchFactorySyncUsesMappedStateWithoutAgentGenerationTask(t *testing.T) {
+	now := time.Date(2026, 10, 23, 12, 8, 0, 0, time.UTC)
+	batches := batchfactoryv11.NewMemoryStore()
+	batch, err := batches.CreateBatch(context.Background(), "alice", batchfactoryv11.CreateBatchInput{Title: "batch", Books: []batchfactoryv11.CreateBookInput{{Title: "book", Videos: []batchfactoryv11.CreateVideoInput{{Label: "VIDEO 01", VideoPrompt: "prompt"}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	book := batch.Books[0]
+	if _, err := batches.CreateProductionJob(context.Background(), batchfactoryv11.ProductionJob{
+		Owner: "alice", BatchID: batch.ID, BookID: book.ID, RequestID: "failed-production", Status: batchfactoryv11.ProductionFailed,
+		Tasks: []batchfactoryv11.ProductionTask{{VideoID: book.Videos[0].ID, Status: batchfactoryv11.ProductionFailed, ErrorMessage: "temporary provider failure"}}, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	projects := agentworkspace.NewMemoryStore()
+	mux := http.NewServeMux()
+	RegisterAgentBatchFactoryBridge(mux, BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}, projects, batches, nil, func() time.Time { return now })
+
+	bound := agentRequest(t, mux, now, http.MethodPost, "/api/batch-factory/v11/batches/"+batch.ID+"/agent-project", "")
+	if bound.Code != http.StatusOK {
+		t.Fatalf("bind status=%d body=%s", bound.Code, bound.Body.String())
+	}
+	var binding agentBatchFactoryBindingResponse
+	if err := json.Unmarshal(bound.Body.Bytes(), &binding); err != nil {
+		t.Fatal(err)
+	}
+	synced := agentRequest(t, mux, now, http.MethodPost, "/api/agent/tasks/"+binding.ProjectID+"/batch-factory/books/"+book.ID+"/sync", "")
+	if synced.Code != http.StatusOK {
+		t.Fatalf("sync status=%d body=%s", synced.Code, synced.Body.String())
+	}
+	canvas, err := projects.Canvas(context.Background(), "alice", binding.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var video agentworkspace.Node
+	for _, node := range canvas.Nodes {
+		if node.Type == "video" && node.Config["resourceType"] == "video" {
+			video = node
+			break
+		}
+	}
+	if video.ID == "" || video.Status != "failed" || video.Config["canRetry"] != true || video.Config["errorMessage"] != "temporary provider failure" {
+		t.Fatalf("video=%+v", video)
+	}
+	tasks, err := projects.ListGenerationTasks(context.Background(), "alice", binding.ProjectID)
+	if err != nil || len(tasks) != 0 {
+		t.Fatalf("agent tasks=%+v err=%v", tasks, err)
+	}
+}
+
+func TestDeleteBoundNodeOnlyRemovesCanvasReference(t *testing.T) {
+	now := time.Date(2026, 10, 23, 12, 10, 0, 0, time.UTC)
+	base := batchfactoryv11.NewMemoryStore()
+	batch, err := base.CreateBatch(context.Background(), "alice", batchfactoryv11.CreateBatchInput{
+		Title: "batch", Books: []batchfactoryv11.CreateBookInput{{Title: "book", SourceText: "source"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	book := batch.Books[0]
+	asset, err := base.CreateBookAsset(context.Background(), "alice", batch.ID, book.ID, batchfactoryv11.CreateBookAssetInput{Kind: "character", Name: "hero", Prompt: "portrait"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batches := &batchFactoryDeleteGuard{MemoryStore: base}
+	projects := agentworkspace.NewMemoryStore()
+	mux := http.NewServeMux()
+	RegisterAgentBatchFactoryBridge(mux, BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}, projects, batches, nil, func() time.Time { return now })
+
+	bound := agentRequest(t, mux, now, http.MethodPost, "/api/batch-factory/v11/batches/"+batch.ID+"/agent-project", "")
+	if bound.Code != http.StatusOK {
+		t.Fatalf("bind status=%d body=%s", bound.Code, bound.Body.String())
+	}
+	var binding agentBatchFactoryBindingResponse
+	if err := json.Unmarshal(bound.Body.Bytes(), &binding); err != nil {
+		t.Fatal(err)
+	}
+	synced := agentRequest(t, mux, now, http.MethodPost, "/api/agent/tasks/"+binding.ProjectID+"/batch-factory/books/"+book.ID+"/sync", "")
+	if synced.Code != http.StatusOK {
+		t.Fatalf("sync status=%d body=%s", synced.Code, synced.Body.String())
+	}
+	origins, err := projects.BatchFactoryNodeOrigins(context.Background(), "alice", binding.ProjectID, book.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nodeID string
+	for _, origin := range origins {
+		if origin.ResourceID == asset.ID {
+			nodeID = origin.NodeID
+			break
+		}
+	}
+	if nodeID == "" {
+		t.Fatalf("asset origin missing: %+v", origins)
+	}
+	canvasBeforeDelete, err := projects.Canvas(context.Background(), "alice", binding.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scriptNodeID string
+	for _, origin := range origins {
+		if origin.ResourceType == "book_script" {
+			scriptNodeID = origin.NodeID
+			break
+		}
+	}
+	if scriptNodeID == "" {
+		t.Fatalf("script origin missing: %+v", origins)
+	}
+	canvasBeforeDelete.Edges = append(canvasBeforeDelete.Edges, agentworkspace.Edge{ID: "manual-reference", Source: scriptNodeID, Target: nodeID, Relation: "manual"})
+	if _, err := projects.SaveCanvas(context.Background(), "alice", binding.ProjectID, canvasBeforeDelete, canvasBeforeDelete.Revision, now); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted := agentRequest(t, mux, now, http.MethodDelete, "/api/agent/tasks/"+binding.ProjectID+"/batch-factory/nodes/"+nodeID+"%20", "")
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	if batches.deleteBookAssetCalls != 0 {
+		t.Fatalf("DeleteBookAsset calls=%d, want 0", batches.deleteBookAssetCalls)
+	}
+	assets, err := base.ListBookAssets(context.Background(), "alice", batch.ID, book.ID)
+	if err != nil || len(assets) != 1 || assets[0].ID != asset.ID {
+		t.Fatalf("assets=%+v err=%v", assets, err)
+	}
+	canvas, err := projects.Canvas(context.Background(), "alice", binding.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range canvas.Nodes {
+		if node.ID == nodeID {
+			t.Fatalf("deleted node remains: %+v", node)
+		}
+	}
+	for _, edge := range canvas.Edges {
+		if edge.Source == nodeID || edge.Target == nodeID {
+			t.Fatalf("deleted node edge remains: %+v", edge)
+		}
+	}
+	origins, err = projects.BatchFactoryNodeOrigins(context.Background(), "alice", binding.ProjectID, book.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, origin := range origins {
+		if origin.NodeID == nodeID {
+			t.Fatalf("deleted origin remains: %+v", origin)
+		}
+	}
+}

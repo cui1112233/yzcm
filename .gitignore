@@ -1,0 +1,65 @@
+node_modules/
+.DS_Store
+data/
+
+# V88 代码直传本地产物（不入库）
+/.direct-staging/
+/.cache/
+/.release/
+/test-results/
+/work/
+/frontend/.direct-staging/
+/_local-archive-*/
+/release/
+
+# Local recovery copies, visual checks, editor notes, and generated release
+# evidence stay on disk but must not turn into source changes.
+/.backups/
+/.trae/
+/_shots/
+/screenshots/
+/docs/releases/
+
+# Local review/runtime output and throwaway verification artifacts.
+/.analysis/
+/.local-review/
+/.local-*.json
+/.local-*.log
+/.local-route-audit.txt
+/.tmp-*
+/tmp-go-*.log
+/.current-novel-config.json
+/.updated-novel-config.json
+/.env.v88-review
+
+# Generated local Go runtime artifacts.
+frontend/dist/
+backend/web/dist/
+backend/*.exe
+/*.exe
+backend/.data-v88-review/
+.data-v88-review/
+frontend/*.log
+backend/*.log
+.tools/
+backend/.tools/
+dist/
+executors/local-executor/build/
+
+# Local process logs, interrupted executable swaps, and Superpowers scratch state.
+/.local-*.err
+/.local-*.out
+/backend/.review-*.err
+/backend/*.exe~
+/.superpowers/
+/frontend/pnpm-lock.yaml
+/frontend/pnpm-workspace.yaml
+
+# Rust/Tauri build outputs.
+**/src-tauri/target/
+**/src-tauri/target-*/
+executors/**/target/
+executors/**/target-*/
+
+backend/backend/
+

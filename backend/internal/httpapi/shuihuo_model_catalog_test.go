@@ -1,0 +1,279 @@
+package httpapi
+
+import (
+	"context"
+	"testing"
+
+	"qiantie/backend/internal/batchfactoryv11"
+	"qiantie/backend/internal/novelfetchworkshop"
+)
+
+type readyLocalVideoClient struct{}
+
+func (readyLocalVideoClient) CreateVideoJob(context.Context, string, batchfactoryv11.LocalVideoJobInput) (batchfactoryv11.LocalVideoJob, error) {
+	return batchfactoryv11.LocalVideoJob{ID: "local-job", State: "queued"}, nil
+}
+
+func (readyLocalVideoClient) GetVideoJob(context.Context, string, string) (batchfactoryv11.LocalVideoJob, error) {
+	return batchfactoryv11.LocalVideoJob{ID: "local-job", State: "queued"}, nil
+}
+
+func TestLoadShuihuoOwnerConfigUsesManagedModelCatalog(t *testing.T) {
+	shuihuoStore := batchfactoryv11.NewMemoryStore()
+	if err := shuihuoStore.SaveShuihuoConfig(context.Background(), "tester", map[string]any{"textModelId": "legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	catalogStore := novelfetchworkshop.NewMemoryStore()
+	if err := catalogStore.PutConfig(context.Background(), "tester", map[string]any{
+		"modelCatalog":        []any{map[string]any{"id": "managed-text", "kind": "text", "enabled": true}},
+		"modelCatalogVersion": 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	config, err := loadShuihuoOwnerConfig(context.Background(), shuihuoStore, "tester", catalogStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, ok := config["modelCatalog"].([]any)
+	if !ok || len(catalog) != 1 || catalog[0].(map[string]any)["id"] != "managed-text" {
+		t.Fatalf("unexpected managed catalog: %#v", config["modelCatalog"])
+	}
+}
+
+func TestRuntimeModelCatalogStoreUsesResolvedManagerOwner(t *testing.T) {
+	catalogStore := novelfetchworkshop.NewMemoryStore()
+	if err := catalogStore.PutConfig(context.Background(), "manager", map[string]any{
+		"modelCatalog": []any{map[string]any{
+			"id": "manager-image", "kind": "image", "enabled": true,
+			"modelId": "gpt-image-2", "baseUrl": "https://images.example/v1", "credential": "secret",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalogStore.PutConfig(context.Background(), "member", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+
+	runtimeStore := runtimeModelCatalogStore(catalogStore, func(owner string) string {
+		if owner == "member" {
+			return "manager"
+		}
+		return owner
+	})
+	config, err := runtimeStore.GetConfig(context.Background(), "member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	models := modelCatalog(config)
+	if len(models) != 1 || modelString(models[0], "id") != "manager-image" {
+		t.Fatalf("member runtime should use manager catalog, got %#v", models)
+	}
+}
+
+func TestRuntimeTextProviderResolverUsesResolvedManagerOwner(t *testing.T) {
+	resolvedOwner := ""
+	resolver := managedTextProviderResolver(func(_ context.Context, owner, _ string) (batchfactoryv11.DirectorProvider, error) {
+		resolvedOwner = owner
+		return nil, nil
+	}, func(owner string) string {
+		if owner == "member" {
+			return "manager"
+		}
+		return owner
+	})
+	if _, err := resolver(context.Background(), "member", "manager-text"); err != nil {
+		t.Fatal(err)
+	}
+	if resolvedOwner != "manager" {
+		t.Fatalf("member text model should resolve through manager, got %q", resolvedOwner)
+	}
+}
+
+func TestLoadShuihuoOwnerConfigMigratesLegacyPersonalImageConfig(t *testing.T) {
+	store := batchfactoryv11.NewMemoryStore()
+	if err := store.SaveShuihuoConfig(context.Background(), "tester", map[string]any{
+		"image": map[string]any{
+			"provider": "openai_compatible", "baseUrl": "https://image.example/v1",
+			"model": "image-model", "apiKey": "image-secret",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	config, err := loadShuihuoOwnerConfig(context.Background(), store, "tester")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !shuihuoImageModelReady(shuihuoCollection(config, "modelCatalog", nil)[0]) {
+		t.Fatalf("legacy image config was not migrated to a ready model: %#v", config["modelCatalog"])
+	}
+}
+
+func TestSafeShuihuoConfigForResponseHidesModelCredentials(t *testing.T) {
+	config := map[string]any{
+		"textModelId": "managed-text",
+		"modelCatalog": []any{map[string]any{
+			"id": "managed-text", "kind": "text", "modelId": "gemini",
+			"credential": "secret-value", "apiKey": "api-key-value", "enabled": true,
+		}},
+	}
+
+	got := safeShuihuoConfigForResponse(config)
+	catalog, ok := got["modelCatalog"].([]map[string]any)
+	if !ok || len(catalog) != 1 {
+		t.Fatalf("catalog = %#v", got["modelCatalog"])
+	}
+	if _, exists := catalog[0]["credential"]; exists {
+		t.Fatalf("credential leaked: %#v", catalog[0])
+	}
+	if _, exists := catalog[0]["apiKey"]; exists {
+		t.Fatalf("api key leaked: %#v", catalog[0])
+	}
+	if catalog[0]["hasCredential"] != true || got["textModelId"] != "managed-text" {
+		t.Fatalf("safe config lost compatibility fields: %#v", got)
+	}
+}
+
+func TestShuihuoTextModelConfiguredUsesManagedCatalog(t *testing.T) {
+	configured := map[string]any{
+		"modelCatalog": []any{map[string]any{
+			"kind": "text", "enabled": true, "modelId": "[anti-2]gemini-3.8-flash",
+			"baseUrl": "https://example.test/v1", "credential": "secret",
+		}},
+	}
+	if !shuihuoTextModelConfigured(configured) {
+		t.Fatal("enabled managed text model should make Shuihuo text readiness true")
+	}
+	if shuihuoTextModelConfigured(map[string]any{
+		"modelCatalog": []any{map[string]any{
+			"kind": "text", "enabled": false, "modelId": "model",
+			"baseUrl": "https://example.test/v1", "credential": "secret",
+		}},
+	}) {
+		t.Fatal("disabled managed text model must not make Shuihuo text readiness true")
+	}
+}
+
+func TestShuihuoModelKindConfiguredUsesCredentialReferenceAndAudioFields(t *testing.T) {
+	t.Setenv("V88_TEXT_MODEL_KEY", "text-secret")
+	config := map[string]any{"modelCatalog": []any{
+		map[string]any{"kind": "text", "enabled": true, "modelId": "text-model", "baseUrl": "https://text.example/v1", "credentialRef": "V88_TEXT_MODEL_KEY"},
+		map[string]any{"kind": "audio", "enabled": true, "modelId": "tts-model", "endpoint": "https://audio.example/speech", "credential": "audio-secret", "requestTemplate": `{\"body\":{}}`, "responseMapping": `{\"resultUrl\":\"data.url\"}`},
+	}}
+	if !shuihuoModelKindConfigured(config, "text") {
+		t.Fatal("text model with a credential reference should be ready")
+	}
+	if !shuihuoModelKindConfigured(config, "audio") {
+		t.Fatal("audio model with endpoint, credential, template and mapping should be ready")
+	}
+	config["modelCatalog"] = []any{map[string]any{"kind": "audio", "enabled": true, "modelId": "tts-model", "endpoint": "https://audio.example/speech", "credential": "audio-secret"}}
+	if shuihuoModelKindConfigured(config, "audio") {
+		t.Fatal("audio model without request template and response mapping must not be ready")
+	}
+}
+
+func TestShuihuoAudioModelConfiguredUsesBuiltInDefaultTTS(t *testing.T) {
+	if !shuihuoAudioModelConfigured(map[string]any{}) {
+		t.Fatal("the built-in Go TTS HTTP fallback should make audio readiness available")
+	}
+	if !shuihuoAudioModelConfigured(map[string]any{
+		"modelCatalog": []any{map[string]any{
+			"kind": "audio", "enabled": false, "modelId": "tts-model",
+			"endpoint": "https://audio.example/speech", "credential": "secret",
+			"requestTemplate": `{}`, "responseMapping": `{"resultUrl":"data.url"}`,
+		}},
+	}) {
+		t.Fatal("the built-in TTS fallback should remain available when a custom audio model is disabled")
+	}
+}
+
+func TestShuihuoVideoReadyCheckerAcceptsLocalDoubaoExecutor(t *testing.T) {
+	store := batchfactoryv11.NewMemoryStore()
+	if err := store.SaveShuihuoConfig(context.Background(), "tester", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	production := &batchfactoryv11.ProductionService{
+		Enabled:       true,
+		LocalExecutor: batchfactoryv11.NewLocalExecutorVideoAdapter(readyLocalVideoClient{}, ""),
+	}
+	ready, reason := shuihuoVideoReadyChecker(store, nil, production)(context.Background(), "tester")
+	if !ready || reason != "" {
+		t.Fatalf("local Doubao executor should make video generation ready: ready=%v reason=%q", ready, reason)
+	}
+}
+
+func TestShuihuoImageModelReadyUsesBaseURLAndCredentialRef(t *testing.T) {
+	t.Setenv("V88_IMAGE_MODEL_KEY", "image-secret")
+	model := map[string]any{
+		"kind":          "image",
+		"enabled":       true,
+		"modelId":       "image-model",
+		"baseUrl":       "https://images.example/v1",
+		"credentialRef": "V88_IMAGE_MODEL_KEY",
+	}
+	if !shuihuoImageModelReady(model) {
+		t.Fatal("image model with a valid base URL and credential reference should be ready")
+	}
+	model["enabled"] = false
+	if shuihuoImageModelReady(model) {
+		t.Fatal("disabled image model must not be ready")
+	}
+}
+
+func TestPatchShuihuoModelAllowsStatusOnlyUpdates(t *testing.T) {
+	current := map[string]any{"id": "text-model", "name": "文本模型", "kind": "text", "enabled": true}
+	updated, err := patchShuihuoModel(current, map[string]any{"enabled": false})
+	if err != nil {
+		t.Fatalf("status-only patch should be accepted: %v", err)
+	}
+	if updated["enabled"] != false || updated["name"] != "文本模型" || updated["kind"] != "text" {
+		t.Fatalf("unexpected patched model: %#v", updated)
+	}
+}
+
+func TestPatchShuihuoModelAcceptsSharedCatalogDisplayName(t *testing.T) {
+	current := map[string]any{"id": "text-model", "displayName": "共享文本模型", "kind": "text", "enabled": true}
+	updated, err := patchShuihuoModel(current, map[string]any{"enabled": false})
+	if err != nil || updated["enabled"] != false {
+		t.Fatalf("shared catalog status-only patch should be accepted: %#v, %v", updated, err)
+	}
+}
+
+func TestPatchShuihuoModelUpdatesVoiceCloneConfiguration(t *testing.T) {
+	current := map[string]any{"modelId": "audio-main", "name": "声音克隆", "kind": "audio", "capabilities": map[string]any{}}
+	updated, err := patchShuihuoModel(current, map[string]any{
+		"capabilities":              map[string]any{"supportsVoiceClone": true},
+		"voiceCloneRequestTemplate": `{"body":{"reference":"{{reference_audio_base64}}"}}`,
+		"voiceCloneResponseMapping": `{"resultUrl":"data.url"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities, _ := updated["capabilities"].(map[string]any)
+	if capabilities["supportsVoiceClone"] != true || modelString(updated, "voiceCloneRequestTemplate") == "" || modelString(updated, "voiceCloneResponseMapping") == "" {
+		t.Fatalf("voice clone patch was dropped: %+v", updated)
+	}
+}
+
+func TestSafeShuihuoModelsKeepsVoiceCloneTemplatesServerSide(t *testing.T) {
+	model := map[string]any{
+		"id": "audio-main", "modelId": "audio-main", "name": "声音克隆", "kind": "audio", "enabled": true,
+		"endpoint": "https://audio.example/clone", "credentialRef": "VOICE_CLONE_KEY", "credential": "secret",
+		"requestTemplate": `{}`, "responseMapping": `{}`,
+		"voiceCloneRequestTemplate": `{"body":{"reference":"{{reference_audio_base64}}"}}`,
+		"voiceCloneResponseMapping": `{"resultUrl":"data.url"}`,
+		"capabilities":              map[string]any{"supportsVoiceClone": true},
+	}
+	public := safeShuihuoModels([]map[string]any{model}, false)[0]
+	for _, key := range []string{"endpoint", "credentialRef", "credential", "requestTemplate", "responseMapping", "voiceCloneRequestTemplate", "voiceCloneResponseMapping"} {
+		if _, exists := public[key]; exists {
+			t.Fatalf("public model leaked %s: %+v", key, public)
+		}
+	}
+	admin := safeShuihuoAdminModels([]map[string]any{model})[0]
+	if modelString(admin, "voiceCloneRequestTemplate") == "" || modelString(admin, "endpoint") == "" {
+		t.Fatalf("admin model lost server configuration: %+v", admin)
+	}
+	if _, exists := admin["credential"]; exists {
+		t.Fatalf("admin model leaked credential: %+v", admin)
+	}
+}

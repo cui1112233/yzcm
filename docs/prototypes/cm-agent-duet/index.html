@@ -1,0 +1,719 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>一战晟铭 · CM 工作台原型</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #070b12;
+      --sidebar: #0d1420;
+      --surface: #101a29;
+      --surface-2: #152235;
+      --surface-3: #1b2a40;
+      --text: #eef4ff;
+      --muted: #8fa0b8;
+      --border: #26364d;
+      --primary: #6e70ff;
+      --primary-2: #48c6ef;
+      --success: #48d7a5;
+      --warning: #f6ba57;
+      --danger: #ff6e7d;
+      --shadow: 0 18px 46px rgb(0 0 0 / 25%);
+      --radius: 14px;
+    }
+    html[data-theme="light"] {
+      color-scheme: light;
+      --bg: #f4f6fa;
+      --sidebar: #ffffff;
+      --surface: #ffffff;
+      --surface-2: #f7f8fc;
+      --surface-3: #edf1f8;
+      --text: #182235;
+      --muted: #65738a;
+      --border: #dce3ee;
+      --primary: #5367df;
+      --primary-2: #1aa8ca;
+      --shadow: 0 18px 46px rgb(50 68 98 / 13%);
+    }
+    html[data-theme="snow"] {
+      color-scheme: light;
+      --bg: #edf6fb;
+      --sidebar: #e7f2f9;
+      --surface: #f8fcff;
+      --surface-2: #eef7fc;
+      --surface-3: #deeff8;
+      --text: #183044;
+      --muted: #607c91;
+      --border: #c8dde9;
+      --primary: #2587bc;
+      --primary-2: #54b6d1;
+      --shadow: 0 18px 46px rgb(52 102 132 / 14%);
+    }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; min-width: 320px; min-height: 100%; margin: 0; }
+    body {
+      min-height: 100vh;
+      overflow: hidden;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 75% 0%, color-mix(in srgb, var(--primary) 13%, transparent), transparent 34%),
+        var(--bg);
+      font-family: Inter, "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+      font-size: 14px;
+    }
+    button, input, select, textarea { font: inherit; }
+    button { color: inherit; }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+      outline: 2px solid var(--primary-2);
+      outline-offset: 2px;
+    }
+    .app-shell { min-height: 100vh; display: grid; grid-template-columns: 232px minmax(0, 1fr); }
+    .sidebar {
+      position: relative;
+      z-index: 30;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      padding: 12px;
+      border-right: 1px solid var(--border);
+      background: color-mix(in srgb, var(--sidebar) 96%, transparent);
+    }
+    .mode-switcher { position: relative; }
+    .mode-button {
+      width: 100%; min-height: 46px; display: flex; align-items: center; gap: 10px;
+      padding: 9px 10px; border: 1px solid var(--border); border-radius: 12px;
+      background: var(--surface); cursor: pointer; text-align: left;
+    }
+    .brand-mark {
+      width: 28px; height: 28px; display: grid; place-items: center; flex: none;
+      border-radius: 9px; color: white; font-weight: 800;
+      background: linear-gradient(135deg, var(--primary), var(--primary-2));
+      box-shadow: 0 7px 18px color-mix(in srgb, var(--primary) 35%, transparent);
+    }
+    .mode-button strong { flex: 1; font-size: 15px; }
+    .mode-button .chevron { color: var(--muted); transition: transform .18s ease; }
+    .mode-switcher.is-open .chevron { transform: rotate(180deg); }
+    .mode-menu {
+      position: absolute; top: 52px; left: 0; right: 0; z-index: 60;
+      padding: 6px; border: 1px solid var(--border); border-radius: 12px;
+      background: var(--surface); box-shadow: var(--shadow);
+    }
+    .mode-option {
+      width: 100%; display: flex; align-items: center; gap: 10px; padding: 10px;
+      border: 0; border-radius: 9px; background: transparent; cursor: pointer; text-align: left;
+    }
+    .mode-option:hover, .mode-option.is-active { background: var(--surface-3); }
+    .mode-option span:first-child { width: 22px; text-align: center; }
+    .mode-option b { flex: 1; }
+    .mode-option em { color: var(--success); font-style: normal; }
+    .sidebar-caption { margin: 20px 10px 7px; color: var(--muted); font-size: 12px; letter-spacing: .08em; }
+    .side-nav { display: grid; gap: 5px; margin-top: 14px; overflow-y: auto; }
+    .sidebar-content { flex: 1; min-height: 0; overflow-y: auto; padding-right: 2px; }
+    .sidebar-content .side-nav { overflow: visible; }
+    .nav-button {
+      width: 100%; min-height: 42px; display: flex; align-items: center; gap: 11px;
+      padding: 9px 11px; border: 0; border-radius: 10px; background: transparent;
+      cursor: pointer; color: var(--muted); text-align: left;
+    }
+    .nav-button:hover { color: var(--text); background: var(--surface-2); }
+    .nav-button.is-active { color: white; background: linear-gradient(100deg, var(--primary), color-mix(in srgb, var(--primary) 58%, var(--primary-2))); }
+    html[data-theme="light"] .nav-button.is-active, html[data-theme="snow"] .nav-button.is-active { color: white; }
+    .nav-icon { width: 20px; text-align: center; font-size: 16px; }
+    .nav-label { flex: 1; font-weight: 650; }
+    .count-badge { min-width: 24px; padding: 2px 7px; border-radius: 999px; background: color-mix(in srgb, var(--text) 10%, transparent); text-align: center; font-size: 12px; }
+    .sidebar-spacer { flex: 1; }
+    .sidebar-footer { display: grid; gap: 6px; padding-top: 10px; border-top: 1px solid var(--border); }
+    .main-shell { min-width: 0; height: 100vh; overflow: auto; }
+    .topbar {
+      position: sticky; top: 0; z-index: 20; min-height: 64px; display: flex; align-items: center;
+      justify-content: space-between; gap: 18px; padding: 12px 24px; border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(16px);
+    }
+    .topbar-title strong { display: block; font-size: 17px; }
+    .topbar-title span { color: var(--muted); font-size: 12px; }
+    .theme-switcher { display: flex; gap: 6px; padding: 4px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+    .theme-button { padding: 6px 9px; border: 0; border-radius: 7px; background: transparent; cursor: pointer; color: var(--muted); }
+    .theme-button.is-active { color: var(--text); background: var(--surface-3); }
+    .page { padding: 24px; }
+    .hero {
+      min-height: 240px; display: grid; align-content: center; padding: 34px;
+      border: 1px solid var(--border); border-radius: 22px; overflow: hidden;
+      background:
+        radial-gradient(circle at 85% 25%, color-mix(in srgb, var(--primary-2) 28%, transparent), transparent 28%),
+        radial-gradient(circle at 60% 100%, color-mix(in srgb, var(--primary) 24%, transparent), transparent 35%),
+        var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .eyebrow { color: var(--primary-2); font-weight: 750; letter-spacing: .06em; }
+    .hero h1 { max-width: 760px; margin: 10px 0 8px; font-size: clamp(32px, 4vw, 56px); line-height: 1.08; }
+    .hero p { max-width: 700px; margin: 0; color: var(--muted); font-size: 16px; line-height: 1.8; }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 16px; }
+    .card { padding: 18px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+    .card h3 { margin: 0 0 8px; }
+    .card p { margin: 0; color: var(--muted); line-height: 1.7; }
+    .card-button { cursor: pointer; text-align: left; }
+    .card-button:hover { border-color: color-mix(in srgb, var(--primary) 65%, var(--border)); transform: translateY(-1px); }
+    .empty-panel { min-height: 420px; display: grid; place-items: center; padding: 30px; text-align: center; }
+    .empty-panel .orb { width: 74px; height: 74px; display: grid; place-items: center; margin: auto; border-radius: 24px; color: white; font-size: 30px; background: linear-gradient(145deg, var(--primary), var(--primary-2)); }
+    .empty-panel h1 { margin-bottom: 8px; }
+    .empty-panel p { max-width: 560px; color: var(--muted); line-height: 1.8; }
+    .primary-button, .secondary-button {
+      min-height: 38px; padding: 8px 14px; border-radius: 9px; cursor: pointer;
+    }
+    .primary-button { border: 0; color: white; background: linear-gradient(100deg, var(--primary), var(--primary-2)); }
+    .secondary-button { border: 1px solid var(--border); background: var(--surface-2); }
+    .workspace-page { padding: 22px; }
+    .workspace-header, .toolbar, .tabs, .chips, .permission-row, .card-actions { display: flex; align-items: center; gap: 10px; }
+    .workspace-header { justify-content: space-between; margin-bottom: 18px; }
+    .workspace-header h1 { margin: 0 0 4px; font-size: 25px; }
+    .workspace-header p, .muted { margin: 0; color: var(--muted); }
+    .tabs { padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+    .tab-button, .chip, .pill { padding: 7px 11px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); cursor: pointer; }
+    .tab-button.is-active, .pill.is-active { color: white; border-color: transparent; background: var(--primary); }
+    .toolbar { flex-wrap: wrap; margin: 14px 0; }
+    .search-input, .composer textarea, .field-input, .field-select { color: var(--text); border: 1px solid var(--border); background: var(--surface-2); }
+    .search-input { min-width: 250px; padding: 9px 12px; border-radius: 9px; }
+    .skill-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .skill-card { display: grid; gap: 12px; padding: 15px; border: 1px solid var(--border); border-radius: 13px; background: var(--surface); }
+    .skill-card.is-enabled { border-color: color-mix(in srgb, var(--primary) 60%, var(--border)); }
+    .skill-head { display: flex; gap: 10px; align-items: flex-start; }
+    .skill-icon { width: 36px; height: 36px; display: grid; place-items: center; flex: none; border-radius: 10px; background: var(--surface-3); color: var(--primary-2); }
+    .skill-head div { flex: 1; }
+    .skill-head strong { display: block; }
+    .skill-head small, .skill-meta { color: var(--muted); }
+    .switch { width: 38px; height: 22px; padding: 2px; border: 0; border-radius: 999px; background: var(--surface-3); cursor: pointer; }
+    .switch::after { content: ''; display: block; width: 18px; height: 18px; border-radius: 50%; background: white; transition: .16s; }
+    .switch.is-on { background: var(--success); }
+    .switch.is-on::after { transform: translateX(16px); }
+    .card-actions { justify-content: space-between; }
+    .composer { position: relative; max-width: 900px; margin: 18px auto; padding: 14px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); }
+    .composer textarea { width: 100%; min-height: 120px; resize: vertical; padding: 12px; border-radius: 10px; }
+    .composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; }
+    .chips { flex-wrap: wrap; margin-bottom: 8px; }
+    .chip { cursor: default; }
+    .chip button { margin-left: 6px; border: 0; background: transparent; cursor: pointer; color: var(--muted); }
+    .permission-row { justify-content: center; flex-wrap: wrap; margin: 14px 0; }
+    .picker { position: absolute; left: 14px; bottom: 58px; z-index: 15; width: min(560px, calc(100% - 28px)); max-height: 310px; overflow: auto; padding: 8px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); }
+    .picker button { width: 100%; display: flex; justify-content: space-between; gap: 10px; padding: 9px; border: 0; border-radius: 8px; background: transparent; cursor: pointer; text-align: left; }
+    .picker button:hover { background: var(--surface-2); }
+    .overlay { position: fixed; inset: 0; z-index: 70; background: rgb(0 0 0 / 45%); }
+    .drawer { position: fixed; top: 0; right: 0; z-index: 71; width: min(480px, 92vw); height: 100vh; overflow: auto; padding: 22px; border-left: 1px solid var(--border); background: var(--surface); box-shadow: var(--shadow); }
+    .modal { position: fixed; left: 50%; top: 50%; z-index: 72; width: min(560px, 92vw); transform: translate(-50%, -50%); padding: 22px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow); }
+    .close-button { float: right; border: 0; background: transparent; cursor: pointer; font-size: 22px; }
+    .detail-list { display: grid; gap: 12px; margin-top: 20px; }
+    .split-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 14px; }
+    .run-timeline { padding: 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+    .timeline-step { display: grid; grid-template-columns: 24px 1fr; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+    .timeline-step:last-child { border: 0; }
+    .timeline-dot { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; background: var(--surface-3); }
+    .timeline-step.is-done .timeline-dot { color: #06150f; background: var(--success); }
+    .timeline-step.is-current .timeline-dot { color: white; background: var(--primary); }
+    .status-banner { margin: 12px 0; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+    .workspace-stage { min-height: 420px; padding: 18px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+    .canvas-board { position: relative; min-height: 330px; border-radius: 12px; background-image: radial-gradient(var(--border) 1px, transparent 1px); background-size: 18px 18px; }
+    .canvas-node { position: absolute; width: 180px; padding: 12px; border: 1px solid var(--primary); border-radius: 11px; background: var(--surface-2); }
+    .list-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 13px; border-bottom: 1px solid var(--border); }
+    .duet-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(300px, .65fr); gap: 14px; }
+    .duet-sidebar-block { margin-top: 14px; }
+    .duet-project-row { display: flex; align-items: center; gap: 9px; padding: 9px 10px; color: var(--muted); }
+    .duet-project-row strong { flex: 1; color: var(--text); }
+    .duet-channel-button { padding-left: 27px; }
+    .duet-chat { min-height: calc(100vh - 150px); display: flex; flex-direction: column; padding: 18px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+    .duet-chat-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+    .duet-chat-stream { flex: 1; display: grid; align-content: start; gap: 14px; padding: 18px 4px; }
+    .duet-message { max-width: 780px; padding: 14px; border-radius: 13px; background: var(--surface-2); }
+    .duet-message h3 { margin: 0 0 8px; }
+    .duet-message p { margin: 0; color: var(--muted); line-height: 1.7; }
+    .duet-team { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+    .duet-team span { padding: 9px; border: 1px solid var(--border); border-radius: 9px; color: var(--muted); background: var(--surface); }
+    .duet-composer { margin-top: auto; padding: 12px; border: 1px solid var(--border); border-radius: 13px; background: var(--surface-2); }
+    .duet-composer textarea { width: 100%; min-height: 74px; resize: vertical; padding: 10px; color: var(--text); border: 0; background: transparent; }
+    .channel-card, .task-card, .relay-column { padding: 16px; border: 1px solid var(--border); border-radius: 13px; background: var(--surface); }
+    .channel-card.is-active { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
+    .channel-head, .task-head, .metric-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .channel-head h3, .task-head h3 { margin: 0; }
+    .employee-avatar { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; color: white; font-weight: 800; background: linear-gradient(135deg, var(--primary), var(--primary-2)); }
+    .employee-card { display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: center; }
+    .employee-card .card-actions { grid-column: 1 / -1; }
+    .relay-columns { display: grid; grid-template-columns: repeat(4, minmax(210px, 1fr)); gap: 12px; overflow-x: auto; padding-bottom: 8px; }
+    .relay-column { min-height: 280px; }
+    .relay-column > h3 { margin-top: 0; }
+    .relay-column .task-card { margin-top: 10px; background: var(--surface-2); }
+    .task-card p { color: var(--muted); }
+    #toast-region {
+      position: fixed; right: 20px; bottom: 20px; z-index: 100; max-width: 360px;
+      padding: 11px 14px; border: 1px solid var(--border); border-radius: 10px;
+      background: var(--surface); box-shadow: var(--shadow); opacity: 0; transform: translateY(10px);
+      pointer-events: none; transition: .2s ease;
+    }
+    #toast-region.is-visible { opacity: 1; transform: translateY(0); }
+    @media (max-width: 1366px) {
+      .app-shell { grid-template-columns: 208px minmax(0, 1fr); }
+      .sidebar { padding: 10px; }
+      .page { padding: 18px; }
+      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .duet-layout { grid-template-columns: minmax(0, 1fr) 330px; }
+      .duet-team { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .split-workspace { grid-template-columns: minmax(0, 1fr) 330px; }
+    }
+    @media (max-width: 1100px) {
+      .duet-layout, .split-workspace { grid-template-columns: 1fr; }
+      .relay-columns { grid-template-columns: repeat(4, 230px); }
+    }
+    @media (max-width: 760px) {
+      body { overflow: auto; }
+      .app-shell { grid-template-columns: 1fr; }
+      .sidebar { position: sticky; top: 0; height: auto; border-right: 0; border-bottom: 1px solid var(--border); }
+      .side-nav, .sidebar-footer { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .sidebar-caption, .sidebar-spacer { display: none; }
+      .nav-button { justify-content: center; }
+      .nav-label { flex: none; }
+      .main-shell { height: auto; overflow: visible; }
+      .grid { grid-template-columns: 1fr; }
+      .duet-team { grid-template-columns: 1fr 1fr; }
+      .topbar { padding: 10px 14px; }
+      .page { padding: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="toast-region" role="status" aria-live="polite"></div>
+  <script>
+    const STORAGE_KEY = 'cm-agent-duet-prototype-v1';
+    const modes = [
+      { id: 'brand', label: '一战晟铭', icon: '◆' },
+      { id: 'agent', label: 'Agent代理', icon: '◎' },
+      { id: 'duet', label: 'Duet', icon: '♬' }
+    ];
+    const themes = [
+      { id: 'dark', label: '深夜黑' },
+      { id: 'light', label: '明亮白' },
+      { id: 'snow', label: '雪山蓝' }
+    ];
+    const skills = [
+      { id:'cm-creative-advisor', name:'CM 创作顾问', version:'1.6.0', summary:'整理创作目标并生成可执行计划', source:'平台', author:'CM', category:'写小说', environment:'ready', inputs:['创作目标','项目资料'], outputs:['创作计划','修改建议'], tools:['读取项目资料'] },
+      { id:'storyboard-director', name:'故事板导演', version:'2.1.0', summary:'把剧本拆成可执行镜头和画面说明', source:'平台', author:'小Y', category:'画布', environment:'ready', inputs:['剧本','人物资产'], outputs:['故事板','镜头计划'], tools:['读取故事板'] },
+      { id:'screenplay-writer', name:'短剧编剧', version:'1.4.2', summary:'生成短剧分集结构、场次和对白', source:'平台', author:'CM', category:'短剧剪辑', environment:'ready', inputs:['故事梗概'], outputs:['分集剧本'], tools:['写入项目文件'] },
+      { id:'novel-writer', name:'写小说', version:'2.1.0', summary:'根据设定和大纲连续创作小说章节', source:'个人', author:'用户', category:'写小说', environment:'ready', inputs:['设定','大纲'], outputs:['章节正文'], tools:['读取项目资料'] },
+      { id:'asset-planner', name:'资产规划师', version:'1.2.0', summary:'提取人物、场景、道具并建立资产清单', source:'平台', author:'CM', category:'画布', environment:'ready', inputs:['剧本'], outputs:['资产清单'], tools:['读取项目素材'] },
+      { id:'video-reviewer', name:'视频审校', version:'1.1.0', summary:'检查镜头连续性和字幕问题', source:'项目', author:'用户', category:'短剧剪辑', environment:'missing', inputs:['视频'], outputs:['问题清单'], tools:['本地执行器'] },
+      { id:'publisher', name:'发布助手', version:'1.0.3', summary:'整理发布文案和封面信息', source:'平台', author:'CM', category:'其他', environment:'denied', inputs:['成片'], outputs:['发布资料'], tools:['外部连接'] },
+      { id:'knowledge-reader', name:'知识资料检索', version:'1.3.1', summary:'从项目文件中查找可靠上下文', source:'平台', author:'小Y', category:'其他', environment:'ready', inputs:['问题'], outputs:['引用资料'], tools:['读取项目文件'] }
+    ];
+    const duetChannels = [
+      { id:'channel-screenplay', name:'剧本生产线', icon:'✎', purpose:'小说拆解、分集剧本与对白审核', lead:'编剧小Y' },
+      { id:'channel-assets', name:'资产工坊', icon:'◫', purpose:'人物、场景、道具资产统一生产', lead:'美术小Y' },
+      { id:'channel-storyboard', name:'分镜台', icon:'▦', purpose:'故事板、镜头运动与画面连续性', lead:'导演小Y' }
+    ];
+    const duetEmployees = [
+      { id:'writer', name:'编剧小Y', role:'短剧编剧', channel:'剧本生产线', load:'2 个任务' },
+      { id:'artist', name:'美术小Y', role:'资产规划师', channel:'资产工坊', load:'1 个任务' },
+      { id:'director', name:'导演小Y', role:'故事板导演', channel:'分镜台', load:'2 个任务' },
+      { id:'reviewer', name:'审片小Y', role:'质量审核', channel:'跨频道', load:'1 个待审' },
+      { id:'coordinator', name:'制片小Y', role:'接力调度', channel:'跨频道', load:'运行正常' }
+    ];
+    const plugins = [
+      { id:'asset-reference', name:'资产参考', summary:'文生图/多图参考快速出图', isNew:true },
+      { id:'ai-segment', name:'AI-分段', summary:'按主轨道 / 文本轨道 / AI对照剧本分集切割', isNew:true },
+      { id:'ai-subtitle', name:'AI-Subtitle', summary:'对照剧本修正剪映语音识别错别字', isNew:true },
+      { id:'ai-filler', name:'AI-Filler', summary:'对照剧本删掉单独成行的呵、嗯、啊、哼、哈哈、哦哦、呵呵', isNew:true },
+      { id:'ai-bilingual-subtitle', name:'AI-双语字幕', summary:'把剪映字幕译成另一种语言，新建一条位置更高的字幕轨', isNew:true },
+      { id:'ai-cut-plugin', name:'AI-CUT插件版', summary:'AI-CUT草稿插件版', isNew:true },
+      { id:'ai-bgm', name:'AI-BGM', summary:'按剧本和字幕从曲库选乐，写入剪映同一条 BGM 轨', isNew:true },
+      { id:'ai-shot', name:'AI-Shot', summary:'按剧本和字幕从成片里抽宣传高光，只在片段交界下刀', isNew:true },
+      { id:'ai-upscale', name:'AI-Upscale', summary:'批量超分视频。支持火山、云端、Picsart CLI 和本地显卡', isNew:true },
+      { id:'ai-split', name:'AI-Split', summary:'按画面变化切开剪映主轨道上的每个视频', isNew:true },
+      { id:'novel-to-drama', name:'小说转剧', summary:'中长篇·纯对话版' },
+      { id:'ai-rewrite', name:'AI改文', summary:'智能改写文本，优化表达' },
+      { id:'storyboard-master', name:'分镜大师', summary:'智能生成分镜脚本' },
+      { id:'viral-opening', name:'爆款开头', summary:'生成吸引人的开头文案' },
+      { id:'female-gender-swap', name:'女频性转', summary:'女频小说性别转换改写' },
+      { id:'subtitle-alignment', name:'字幕对轴', summary:'字幕时间轴对齐调整' },
+      { id:'text-format', name:'格式化文本', summary:'文本格式整理与规范化' },
+      { id:'character-edit', name:'角色修改', summary:'批量修改角色名称属性' },
+      { id:'long-novel-split', name:'长篇拆书', summary:'长篇小说智能拆分章节' },
+      { id:'voice-clone', name:'声音克隆', summary:'AI克隆个性化音色' },
+      { id:'world-building', name:'世界观', summary:'构建小说世界观设定' },
+      { id:'subtitle-merge', name:'字幕合并', summary:'多条字幕智能合并处理' },
+      { id:'document-merge', name:'文档合并', summary:'按章节规则批量合并TXT' },
+      { id:'book-title', name:'书名生成', summary:'智能生成吸引人的书名' },
+      { id:'cover-generation', name:'封面生成', summary:'AI智能生成精美封面图' },
+      { id:'character-turnaround', name:'角色三视图', summary:'一键生成人物三视图' },
+      { id:'voice-design', name:'音色设计', summary:'AI智能设计角色音色' },
+      { id:'draft-merge', name:'草稿合并', summary:'多选剪映草稿按顺序合成一份' },
+      { id:'jianying-keyframe', name:'剪映关键帧', summary:'为剪映草稿添加关键帧动画' }
+    ];
+    const defaultState = {
+      mode: 'brand',
+      theme: 'dark',
+      pages: { brand: 'home', agent: 'new-session', duet: 'channels' },
+      modeMenuOpen: false,
+      activeProjectId: 'project-water-margin',
+      activeChannelId: 'channel-screenplay',
+      activeWorkspaceView: 'canvas',
+      skillTab: 'skills',
+      enabledSkillIds: ['cm-creative-advisor', 'storyboard-director'],
+      selectedContext: [],
+      permissionMode: 'auto',
+      run: { status: 'idle', step: 0, error: '' },
+      automations: [],
+      duetTasks: [],
+      activeDuetTaskId: null,
+      duetScheduleEnabled: true,
+      aiCutStage: 0,
+      installedPluginIds: plugins.map(item => item.id),
+      enabledPluginIds: [],
+      selectedPluginId: null,
+      pluginSearch: '',
+      modal: null,
+      drawer: null
+      , picker: null, skillSearch: '', skillCategory: '全部'
+    };
+    let state = loadState();
+    let toastTimer = 0;
+    let runTimer = 0;
+
+    function loadState() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+        if (!saved || typeof saved !== 'object') return structuredClone(defaultState);
+        return {
+          ...structuredClone(defaultState),
+          ...saved,
+          pages: { ...defaultState.pages, ...(saved.pages || {}) },
+          run: { ...defaultState.run, ...(saved.run || {}) }
+        };
+      } catch {
+        return structuredClone(defaultState);
+      }
+    }
+    function saveState() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    }
+    function patchState(patch) {
+      state = { ...state, ...patch };
+      saveState();
+      renderApp();
+    }
+    function resetState() {
+      state = structuredClone(defaultState);
+      saveState();
+      renderApp();
+      showToast('原型状态已重置');
+    }
+    function setPage(page) {
+      patchState({ pages: { ...state.pages, [state.mode]: page } });
+    }
+    function showToast(text) {
+      const region = document.querySelector('#toast-region');
+      if (!region) return;
+      region.textContent = text;
+      region.classList.add('is-visible');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => region.classList.remove('is-visible'), 2200);
+    }
+    function modeLabel() {
+      return modes.find(item => item.id === state.mode)?.label || '一战晟铭';
+    }
+    function navForMode() {
+      if (state.mode === 'agent') return [
+        ['new-session', '✦', '新 Agent 会话', ''],
+        ['automations', '⌁', '自动任务', '3'],
+        ['skills', '◇', 'Agent 技能', '52'],
+        ['projects', '▣', 'Agent工作区', '2']
+      ];
+      if (state.mode === 'duet') return [
+        ['channels', '#', '任何事', '']
+      ];
+      return [
+        ['home', '⌂', '首页', ''],
+        ['private', '◫', '私人定制', ''],
+        ['novel', '▤', '小说获取', ''],
+        ['production', '▰', '水货生产', ''],
+        ['voice', '◖', '配音', ''],
+        ['ai-cut', '✂', 'AI-CUT', ''],
+        ['tutorial', '◇', '教程', ''],
+        ['plugins', '⚡', '插件中心', '29'],
+        ['assets', '□', '我的资产', '']
+      ];
+    }
+    function renderNavButtons(items) {
+      return items.map(([id, icon, label, count]) => `<button type="button" class="nav-button ${state.pages[state.mode] === id ? 'is-active' : ''}" data-action="SET_PAGE" data-page="${id}"><span class="nav-icon">${icon}</span><span class="nav-label">${label}</span>${count ? `<span class="count-badge">${count}</span>` : ''}</button>`).join('');
+    }
+    function renderModeMenu() {
+      if (!state.modeMenuOpen) return '';
+      return `<div class="mode-menu" role="menu" aria-label="工作模式">
+        ${modes.map(item => `<button type="button" role="menuitem" class="mode-option ${item.id === state.mode ? 'is-active' : ''}" data-action="SET_MODE" data-mode="${item.id}"><span>${item.icon}</span><b>${item.label}</b><em>${item.id === state.mode ? '✓' : ''}</em></button>`).join('')}
+      </div>`;
+    }
+    function renderSidebar() {
+      const nav = navForMode();
+      const primaryNav = state.mode === 'brand' ? nav.filter(item => ['home','private','novel','production','voice'].includes(item[0])) : nav;
+      const aiCutNav = nav.filter(item => item[0] === 'ai-cut');
+      const serviceNav = nav.filter(item => ['tutorial','plugins','assets'].includes(item[0]));
+      const duetSidebar = `<div class="duet-sidebar-block"><div class="duet-project-row"><span>✦</span><strong>任何事</strong></div><div class="duet-project-row"><span>□</span><strong>q</strong><span class="count-badge">20集</span></div><nav class="side-nav" aria-label="Duet频道">${duetChannels.map(channel => `<button type="button" class="nav-button duet-channel-button ${state.activeChannelId === channel.id ? 'is-active' : ''}" data-action="OPEN_DUET_CHANNEL" data-id="${channel.id}"><span class="nav-icon">#</span><span class="nav-label">${channel.name}</span></button>`).join('')}<button type="button" class="nav-button" aria-label="＋ 新频道" data-action="NOTICE" data-message="已打开新频道演示入口"><span class="nav-icon">＋</span><span class="nav-label">新频道</span></button><button type="button" class="nav-button" aria-label="＋ 新项目" data-action="NOTICE" data-message="已打开新项目演示入口"><span class="nav-icon">＋</span><span class="nav-label">新项目</span></button></nav></div>`;
+      return `<aside class="sidebar">
+        <div class="mode-switcher ${state.modeMenuOpen ? 'is-open' : ''}">
+          <button type="button" class="mode-button" data-action="TOGGLE_MODE_MENU" aria-label="切换工作模式" aria-expanded="${state.modeMenuOpen}">
+            <span class="brand-mark">Y</span><strong>${modeLabel()}</strong><span class="chevron">⌄</span>
+          </button>
+          ${renderModeMenu()}
+        </div>
+        <div class="sidebar-content">
+        ${state.mode === 'duet' ? duetSidebar : `<nav class="side-nav" aria-label="${modeLabel()}导航">
+          ${renderNavButtons(primaryNav)}
+        </nav>`}
+        ${state.mode === 'brand' ? `<div class="sidebar-caption">AI剪辑视频</div><nav class="side-nav">${renderNavButtons(aiCutNav)}</nav><div class="sidebar-caption">扩展与资源</div><nav class="side-nav">${renderNavButtons(serviceNav)}</nav>` : ''}
+        ${state.mode === 'agent' ? `<div class="sidebar-caption">一战晟铭工作区</div><nav class="side-nav"><button type="button" class="nav-button" data-action="SET_PAGE" data-page="projects"><span class="nav-icon">□</span><span class="nav-label">默认工作区</span></button><button type="button" class="nav-button" data-action="SET_PAGE" data-page="projects"><span class="nav-icon">□</span><span class="nav-label">水浒漫剧</span></button></nav>` : ''}
+        </div>
+        <div class="sidebar-footer">
+          <button type="button" class="nav-button" data-action="NOTICE" data-message="主题可在页面右上角切换"><span class="nav-icon">◉</span><span class="nav-label">主题</span></button>
+          <button type="button" class="nav-button" data-action="NOTICE" data-message="这是独立原型，不修改正式设置"><span class="nav-icon">⚙</span><span class="nav-label">设置</span></button>
+          <button type="button" class="nav-button" data-action="RESET_STATE"><span class="nav-icon">↺</span><span class="nav-label">重置原型</span></button>
+        </div>
+      </aside>`;
+    }
+    function renderTopbar() {
+      return `<header class="topbar">
+        <div class="topbar-title"><strong>${modeLabel()}</strong><span>CM 交互原型 · 演示数据，不连接真实服务</span></div>
+        <div class="theme-switcher" aria-label="主题选择">
+          ${themes.map(theme => `<button type="button" class="theme-button ${theme.id === state.theme ? 'is-active' : ''}" data-action="SET_THEME" data-theme="${theme.id}">${theme.label}</button>`).join('')}
+        </div>
+      </header>`;
+    }
+    function renderBrandPage() {
+      const page = state.pages.brand;
+      if (page === 'ai-cut') return renderAiCutPage();
+      if (page === 'plugins') return renderPluginCenter();
+      if (page === 'production') return renderWaterProductionPage();
+      if (page !== 'home') return `<section class="empty-panel"><div><div class="orb">${page === 'production' ? '▰' : '◆'}</div><h1>${navForMode().find(item => item[0] === page)?.[2] || '一战晟铭'}</h1><p>该页面在原型中用于验证工作模式切换和导航恢复。正式业务仍由现有 V88 页面负责。</p><button class="primary-button" data-action="SET_PAGE" data-page="home">返回首页</button></div></section>`;
+      return `<div class="page"><section class="hero"><span class="eyebrow">一战晟铭 · AI 创作平台</span><h1>保留我们自己的创作入口和生产链路</h1><p>私人定制、小说获取、水货生产和配音仍是一战晟铭的首页功能；Agent代理和 Duet 通过左上角独立切换。</p></section><section class="grid">
+        ${[['私人定制','为单个创作需求建立专属生产方案','private'],['小说获取','获取、整理并进入后续改编链','novel'],['水货生产','批量管理剧本、漫剧、素材与成片','production'],['配音','管理角色音色、台词与音频任务','voice']].map(item => `<button type="button" class="card card-button" data-action="SET_PAGE" data-page="${item[2]}"><h3>${item[0]}</h3><p>${item[1]}</p></button>`).join('')}
+      </section></div>`;
+    }
+    function renderWaterProductionPage() {
+      return `<div class="workspace-page"><div class="workspace-header"><div><span class="eyebrow">一战晟铭 · 水货生产</span><h1>水货生产</h1><p>沿用一战晟铭自己的批量生产入口，漫剧能力从这里进入。</p></div><button class="secondary-button" data-action="SET_PAGE" data-page="home">返回首页</button></div><section class="grid"><button type="button" class="card card-button" data-action="CREATE_COMIC_WORK"><div class="task-head"><h3>创作漫剧</h3><span class="pill">重点能力</span></div><p>导入小说或剧本，进入分集、资产、分镜、画面和成片生产链。</p></button><article class="card"><h3>批量生产</h3><p>继续承载一战晟铭现有的批量任务和作品进度。</p></article><article class="card"><h3>生产记录</h3><p>统一查看正在运行、等待处理和已经完成的项目。</p></article></section></div>`;
+    }
+    function renderAiCutPage() {
+      const stages = [
+        ['导入视频','读取媒体与基础信息'],
+        ['智能拆分','识别镜头和可用片段'],
+        ['字幕纠错','处理错字、口癖与双语字幕'],
+        ['BGM','匹配节奏并调整音量'],
+        ['剪映草稿','生成可继续编辑的时间线']
+      ];
+      return `<div class="workspace-page"><div class="workspace-header"><div><span class="eyebrow">AI剪辑视频</span><h1>AI-CUT</h1><p>从视频分析到剪映草稿的独立剪辑工作台，不属于Agent代理。</p></div><span class="pill">${state.aiCutStage ? `步骤 ${Math.min(state.aiCutStage, stages.length)} / ${stages.length}` : '等待导入'}</span></div><section class="card"><div class="grid">${stages.map((stage,index) => `<article class="card ${index < state.aiCutStage ? 'is-enabled' : ''}"><div class="task-head"><h3>${index+1}. ${stage[0]}</h3><span class="pill">${index < state.aiCutStage ? '已完成' : index === state.aiCutStage ? '当前' : '等待'}</span></div><p>${stage[1]}</p></article>`).join('')}</div><div class="toolbar">${state.aiCutStage === 0 ? `<button class="primary-button" data-action="START_AI_CUT_DEMO">选择演示视频</button>` : state.aiCutStage < stages.length ? `<button class="primary-button" data-action="NEXT_AI_CUT_STAGE">完成当前步骤并继续</button>` : `<button class="primary-button" data-action="NOTICE" data-message="剪映草稿已生成，可进入现有生产流程">打开剪映草稿</button>`}<button class="secondary-button" data-action="RESET_AI_CUT_DEMO">重新开始</button></div></section></div>`;
+    }
+    function renderPluginCenter() {
+      const query = state.pluginSearch.trim().toLowerCase();
+      const visible = plugins.filter(plugin => !query || `${plugin.name} ${plugin.summary}`.toLowerCase().includes(query));
+      const selected = plugins.find(plugin => plugin.id === state.selectedPluginId);
+      const detail = selected ? `<section class="card" style="margin:14px 0"><div class="task-head"><div><span class="eyebrow">本地插件详情</span><h2 style="margin:4px 0">${selected.name}</h2></div><button class="secondary-button" data-action="CLOSE_PLUGIN_DETAIL">关闭</button></div><p>${selected.summary}</p><div class="toolbar"><span class="pill">本地已收录</span><button class="secondary-button" data-action="TOGGLE_PLUGIN" data-id="${selected.id}">${state.enabledPluginIds.includes(selected.id) ? '停用本地演示' : '启用本地演示'}</button></div><p class="muted">当前只保存本地目录与交互说明，不连接真实插件服务。</p></section>` : '';
+      return `<div class="workspace-page"><div class="workspace-header"><div><span class="eyebrow">扩展与资源</span><h1>插件市场</h1><p>丰富的AI辅助工具，提升创作效率。当前共收录 ${plugins.length} 个本地插件入口。</p></div><span class="pill">本地 ${plugins.length}</span></div><div class="toolbar"><input class="search-input" aria-label="搜索插件名称或功能" placeholder="搜索插件名称或功能" value="${state.pluginSearch}" data-input="plugin-search"><span class="muted">找到 ${visible.length} 个</span></div>${detail}<div class="grid">${visible.map(plugin => { const enabled = state.enabledPluginIds.includes(plugin.id); return `<article class="card"><div class="task-head"><h3>${plugin.name}</h3><span class="pill">${plugin.isNew ? 'NEW' : enabled ? '已启用' : '本地'}</span></div><p>${plugin.summary}</p><div class="card-actions"><span class="muted">${enabled ? '本地演示已启用' : '本地已收录'}</span><button class="secondary-button" data-action="OPEN_PLUGIN" data-plugin-id="${plugin.id}">查看详情</button></div></article>`; }).join('')}</div></div>`;
+    }
+    function renderSkillDetail() {
+      const skill = skills.find(item => item.id === state.drawer);
+      if (!skill) return '';
+      return `<div class="overlay" data-action="CLOSE_LAYER"></div><aside class="drawer" aria-label="技能详情"><button class="close-button" data-action="CLOSE_LAYER">×</button><span class="eyebrow">${skill.source}技能 · v${skill.version}</span><h1>${skill.name}</h1><p class="muted">${skill.summary}</p><div class="detail-list"><div class="card"><strong>触发方式</strong><p>在会话中输入 / 并选择该技能，或通过 @ 引用。</p></div><div class="card"><strong>需要输入</strong><p>${skill.inputs.join('、')}</p></div><div class="card"><strong>产生输出</strong><p>${skill.outputs.join('、')}</p></div><div class="card"><strong>需要工具</strong><p>${skill.tools.join('、')}</p></div><div class="card"><strong>说明</strong><p>系统提示词由 Go 后端管理，本原型不展示提示词正文。</p></div></div></aside>`;
+    }
+    function renderSkillCenter() {
+      const categories = ['全部', ...new Set(skills.map(item => item.category))];
+      const visible = skills.filter(item => (state.skillCategory === '全部' || item.category === state.skillCategory) && (!state.skillSearch || `${item.name}${item.summary}`.includes(state.skillSearch)));
+      if (state.skillTab !== 'skills') return `<div class="workspace-page"><div class="workspace-header"><div><h1>Agent 技能</h1><p>${state.skillTab === 'mcp' ? 'MCP 连接与工具状态' : 'Codex 渠道和可用模型'}</p></div></div>${renderSkillTabs()}<div class="grid">${(state.skillTab === 'mcp' ? [['项目文件 MCP','已连接'],['素材服务 MCP','缺少配置'],['浏览器 MCP','无权限'],['导演台 MCP','已连接']] : [['Codex 创作版','可用'],['Codex 审校版','可用'],['本地执行渠道','缺少配置']]).map(item => `<article class="card"><h3>${item[0]}</h3><p>${item[1]} · 演示状态，不会发起真实授权或连接。</p><button class="secondary-button" data-action="NOTICE" data-message="已打开演示详情">查看详情</button></article>`).join('')}</div></div>`;
+      return `<div class="workspace-page"><div class="workspace-header"><div><h1>Agent 技能</h1><p>管理平台、个人和项目技能；启用后可在会话中使用。</p></div><div class="toolbar"><button class="secondary-button" data-action="TOGGLE_ALL_SKILLS">全部开启</button><button class="secondary-button" data-action="OPEN_MODAL" data-value="import">导入 Skill</button><button class="secondary-button" data-action="OPEN_MODAL" data-value="executor">管理执行器</button></div></div>${renderSkillTabs()}<div class="toolbar"><input class="search-input" aria-label="搜索技能" placeholder="搜索技能" value="${state.skillSearch}" data-input="skill-search">${categories.map(category => `<button class="pill ${state.skillCategory === category ? 'is-active' : ''}" data-action="SET_SKILL_CATEGORY" data-value="${category}">${category}</button>`).join('')}</div><div class="skill-grid">${visible.map(skill => { const enabled = state.enabledSkillIds.includes(skill.id); return `<article class="skill-card ${enabled ? 'is-enabled' : ''}"><div class="skill-head"><span class="skill-icon">✦</span><div><strong>${skill.name}</strong><small>v${skill.version} · ${skill.source}</small></div><button class="switch ${enabled ? 'is-on' : ''}" aria-label="${enabled ? '停用' : '启用'} ${skill.name}" data-action="TOGGLE_SKILL" data-id="${skill.id}"></button></div><p>${skill.summary}</p><div class="skill-meta">作者：${skill.author} · ${skill.environment === 'ready' ? '环境可用' : skill.environment === 'missing' ? '缺少执行器' : '无权限'}</div><div class="card-actions"><span class="pill">${skill.category}</span><button class="secondary-button" data-action="OPEN_SKILL_DETAIL" data-id="${skill.id}">查看详情</button></div></article>`; }).join('')}</div></div>`;
+    }
+    function renderSkillTabs() {
+      return `<div class="tabs">${[['skills','Skills 52'],['mcp','MCP 4'],['codex','Codex 7']].map(item => `<button class="tab-button ${state.skillTab === item[0] ? 'is-active' : ''}" data-action="SET_SKILL_TAB" data-value="${item[0]}">${item[1]}</button>`).join('')}</div>`;
+    }
+    function renderContextPicker(kind) {
+      if (state.picker !== kind) return '';
+      const slashItems = skills.filter(item => state.enabledSkillIds.includes(item.id) && item.environment === 'ready').map(item => ({ id:item.id, label:item.name, type:'技能' })).concat([{id:'mcp-files',label:'项目文件 MCP',type:'MCP'},{id:'automation-daily',label:'每日进度简报',type:'自动任务'},{id:'effort-high',label:'深度思考',type:'思考强度'}]);
+      const mentionItems = skills.slice(0,3).map(item => ({id:item.id,label:item.name,type:'技能'})).concat([{id:'file-script',label:'第1集剧本.docx',type:'项目文件'},{id:'asset-hero',label:'宋江人物参考图',type:'项目素材'},{id:'node-script',label:'剧本拆解节点',type:'画布节点'},{id:'shot-01',label:'第1镜',type:'故事板镜头'}]);
+      const items = kind === 'slash' ? slashItems : mentionItems;
+      return `<div class="picker" role="listbox" aria-label="${kind === 'slash' ? '技能选择' : '引用选择'}">${items.map(item => `<button data-action="ADD_CONTEXT" data-id="${item.id}" data-label="${item.label}" data-kind="${item.type}"><span><b>${item.label}</b><br><small>${item.type}</small></span><span>＋</span></button>`).join('')}</div>`;
+    }
+    function renderAgentSessionBase() {
+      const permissionCopy = { plan:'只生成计划，不执行写入与工具。', auto:'只读步骤自动执行，写入与生成等待确认。', bypass:'按计划连续执行，高风险操作仍需确认。' };
+      return `<div class="workspace-page"><div class="workspace-header"><div><h1>新 Agent 会话</h1><p>Agent代理负责计划与调度：选择技能、引用资料，再让小Y连续执行。</p></div><span class="pill">默认工作区</span></div><div class="split-workspace"><section><div class="permission-row">${[['plan','计划模式'],['auto','自动审批'],['bypass','完全运行']].map(item => `<button class="pill ${state.permissionMode === item[0] ? 'is-active' : ''}" data-action="SET_PERMISSION_MODE" data-value="${item[0]}">${item[1]}</button>`).join('')}</div><p class="muted" style="text-align:center">${permissionCopy[state.permissionMode]}</p><div class="composer">${state.selectedContext.length ? `<div class="chips">${state.selectedContext.map(item => `<span class="chip">${item.kind} · ${item.label}<button aria-label="移除 ${item.label}" data-action="REMOVE_CONTEXT" data-id="${item.id}">×</button></span>`).join('')}</div>` : ''}<textarea aria-label="创作目标" placeholder="输入目标，使用 / 选择技能，使用 @ 引用文件或素材">把第一章改编成三集短剧并生成故事板</textarea>${renderContextPicker('slash')}${renderContextPicker('mention')}<div class="composer-footer"><div class="toolbar"><button class="secondary-button" data-action="OPEN_PICKER" data-value="slash">/ 技能</button><button class="secondary-button" data-action="OPEN_PICKER" data-value="mention">@ 引用</button><button class="secondary-button" data-action="NOTICE" data-message="演示模式不会上传真实文件">＋ 附件</button></div>${state.run.status === 'idle' || ['succeeded','failed','cancelled'].includes(state.run.status) ? `<button class="primary-button" data-action="${state.run.status === 'failed' ? 'RETRY_RUN' : 'START_RUN'}">${state.run.status === 'failed' ? '从失败处重试' : '开始创作'}</button>` : `<button class="secondary-button" data-action="CANCEL_RUN">停止生成</button>`}</div></div></section>${renderRunTimeline()}</div></div>`;
+    }
+    function renderAgentSession() { return renderAgentSessionBase(); }
+    function renderRunTimeline() {
+      const steps = ['分析需求','读取项目资料','调用 CM 创作顾问','生成故事板','写入项目产物'];
+      const statusLabel = { idle:'等待开始', planning:'正在规划', awaiting_approval:'等待确认', running:'正在执行', succeeded:'执行成功', failed:'执行失败', cancelled:'已取消' }[state.run.status];
+      return `<aside class="run-timeline"><h3>执行计划</h3><div class="status-banner"><b>${statusLabel}</b>${state.run.error ? `<p style="color:var(--danger)">${state.run.error}</p>` : ''}</div>${steps.map((label,index) => `<div class="timeline-step ${index < state.run.step ? 'is-done' : index === state.run.step ? 'is-current' : ''}"><span class="timeline-dot">${index < state.run.step ? '✓' : index + 1}</span><div><strong>${label}</strong><p class="muted">${index < state.run.step ? '已完成' : index === state.run.step ? statusLabel : '等待执行'}</p></div></div>`).join('')}${state.run.status === 'awaiting_approval' ? `<button class="primary-button" data-action="APPROVE_RUN">继续执行</button><button class="secondary-button" data-action="FAIL_RUN">调整后再执行</button>` : ''}${state.run.status === 'running' ? `<button class="secondary-button" data-action="FAIL_RUN">演示失败</button>` : ''}${state.run.status === 'succeeded' ? `<button class="primary-button" data-action="SEND_TO_AGENT_WORKSPACE" data-value="storyboard">发送到Agent工作区</button>` : ''}</aside>`;
+    }
+    function patchRun(status, step, error='') { patchState({ run:{ status, step, error } }); }
+    function scheduleRunAdvance() { clearTimeout(runTimer); runTimer = setTimeout(advanceRun, 650); }
+    function advanceRun() {
+      if (state.run.status === 'planning') {
+        if (state.permissionMode === 'plan') return patchRun('succeeded', 2);
+        if (state.permissionMode === 'auto') return patchRun('awaiting_approval', 3);
+        patchRun('running', 3); return scheduleRunAdvance();
+      }
+      if (state.run.status === 'running') patchRun('succeeded', 5);
+    }
+    function startRun() { patchRun('planning', 1); scheduleRunAdvance(); }
+    function renderAutomationPage() {
+      const items = state.automations.length ? state.automations : [{id:'auto-daily',name:'每日项目进度简报',status:'active',schedule:'每天 09:00'},{id:'auto-review',name:'故事板自动审校',status:'paused',schedule:'工作日 18:00'},{id:'auto-assets',name:'资产缺失检查',status:'failed',schedule:'每 2 小时'}];
+      return `<div class="workspace-page"><div class="workspace-header"><div><h1>自动任务</h1><p>使用同一套技能、权限和运行记录。</p></div><button class="primary-button" data-action="CREATE_AUTOMATION">＋ 新建自动任务</button></div><section class="card">${items.map(item => `<div class="list-row"><div><strong>${item.name}</strong><p class="muted">${item.schedule} · ${item.status}</p></div><div class="toolbar"><button class="secondary-button" data-action="RUN_AUTOMATION" data-id="${item.id}">立即运行</button><button class="secondary-button" data-action="TOGGLE_AUTOMATION" data-id="${item.id}">${item.status === 'paused' ? '恢复' : '暂停'}</button></div></div>`).join('')}</section></div>`;
+    }
+    function renderAgentWorkspace() {
+      const view = state.activeWorkspaceView;
+      const content = view === 'canvas' ? `<div class="canvas-board"><article class="canvas-node" style="left:8%;top:18%"><b>剧本拆解</b><p>第 1—3 集</p></article><article class="canvas-node" style="left:48%;top:50%"><b>故事板生成</b><p>12 个镜头</p></article></div>` : view === 'storyboard' ? `<div class="grid">${[1,2,3,4,5,6].map(i => `<article class="card"><h3>镜头 ${i}</h3><p>人物、场景、运镜与对白说明</p></article>`).join('')}</div>` : view === 'assets' ? `<div class="grid">${['宋江人物图','聚义厅场景','令牌道具','第1集预览'].map(x => `<article class="card"><h3>${x}</h3><p>项目正式素材 · 可加入对话和画布</p></article>`).join('')}</div>` : `<section class="card">${['生成故事板 · 成功','人物资产提取 · 执行中','视频审校 · 失败'].map(x => `<div class="list-row"><b>${x}</b><button class="secondary-button" data-action="NOTICE" data-message="已打开任务详情">查看</button></div>`).join('')}</section>`;
+      return `<div class="workspace-page"><div class="workspace-header"><div><span class="eyebrow">一战晟铭原有生产工作台</span><h1>水浒漫剧 · Agent工作区</h1><p>保留现有画布、故事板、素材和任务能力，接收Agent代理交付的结果。</p></div><span class="pill">CM 正常</span></div><div class="tabs">${[['canvas','画布'],['storyboard','故事板'],['assets','素材'],['tasks','任务']].map(item => `<button class="tab-button ${view===item[0]?'is-active':''}" data-action="SET_WORKSPACE_VIEW" data-value="${item[0]}">${item[1]}</button>`).join('')}</div><div class="toolbar"><button class="secondary-button" data-action="OPEN_PICKER" data-value="slash">/ 技能</button><button class="secondary-button" data-action="OPEN_PICKER" data-value="mention">@ 引用</button><span class="pill">${state.permissionMode === 'auto' ? '自动审批' : state.permissionMode === 'plan' ? '计划模式' : '完全运行'}</span><button class="secondary-button" data-action="NOTICE" data-message="附件入口可用">＋ 附件</button></div><div class="workspace-stage">${content}</div>${renderContextPicker('slash')}${renderContextPicker('mention')}</div>`;
+    }
+    function renderAgentFoundation() {
+      const page = state.pages.agent;
+      if (page === 'skills') return `${renderSkillCenter()}${renderSkillDetail()}${renderModal()}`;
+      if (page === 'new-session') return `${renderAgentSession()}${renderModal()}`;
+      if (page === 'automations') return renderAutomationPage();
+      return renderAgentWorkspace();
+    }
+    function renderModal() {
+      if (!state.modal) return '';
+      const title = state.modal === 'import' ? '导入 Skill' : '管理执行器';
+      return `<div class="overlay" data-action="CLOSE_LAYER"></div><section class="modal" role="dialog" aria-label="${title}"><button class="close-button" data-action="CLOSE_LAYER">×</button><h2>${title}</h2><p class="muted">演示模式只展示入口，不会上传文件、运行安装命令或连接外部服务。</p><button class="primary-button" data-action="CLOSE_LAYER">我知道了</button></section>`;
+    }
+    function renderDuetFoundation() {
+      return renderDuetWorkspace();
+    }
+    function renderDuetHeader(title, description) {
+      return `<div class="workspace-header"><div><span class="eyebrow">CM Duet · 多 Agent 协作</span><h1>${title}</h1><p>${description}</p></div><button class="primary-button" data-action="CREATE_DUET_TASK">＋ 创建任务</button></div>`;
+    }
+    function renderDuetWorkspace() {
+      const active = duetChannels.find(item => item.id === state.activeChannelId) || duetChannels[0];
+      const team = duetEmployees.map(employee => `<span><b>${employee.name}</b><br>${employee.role}</span>`).join('');
+      return `<div class="workspace-page"><div class="duet-layout"><section class="duet-chat"><div class="duet-chat-toolbar"><div><span class="eyebrow">✦ ${active.name}</span><h2 style="margin:4px 0 0">任何事</h2></div><div class="toolbar"><button class="secondary-button" data-action="NOTICE" data-message="已打开任务侧栏">任务</button><button class="secondary-button" data-action="NOTICE" data-message="已打开频道设置">设置</button><button class="secondary-button" data-action="NOTICE" data-message="已打开新项目演示入口">新项目</button></div></div><div class="duet-chat-stream"><article class="duet-message"><h3>CM Duet</h3><p>你好，我是CM Duet。我会把小说改编任务拆给对应员工，在剧本、资产和分镜频道里接力执行；只有需要你拍板时才会来找你。</p><div class="duet-team">${team}</div></article><article class="duet-message"><h3>项目 q 已就绪</h3><p>已建立 #剧本生产线、#资产工坊、#分镜台。当前频道负责：${active.purpose}。</p></article></div><div class="duet-composer"><textarea aria-label="Duet消息" placeholder="跟CM Duet说点什么，比如：新开一个项目……"></textarea><div class="composer-footer"><div class="toolbar"><button class="secondary-button" data-action="NOTICE" data-message="文件入口为演示">📎 文件</button><button class="secondary-button" data-action="NOTICE" data-message="已打开员工选择">@ 员工</button><button class="secondary-button" data-action="CREATE_DUET_TASK">＋ 任务</button></div><button class="primary-button" data-action="NOTICE" data-message="演示模式不会发送真实消息">发送</button></div><p class="muted">员工会自动接力；只有需要你拍板时才会来找你</p></div></section><aside>${renderDuetTaskPanel(true)}</aside></div></div>`;
+    }
+    function renderDuetEmployees() {
+      return `<div class="workspace-page">${renderDuetHeader('员工 Agent','每个员工有明确岗位、负责频道和当前工作量。')}<div class="grid">${duetEmployees.map(employee => `<article class="card employee-card"><div class="employee-avatar">${employee.name.slice(0,1)}</div><div><h3>${employee.name}</h3><p>${employee.role} · ${employee.channel}</p><small class="muted">${employee.load}</small></div><div class="card-actions"><button class="secondary-button" data-action="HANDOFF_DUET_TASK" data-employee="${employee.id}">转交给他</button><button class="secondary-button" data-action="NOTICE" data-message="已打开 ${employee.name} 的工作记录">查看记录</button></div></article>`).join('')}</div></div>`;
+    }
+    function renderDuetTaskPanel(compact = false) {
+      const tasks = state.duetTasks;
+      if (!tasks.length) return `<section class="card"><h3>${compact?'当前频道任务':'任务队列'}</h3><p class="muted">还没有演示任务。创建后可模拟转交、补充、审核与返工。</p><button class="primary-button" data-action="CREATE_DUET_TASK">创建《第一集改编》</button></section>`;
+      return `<section class="card"><div class="task-head"><h3>${compact?'当前频道任务':'任务队列'}</h3><span class="pill">${tasks.length} 项</span></div>${tasks.map(task => `<article class="task-card"><div class="task-head"><h3>${task.name}</h3><span class="pill">${duetStatusLabel(task.status)}</span></div><p>${duetChannels.find(c=>c.id===task.channelId)?.name || '跨频道'} · ${duetEmployees.find(e=>e.id===task.employeeId)?.name || '待分配'} · 第 ${task.round+1} 轮</p><div class="card-actions"><button class="secondary-button" data-action="HANDOFF_DUET_TASK" data-id="${task.id}" data-employee="director">转交导演</button><button class="secondary-button" data-action="SUPPLEMENT_DUET_TASK" data-id="${task.id}">补充要求</button>${task.status==='review'?`<button class="primary-button" data-action="APPROVE_DUET_TASK" data-id="${task.id}">审核通过</button><button class="secondary-button" data-action="REWORK_DUET_TASK" data-id="${task.id}">退回返工</button>`:`<button class="primary-button" data-action="REVIEW_DUET_TASK" data-id="${task.id}">提交审核</button>`}</div></article>`).join('')}</section>`;
+    }
+    function duetStatusLabel(status) {
+      return ({queued:'待领取',in_progress:'制作中',review:'待审核',rework:'返工中',done:'已完成'})[status] || status;
+    }
+    function renderRelayBoard() {
+      const columns = [['queued','待领取'],['in_progress','制作中'],['review','待审核'],['done','已完成']];
+      return `<div class="workspace-page">${renderDuetHeader('接力看板','任务只有在审核通过后才进入下一环；退回会保留轮次和补充要求。')}<div class="relay-columns">${columns.map(([status,label]) => `<section class="relay-column"><h3>${label}</h3><span class="muted">${state.duetTasks.filter(t=>t.status===status || (status==='in_progress'&&t.status==='rework')).length} 项</span>${state.duetTasks.filter(t=>t.status===status || (status==='in_progress'&&t.status==='rework')).map(t=>`<article class="task-card"><b>${t.name}</b><p>${duetStatusLabel(t.status)} · 第 ${t.round+1} 轮</p><button class="secondary-button" data-action="REVIEW_DUET_TASK" data-id="${t.id}">推进</button></article>`).join('') || '<p class="muted">暂无任务</p>'}</section>`).join('')}</div></div>`;
+    }
+    function renderDuetSchedules() {
+      return `<div class="workspace-page">${renderDuetHeader('定时任务','按固定时间整理频道进度，不会在原型中连接真实服务。')}<section class="card"><div class="list-row"><div><h3>每日制片晨会</h3><p class="muted">每天 09:00 · 汇总全部频道阻塞</p></div><button class="secondary-button" data-action="TOGGLE_DUET_SCHEDULE">${state.duetScheduleEnabled?'已开启':'已暂停'}</button></div><div class="list-row"><div><h3>待审任务提醒</h3><p class="muted">每 2 小时 · 通知审片小Y</p></div><button class="secondary-button" data-action="RUN_DUET_SCHEDULE">立即运行</button></div></section></div>`;
+    }
+    function createDuetTask(employeeId = 'writer') {
+      const task = { id:`duet-${Date.now()}`, name:'第一集改编与分镜', channelId:state.activeChannelId, employeeId, status:'queued', round:0, supplement:'' };
+      patchState({ duetTasks:[...state.duetTasks, task], activeDuetTaskId:task.id });
+      showToast('任务已创建，等待员工领取');
+    }
+    function updateDuetTask(id, updater) {
+      const targetId = id || state.activeDuetTaskId || state.duetTasks.at(-1)?.id;
+      if (!targetId) return false;
+      patchState({ duetTasks:state.duetTasks.map(task => task.id === targetId ? updater(task) : task), activeDuetTaskId:targetId });
+      return true;
+    }
+    function renderMain() {
+      const content = state.mode === 'brand' ? renderBrandPage() : state.mode === 'agent' ? renderAgentFoundation() : renderDuetFoundation();
+      return `<main class="main-shell">${renderTopbar()}${content}</main>`;
+    }
+    function renderApp() {
+      document.documentElement.dataset.theme = state.theme;
+      document.querySelector('#app').innerHTML = `<div class="app-shell">${renderSidebar()}${renderMain()}</div>`;
+    }
+    function dispatchAction(action, payload = {}) {
+      switch (action) {
+        case 'TOGGLE_MODE_MENU': return patchState({ modeMenuOpen: !state.modeMenuOpen });
+        case 'SET_MODE': return patchState({ mode: payload.mode, modeMenuOpen: false });
+        case 'SET_THEME': return patchState({ theme: payload.theme });
+        case 'SET_PAGE': return setPage(payload.page);
+        case 'CREATE_COMIC_WORK': return showToast('已进入创作漫剧演示入口');
+        case 'START_AI_CUT_DEMO': patchState({ aiCutStage:1 }); return showToast('演示视频已导入，开始镜头分析');
+        case 'NEXT_AI_CUT_STAGE': return patchState({ aiCutStage:Math.min(5, state.aiCutStage+1) });
+        case 'RESET_AI_CUT_DEMO': return patchState({ aiCutStage:0 });
+        case 'INSTALL_PLUGIN': return patchState({ installedPluginIds:[...new Set([...state.installedPluginIds, payload.id])], enabledPluginIds:[...new Set([...state.enabledPluginIds, payload.id])] });
+        case 'OPEN_PLUGIN': return patchState({ selectedPluginId:payload.pluginId });
+        case 'CLOSE_PLUGIN_DETAIL': return patchState({ selectedPluginId:null });
+        case 'TOGGLE_PLUGIN': {
+          const enabled = state.enabledPluginIds.includes(payload.id);
+          return patchState({ enabledPluginIds:enabled ? state.enabledPluginIds.filter(id => id !== payload.id) : [...state.enabledPluginIds, payload.id] });
+        }
+        case 'SET_SKILL_TAB': return patchState({ skillTab: payload.value });
+        case 'SET_SKILL_CATEGORY': return patchState({ skillCategory: payload.value });
+        case 'TOGGLE_SKILL': {
+          const enabled = state.enabledSkillIds.includes(payload.id);
+          return patchState({ enabledSkillIds: enabled ? state.enabledSkillIds.filter(id => id !== payload.id) : [...state.enabledSkillIds, payload.id] });
+        }
+        case 'TOGGLE_ALL_SKILLS': return patchState({ enabledSkillIds: state.enabledSkillIds.length === skills.length ? [] : skills.filter(item => item.environment === 'ready').map(item => item.id) });
+        case 'OPEN_SKILL_DETAIL': return patchState({ drawer: payload.id });
+        case 'OPEN_MODAL': return patchState({ modal: payload.value });
+        case 'CLOSE_LAYER': return patchState({ drawer: null, modal: null, picker: null });
+        case 'OPEN_PICKER': return patchState({ picker: state.picker === payload.value ? null : payload.value });
+        case 'ADD_CONTEXT': return patchState({ selectedContext: state.selectedContext.some(item => item.id === payload.id) ? state.selectedContext : [...state.selectedContext, { id:payload.id, label:payload.label, kind:payload.kind }], picker: null });
+        case 'REMOVE_CONTEXT': return patchState({ selectedContext: state.selectedContext.filter(item => item.id !== payload.id) });
+        case 'SET_PERMISSION_MODE': return patchState({ permissionMode: payload.value });
+        case 'START_RUN': return startRun();
+        case 'APPROVE_RUN': patchRun('running', 3); return scheduleRunAdvance();
+        case 'CANCEL_RUN': return patchRun('cancelled', state.run.step);
+        case 'FAIL_RUN': return patchRun('failed', Math.max(state.run.step, 3), '故事板结构校验未通过，请调整后从失败处重试。');
+        case 'RETRY_RUN': patchRun('running', Math.max(state.run.step, 3)); return scheduleRunAdvance();
+        case 'SET_WORKSPACE_VIEW': return patchState({ activeWorkspaceView: payload.value });
+        case 'SEND_TO_AGENT_WORKSPACE': patchState({ pages:{...state.pages,agent:'projects'}, activeWorkspaceView:payload.value }); return showToast('已发送到现有Agent工作区，并定位到第 1 集故事板');
+        case 'CREATE_AUTOMATION': return patchState({ automations:[...state.automations,{id:`auto-${Date.now()}`,name:'每晚故事板进度检查',status:'active',schedule:'每天 21:00'}] });
+        case 'TOGGLE_AUTOMATION': return showToast('自动任务状态已切换');
+        case 'RUN_AUTOMATION': state.pages.agent='new-session'; saveState(); renderApp(); return startRun();
+        case 'OPEN_DUET_CHANNEL': return patchState({ activeChannelId:payload.id });
+        case 'CREATE_DUET_TASK': return createDuetTask();
+        case 'HANDOFF_DUET_TASK': {
+          if (!state.duetTasks.length) return createDuetTask(payload.employee || 'writer');
+          updateDuetTask(payload.id, task => ({...task, employeeId:payload.employee || 'director', status:'in_progress'}));
+          return showToast('任务已转交，接收员工开始制作');
+        }
+        case 'SUPPLEMENT_DUET_TASK':
+          updateDuetTask(payload.id, task => ({...task, supplement:'补充：强化前三秒冲突，并保持人物造型连续。'}));
+          return showToast('补充要求已追加到任务记录');
+        case 'REVIEW_DUET_TASK':
+          updateDuetTask(payload.id, task => ({...task, status:'review'}));
+          return showToast('已提交审片小Y审核');
+        case 'APPROVE_DUET_TASK':
+          updateDuetTask(payload.id, task => ({...task, status:'done'}));
+          return showToast('审核通过，产物已进入项目');
+        case 'REWORK_DUET_TASK': {
+          const task = state.duetTasks.find(item => item.id === payload.id);
+          if (task?.round >= 2) return showToast('已到返工上限，请制片人介入');
+          updateDuetTask(payload.id, item => ({...item, status:'rework', round:item.round+1}));
+          return showToast('已退回返工，原审核意见已保留');
+        }
+        case 'TOGGLE_DUET_SCHEDULE': return patchState({ duetScheduleEnabled:!state.duetScheduleEnabled });
+        case 'RUN_DUET_SCHEDULE': return showToast('演示运行完成：1 个待审任务，0 个阻塞');
+        case 'RESET_STATE': return resetState();
+        case 'NOTICE': return showToast(payload.message || '操作已完成');
+      }
+    }
+    document.addEventListener('click', event => {
+      const target = event.target.closest('[data-action]');
+      if (target) dispatchAction(target.dataset.action, target.dataset);
+      else if (state.modeMenuOpen) patchState({ modeMenuOpen: false });
+    });
+    document.addEventListener('input', event => {
+      if (event.target.dataset.input === 'skill-search') { state.skillSearch = event.target.value; saveState(); renderApp(); document.querySelector('[data-input="skill-search"]')?.focus(); }
+      if (event.target.dataset.input === 'plugin-search') { state.pluginSearch = event.target.value; saveState(); renderApp(); document.querySelector('[data-input="plugin-search"]')?.focus(); }
+    });
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && (state.modal || state.drawer || state.picker || state.modeMenuOpen)) {
+        patchState({ modal:null, drawer:null, picker:null, modeMenuOpen:false });
+      }
+    });
+    window.__CM_PROTOTYPE__ = {
+      getState: () => structuredClone(state),
+      reset: () => resetState(),
+      dispatch: (action, payload) => dispatchAction(action, payload)
+    };
+    renderApp();
+  </script>
+</body>
+</html>
