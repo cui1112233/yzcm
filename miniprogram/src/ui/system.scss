@@ -1,0 +1,76 @@
+// Canonical shared controls. Page-specific layouts live with their feature.
+.mp-theme {
+  --ui-gutter: 20px;
+  color: var(--ui-text);
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: var(--ui-body-size);
+  line-height: var(--ui-body-line);
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+.mp-theme.mp-page, .mp-theme .mp-page {
+  padding: var(--ui-space-4) var(--ui-gutter) calc(var(--ui-space-6) + env(safe-area-inset-bottom));
+  background: var(--ui-canvas);
+  color: var(--ui-text);
+}
+.mp-theme {
+  .mp-ambient-starfield { display: none; }
+  .mp-brand-header { min-height: 72PX; margin: calc(-1 * var(--ui-space-4)) calc(-1 * var(--ui-gutter)) 0; padding: 8PX var(--ui-gutter); border-color: var(--ui-divider); }
+  .mp-brand-back { min-width: 44PX; min-height: 44PX; margin-right: var(--ui-space-2); color: var(--ui-text); }
+  .mp-brand-page-title { font-size: var(--ui-caption-size); line-height: var(--ui-caption-line); font-weight: 500; color: var(--ui-textMuted); }
+  .mp-title { font-size: var(--ui-page-size); line-height: var(--ui-page-line); font-weight: 600; color: var(--ui-text); letter-spacing: 0; margin-top: var(--ui-space-6); }
+  .mp-section-title { font-size: var(--ui-section-size); line-height: var(--ui-section-line); font-weight: 600; color: var(--ui-text); letter-spacing: 0; }
+  .mp-row-title { display: block; font-size: var(--ui-body-size); line-height: 24PX; font-weight: 600; color: var(--ui-text); overflow-wrap: anywhere; }
+  .mp-row-description, .mp-subtitle, .mp-muted { font-size: var(--ui-caption-size); line-height: var(--ui-caption-line); color: var(--ui-textMuted); overflow-wrap: anywhere; }
+  .mp-row-description { display: block; margin-top: 4PX; }
+  .mp-subtitle { display: block; margin-top: 8PX; }
+  .mp-row-copy { min-width: 0; }
+  .mp-section-kicker, .mp-section-link, .mp-chevron { color: var(--ui-accent); letter-spacing: 0; }
+  .mp-card { margin-top: 12PX; padding: var(--ui-space-4); border: 1PX solid var(--ui-divider); border-radius: var(--ui-radius); background: var(--ui-surface); box-shadow: none; }
+  .mp-primary, .mp-secondary {
+    display: flex; align-items: center; justify-content: center; gap: var(--ui-space-2);
+    min-height: 48PX; height: auto; padding: 12PX 16PX; box-sizing: border-box;
+    border: 1PX solid transparent; border-radius: var(--ui-radius);
+    font-size: var(--ui-control-size); line-height: var(--ui-control-line); font-weight: 500;
+    white-space: normal; word-break: normal;
+    transition: background-color var(--ui-feedback) var(--ui-ease), color var(--ui-feedback) var(--ui-ease);
+  }
+  .mp-primary { margin-top: 16PX; background: var(--ui-accent); color: var(--ui-onAccent); box-shadow: none; }
+  .mp-secondary { margin-top: 12PX; background: var(--ui-surface); color: var(--ui-text); border-color: var(--ui-controlBorder); box-shadow: none; }
+  .mp-primary::after, .mp-secondary::after { border: 0; }
+  .mp-primary[disabled], .mp-secondary[disabled] { opacity: 1; color: var(--ui-disabledText); background: var(--ui-disabledSurface); border-color: var(--ui-divider); }
+  // WeChat WXSS does not support :not(); disabled native buttons do not
+  // enter the active state, so the direct active selector is equivalent.
+  .mp-primary:active { box-shadow: inset 0 0 0 2PX var(--ui-onAccent); }
+  .mp-secondary:active { border-color: var(--ui-accent); }
+  .mp-input, .mp-textarea, .mp-result, .mp-picker-field {
+    box-sizing: border-box; width: 100%; min-height: 48PX; padding: 12PX;
+    border: 1PX solid var(--ui-controlBorder); border-radius: var(--ui-radius);
+    background: var(--ui-surface); color: var(--ui-text); font-size: var(--ui-body-size); line-height: var(--ui-body-line);
+  }
+  .mp-input, .mp-textarea, .mp-result { margin-top: 8PX; }
+  .mp-textarea { min-height: 160PX; }
+  .mp-result { min-height: 180PX; }
+  .mp-field-label { display: block; color: var(--ui-textMuted); font-size: var(--ui-control-size); line-height: var(--ui-control-line); }
+  .mp-picker-value { display: block; color: var(--ui-text); font-size: var(--ui-body-size); line-height: 24PX; margin-top: var(--ui-space-2); white-space: normal; overflow-wrap: anywhere; }
+  .mp-error { display: block; margin-top: 8PX; color: var(--ui-error); font-size: var(--ui-control-size); line-height: var(--ui-control-line); }
+  .mp-status-text { font-size: var(--ui-caption-size); line-height: var(--ui-caption-line); }
+  .mp-status-text-success { color: var(--ui-success); }
+  .mp-status-text-info { color: var(--ui-info); }
+  .mp-status-text-attention { color: var(--ui-warning); }
+  .mp-status-text-danger { color: var(--ui-error); }
+  .mp-status-text-muted, .mp-status-text-unknown { color: var(--ui-textMuted); }
+  .mp-app-icon { filter: brightness(0) invert(1); opacity: .85; }
+  /* Function cards use their own colored icon artwork; the global dark-theme
+     filter must not wash those colors out on pale icon tiles. */
+  .mp-function-tile-icon .mp-app-icon { filter: none; opacity: 1; }
+  &.mp-theme-light .mp-app-icon { filter: brightness(0); }
+  .mp-primary .mp-app-icon { filter: brightness(0); }
+  &.mp-theme-light .mp-primary .mp-app-icon { filter: brightness(0) invert(1); }
+}
+@media (max-width: 359PX) { .mp-theme { --ui-gutter: 16px; } }
+@media (min-width: 600PX) { .mp-theme { --ui-gutter: 24px; } }
+@media (min-width: 1024PX) { .mp-theme { --ui-gutter: 32px; } }
+@media (prefers-reduced-motion: reduce) {
+  .mp-theme .mp-primary, .mp-theme .mp-secondary { transition: none; }
+}

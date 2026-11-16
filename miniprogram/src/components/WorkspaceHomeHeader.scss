@@ -1,0 +1,39 @@
+.mp-page.mp-workspace-home{--home-bg:#f5f2e9;--home-ink:#242720;--home-muted:#727469;--home-line:#24272024;overflow:visible;padding:0 0 72rpx;background:var(--home-bg);color:var(--home-ink)}
+.mp-workspace-home.mp-theme-dark{--home-bg:#191e1b;--home-ink:#f3f2e8;--home-muted:#b6bead;--home-line:#f3f2e82b}
+.mp-workspace-home .mp-brand-header{position:sticky;top:0;z-index:9;margin:0;padding-left:36rpx;padding-right:36rpx;background:var(--home-bg);border:0}
+.mp-workspace-home .mp-brand-lockup{width:auto;flex-direction:row;gap:18rpx}
+.mp-workspace-home .mp-brand-logo{width:112rpx;height:58rpx}
+.mp-workspace-home .mp-brand-page-title{width:auto;font-size:25rpx;color:var(--home-ink);margin:0;padding-left:18rpx;border-left:1rpx solid var(--home-line)}
+.home-hero{height:470rpx;position:relative;z-index:2;background:#daeff5;overflow:hidden}
+.mp-theme-dark .home-hero{background:#1f4558}
+.mp-theme-dark .home-eyebrow,.mp-theme-dark .home-caption{color:#d0e3ed}
+.mp-theme-dark .home-headline{color:#f3faff}
+.home-hero-art{position:absolute;inset:0;width:100%;height:100%}
+.home-hero-copy{position:relative;padding:66rpx 48rpx 0;pointer-events:none}
+.home-eyebrow{display:block;font-size:18rpx;font-weight:650;letter-spacing:3rpx;color:#30372a}
+.home-headline{display:block;margin-top:20rpx;font-size:66rpx;font-weight:850;line-height:1.18;letter-spacing:-2rpx;white-space:pre-line;color:#171c16}
+.home-caption{display:block;margin-top:24rpx;font-size:20rpx;color:#333c2c}
+.home-theme-switch{position:absolute;right:36rpx;top:20rpx;display:flex;align-items:center;justify-content:center;width:62rpx;height:48rpx;border-radius:26rpx;background:#fff8;border:1rpx solid #24272040;color:#242720}
+.home-status-card{position:relative;z-index:5;margin:24rpx 34rpx 44rpx;min-height:164rpx;padding:28rpx 34rpx;box-sizing:border-box;display:grid;grid-template-columns:minmax(0,1fr) minmax(150rpx,auto);align-items:center;gap:28rpx;border-radius:34rpx}
+.home-clock{display:block;font-size:60rpx;line-height:1.1;font-weight:650;letter-spacing:-3rpx;font-variant-numeric:tabular-nums}
+.home-date{display:block;margin-top:12rpx;color:var(--home-muted);font-size:20rpx}
+.home-greeting{text-align:right;font-size:23rpx;padding-left:14rpx}
+.home-companion-caption{display:block;margin-top:12rpx;color:var(--home-muted);font-size:18rpx}
+.home-status-card.is-stuck .home-greeting{padding-right:115rpx;font-size:21rpx}
+.mp-workspace-home>.mp-section,.mp-workspace-home>.mp-card,.mp-workspace-home>.mp-inline-state{margin-left:48rpx;margin-right:48rpx;position:relative;z-index:1}
+.mp-workspace-home .mp-section-title{color:var(--home-ink);font-size:30rpx;font-weight:650}
+.mp-workspace-home .mp-section-kicker{display:none}
+.mp-workspace-home .mp-section-link,.mp-workspace-home .mp-row-description{color:var(--home-muted)}
+.mp-workspace-home .mp-row-title,.mp-workspace-home .mp-workspace-current-title{color:var(--home-ink)}
+.mp-workspace-home .mp-workspace-actions{display:flex;flex-wrap:wrap;border:0;border-top:1rpx solid var(--home-line);border-bottom:1rpx solid var(--home-line);border-radius:0;background:transparent}
+.mp-workspace-home .mp-workspace-action{width:50%;box-sizing:border-box;flex-wrap:wrap;position:relative;padding:28rpx 0;border:0;gap:12rpx}
+.mp-workspace-home .mp-workspace-action:nth-child(2){border-left:1rpx solid var(--home-line);padding-left:28rpx}
+.mp-workspace-home .mp-workspace-action:last-child{width:100%;border-top:1rpx solid var(--home-line)}
+.mp-workspace-home .mp-workspace-action-icon{display:none}
+.mp-workspace-home .mp-workspace-action .mp-row-title{font-size:26rpx}
+.mp-workspace-home .mp-workspace-action .mp-row-description{font-size:20rpx;line-height:1.6;margin-top:8rpx}
+.mp-workspace-home .mp-workspace-action .mp-chevron{position:absolute;right:10rpx;top:32rpx;color:var(--home-muted)}
+.mp-workspace-home .mp-workspace-current,.mp-workspace-home .mp-workspace-local,.mp-workspace-home .mp-workspace-empty,.mp-workspace-home .mp-workspace-state{background:transparent;border:1rpx solid var(--home-line);border-radius:22rpx;box-shadow:none;padding:26rpx;margin-top:16rpx}
+.mp-workspace-home .mp-workspace-recent-head{margin-top:48rpx}
+.mp-workspace-home .mp-workspace-current-title{font-size:28rpx;line-height:1.5}
+.mp-workspace-home .mp-workspace-local-label{color:var(--home-muted)}

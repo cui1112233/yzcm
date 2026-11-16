@@ -1,0 +1,107 @@
+.mp-page.script-studio {
+  --studio-bg: #202720;
+  --studio-paper: #2a3229;
+  --studio-ink: #edf0e5;
+  --studio-muted: #aab4a1;
+  --studio-line: #3a4436;
+  --studio-accent: #c4d4ac;
+  --studio-soft: #333e2f;
+  --studio-button: #c4d4ac;
+  --studio-on-button: #253022;
+  --ui-text: var(--studio-ink);
+  --ui-textMuted: var(--studio-muted);
+  --ui-divider: var(--studio-line);
+  --ui-surface: var(--studio-paper);
+  --ui-surfaceRaised: var(--studio-paper);
+  --ui-accent: var(--studio-accent);
+  --ui-control-size: 26rpx;
+  --ui-body-size: 26rpx;
+  background: var(--studio-bg);
+  color: var(--studio-ink);
+  padding-bottom: calc(190rpx + env(safe-area-inset-bottom));
+  &.mp-theme-light, .mp-theme-light & {
+    --studio-bg: #f7f8f3;
+    --studio-paper: #fffefb;
+    --studio-ink: #303831;
+    --studio-muted: #6e7768;
+    --studio-line: #e1e5d9;
+    --studio-accent: #526845;
+    --studio-soft: #e7ecdf;
+    --studio-button: #526845;
+    --studio-on-button: #ffffff;
+  }
+  button { box-sizing: border-box; }
+  button::after { border: 0; }
+  .studio-titlebar { display: flex; align-items: center; justify-content: space-between; gap: 14rpx; margin: 32rpx 8rpx 26rpx; }
+  .studio-eyebrow { display: block; color: var(--studio-muted); font-size: 17rpx; letter-spacing: 4rpx; line-height: 1.5; }
+  .studio-title { display: flex; align-items: center; gap: 10rpx; margin-top: 10rpx; font-family: 'Songti SC', 'Noto Serif CJK SC', serif; font-size: 40rpx; font-weight: 500; line-height: 1.4; }
+  .studio-title .mp-app-icon { display: none; }
+  .studio-history { display: flex; align-items: center; justify-content: center; width: 70rpx; height: 70rpx; padding: 0; margin: 0; border: 1rpx solid var(--studio-line); border-radius: 50%; background: transparent; }
+  .studio-tabs { display: flex; gap: 40rpx; margin: 0 8rpx 28rpx; border-bottom: 1rpx solid var(--studio-line); }
+  .studio-tab { position: relative; flex: none; margin: 0; padding: 12rpx 0 20rpx; border: 0; border-radius: 0; background: transparent; color: var(--studio-muted); font-size: 25rpx; line-height: 1.5; overflow: visible; }
+  .studio-tab.is-active { color: var(--studio-ink); font-weight: 600; }
+  .studio-tab.is-active::before { content: ''; position: absolute; bottom: -2rpx; left: 0; height: 5rpx; width: 28rpx; border-radius: 5rpx; background: var(--studio-accent); }
+  .studio-result-dot { display: inline-block; width: 8rpx; height: 8rpx; margin-left: 8rpx; border-radius: 50%; background: var(--studio-accent); vertical-align: middle; }
+  .studio-caption { display: block; color: var(--studio-muted); font-size: 21rpx; line-height: 1.7; font-weight: 400; }
+  .studio-paper { padding: 26rpx 28rpx 16rpx; border: 1rpx solid var(--studio-line); border-radius: 6rpx 30rpx 30rpx 30rpx; background: var(--studio-paper); box-shadow: 0 8rpx 24rpx rgba(25,40,18,.025); }
+  .studio-paper-head { display: flex; align-items: center; justify-content: space-between; color: var(--studio-ink); font-size: 23rpx; }
+  .studio-paper-tag { padding: 3rpx 10rpx; border-radius: 7rpx; background: var(--studio-soft); color: var(--studio-accent); font-size: 18rpx; }
+  .studio-source-input { display: block; box-sizing: border-box; width: 100%; height: 186rpx; margin: 20rpx 0; padding: 0; border: 0; background: transparent; color: var(--studio-ink); font-size: 26rpx; line-height: 1.95; }
+  .studio-source-excerpt { display: -webkit-box; margin: 20rpx 0; overflow: hidden; -webkit-line-clamp: 3; -webkit-box-orient: vertical; color: var(--studio-ink); font-size: 26rpx; line-height: 1.95; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .studio-paper-foot { display: flex; align-items: center; justify-content: space-between; gap: 20rpx; border-top: 1rpx dashed var(--studio-line); padding-top: 6rpx; color: var(--studio-muted); font-size: 21rpx; }
+  .studio-link { display: inline-flex; align-items: center; justify-content: center; margin: 0; padding: 12rpx 0; min-height: 64rpx; border: 0; background: transparent; color: var(--studio-accent); font-size: 23rpx; line-height: 1.5; border-radius: 0; }
+  .studio-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12rpx; margin: 30rpx 2rpx 16rpx; color: var(--studio-ink); font-size: 25rpx; font-weight: 600; }
+  .studio-section-head .studio-link { min-height: 0; padding: 0; }
+  .studio-settings { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12rpx; }
+  .studio-settings picker { min-width: 0; }
+  .studio-setting { box-sizing: border-box; min-height: 104rpx; padding: 16rpx 15rpx; border: 1rpx solid var(--studio-line); border-radius: 16rpx; background: transparent; }
+  .studio-setting-label { display: block; color: var(--studio-muted); font-size: 20rpx; line-height: 1.5; }
+  .studio-setting-value { display: flex; align-items: center; gap: 4rpx; margin-top: 7rpx; color: var(--studio-ink); font-size: 23rpx; line-height: 1.5; }
+  .studio-setting-value > text { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .studio-setting-value > image { flex: none; opacity: .6; }
+  .studio-entities { width: 100%; white-space: nowrap; }
+  .studio-entity-track { display: inline-flex; gap: 18rpx; padding: 4rpx 0; }
+  .studio-entity { flex: none; width: 128rpx; padding: 0; margin: 0; color: var(--studio-ink); border: 0; background: transparent; font-size: 22rpx; line-height: 1.5; }
+  .studio-entity > text { display: block; margin-top: 10rpx; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .studio-entity-icon { display: flex; align-items: center; justify-content: center; height: 124rpx; border-radius: 20rpx; background: var(--studio-soft); }
+  .studio-entity-icon.scene { background: var(--studio-paper); border: 1rpx solid var(--studio-line); }
+  .studio-entity-empty { display: flex; align-items: center; gap: 20rpx; padding: 20rpx 0; color: var(--studio-ink); font-size: 24rpx; }
+  .studio-entity-empty .studio-caption { margin-top: 6rpx; }
+  .studio-focus-list { display: flex; flex-wrap: wrap; gap: 10rpx; margin-top: 18rpx; }
+  .studio-focus { margin: 0; padding: 9rpx 16rpx; border: 1rpx solid var(--studio-line); border-radius: 30rpx; background: transparent; color: var(--studio-muted); font-size: 22rpx; line-height: 1.5; }
+  .studio-focus.is-focused { background: var(--studio-soft); color: var(--studio-accent); border-color: var(--studio-accent); }
+  .studio-reextract { margin-top: 6rpx; }
+  .studio-entry-list { border-top: 1rpx solid var(--studio-line); margin-top: 24rpx; }
+  .studio-entry { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12rpx; margin: 0; padding: 24rpx 0; border: 0; border-bottom: 1rpx solid var(--studio-line); border-radius: 0; background: transparent; color: var(--studio-ink); font-size: 24rpx; line-height: 1.6; }
+  .studio-entry > view { display: flex; align-items: center; gap: 12rpx; }
+  .studio-dock { position: fixed; z-index: 30; left: 0; right: 0; bottom: 0; display: flex; align-items: center; justify-content: space-between; gap: 18rpx; padding: 22rpx 34rpx calc(22rpx + env(safe-area-inset-bottom)); border-top: 1rpx solid var(--studio-line); background: var(--studio-bg); }
+  .studio-dock-copy { flex: 1; min-width: 0; }
+  .studio-dock-copy > text:first-child { display: block; font-size: 23rpx; line-height: 1.6; margin-bottom: 5rpx; }
+  .studio-dock-copy .studio-caption { font-size: 19rpx; }
+  .studio-primary { display: flex; align-items: center; justify-content: center; flex: none; margin: 0; padding: 0 26rpx; min-height: 86rpx; border: 0; border-radius: 24rpx; background: var(--studio-button); color: var(--studio-on-button); font-size: 25rpx; line-height: 1.5; font-weight: 500; }
+  .studio-primary[disabled] { background: var(--studio-line); color: var(--studio-muted); }
+  .studio-result-header { padding: 8rpx 0 24rpx; }
+  .studio-result-title { display: block; margin: 16rpx 0; color: var(--studio-ink); font-family: 'Songti SC',serif; font-size: 36rpx; font-weight: 500; line-height: 1.5; }
+  .studio-result-text { display: block; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 27rpx; line-height: 2; color: var(--studio-ink); }
+  .studio-copy { margin-top: 24rpx; }
+  .studio-overlay { position: fixed; z-index: 100; inset: 0; }
+  .studio-backdrop { position: absolute; inset: 0; background: rgba(12,20,13,.42); }
+  .studio-sheet { position: absolute; bottom: 0; left: 0; right: 0; border-radius: 38rpx 38rpx 0 0; background: var(--studio-bg); overflow: hidden; }
+  .studio-sheet-handle { width: 54rpx; height: 6rpx; margin: 16rpx auto 8rpx; border-radius: 6rpx; background: var(--studio-line); }
+  .studio-sheet-header { display: flex; align-items: center; justify-content: space-between; padding: 4rpx 34rpx 16rpx; border-bottom: 1rpx solid var(--studio-line); font-size: 32rpx; }
+  .studio-sheet-scroll { height: 65vh; }
+  .studio-sheet-body { padding: 24rpx 34rpx calc(38rpx + env(safe-area-inset-bottom)); }
+  .studio-sheet .mp-field-label { display: block; margin: 22rpx 0 8rpx; color: var(--studio-ink); font-size: 23rpx; }
+  .studio-sheet .mp-textarea { min-height: 180rpx; height: 180rpx; font-size: 25rpx; border-color: var(--studio-line); color: var(--studio-ink); background: var(--studio-paper); }
+  .studio-sheet .mp-input { border-color: var(--studio-line); color: var(--studio-ink); background: var(--studio-paper); }
+  .studio-sheet .mp-row-title { margin-top: 26rpx; font-size: 27rpx; }
+  .studio-apply { width: 100%; margin-top: 30rpx; }
+  .studio-constraint-layer { border-top: 1rpx solid var(--studio-line); margin-top: 28rpx; padding-top: 10rpx; }
+  .studio-layer-toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; margin: 0; padding: 18rpx 0; border: 0; background: transparent; color: var(--studio-ink); font-size: 26rpx; }
+  .studio-toggle { padding: 5rpx 13rpx; border-radius: 18rpx; background: var(--studio-line); color: var(--studio-muted); font-size: 20rpx; }
+  .studio-toggle.is-on { color: var(--studio-on-button); background: var(--studio-button); }
+  .studio-audio { text-align: center; padding-top: 30rpx; }
+  .studio-audio .studio-layer-toggle { margin-top: 28rpx; }
+  .mp-error { display: block; padding: 12rpx 0; font-size: 24rpx; line-height: 1.7; }
+  .mp-row-description { color: var(--studio-muted); }
+}

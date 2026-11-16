@@ -1,0 +1,24 @@
+.home-companion-stage{position:absolute;left:0;right:0;top:-111rpx;height:144rpx;pointer-events:none;z-index:4;overflow:visible}
+.home-companion{position:absolute;top:0;left:0;width:144rpx;height:144rpx;pointer-events:auto;transition-property:transform;transition-timing-function:linear;touch-action:none}
+.home-companion-facing,.home-companion-window{width:144rpx;height:144rpx}
+.home-companion-window{overflow:hidden}
+.home-companion-strip{display:block;max-width:none;animation-iteration-count:infinite;will-change:transform}
+.home-companion.is-held .home-companion-window{animation:companion-struggle .2s ease-in-out infinite alternate}
+@keyframes companion-struggle{from{transform:rotate(-5deg) translateY(-2rpx)}to{transform:rotate(5deg) translateY(2rpx)}}
+.home-companion-stage.is-parked{top:10rpx;left:auto;right:8rpx;width:144rpx}
+.home-companion-stage.is-parked .home-companion{left:0}
+.home-companion-strip.is-paused,.is-reduced .home-companion-strip{animation-play-state:paused}
+.home-companion.is-card{top:-7rpx;transition-duration:0ms!important;height:136rpx}
+.home-card-peek{position:relative;width:144rpx;height:136rpx;transform-origin:50% 100%}
+.home-card-head{width:144rpx;height:118rpx;overflow:hidden}
+.home-card-head image{display:block;width:144rpx;height:118rpx;animation:companion-card-arrive .9s ease-out,companion-card-breathe 4s .9s ease-in-out infinite;transform-origin:50% 100%}
+.home-card-paws{position:absolute;left:0;right:0;top:111rpx;display:flex;justify-content:space-between;padding:0 28rpx;pointer-events:none}
+.home-card-paws>view{width:20rpx;height:23rpx;box-sizing:border-box;border:2rpx solid #674738;border-radius:48%;background:radial-gradient(circle at 40% 22%,#fff 25%,#f6edf2 75%,#d6c0cc);box-shadow:0 5rpx 3rpx #3d2c2024}
+.card-left{--card-angle:-10deg}
+.card-right{--card-angle:10deg}
+.is-reduced .home-card-head image{animation:none}
+.is-hidden .home-card-head image{animation-play-state:paused}
+@media(prefers-reduced-motion:reduce){.home-card-head image{animation:none!important}}
+@keyframes companion-card-arrive{from{transform:translateY(40rpx) rotate(var(--card-angle,0deg))}to{transform:translateY(0) rotate(var(--card-angle,0deg))}}
+@keyframes companion-card-breathe{0%,100%{transform:translateY(0) rotate(var(--card-angle,0deg))}50%{transform:translateY(3rpx) rotate(var(--card-angle,0deg))}}
+@media(prefers-reduced-motion:reduce){.home-companion,.home-companion-window,.home-companion-strip{animation:none!important;transition:none!important}}

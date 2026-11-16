@@ -1,0 +1,12 @@
+{
+  "version": "1.1.0",
+  "material": "liquid-smooth-a",
+  "commit": "1cef2cccaddf2500c4015b748a5b5da2029a4f34",
+  "shortCommit": "1cef2cc",
+  "dirty": true,
+  "builtAt": "2026-11-10T05:40:05.105Z",
+  "wallpapers": {
+    "light": "sha256:f4c59ac6e4e62bc0f4f10f3ced2d65ec5373b87d4f74921c40b426d33c4d7fa0",
+    "dark": "sha256:b42384f13a8631becb15510f23f403ec961497192a50ed60c1abbed1cd5793d4"
+  }
+}
