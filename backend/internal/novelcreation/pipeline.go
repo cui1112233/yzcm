@@ -69,8 +69,9 @@ type RunContext struct {
 	Notes              []ProjectNote
 	KnowledgeMaterials []KnowledgeMaterial
 	// MaxRevisionRounds overrides the default audit-revision loop bound.
-	MaxRevisionRounds int
-	Agent             *AgentSettings
+	MaxRevisionRounds  int
+	Agent              *AgentSettings
+	ReviewCycleVersion int
 }
 
 type Pipeline struct {
@@ -131,11 +132,14 @@ type chapterAuditOutput struct {
 }
 
 type auditIssue struct {
-	ID          string          `json:"id"`
-	Severity    string          `json:"severity"`
-	Description string          `json:"description"`
-	Category    json.RawMessage `json:"category,omitempty"`
-	Evidence    json.RawMessage `json:"evidence,omitempty"`
+	RepairScope      json.RawMessage `json:"repairScope,omitempty"`
+	RepairScopeSnake json.RawMessage `json:"repair_scope,omitempty"`
+	Source           string          `json:"source,omitempty"`
+	ID               string          `json:"id"`
+	Severity         string          `json:"severity"`
+	Description      string          `json:"description"`
+	Category         json.RawMessage `json:"category,omitempty"`
+	Evidence         json.RawMessage `json:"evidence,omitempty"`
 }
 
 type chapterRevisionOutput struct {
@@ -547,6 +551,17 @@ func (p *Pipeline) auditChapter(ctx context.Context, input RunContext, sink Even
 		temperature: 0.2, maxTokens: 4500,
 		validate: func() error { return validateAudit(audit, p.threshold(input)) },
 	}, &audit)
+	if err == nil {
+		if input.ReviewCycleVersion < 3 {
+			// Before version3 these fields were discarded during decoding. Keep
+			// old journal request fingerprints unchanged when replaying a reply.
+			for index := range audit.Issues {
+				audit.Issues[index].RepairScope = nil
+				audit.Issues[index].RepairScopeSnake = nil
+			}
+		}
+		audit, raw, err = mergePostWriteIntoAudit(input, plan, content, audit, raw)
+	}
 	return audit, raw, err
 }
 
@@ -578,6 +593,9 @@ func (p *Pipeline) callJSON(ctx context.Context, input RunContext, sink EventSin
 		if fields, ok := spec.userPayload.(map[string]any); ok {
 			delete(fields, "pass_score")
 		}
+	}
+	if input.ReviewCycleVersion >= 2 && spec.definition.ID == novelprompt.ChapterRevision.ID {
+		return p.callNativeRevision(ctx, input, sink, provider, spec, target)
 	}
 	userPrompt, err := marshalPromptPayload(withThinkingLevel(spec.userPayload, input.Run.ThinkingLevel))
 	if err != nil {
