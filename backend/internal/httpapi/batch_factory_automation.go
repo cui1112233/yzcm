@@ -1002,11 +1002,20 @@ func automationResumeShouldRunStage(resumeStage, stage string) bool {
 }
 
 // automationResumeStageForBook prevents a retry that previously failed at
-// video/merge/upload from skipping an opening prompt that is still missing.
-// It only moves the resume point backwards to opening; completed assets and
-// director work remain reused.
+// video/merge/upload from skipping stages whose output is still missing.
+// Assets that were never extracted (for example because the image switch used
+// to skip the whole stage) are generated first; completed assets and director
+// work remain reused, and a missing opening prompt still downgrades the resume
+// point to opening.
 func automationResumeStageForBook(resumeStage string, batch batchfactoryv11.Batch, book batchfactoryv11.Book) string {
-	if strings.TrimSpace(resumeStage) != "" && automationOpeningEnabled(batch, book) && !batchfactoryv11.OpeningStageComplete(batch, book) && !automationResumeShouldRunStage(resumeStage, "opening") {
+	resume := strings.TrimSpace(resumeStage)
+	if resume == "" {
+		return resumeStage
+	}
+	if !automationAssetsComplete(book) && !automationResumeShouldRunStage(resume, "assets") {
+		return "assets"
+	}
+	if automationOpeningEnabled(batch, book) && !batchfactoryv11.OpeningStageComplete(batch, book) && !automationResumeShouldRunStage(resume, "opening") {
 		return "opening"
 	}
 	return resumeStage
@@ -1958,11 +1967,18 @@ func (c *BatchAutomationCoordinator) Start(ctx context.Context, owner, batchID s
 	if runMode == "full_submit" {
 		autoPublish = true
 	}
+	// 任务记录批次生产模式，前端用它判断“自动就绪”数字是否仍适用于当前批次。
+	// 旧前端/旧任务没有该字段时回退到批次设置，再不行就留空（视为通用）。
+	productionMode := automationStringValue(input["productionMode"], "")
+	if productionMode != "comic" && productionMode != "video" {
+		productionMode = batchfactoryv11.EffectiveProductionMode(batch.SettingsState.Patch, nil)
+	}
 	job := map[string]any{
 		"id": jobID, "owner": owner, "batchId": batchID, "state": initialState,
 		"runMode": runMode, "autoPublish": autoPublish, "forceRegenerate": forceRegenerate,
 		"scheduleMode": scheduleMode, "scheduledAt": scheduledAt,
 		"concurrency": automationNumberValue(input["concurrency"], 1), "preset": map[string]any{"id": preset.ID, "name": preset.Name, "version": preset.Version},
+		"productionMode": productionMode,
 		"createdAt": c.now(), "updatedAt": c.now(),
 		"counts": automationCounts(len(targetBooks), len(targetBooks), 0, 0), "books": map[string]any{},
 	}
@@ -2439,6 +2455,24 @@ func automationMergeRequestID(jobID, bookID string, retryAttempt, batchRetry int
 		return fmt.Sprintf("%s-merge-%s-r%db%d", jobID, bookID, retryAttempt, batchRetry)
 	}
 	return jobID + "-merge-" + bookID
+}
+
+// automationOpeningVideoRequestID scopes the production request by the opening
+// variants that must be produced. SubmitBookProductionWithOptions is idempotent
+// per request id, so adding a new 换开头 variant under the old id would return
+// the old job and leave the variant without any VIDEO task.
+func automationOpeningVideoRequestID(base string, batch batchfactoryv11.Batch, book batchfactoryv11.Book) string {
+	indices := batchfactoryv11.RequiredOpeningVariantIndices(batch, book)
+	if len(indices) <= 1 {
+		return base
+	}
+	var suffix strings.Builder
+	suffix.WriteString(base)
+	for _, index := range indices {
+		suffix.WriteString("-o")
+		suffix.WriteString(strconv.Itoa(index))
+	}
+	return suffix.String()
 }
 
 func automationCountsWithPending(total, pending int) map[string]any {
@@ -3422,12 +3456,23 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 	// 批次末尾统一回补：单本书失败时先跳过，等本批其余书全部跑完，再按顺序重跑
 	// 失败的书。生成链路是幂等的，回补会从缺失的页/阶段继续，不会重做已完成部分。
 	books := job["books"].(map[string]any)
+	// 服务重启后自动恢复的 job 不会经过 Start 的 providerSync 边界；内存里的
+	// 视频通道注册表为空时，新的视频任务会被误判成“通道未配置”。恢复执行前
+	// 补一次同步，失败只记录，不阻断已恢复的书。
+	if c.providerSync != nil {
+		if syncErr := c.providerSync(ctx, owner); syncErr != nil {
+			log.Printf("automation: provider sync failed job=%s owner=%s: %v", jobID, owner, syncErr)
+		}
+	}
 	// Video submissions are idempotent per request id. On a reopened (retry) run
 	// the plain "-video-<book>" id would return the previous failed production
 	// job instead of submitting again, so retries use a distinct id suffix.
 	retryAttempt := automationNumberValue(job["retryAttempt"], 0)
-	videoRequestID := func(bookID string, batchRetry int) string {
-		return automationVideoRequestID(jobID, bookID, retryAttempt, batchRetry)
+	videoRequestID := func(book batchfactoryv11.Book, batchRetry int) string {
+		base := automationVideoRequestID(jobID, book.ID, retryAttempt, batchRetry)
+		// 换开头变体新增后必须换一个生产任务标识：同一 request id 会按幂等
+		// 返回旧生产任务，只包含当时已存在的变体，新变体永远拿不到视频。
+		return automationOpeningVideoRequestID(base, batch, book)
 	}
 	mergeRequestID := func(bookID string, batchRetry int) string {
 		return automationMergeRequestID(jobID, bookID, retryAttempt, batchRetry)
@@ -4406,18 +4451,28 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 							fail("opening", stageErr, "换开头提示词生成失败")
 							continue
 						}
+						// 换开头阶段会把变体写进 VIDEO01 设置；视频提交和请求标识
+						// 都必须基于最新书籍快照，否则本次新生成的变体会被漏掉。
+						if latestBatch, refreshErr := c.store.GetBatch(ctx, owner, batchID); refreshErr == nil {
+							for _, candidate := range latestBatch.Books {
+								if candidate.ID == book.ID {
+									book = candidate
+									break
+								}
+							}
+						}
 					}
 					entry["stage"], entry["message"], entry["updatedAt"] = "video", "正在提交视频生成", c.now()
 					persist()
 					stageCtx, cancel = context.WithTimeout(ctx, stageTimeout)
-					_, stageErr = c.stages.Run(stageCtx, owner, batchID, book.ID, batchfactoryv11.BookStageVideo, batchfactoryv11.StageModeMissing, videoRequestID(book.ID, automationNumberValue(entry["batchRetryCount"], 0)), "")
+					_, stageErr = c.stages.Run(stageCtx, owner, batchID, book.ID, batchfactoryv11.BookStageVideo, batchfactoryv11.StageModeMissing, videoRequestID(book, automationNumberValue(entry["batchRetryCount"], 0)), "")
 					cancel()
 					if stageErr != nil {
 						fail("video", stageErr, "视频提交失败")
 						continue
 					}
 					stageCtx, cancel = context.WithTimeout(ctx, videoWaitTimeout)
-					completedProduction, waitErr := c.waitProduction(stageCtx, owner, batchID, book.ID, videoRequestID(book.ID, automationNumberValue(entry["batchRetryCount"], 0)), videoWaitIdleTimeout, func() {
+					completedProduction, waitErr := c.waitProduction(stageCtx, owner, batchID, book.ID, videoRequestID(book, automationNumberValue(entry["batchRetryCount"], 0)), videoWaitIdleTimeout, func() {
 						// 供应商侧任务状态在推进也算书内进展，避免慢视频被停滞看门狗误杀。
 						stallLast.Store(c.now())
 					})
@@ -4429,6 +4484,9 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 							appendAutomationBookLog(entry, c.now(), "video", "视频仍在生成，已超过等待上限，稍后可重新回读")
 							persist()
 							continue
+						}
+						if isVideoModerationFailure(waitErr) {
+							appendAutomationBookLog(entry, c.now(), "video", "视频提示词被内容审核拒绝，重试时将自动去敏改写")
 						}
 						fail("video", waitErr, "视频生成失败")
 						continue

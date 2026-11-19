@@ -126,7 +126,11 @@ func TestAutomationSucceededProductionWaitsForConfiguredOpeningVariants(t *testi
 
 func TestAutomationResumeStageReopensMissingOpeningBeforeVideo(t *testing.T) {
 	batch := batchfactoryv11.Batch{ID: "batch-1", SettingsState: batchfactoryv11.SettingsState{Patch: automationSettings(map[string]any{"openingEnabled": true, "openingCount": 2})}}
-	book := batchfactoryv11.Book{ID: "book-1", Videos: []batchfactoryv11.Video{{ID: "video-0", Ordinal: 0}, {ID: "video-1", Ordinal: 1}}}
+	book := batchfactoryv11.Book{
+		ID:           "book-1",
+		Videos:       []batchfactoryv11.Video{{ID: "video-0", Ordinal: 0}, {ID: "video-1", Ordinal: 1}},
+		AssetRecords: []batchfactoryv11.BookAsset{{ID: "asset-1", Prompt: "林晚，黑色长发"}},
+	}
 
 	if got := automationResumeStageForBook("video", batch, book); got != "opening" {
 		t.Fatalf("resume stage = %q, want opening so the missing opening prompt is generated first", got)
@@ -139,6 +143,39 @@ func TestAutomationResumeStageReopensMissingOpeningBeforeVideo(t *testing.T) {
 	book.Videos[0].SettingsState.Patch = batchfactoryv11.SettingsPatch{"openingVariants": variants}
 	if got := automationResumeStageForBook("video", batch, book); got != "video" {
 		t.Fatalf("resume stage = %q, want video after opening prompts are complete", got)
+	}
+}
+
+// 旧逻辑会在资产图片关闭时整段跳过资产阶段，导致重试从 video 继续后永远不再
+// 提取文字提示词。资产为空时必须先回到 assets，已有资产则保持原回补起点。
+func TestAutomationResumeStageExtractsMissingAssetPrompts(t *testing.T) {
+	batch := batchfactoryv11.Batch{ID: "batch-1", SettingsState: batchfactoryv11.SettingsState{Patch: automationSettings(map[string]any{"openingEnabled": false})}}
+	book := batchfactoryv11.Book{ID: "book-1", Videos: []batchfactoryv11.Video{{ID: "video-0", Ordinal: 0}, {ID: "video-1", Ordinal: 1}}}
+	if got := automationResumeStageForBook("video", batch, book); got != "assets" {
+		t.Fatalf("resume stage = %q, want assets for a book without asset prompts", got)
+	}
+	book.AssetRecords = []batchfactoryv11.BookAsset{{ID: "asset-1", Prompt: "林晚，黑色长发"}}
+	if got := automationResumeStageForBook("video", batch, book); got != "video" {
+		t.Fatalf("resume stage = %q, want video after asset prompts exist", got)
+	}
+}
+
+// 生产任务按 request id 幂等。换开头变体新增后必须换 request id，否则会拿到
+// 只包含原开头的旧生产任务，新变体永远没有视频任务。
+func TestAutomationOpeningVideoRequestIDChangesWhenVariantsAppear(t *testing.T) {
+	batch := batchfactoryv11.Batch{ID: "batch-1", SettingsState: batchfactoryv11.SettingsState{Patch: automationSettings(map[string]any{"openingEnabled": true, "openingCount": 2})}}
+	book := batchfactoryv11.Book{ID: "book-1", Videos: []batchfactoryv11.Video{{ID: "video-0", Ordinal: 0}, {ID: "video-1", Ordinal: 1}}}
+	base := "job-video-book-1"
+	if got := automationOpeningVideoRequestID(base, batch, book); got != base {
+		t.Fatalf("request id = %q, want the stable base id before any variant exists", got)
+	}
+	variants, err := json.Marshal([]batchfactoryv11.OpeningVariant{{Index: 1, Label: "换开头1", Status: "success", Prompt: "雨夜推门而入。"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	book.Videos[0].SettingsState.Patch = batchfactoryv11.SettingsPatch{"openingVariants": variants}
+	if got := automationOpeningVideoRequestID(base, batch, book); got != base+"-o0-o1" {
+		t.Fatalf("request id = %q, want an opening-scoped id so the new variant gets produced", got)
 	}
 }
 
