@@ -106,9 +106,24 @@ test('realtime queue counts are presented as one readable task summary', () => {
     running: 2,
     queued: 3,
     waitingRetry: 1,
+    scopeDate: '',
+    scopeBatchId: '',
+    scopeLabel: '全部任务',
+    matchedDocuments: 0,
     updatedAt: '2026-10-18T12:00:00Z'
   });
   assert.equal(novelFetchQueueSummary({ counts: {} }).label, '队列空闲');
+});
+
+test('realtime queue summary states which batch or date the counts belong to', () => {
+  const scoped = novelFetchQueueSummary({
+    counts: { running: 1, queued: 2 },
+    scope: { batch_id: 'batch-1758', current_batch_id: 'batch-1758', matched_documents: 12 }
+  });
+  assert.equal(scoped.scopeLabel, '当前批次');
+  assert.equal(scoped.scopeBatchId, 'batch-1758');
+  assert.equal(scoped.matchedDocuments, 12);
+  assert.equal(novelFetchQueueSummary({ counts: {}, scope: { date: '2026-09-24' } }).scopeLabel, '2026-09-24');
 });
 
 test('realtime queue summary exposes full automation state', () => {
@@ -156,6 +171,15 @@ test('submission status explains version-level blockers from the legacy contract
   assert.equal(novelFetchSubmissionLabel({ site_submit_status: 'unknown', site_submit_expected_versions: ['ai1', 'ai2'], site_submit_pending_versions: ['ai2'] }), '待远端核验 · 待提交 AI2');
   assert.equal(novelFetchSubmissionLabel({ site_submit_status: 'partial', site_submit_partial_versions: ['ai1'], site_submit_failed_versions: ['ai2'] }), '部分接收 · 失败 AI2');
   assert.equal(novelFetchSubmissionLabel({ site_submit_status: 'waiting_generate', site_submit_waiting_generate_versions: ['ai1'] }), '待生成 AI1');
+});
+
+test('submit status uses one Chinese vocabulary for legacy and canonical values', () => {
+  assert.equal(statusHelpers.webSubmitStatusLabel('pending_confirmation'), '待远端核验');
+  assert.equal(statusHelpers.webSubmitStatusLabel('pending_upload'), '待提交');
+  assert.equal(statusHelpers.webSubmitStatusLabel('waiting_configuration'), '等待配置');
+  assert.equal(statusHelpers.webSubmitStatusLabel('error'), '失败');
+  assert.equal(statusHelpers.webSubmitStatusLabel('skipped'), '已跳过');
+  assert.equal(novelFetchSubmissionLabel({ site_submit_status: 'pending_upload' }), '待提交');
 });
 
 test('current batch marks AI1 complete only when AI1 content is actually available', () => {
@@ -238,7 +262,7 @@ test('stop action excludes completed and pending-submit tasks', () => {
   ] }), ['queued', 'running']);
 });
 
-test('default task view keeps recent completed tasks and all unfinished tasks', () => {
+test('default task view keeps every visible task like the reference workbench', () => {
   const rows = [
     { book_id: 'recent-ok', status: 'completed', created_at: '2026-10-17T08:00:00+08:00' },
     { book_id: 'old-ok', status: 'completed', created_at: '2026-10-10T08:00:00+08:00' },
@@ -248,7 +272,25 @@ test('default task view keeps recent completed tasks and all unfinished tasks', 
 
   assert.deepEqual(
     filterNovelFetchTasks(rows, { mode: 'default', now: new Date('2026-10-18T12:00:00+08:00') }).map(row => row.book_id),
-    ['recent-ok', 'old-failed', 'old-running']
+    ['recent-ok', 'old-ok', 'old-failed', 'old-running']
+  );
+});
+
+test('default task view no longer hides unfinished books by batch', () => {
+  const rows = [
+    { book_id: 'current-failed', status: 'failed', created_at: '2026-09-01T08:00:00+08:00' },
+    { book_id: 'current-running', status: 'processing', created_at: '2026-09-02T08:00:00+08:00' },
+    { book_id: 'history-queued', status: 'queued', created_at: '2026-09-03T08:00:00+08:00' },
+    { book_id: 'recent-ok', status: 'completed', created_at: '2026-10-17T08:00:00+08:00' }
+  ];
+
+  assert.deepEqual(
+    filterNovelFetchTasks(rows, {
+      mode: 'default',
+      batchIds: ['current-failed', 'current-running'],
+      now: new Date('2026-10-18T12:00:00+08:00')
+    }).map(row => row.book_id),
+    ['current-failed', 'current-running', 'history-queued', 'recent-ok']
   );
 });
 

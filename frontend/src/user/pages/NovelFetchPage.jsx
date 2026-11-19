@@ -7,6 +7,7 @@ import { CalendarClock, ChevronDown, ChevronUp, Factory, MoreHorizontal, Refresh
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   checkWebSubmitEnvironment, getWebSubmitConfig, getWebSubmitHistory, getWebSubmitOrganizations, previewWebSubmit,
+  listWebSubmitManifests,
   saveWebSubmitConfig, startWebSubmit, syncWebSubmitConfigs, syncWebSubmitStyles, testWebSubmitVisible, uploadLogin, getUploadSession
 } from '../../shared/api/novelFetch';
 import {
@@ -17,7 +18,7 @@ import {
   previewWorkshopRules, restoreWorkshopOriginal, retryWorkshopTasks, saveWorkshopConfig,
   updateWorkshopAiCount, applyWorkshopRules,
   saveWorkshopKnowledge, saveWorkshopOpening, startWorkshopProcess, startWorkshopAutomation, pauseWorkshopAutomation, suggestWorkshopRules, testWorkshopAi, reprocessWorkshopSensitive, getWorkshopRealtimeStatus,
-  getWorkshopCurrentBatch, getWorkshopBatches, rerunWorkshopBatch, stopWorkshopTasks
+  getWorkshopCurrentBatch, getWorkshopBatches, rerunWorkshopBatch, stopWorkshopTasks, stopWorkshopProcess
 } from '../../shared/api/novelFetchWorkshop';
 import { createNovelFetchIntake } from '../../shared/api/batchFactory';
 import { listAvailableModels as listAvailableTextModels, modelSelectOptions } from '../../shared/api/modelCatalog';
@@ -26,7 +27,7 @@ import { NovelFetchAutomationOptions } from './novel-fetch-automation-options.js
 import { withNovelFetchConfigDefaults, withNovelFetchVersionProfiles } from './novel-fetch-config-defaults.js';
 import { novelFetchAiVersions, novelFetchSensitiveComparisons, novelFetchSubmitDiagnostic, novelFetchTaskSummaryItems } from './novel-fetch-task-detail.js';
 import { novelFetchProgressLines } from './novel-fetch-progress.js';
-import { beijingDateKey, currentBatchBookIds, filterNovelFetchTasks, mergeNovelFetchQueueStatus, novelFetchBatchResultSummary, novelFetchCharCount, novelFetchCurrentBatchTaskDetail, novelFetchOriginalFetchRetry, novelFetchPollingPlan, novelFetchQueueSummary, novelFetchStageLabel, novelFetchSubmissionLabel, novelFetchTaskDateKey, novelFetchTaskStatus, novelFetchVersionReady, retainVisibleTaskIds, stoppableCurrentBatchBookIds } from './novel-fetch-status.js';
+import { beijingDateKey, currentBatchBookIds, filterNovelFetchTasks, mergeNovelFetchQueueStatus, novelFetchBatchResultSummary, novelFetchCharCount, novelFetchCurrentBatchTaskDetail, novelFetchOriginalFetchRetry, novelFetchPollingPlan, novelFetchQueueSummary, novelFetchStageLabel, novelFetchSubmissionLabel, novelFetchTaskDateKey, novelFetchTaskStatus, novelFetchVersionReady, retainVisibleTaskIds, stoppableCurrentBatchBookIds, webSubmitStatusLabel, webSubmitRunStatusLabel } from './novel-fetch-status.js';
 import { singleVersionRetryPayload, submissionPreviewMatches } from './novel-fetch-submit.js';
 import { mergeDefaultUploadProfile, uploadSessionDisplayName } from './novel-fetch-upload-profile.js';
 import { describeWebSubmitExecution, describeWebSubmitReconcile, describeWebSubmitVisible } from './webSubmitFeedback.js';
@@ -55,8 +56,9 @@ const TABS = [
   { key: 'submit', label: '提交' },
   { key: 'logs', label: '记录' }
 ];
-// 后端支持 ai1~ai20，前端版本选择必须与后端能力一致，不能只暴露到 ai5。
-const AI_VERSION_KEYS = Array.from({ length: 20 }, (_, index) => `ai${index + 1}`);
+// 产品只配置了原文 + AI1~AI5 五个文案版本，版本档案也只有这五项；
+// 后端虽然能按编号生成更多版本，但页面不应暴露没有档案的空版本。
+const AI_VERSION_KEYS = Array.from({ length: 5 }, (_, index) => `ai${index + 1}`);
 const AI_VERSIONS = ['original', ...AI_VERSION_KEYS];
 const AI_VERSION_LABELS = Object.fromEntries([['original', '原文'], ...AI_VERSION_KEYS.map(key => [key, key.toUpperCase()])]);
 const REWRITE_METHOD_OPTIONS = [
@@ -688,6 +690,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
   const [webSubmitEnvironment, setWebSubmitEnvironment] = useState(null);
   const [webSubmitResults, setWebSubmitResults] = useState([]);
   const [webSubmitHistory, setWebSubmitHistory] = useState([]);
+  const [webSubmitRuns, setWebSubmitRuns] = useState([]);
   const [webSubmitLoading, setWebSubmitLoading] = useState(false);
   const [submitView, setSubmitView] = useState('ready');
   const [uploadSession, setUploadSession] = useState(null);
@@ -705,7 +708,10 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
   const [batchAiCount, setBatchAiCount] = useState(1);
   const [ruleApplyScope, setRuleApplyScope] = useState('both');
   const [configSection, setConfigSection] = useState('workflow');
-  const [selectedVersions, setSelectedVersions] = useState(() => savedProcessSettings.selectedVersions);
+  const [selectedVersions, setSelectedVersions] = useState(() => {
+    const savedVersions = (savedProcessSettings.selectedVersions || []).filter(version => AI_VERSIONS.includes(version));
+    return savedVersions.length ? savedVersions : ['original', 'ai1'];
+  });
   const [batchFactorySourceVersion, setBatchFactorySourceVersion] = useState('sensitive');
   const [rewriteMethods, setRewriteMethods] = useState(() => savedProcessSettings.rewriteMethods);
   const [sensitiveAiProcessEnabled, setSensitiveAiProcessEnabled] = useState(() => savedProcessSettings.sensitiveAiProcessEnabled);
@@ -719,6 +725,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
   const [accountOptions, setAccountOptions] = useState([]);
   const [documentHidden, setDocumentHidden] = useState(() => typeof document !== 'undefined' && document.hidden);
   const pollingRef = useRef({ realtimeBusy: false, queueBusy: false, tasksBusy: false, realtimeFailures: 0, taskFailures: 0, queueStatusSignature: '' });
+  const queueScopeRef = useRef({ batchId: '', date: '' });
   const taskDataSignatureRef = useRef('');
   const batchDataSignatureRef = useRef('');
   const inputFormatOption = INPUT_FORMAT_OPTIONS.find(item => item.value === inputFormat) || INPUT_FORMAT_OPTIONS[0];
@@ -740,19 +747,27 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
   }, [processForm, savedProcessSettings, selectedVersions, rewriteMethods, sensitiveAiProcessEnabled, textModel]);
 
   const selectedTask = useMemo(() => selectedTaskKeys[0] || '', [selectedTaskKeys]);
-  const visibleTasks = useMemo(() => {
-    return filterNovelFetchTasks(tasks, {
-      mode: taskDate ? 'date' : 'default',
-      date: taskDate,
-      query: taskSearch
-    });
-  }, [tasks, taskDate, taskSearch]);
   const currentBatchRows = useMemo(() => {
     const rows = currentBatch?.taskStates || currentBatch?.task_states;
     return Array.isArray(rows) ? rows : [];
   }, [currentBatch]);
   const currentBatchIds = useMemo(() => currentBatchBookIds(currentBatch || {}), [currentBatch]);
   const currentBatchStoppableIds = useMemo(() => stoppableCurrentBatchBookIds(currentBatch || {}), [currentBatch]);
+  // 轮询回调会捕获首次渲染的闭包，队列统计范围必须通过 ref 读取最新的
+  // 日期/当前批次，否则切到历史日期后横幅仍显示当前批次数字。
+  queueScopeRef.current = { batchId: taskDate ? '' : (currentBatch?.id || ''), date: taskDate };
+  const visibleTasks = useMemo(() => {
+    return filterNovelFetchTasks(tasks, {
+      mode: taskDate ? 'date' : 'default',
+      date: taskDate,
+      query: taskSearch,
+      // 默认视图只显示当前批次；历史批次未完成的任务要切换到对应日期才出现。
+      batchIds: currentBatchIds
+    });
+  }, [tasks, taskDate, taskSearch, currentBatchIds]);
+  const visibleTaskIds = useMemo(() => Array.from(new Set(visibleTasks
+    .map(row => String(row.bookId ?? row.book_id ?? row.id ?? '').trim())
+    .filter(Boolean))), [visibleTasks]);
   const latestCurrentBatchRows = useMemo(() => {
     if (!currentBatchIds.length) return [];
     const batchIds = new Set(currentBatchIds);
@@ -823,7 +838,8 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
 
   async function loadQueueStatus() {
     try {
-      const nextStatus = await getWorkshopRealtimeStatus();
+      const scope = queueScopeRef.current || {};
+      const nextStatus = await getWorkshopRealtimeStatus({ batchId: scope.batchId, date: scope.date });
       const meaningfulStatus = {
         enabled: nextStatus?.enabled,
         auto_queue_enabled: nextStatus?.auto_queue_enabled,
@@ -831,6 +847,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
         pending_count: nextStatus?.pending_count,
         processing_count: nextStatus?.processing_count,
         active_job_id: nextStatus?.active_job_id,
+        scope: nextStatus?.scope || {},
         latest_job: nextStatus?.latest_job ? {
           id: nextStatus.latest_job.id,
           status: nextStatus.latest_job.status
@@ -986,9 +1003,14 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
   }
   async function loadWebSubmit() {
     try {
-      const [configData, historyData] = await Promise.all([getWebSubmitConfig(), getWebSubmitHistory()]);
+      const [configData, historyData, manifestData] = await Promise.all([
+        getWebSubmitConfig(),
+        getWebSubmitHistory(),
+        listWebSubmitManifests(8).catch(() => ({ runs: [] }))
+      ]);
       setWebSubmitConfig(configData.settings || configData.config || {});
       setWebSubmitHistory(historyData.records || historyData.items || []);
+      setWebSubmitRuns(manifestData.runs || []);
     } catch (error) { message.error(error.message || '读取提交配置失败'); }
   }
   async function loadUploadSession() {
@@ -1088,6 +1110,11 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
   }, []);
 
+  // 切换日期或当前批次后立刻重算队列横幅，避免等到下一次轮询才更新。
+  useEffect(() => {
+    loadQueueStatus();
+  }, [taskDate, currentBatch?.id]);
+
   useEffect(() => {
     // 运行状态、队列和完整任务列表分开刷新，避免空闲页面每两秒重拉整张任务表。
     const plan = novelFetchPollingPlan({ activeTab, processing, documentHidden, ...pollingRef.current });
@@ -1127,11 +1154,11 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
       return;
     }
     dispatchGlobalStatus({
-      text: `批量测书队列：处理中 ${running} 个，排队 ${queued} 个。`,
+      text: `批量测书队列（${queueSummary.scopeLabel}）：处理中 ${running} 个，排队 ${queued} 个。`,
       tone: running > 0 ? 'working' : 'info',
       durationMs: 60000
     });
-  }, [queueSummary.running, queueSummary.queued]);
+  }, [queueSummary.running, queueSummary.queued, queueSummary.scopeLabel]);
 
   useEffect(() => {
     if (activeTab === 'config') loadConfig();
@@ -1174,10 +1201,16 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
     const normalizedInputText = serializeNovelFetchRows(parsed.rows);
     return { inputText: normalizedInputText, parsed, metadata: { input_format: inputFormat, column_preset: inputFormatLabel, column_order: inputColumnOrder } };
   }
-  function handleCancelProcess() {
+  async function handleCancelProcess() {
     if (!processing) return;
     processCancelRef.current = true;
-    message.info('正在停止等待，后台任务不会中断');
+    try {
+      const result = await stopWorkshopProcess({ job_id: processJob?.id || '', pause_auto_queue: true });
+      message.warning(`已停止后台处理${result?.updated ? `（${result.updated} 个任务）` : ''}，自动队列已暂停`);
+      await loadTasks({ silent: true });
+    } catch (error) {
+      message.error(error.message || '停止后台处理失败');
+    }
   }
   async function handleProcess() {
     const values = await processForm.validateFields();
@@ -1220,7 +1253,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
       }
       if (processCancelRef.current) {
         setProcessRows(current => current.map(row => (row.status === 'loading' ? { ...row, status: 'pending' } : row)));
-        message.info('已停止等待，后台任务仍在处理，请到任务列表查看进度');
+        message.info('已停止等待，并已请求停止后台任务，请到任务列表确认进度');
         loadTasks({ silent: true });
         return;
       }
@@ -1548,12 +1581,14 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
     setWebSubmitPreviewTaskIds([...selectedTaskKeys]);
   }
   function confirmWebSubmit() {
-    if (!webSubmitPreviewReady) return message.warning('请先为当前选中任务生成提交预览');
+    if (!selectedTaskKeys.length) return message.warning('请先选择需要提交的任务');
     Modal.confirm({
       title: '确认开始自动提交',
-      content: `将按当前预览提交 ${selectedTaskKeys.length} 个任务，确认继续？`,
+      content: `将提交选中的 ${selectedTaskKeys.length} 个任务；提交时会按最新正文和配置重新生成计划，确认继续？`,
       onOk: async () => {
-        const result = await handleWebSubmit(() => startWebSubmit({ taskIds: selectedTaskKeys, previewRevision: webSubmitPlan.revision }), '自动提交完成');
+        // 参考实现的提交不依赖预览令牌；预览只用于查看，不再阻塞提交，
+        // 避免后台状态更新导致 revision 变化而把正常提交拒掉。
+        const result = await handleWebSubmit(() => startWebSubmit({ taskIds: selectedTaskKeys }), '自动提交完成');
         if (!result) return;
         setWebSubmitResults(result.results || []);
         setWebSubmitHistory(current => [...(result.results || []), ...current]);
@@ -1677,12 +1712,12 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
   }
   async function retryAllFailedTasks() {
     const failed = tasks
-      .filter(task => novelFetchTaskStatus(task).status === 'failed')
+      .filter(task => currentBatchIds.includes(task.bookId || task.book_id) && novelFetchTaskStatus(task).status === 'failed')
       .map(task => task.bookId || task.book_id)
       .filter(Boolean);
-    if (!failed.length) return message.info('全部任务中没有失败项');
+    if (!failed.length) return message.info('当前批次没有失败任务');
     setTaskActionBusy('retry-all-failed');
-    try { const result = await retryWorkshopTasks(failed); await Promise.all([loadTasks(), loadCurrentBatch()]); message[result.failed ? 'warning' : 'success'](`重试已处理：${novelFetchBatchResultSummary(result)}`); } catch (error) { message.error(error.message || '重试全部失败任务失败'); } finally { setTaskActionBusy(''); }
+    try { const result = await retryWorkshopTasks(failed); await Promise.all([loadTasks(), loadCurrentBatch()]); message[result.failed ? 'warning' : 'success'](`重试已处理：${novelFetchBatchResultSummary(result)}`); } catch (error) { message.error(error.message || '重试当前批次失败任务失败'); } finally { setTaskActionBusy(''); }
   }
   function selectAllTasks() { setSelectedTaskKeys(visibleTasks.map(task => task.bookId || task.book_id).filter(Boolean)); }
   function shiftTaskDate(days) {
@@ -1702,10 +1737,10 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
     try { await applyWorkshopRules(ids, ruleApplyScope, sensitiveAiProcessEnabled); await loadTasks(); message.success('已完成全部任务规则处理'); } catch (error) { message.error(error.message || '规则处理失败'); } finally { setTaskActionBusy(''); }
   }
   async function applyRulesToAllTasks() {
-    const ids = tasks.map(task => task.bookId || task.book_id).filter(Boolean);
-    if (!ids.length) return message.warning('当前没有可处理任务');
+    const ids = currentBatchIds;
+    if (!ids.length) return message.warning('当前批次没有可处理任务');
     setTaskActionBusy('rules-all');
-    try { await applyWorkshopRules(ids, ruleApplyScope, sensitiveAiProcessEnabled); await loadTasks(); message.success(`已处理全部 ${ids.length} 个任务`); } catch (error) { message.error(error.message || '规则处理全部任务失败'); } finally { setTaskActionBusy(''); }
+    try { await applyWorkshopRules(ids, ruleApplyScope, sensitiveAiProcessEnabled); await loadTasks(); message.success(`已处理当前批次 ${ids.length} 个任务`); } catch (error) { message.error(error.message || '规则处理当前批次任务失败'); } finally { setTaskActionBusy(''); }
   }
   async function submitVisibleTasks() {
     const ids = currentBatchIds;
@@ -1713,11 +1748,44 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
     const result = await handleWebSubmit(() => startWebSubmit({ taskIds: ids }), '当前批次提交已处理');
     if (result) setWebSubmitResults(result.results || []);
   }
+  // 参考实现的「提交选中」是直接提交 selectedTaskIds，而不是只切换到提交页；
+  // 这里保持同一语义，避免勾选后点按钮却没有任何提交动作。
+  async function submitSelectedTasks() {
+    const ids = [...selectedTaskKeys];
+    if (!ids.length) return message.warning('请先选择需要提交的任务');
+    Modal.confirm({
+      title: '提交选中任务？',
+      content: `将提交选中的 ${ids.length} 个任务到视频管理系统，系统会按平台、男女频、风格类型自动分组上传。`,
+      okText: '确认提交',
+      onOk: async () => {
+        const result = await handleWebSubmit(() => startWebSubmit({ taskIds: ids }), '选中任务提交已处理');
+        if (!result) return;
+        setWebSubmitResults(result.results || []);
+        setWebSubmitHistory(current => [...(result.results || []), ...current]);
+        setSubmitView('result');
+        changeTab('submit');
+        await Promise.all([loadTasks(), loadCurrentBatch()]);
+      }
+    });
+  }
   async function submitAllTasks() {
-    const ids = tasks.map(task => task.bookId || task.book_id).filter(Boolean);
-    if (!ids.length) return message.info('当前没有可提交任务');
-    const result = await handleWebSubmit(() => startWebSubmit({ taskIds: ids }), `已提交全部 ${ids.length} 个任务`);
-    if (result) setWebSubmitResults(result.results || []);
+    // 参考实现的 mode=all 由后端解析为当前账号全部可见任务，
+    // 不受任务列表的日期/搜索筛选影响。
+    if (!tasks.length && !visibleTaskIds.length) return message.info('当前没有可提交任务');
+    Modal.confirm({
+      title: '提交全部任务？',
+      content: '将提交当前账号全部任务（不限日期和搜索筛选）到视频管理系统，系统会按平台、男女频、风格类型自动分组上传。',
+      okText: '确认提交',
+      onOk: async () => {
+        const result = await handleWebSubmit(() => startWebSubmit({ mode: 'all' }), '全部任务提交已处理');
+        if (!result) return;
+        setWebSubmitResults(result.results || []);
+        setWebSubmitHistory(current => [...(result.results || []), ...current]);
+        setSubmitView('result');
+        changeTab('submit');
+        await Promise.all([loadTasks(), loadCurrentBatch()]);
+      }
+    });
   }
   async function deleteTasksByFilter(filter, emptyMessage, scopeIds = null) {
     const ids = tasks.filter(task => (scopeIds === null || scopeIds.includes(task.bookId || task.book_id)) && filter(task)).map(task => task.bookId || task.book_id).filter(Boolean);
@@ -1885,18 +1953,18 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
   const submissionStatus = [
     { key: 'environment', label: '环境', value: webSubmitEnvironment ? '已检测' : '待检测' },
     { key: 'config', label: '配置', value: webSubmitConfig ? '已加载' : '待加载' },
-    { key: 'preview', label: '预览', value: webSubmitPreviewReady ? '当前选择已预览' : '待预览' },
+    { key: 'preview', label: '预览', value: webSubmitPreviewReady ? '已预览' : '可选' },
     { key: 'execute', label: '执行', value: webSubmitResults.length ? `${webSubmitResults.length} 条结果` : '未执行' }
   ];
   const submitReadyPanel = <Space direction="vertical" size={12} style={{ width: '100%' }}>
     <Alert type="info" showIcon message="仅在确认“开始自动提交”后执行外部提交。批量测书和批量工厂共用同一份视频管理系统登录会话。" />
-    <div className="novel-fetch-panel novel-fetch-submit-actions"><Typography.Title level={5}>提交前检查</Typography.Title><Space wrap><Button loading={webSubmitLoading} onClick={async () => { const result = await handleWebSubmit(checkWebSubmitEnvironment, '环境检测完成'); if (result) setWebSubmitEnvironment(result); }}>环境检测</Button><Button loading={webSubmitLoading} onClick={verifyWebSubmitVisible}>验证登录可用性</Button><Button loading={webSubmitLoading} onClick={() => handleWebSubmit(syncWebSubmitConfigs, '已同步批量后台配置')}>同步批量后台配置</Button><Button loading={webSubmitLoading} onClick={syncWebSubmitOrganizations}>同步组织归属</Button><Button loading={webSubmitLoading} onClick={() => handleWebSubmit(syncWebSubmitStyles, '同步网站风格完成')}>同步网站风格</Button><Button disabled={!selectedTaskKeys.length} loading={webSubmitLoading} onClick={handleWebSubmitPreview}>生成提交预览</Button><Button type="primary" disabled={!webSubmitPreviewReady} loading={webSubmitLoading} onClick={confirmWebSubmit}>开始自动提交</Button></Space></div>
-    <div className="novel-fetch-panel novel-fetch-submit-settings"><Typography.Title level={5}>提交配置</Typography.Title><div className="novel-fetch-submit-config-grid"><label>组织归属<Select value={webSubmitConfig?.organization || undefined} placeholder="跟随网站配置档" options={(webSubmitConfig?.organization_catalog || []).map(item => ({ value: String(item.id || item.value), label: item.name || item.label || item.id }))} onChange={value => setWebSubmitConfig(current => ({ ...(current || {}), organization: value }))} /></label><label>最少字数<InputNumber min={0} value={webSubmitConfig?.min_text_chars ?? 0} onChange={value => setWebSubmitConfig(current => ({ ...(current || {}), min_text_chars: value || 0 }))} /></label><label>失败重试<InputNumber min={0} max={10} value={webSubmitConfig?.retry_times ?? 1} onChange={value => setWebSubmitConfig(current => ({ ...(current || {}), retry_times: value || 0 }))} /></label><label className="novel-fetch-submit-check"><Checkbox checked={webSubmitConfig?.skip_submitted !== false} onChange={event => setWebSubmitConfig(current => ({ ...(current || {}), skip_submitted: event.target.checked }))}>跳过已提交版本</Checkbox></label></div><Button onClick={() => handleWebSubmit(() => saveWebSubmitConfig(webSubmitConfig), '提交配置已保存')}>保存提交配置</Button></div>
+    <div className="novel-fetch-panel novel-fetch-submit-actions"><Typography.Title level={5}>提交前检查</Typography.Title><Space wrap><Button loading={webSubmitLoading} onClick={async () => { const result = await handleWebSubmit(checkWebSubmitEnvironment, '环境检测完成'); if (result) setWebSubmitEnvironment(result); }}>环境检测</Button><Button loading={webSubmitLoading} onClick={verifyWebSubmitVisible}>验证登录可用性</Button><Button loading={webSubmitLoading} onClick={() => handleWebSubmit(syncWebSubmitConfigs, '已同步批量后台配置')}>同步批量后台配置</Button><Button loading={webSubmitLoading} onClick={syncWebSubmitOrganizations}>同步组织归属</Button><Button loading={webSubmitLoading} onClick={() => handleWebSubmit(syncWebSubmitStyles, '同步网站风格完成')}>同步网站风格</Button><Button disabled={!selectedTaskKeys.length} loading={webSubmitLoading} onClick={handleWebSubmitPreview}>生成提交预览</Button><Button disabled={!tasks.length} loading={webSubmitLoading} onClick={submitAllTasks}>提交全部</Button><Button type="primary" disabled={!selectedTaskKeys.length} loading={webSubmitLoading} onClick={confirmWebSubmit}>开始自动提交</Button></Space></div>
+    <div className="novel-fetch-panel novel-fetch-submit-settings"><Typography.Title level={5}>提交配置</Typography.Title><div className="novel-fetch-submit-config-grid"><label>组织归属<Select value={webSubmitConfig?.organization || undefined} placeholder="跟随网站配置档" options={(webSubmitConfig?.organization_catalog || []).map(item => ({ value: String(item.id || item.value), label: item.name || item.label || item.id }))} onChange={value => setWebSubmitConfig(current => ({ ...(current || {}), organization: value }))} /></label><label>最少文件大小(字节)<InputNumber min={0} step={1024} value={webSubmitConfig?.min_file_size ?? 3072} onChange={value => setWebSubmitConfig(current => ({ ...(current || {}), min_file_size: value ?? 0 }))} /></label><label>上传并发(1-4)<InputNumber min={1} max={4} value={webSubmitConfig?.parallel_upload_workers ?? 4} onChange={value => setWebSubmitConfig(current => ({ ...(current || {}), parallel_upload_workers: value ?? 4 }))} /></label><label>失败重试<InputNumber min={0} max={10} value={webSubmitConfig?.retry_times ?? 1} onChange={value => setWebSubmitConfig(current => ({ ...(current || {}), retry_times: value || 0 }))} /></label><label className="novel-fetch-submit-check"><Checkbox checked={webSubmitConfig?.skip_submitted !== false} onChange={event => setWebSubmitConfig(current => ({ ...(current || {}), skip_submitted: event.target.checked }))}>跳过已提交版本</Checkbox></label></div><Button onClick={() => handleWebSubmit(() => saveWebSubmitConfig(webSubmitConfig), '提交配置已保存')}>保存提交配置</Button></div>
     <div className="novel-fetch-panel novel-fetch-submit-summary"><Typography.Text>已选任务 <strong>{selectedTaskKeys.length}</strong></Typography.Text><Typography.Text>配置版本 <strong>{(webSubmitConfig?.submit_versions || webSubmitConfig?.submitVersions || []).join('、') || '默认'}</strong></Typography.Text><Typography.Text>可用组织 <strong>{webSubmitConfig?.organization_catalog?.length || 0}</strong></Typography.Text></div>
-    {webSubmitPlan ? <><Alert type={webSubmitPreviewReady ? 'success' : 'warning'} message={webSubmitPreviewReady ? '当前选择的提交预览已生成' : '任务选择已变化，请重新生成预览'} description={`提交组：${webSubmitPlan.groups?.length || 0}，跳过：${webSubmitPlan.skipped?.length || 0}`} /><Table className="novel-fetch-panel" size="small" rowKey={(group, index) => group.group_id || index} pagination={false} dataSource={webSubmitPlan.groups || []} columns={[{ title: '版本', dataIndex: 'version' }, { title: '配置档', render: (_, group) => group.summary?.profile_name || group.summary?.profile_id || '默认配置' }, { title: '组织', render: (_, group) => group.summary?.organization || '未设置' }, { title: '风格', render: (_, group) => group.summary?.style || '未分类' }, { title: '任务数', render: (_, group) => group.items?.length || 0 }]} /><Table className="novel-fetch-panel" size="small" rowKey={(item, index) => `${item.id || index}-${item.version || ''}`} pagination={false} locale={{ emptyText: '没有跳过项' }} dataSource={webSubmitPlan.skipped || []} columns={[{ title: '跳过任务', dataIndex: 'id' }, { title: '版本', dataIndex: 'version' }, { title: '状态', dataIndex: 'status' }, { title: '原因', dataIndex: 'error' }]} /></> : null}
+    {webSubmitPlan ? <><Alert type="info" message={webSubmitPreviewReady ? '当前选择的提交预览已生成（仅用于查看，不阻塞提交）' : '当前选择还没有预览；可以直接提交，系统会按最新正文和配置生成计划'} description={`提交组：${webSubmitPlan.groups?.length || 0}，跳过：${webSubmitPlan.skipped?.length || 0}`} /><Table className="novel-fetch-panel" size="small" rowKey={(group, index) => group.group_id || index} pagination={false} dataSource={webSubmitPlan.groups || []} columns={[{ title: '版本', dataIndex: 'version' }, { title: '配置档', render: (_, group) => group.summary?.profile_name || group.summary?.profile_id || '默认配置' }, { title: '组织', render: (_, group) => group.summary?.organization || '未设置' }, { title: '风格', render: (_, group) => group.summary?.style || '未分类' }, { title: '任务数', render: (_, group) => group.items?.length || 0 }]} /><Table className="novel-fetch-panel" size="small" rowKey={(item, index) => `${item.id || index}-${item.version || ''}`} pagination={false} locale={{ emptyText: '没有跳过项' }} dataSource={webSubmitPlan.skipped || []} columns={[{ title: '跳过任务', dataIndex: 'id' }, { title: '版本', dataIndex: 'version' }, { title: '状态', render: (_, item) => webSubmitStatusLabel(item.status) }, { title: '原因', dataIndex: 'error' }]} /></> : null}
   </Space>;
-  const submitResultPanel = <Table className="novel-fetch-panel" scroll={{ x: 720 }} rowKey={(row, index) => `${row.bookId || row.book_id}-${row.version}-${index}`} dataSource={webSubmitResults} locale={{ emptyText: '暂无本次提交结果' }} columns={[{ title: '任务', render: (_, row) => row.bookId || row.book_id }, { title: '版本', dataIndex: 'version' }, { title: '状态', dataIndex: 'status' }, { title: '结果', render: (_, row) => row.result || row.message || row.error || '-' }, { title: '操作', render: (_, row) => row.status === 'pending_confirmation' ? <Button size="small" icon={<RefreshCw size={14} />} loading={webSubmitLoading} onClick={() => reconcileWebSubmitVersion(row)}>重新核对</Button> : /error|fail|失败/i.test(String(row.status || '')) ? <Button size="small" loading={webSubmitLoading} onClick={() => retryWebSubmitVersion(row)}>重试该版本</Button> : '-' }]} />;
-  const submitHistoryPanel = <div className="novel-fetch-panel"><div className="novel-fetch-toolbar"><Typography.Title level={5}>提交历史</Typography.Title><span className="novel-fetch-toolbar-spacer" /><Button size="small" icon={<RefreshCw size={14} />} loading={webSubmitLoading} onClick={loadWebSubmit}>刷新历史</Button></div><Table size="small" scroll={{ x: 760 }} rowKey={(row, index) => `${row.book_id || row.bookId}-${row.version}-${index}`} dataSource={webSubmitHistory} pagination={{ pageSize: 10 }} columns={[{ title: '书名', render: (_, row) => row.book_name || row.bookName || row.book_id || row.bookId }, { title: '版本', dataIndex: 'version' }, { title: '状态', dataIndex: 'status' }, { title: '结果', dataIndex: 'result' }, { title: '时间', render: (_, row) => formatWorkDateTime(row.time || row.created_at || row.createdAt) }]} /></div>;
+  const submitResultPanel = <Table className="novel-fetch-panel" scroll={{ x: 720 }} rowKey={(row, index) => `${row.bookId || row.book_id}-${row.version}-${index}`} dataSource={webSubmitResults} locale={{ emptyText: '暂无本次提交结果' }} columns={[{ title: '任务', render: (_, row) => row.bookId || row.book_id }, { title: '版本', dataIndex: 'version' }, { title: '状态', render: (_, row) => webSubmitStatusLabel(row.status_label || row.status) }, { title: '结果', render: (_, row) => row.result || row.message || row.error || '-' }, { title: '操作', render: (_, row) => row.status === 'pending_confirmation' ? <Button size="small" icon={<RefreshCw size={14} />} loading={webSubmitLoading} onClick={() => reconcileWebSubmitVersion(row)}>重新核对</Button> : /error|fail|失败/i.test(String(row.status || '')) ? <Button size="small" loading={webSubmitLoading} onClick={() => retryWebSubmitVersion(row)}>重试该版本</Button> : '-' }]} />;
+  const submitHistoryPanel = <div className="novel-fetch-panel"><div className="novel-fetch-toolbar"><Typography.Title level={5}>最近提交轮次</Typography.Title><span className="novel-fetch-toolbar-spacer" /><Button size="small" icon={<RefreshCw size={14} />} loading={webSubmitLoading} onClick={loadWebSubmit}>刷新历史</Button></div><Table size="small" scroll={{ x: 760 }} rowKey={(run, index) => run.submission_run_id || index} dataSource={webSubmitRuns} pagination={{ pageSize: 5 }} locale={{ emptyText: '暂无提交轮次' }} columns={[{ title: '轮次', render: (_, run) => run.submission_run_id || '-' }, { title: '来源', render: (_, run) => run.reason === 'auto_submit' ? '自动提交' : run.reason === 'dry_run' ? '演练' : '手动提交' }, { title: '状态', render: (_, run) => webSubmitRunStatusLabel(run.status) }, { title: '任务/计划/延后/失败', render: (_, run) => `${run.requested_count || 0}/${run.planned_count || 0}/${run.deferred_count || 0}/${run.failed_count || 0}` }, { title: '时间', render: (_, run) => formatWorkDateTime(run.updated_at || run.created_at) }]} /><div className="novel-fetch-toolbar" style={{ marginTop: 12 }}><Typography.Title level={5}>逐本提交历史</Typography.Title></div><Table size="small" scroll={{ x: 760 }} rowKey={(row, index) => `${row.book_id || row.bookId}-${row.version}-${index}`} dataSource={webSubmitHistory} pagination={{ pageSize: 10 }} columns={[{ title: '书名', render: (_, row) => row.book_name || row.bookName || row.book_id || row.bookId }, { title: '版本', dataIndex: 'version' }, { title: '状态', render: (_, row) => webSubmitStatusLabel(row.status_label || row.status) }, { title: '结果', dataIndex: 'result' }, { title: '时间', render: (_, row) => formatWorkDateTime(row.time || row.created_at || row.createdAt) }]} /></div>;
   const submitLogsPanel = <div className="novel-fetch-panel"><div className="novel-fetch-toolbar"><Typography.Title level={5}>操作日志</Typography.Title><span className="novel-fetch-toolbar-spacer" /><Button size="small" icon={<RefreshCw size={14} />} onClick={loadGlobalLogs}>刷新日志</Button></div><Select value={selectedTask || undefined} className="novel-fetch-log-task-select" placeholder="选择任务查看日志" options={tasks.map(task => ({ value: task.bookId || task.book_id, label: task.bookName || task.book_name || task.bookId || task.book_id }))} onChange={selectTask} />{selectedTaskData ? <Collapse items={(selectedTaskData.logs || []).map((log, index) => ({ key: String(index), label: `${log.time || ''} ${log.event || '操作日志'}`, children: <Typography.Paragraph style={{ whiteSpace: 'pre-wrap' }}>{log.detail || JSON.stringify(log)}</Typography.Paragraph> }))} /> : <Table size="small" pagination={{ pageSize: 20 }} rowKey={(row, index) => row.id || index} dataSource={globalLogs} locale={{ emptyText: '暂无操作记录' }} columns={[{ title: '时间', dataIndex: 'time', render: (value, row) => formatWorkDateTime(value || row.createdAt || row.created_at) }, { title: '事件', dataIndex: 'event' }, { title: '详情', render: (_, row) => String(row.detail || row.message || '').slice(0, 120) }]} />}</div>;
   const submissionPanel = <Space direction="vertical" size={12} style={{ width: '100%' }}><NovelFetchMetricStrip items={submissionStatus} /><Tabs className="novel-fetch-section-tabs" activeKey={submitView} onChange={setSubmitView} items={[{ key: 'ready', label: '提交准备', children: submitReadyPanel }, { key: 'result', label: `本次结果${webSubmitResults.length ? ` (${webSubmitResults.length})` : ''}`, children: submitResultPanel }, { key: 'history', label: '提交历史', children: submitHistoryPanel }, { key: 'logs', label: '操作日志', children: submitLogsPanel }]} /></Space>;
   const currentBatchMenuItems = [
@@ -1912,7 +1980,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
     process: <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <div className="novel-fetch-process-grid">
       <div className="novel-fetch-process-main">
-      <Form className="novel-fetch-public-workspace" form={processForm} layout="vertical" initialValues={{ platform: savedProcessSettings.platform, maxTxt: savedProcessSettings.maxTxt }} onValuesChange={changedValues => {
+      <Form className="novel-fetch-public-workspace" form={processForm} layout="vertical" initialValues={{ platform: savedProcessSettings.platform, maxTxt: savedProcessSettings.maxTxt, bookIds: savedProcessSettings.bookIds }} onValuesChange={changedValues => {
         writeNovelFetchProcessSettings({
           ...savedProcessSettings,
           ...processForm.getFieldsValue(),
@@ -1949,7 +2017,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
       <div className={`novel-fetch-automation-bar ${queueSummary.enabled ? 'is-enabled' : 'is-paused'}`}>
         <div className="novel-fetch-automation-heading"><div><strong>全自动队列</strong><span>{queueSummary.enabled ? '持续处理、自动上传并回读确认' : '已暂停，不会派发新的自动任务'}</span></div><V88Button variant={queueSummary.enabled ? 'danger' : 'primary'} loading={automationChanging} onClick={toggleAutomation}>{queueSummary.enabled ? '暂停全自动' : '开启全自动'}</V88Button></div>
         <div className="novel-fetch-automation-facts">
-          <span>已选 <b>{selectedTaskKeys.length}</b> 个</span><span>自动队列 <b>{queueSummary.enabled ? '已开启' : '已暂停'}</b></span><span>当前任务 <b>{queueSummary.activeJobId || '无'}</b></span><span>处理中 <b>{queueSummary.running}</b> 个</span><span>排队 <b>{queueSummary.queued}</b> 个</span>
+          <span>已选 <b>{selectedTaskKeys.length}</b> 个</span><span>自动队列 <b>{queueSummary.enabled ? '已开启' : '已暂停'}</b></span><span>当前任务 <b>{queueSummary.activeJobId || '无'}</b></span><span>{queueSummary.scopeLabel}：处理中 <b>{queueSummary.running}</b> 个</span><span>{queueSummary.scopeLabel}：排队 <b>{queueSummary.queued}</b> 个</span>
         </div>
         <div className="novel-fetch-automation-foot"><span>最近任务 {queueSummary.latestJob?.status || '暂无'}：{queueSummary.latestJob?.id || '—'}</span><span>刷新 {queueSummary.updatedAt ? formatScheduleTime(queueSummary.updatedAt) : '—'}</span></div>
       </div>
@@ -1973,7 +2041,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
        </div>
        </div>
        </div>
-       {currentBatch ? <div className="novel-fetch-panel novel-fetch-current-batch"><div className="novel-fetch-current-batch-heading"><Typography.Title level={5}>当前批次</Typography.Title><Space><Button size="small" icon={<RefreshCw size={14} />} onClick={loadCurrentBatch}>刷新</Button><Button size="small" danger disabled={!currentBatchStoppableIds.length} onClick={() => Modal.confirm({ title: '停止当前批次？', content: '排队中和正在执行的任务会停止，已完成任务不会改变。', okText: '确认停止', okButtonProps: { danger: true }, onOk: async () => { await stopWorkshopTasks(currentBatchStoppableIds); await Promise.all([loadTasks(), loadCurrentBatch()]); message.success('已停止当前批次'); } })}>停止处理</Button><Button size="small" onClick={() => { setTaskSearch(''); setTaskDate(''); setTaskView('current'); changeTab('tasks'); }}>查看全部任务</Button></Space></div><Typography.Text type="secondary">{currentBatch.id} · {currentBatchIds.length} 本</Typography.Text><Table className="novel-fetch-current-batch-table" size="small" pagination={false} scroll={{ x: 1060 }} rowKey={row => row.bookId || row.book_id} dataSource={currentBatch.taskStates || currentBatch.task_states || []} columns={[{ title: 'ID', render: (_, row) => row.id || row.index || row.bookId || row.book_id }, { title: '书名', render: (_, row) => row.bookName || row.book_name || row.bookId || row.book_id }, { title: 'Book ID', render: (_, row) => row.bookId || row.book_id }, { title: 'AI1', render: (_, row) => novelFetchVersionReady(row, 'ai1') ? '✓' : '×' }, { title: '网站提交', render: (_, row) => row.siteSubmitStatus || row.site_submit_status || '○' }, { title: '状态', render: (_, row) => <TaskStatusTag row={row} /> }, { title: '字数', render: (_, row) => novelFetchCharCount(row) }, { title: '创建时间', render: (_, row) => formatWorkDateTime(row.createdAt || row.created_at) }, { title: '操作', render: (_, row) => <Button size="small" onClick={async () => { const target = novelFetchCurrentBatchTaskDetail(row); if (!target) return; setTaskDetail({ ...target, data: await getWorkshopTaskSummary(target.bookId) }); }}>查看</Button> }]} /></div> : null}
+       {currentBatch ? <div className="novel-fetch-panel novel-fetch-current-batch"><div className="novel-fetch-current-batch-heading"><Typography.Title level={5}>当前批次</Typography.Title><Space><Button size="small" icon={<RefreshCw size={14} />} onClick={loadCurrentBatch}>刷新</Button><Button size="small" danger disabled={!currentBatchStoppableIds.length} onClick={() => Modal.confirm({ title: '停止当前批次？', content: '排队中和正在执行的任务会停止，已完成任务不会改变。', okText: '确认停止', okButtonProps: { danger: true }, onOk: async () => { await stopWorkshopTasks(currentBatchStoppableIds); await Promise.all([loadTasks(), loadCurrentBatch()]); message.success('已停止当前批次'); } })}>停止处理</Button><Button size="small" onClick={() => { setTaskSearch(''); setTaskDate(''); setTaskView('current'); changeTab('tasks'); }}>查看全部任务</Button></Space></div><Typography.Text type="secondary">{currentBatch.id} · {currentBatchIds.length} 本</Typography.Text><Table className="novel-fetch-current-batch-table" size="small" pagination={false} scroll={{ x: 1060 }} rowKey={row => row.bookId || row.book_id} dataSource={currentBatch.taskStates || currentBatch.task_states || []} columns={[{ title: 'ID', render: (_, row) => row.id || row.index || row.bookId || row.book_id }, { title: '书名', render: (_, row) => row.bookName || row.book_name || row.bookId || row.book_id }, { title: 'Book ID', render: (_, row) => row.bookId || row.book_id }, { title: 'AI1', render: (_, row) => novelFetchVersionReady(row, 'ai1') ? '✓' : '×' }, { title: '网站提交', render: (_, row) => (row.siteSubmitStatus || row.site_submit_status) ? novelFetchSubmissionLabel(row) : '○' }, { title: '状态', render: (_, row) => <TaskStatusTag row={row} /> }, { title: '字数', render: (_, row) => novelFetchCharCount(row) }, { title: '创建时间', render: (_, row) => formatWorkDateTime(row.createdAt || row.created_at) }, { title: '操作', render: (_, row) => <Button size="small" onClick={async () => { const target = novelFetchCurrentBatchTaskDetail(row); if (!target) return; setTaskDetail({ ...target, data: await getWorkshopTaskSummary(target.bookId) }); }}>查看</Button> }]} /></div> : null}
        <Modal className="novel-fetch-upload-manager-modal" open={loginModalOpen} width={620} title="视频管理系统" cancelText="取消" okText="保存并关闭" confirmLoading={uploadProfileLoading} okButtonProps={{ disabled: uploadSession?.status !== 'ready' || !uploadProfileDraft }} onCancel={() => { setLoginModalOpen(false); setLoginFormVisible(false); setLoginPassword(''); }} onOk={saveUploadProfileAndClose}>
         <div className={`novel-fetch-upload-manager-status ${uploadSession?.status === 'ready' ? 'is-ready' : ''}`}>
           <div><strong>{uploadSession?.status === 'ready' ? uploadSessionDisplayName(uploadSession) : '尚未登录'}</strong><span>{uploadSession?.status === 'ready' ? '登录会话可用于配置同步和网站提交' : '请先登录视频管理系统，再同步网站配置档'}</span></div>
@@ -2016,10 +2084,10 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
           <V88Button variant="secondary" loading={taskActionBusy === 'retry-all-failed'} onClick={retryAllFailedTasks}>重试全部失败</V88Button>
           <Select className="novel-fetch-rule-scope" value={ruleApplyScope} onChange={setRuleApplyScope} options={[{ value: 'both', label: '规则处理原文 + AI' }, { value: 'original', label: '只处理原文' }, { value: 'ai', label: '只处理 AI' }]} />
           <V88Button variant="secondary" loading={taskActionBusy === 'rules-all'} onClick={applyRulesToAllTasks}>规则处理全部</V88Button>
-          <V88Button variant="primary" onClick={() => Modal.confirm({ title: '提交全部任务？', content: `将提交任务列表中的 ${tasks.length} 个任务。`, onOk: submitAllTasks })}>提交全部</V88Button>
+          <V88Button variant="primary" loading={webSubmitLoading} onClick={() => Modal.confirm({ title: '提交当前批次？', content: `将提交当前批次的 ${currentBatchIds.length} 个任务。`, onOk: submitVisibleTasks })}>提交当前批次</V88Button>
           <span className="novel-fetch-toolbar-spacer" />
-          <V88Button variant="danger" onClick={() => deleteTasksByFilter(task => novelFetchTaskStatus(task).status === 'failed', '当前没有失败任务')}>删除失败</V88Button>
-          <V88Button variant="danger" onClick={() => deleteTasksByFilter(() => true, '当前没有任务')}>删除全部</V88Button>
+          <V88Button variant="danger" onClick={() => deleteTasksByFilter(task => novelFetchTaskStatus(task).status === 'failed', '当前批次没有失败任务', currentBatchIds)}>删除失败</V88Button>
+          <V88Button variant="danger" onClick={() => deleteTasksByFilter(() => true, '当前批次没有任务', currentBatchIds)}>删除全部</V88Button>
         </div>
         {selectedTaskKeys.length ? <div className="novel-fetch-task-selection-bar">
           <Typography.Text strong>已选 {selectedTaskKeys.length} 个任务</Typography.Text>
@@ -2032,7 +2100,8 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
           <V88Button variant="secondary" loading={taskActionBusy === 'ai-count'} onClick={updateSelectedAiCount}>调整选中</V88Button>
           <V88Button variant="secondary" loading={taskActionBusy === 'rules-selected'} onClick={applySelectedRules}>规则处理选中</V88Button>
           <V88Button variant="secondary" icon={<Factory size={16} />} title={`入厂内容：${batchFactoryVersionLabel(batchFactorySourceVersion)}`} onClick={transferToBatchFactory}>进入批量工厂</V88Button>
-          <V88Button variant="primary" onClick={() => changeTab('submit')}>提交选中</V88Button>
+          <V88Button variant="primary" loading={webSubmitLoading} onClick={submitSelectedTasks}>提交选中</V88Button>
+          <V88Button loading={webSubmitLoading} onClick={submitAllTasks}>提交全部</V88Button>
           <V88Button variant="danger" onClick={handleDeleteTasks}>删除选中</V88Button>
         </div> : null}
         <Table className="novel-fetch-task-table" scroll={{ x: 1420 }} rowKey={row => row.bookId || row.book_id} loading={tasksLoading} dataSource={visibleTasks} rowSelection={{ selectedRowKeys: selectedTaskKeys, onChange: setSelectedTaskKeys }} pagination={{ pageSize: 20, showSizeChanger: true }} locale={{ emptyText: <V88EmptyState title="当前筛选下没有任务" description="调整查看日期、搜索条件或刷新任务后再试。" action={<V88Button size="small" variant="secondary" onClick={() => { loadTasks(); loadCurrentBatch(); }}>刷新任务</V88Button>} /> }} columns={[

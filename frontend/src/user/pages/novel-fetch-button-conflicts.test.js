@@ -5,7 +5,8 @@ import vm from 'node:vm';
 
 const page = fs.readFileSync(new URL('./NovelFetchPage.jsx', import.meta.url), 'utf8');
 function handler(name, context) {
-  const start = page.indexOf(`  async function ${name}(`);
+  let start = page.indexOf(`  async function ${name}(`);
+  if (start < 0) start = page.indexOf(`  function ${name}(`);
   assert.ok(start >= 0, name);
   const end = page.indexOf('\n  }', start) + 4;
   return vm.runInNewContext(`(${page.slice(start, end)})`, context);
@@ -34,6 +35,84 @@ test('current batch submit never silently submits visible tasks when no current 
     startWebSubmit: async body => requests.push(body), setWebSubmitResults() {}
   })();
   assert.equal(requests.length, 0);
+});
+
+test('submit selected directly submits only the checked task ids', async () => {
+  const requests = [];
+  const results = [];
+  let warned = '';
+  let confirmOptions = null;
+  await handler('submitSelectedTasks', {
+    selectedTaskKeys: ['a', 'b'],
+    message: { warning: text => { warned = text; } },
+    Modal: { confirm: options => { confirmOptions = options; } },
+    handleWebSubmit: async fn => fn(),
+    startWebSubmit: async body => {
+      requests.push(body);
+      return { results: [{ bookId: 'a', version: 'ai1', status: 'confirmed' }] };
+    },
+    setWebSubmitResults: value => results.push(value),
+    setWebSubmitHistory() {}, setSubmitView() {}, changeTab() {},
+    loadTasks: async () => {}, loadCurrentBatch: async () => {}
+  })();
+  assert.ok(confirmOptions);
+  await confirmOptions.onOk();
+  assert.equal(warned, '');
+  assert.equal(JSON.stringify(requests), JSON.stringify([{ taskIds: ['a', 'b'] }]));
+  assert.equal(results.length, 1);
+});
+
+test('submit selected refuses to submit when nothing is checked', async () => {
+  const requests = [];
+  let warned = '';
+  await handler('submitSelectedTasks', {
+    selectedTaskKeys: [],
+    message: { warning: text => { warned = text; } },
+    Modal: { confirm: async () => { throw new Error('should not confirm'); } },
+    handleWebSubmit: async fn => fn(),
+    startWebSubmit: async body => requests.push(body),
+    setWebSubmitResults() {}, setWebSubmitHistory() {}, setSubmitView() {}, changeTab() {},
+    loadTasks: async () => {}, loadCurrentBatch: async () => {}
+  })();
+  assert.match(warned, /请先选择/);
+  assert.equal(requests.length, 0);
+});
+
+test('submit all delegates the full scope to the backend instead of filtered ids', async () => {
+  const requests = [];
+  let confirmOptions = null;
+  await handler('submitAllTasks', {
+    tasks: [{ bookId: 'a' }],
+    visibleTaskIds: ['a'],
+    message: { info() {} },
+    Modal: { confirm: options => { confirmOptions = options; } },
+    handleWebSubmit: async fn => fn(),
+    startWebSubmit: async body => { requests.push(body); return { results: [] }; },
+    setWebSubmitResults() {}, setWebSubmitHistory() {}, setSubmitView() {}, changeTab() {},
+    loadTasks: async () => {}, loadCurrentBatch: async () => {}
+  })();
+  assert.ok(confirmOptions);
+  assert.match(confirmOptions.content, /全部任务/);
+  await confirmOptions.onOk();
+  assert.equal(JSON.stringify(requests), JSON.stringify([{ mode: 'all' }]));
+});
+
+test('submit page confirmation no longer requires or sends a preview revision', async () => {
+  const requests = [];
+  let warned = '';
+  let confirmOptions = null;
+  await handler('confirmWebSubmit', {
+    selectedTaskKeys: ['a'],
+    message: { warning: text => { warned = text; } },
+    Modal: { confirm: options => { confirmOptions = options; } },
+    handleWebSubmit: async fn => fn(),
+    startWebSubmit: async body => { requests.push(body); return { results: [] }; },
+    setWebSubmitResults() {}, setWebSubmitHistory() {}, setSubmitView() {}
+  })();
+  assert.equal(warned, '');
+  assert.ok(confirmOptions);
+  await confirmOptions.onOk();
+  assert.equal(JSON.stringify(requests), JSON.stringify([{ taskIds: ['a'] }]));
 });
 
 test('retry reports partial failure rather than unconditional success', async () => {

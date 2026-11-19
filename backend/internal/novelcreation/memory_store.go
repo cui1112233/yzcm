@@ -11,39 +11,55 @@ import (
 )
 
 type MemoryStore struct {
-	mu             sync.RWMutex
-	nextID         int64
-	nextEventID    int64
-	projects       map[string]Project
-	sessions       map[string]Session
-	messages       map[string][]Message
-	runs           map[string]Run
-	runByKey       map[string]string
-	runEvents      map[string][]RunEvent
-	chapterBundles map[string]ChapterBundle
-	settings       map[string]ProjectSettings
-	foundations    map[string]Foundation
-	materials      map[string]Material
-	notes          map[string]ProjectNote
-	schedules      map[string]Schedule
-	batches        map[string]Batch
+	studios          map[string]json.RawMessage
+	submissions      map[string]submissionReceipt
+	contentRecords   map[string]ContentRecord
+	automationRounds map[string]string
+	executions       map[string]Execution
+	slots            map[string]ProjectSlot
+	mu               sync.RWMutex
+	nextID           int64
+	nextEventID      int64
+	projects         map[string]Project
+	sessions         map[string]Session
+	messages         map[string][]Message
+	runs             map[string]Run
+	runByKey         map[string]string
+	runEvents        map[string][]RunEvent
+	chapterBundles   map[string]ChapterBundle
+	chapterVersions  map[string]ChapterVersion
+	settings         map[string]ProjectSettings
+	foundations      map[string]Foundation
+	materials        map[string]Material
+	notes            map[string]ProjectNote
+	styles           map[string]StyleProfile
+	schedules        map[string]Schedule
+	batches          map[string]Batch
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		projects:       make(map[string]Project),
-		sessions:       make(map[string]Session),
-		messages:       make(map[string][]Message),
-		runs:           make(map[string]Run),
-		runByKey:       make(map[string]string),
-		runEvents:      make(map[string][]RunEvent),
-		chapterBundles: make(map[string]ChapterBundle),
-		settings:       make(map[string]ProjectSettings),
-		foundations:    make(map[string]Foundation),
-		materials:      make(map[string]Material),
-		notes:          make(map[string]ProjectNote),
-		schedules:      make(map[string]Schedule),
-		batches:        make(map[string]Batch),
+		studios:          make(map[string]json.RawMessage),
+		submissions:      make(map[string]submissionReceipt),
+		contentRecords:   make(map[string]ContentRecord),
+		automationRounds: make(map[string]string),
+		executions:       make(map[string]Execution),
+		slots:            make(map[string]ProjectSlot),
+		projects:         make(map[string]Project),
+		sessions:         make(map[string]Session),
+		messages:         make(map[string][]Message),
+		runs:             make(map[string]Run),
+		runByKey:         make(map[string]string),
+		runEvents:        make(map[string][]RunEvent),
+		chapterBundles:   make(map[string]ChapterBundle),
+		chapterVersions:  make(map[string]ChapterVersion),
+		settings:         make(map[string]ProjectSettings),
+		foundations:      make(map[string]Foundation),
+		materials:        make(map[string]Material),
+		notes:            make(map[string]ProjectNote),
+		styles:           make(map[string]StyleProfile),
+		schedules:        make(map[string]Schedule),
+		batches:          make(map[string]Batch),
 	}
 }
 
@@ -433,6 +449,21 @@ func (s *MemoryStore) SaveChapterBundle(_ context.Context, owner string, bundle 
 	if strings.TrimSpace(bundle.Chapter.ID) == "" || bundle.Chapter.Number <= 0 {
 		return &DomainError{Code: ErrInputRequired, Message: "chapter id and number are required"}
 	}
+	// Keep version rows immutable, matching the MySQL unique chapter/version key.
+	if version := bundle.ChapterVersion; version.ID != "" {
+		if version.Version == 0 {
+			version.Version = bundle.Chapter.Version
+			if version.Version == 0 {
+				version.Version = 1
+			}
+		}
+		key := memoryKey(owner, bundle.ProjectID, bundle.Chapter.ID, fmt.Sprint(version.Version))
+		if _, exists := s.chapterVersions[key]; exists {
+			return continuityError(fmt.Errorf("chapter version already exists"))
+		}
+		version.Snapshot = cloneRawJSON(version.Snapshot)
+		s.chapterVersions[key] = version
+	}
 	bundle.Chapter.ProjectID = bundle.ProjectID
 	now := time.Now().UTC()
 	if bundle.Chapter.CreatedAt.IsZero() {
@@ -450,6 +481,18 @@ func (s *MemoryStore) SaveChapterBundle(_ context.Context, owner string, bundle 
 		foundation.Snapshot = cloneRawJSON(foundation.Snapshot)
 		s.foundations[memoryKey(owner, bundle.ProjectID)] = foundation
 	}
+	if bundle.RunID != "" && bundle.FinalRunStatus != "" {
+		key := memoryKey(owner, bundle.RunID)
+		run := s.runs[key]
+		run.Status = bundle.FinalRunStatus
+		run.RuntimeSnapshot = cloneRawJSON(bundle.RuntimeSnapshot)
+		run.UpdatedAt = now
+		if isTerminalRunStatus(run.Status) {
+			run.FinishedAt = &now
+		}
+		s.runs[key] = cloneRun(run)
+	}
+
 	return nil
 }
 
@@ -482,6 +525,7 @@ func (s *MemoryStore) UpdateProjectSettings(_ context.Context, owner, projectID 
 		Agent: NormalizeAgentSettings(input.Agent, project.TargetChapterWords), UpdatedAt: time.Now().UTC(),
 	}
 	s.settings[memoryKey(owner, projectID)] = settings
+	settings.Agent = NormalizeAgentSettings(settings.Agent, project.TargetChapterWords)
 	return settings, nil
 }
 
@@ -532,8 +576,8 @@ func (s *MemoryStore) ListMaterials(_ context.Context, owner, projectID string) 
 		return nil, &DomainError{Code: ErrProjectNotFound, Message: "project not found"}
 	}
 	materials := make([]Material, 0)
-	for _, material := range s.materials {
-		if material.ProjectID == projectID {
+	for key, material := range s.materials {
+		if strings.HasPrefix(key, memoryKey(owner)+"\x00") && material.ProjectID == projectID {
 			materials = append(materials, material)
 		}
 	}
@@ -578,8 +622,8 @@ func (s *MemoryStore) ListNotes(_ context.Context, owner, projectID string) ([]P
 		return nil, &DomainError{Code: ErrProjectNotFound, Message: "project not found"}
 	}
 	notes := make([]ProjectNote, 0)
-	for _, note := range s.notes {
-		if note.ProjectID == projectID {
+	for key, note := range s.notes {
+		if strings.HasPrefix(key, memoryKey(owner)+"\x00") && note.ProjectID == projectID {
 			notes = append(notes, note)
 		}
 	}
@@ -659,8 +703,8 @@ func (s *MemoryStore) ListSchedules(_ context.Context, owner, projectID string) 
 	}
 	schedules := make([]Schedule, 0)
 	for _, schedule := range s.schedules {
-		if schedule.ProjectID == projectID {
-			schedules = append(schedules, schedule)
+		if schedule.OwnerUsername == owner && schedule.ProjectID == projectID {
+			schedules = append(schedules, cloneSchedule(schedule))
 		}
 	}
 	sort.Slice(schedules, func(i, j int) bool { return schedules[i].CreatedAt.After(schedules[j].CreatedAt) })
@@ -674,7 +718,7 @@ func (s *MemoryStore) GetSchedule(_ context.Context, owner, scheduleID string) (
 	if !ok {
 		return Schedule{}, &DomainError{Code: ErrProjectNotFound, Message: "schedule not found"}
 	}
-	return schedule, nil
+	return cloneSchedule(schedule), nil
 }
 
 func (s *MemoryStore) CreateSchedule(_ context.Context, owner string, schedule Schedule) (Schedule, error) {
@@ -696,8 +740,8 @@ func (s *MemoryStore) CreateSchedule(_ context.Context, owner string, schedule S
 		schedule.CreatedAt = now
 	}
 	schedule.UpdatedAt = now
-	s.schedules[memoryKey(owner, schedule.ID)] = schedule
-	return schedule, nil
+	s.schedules[memoryKey(owner, schedule.ID)] = cloneSchedule(schedule)
+	return cloneSchedule(schedule), nil
 }
 
 func (s *MemoryStore) UpdateSchedule(_ context.Context, owner string, schedule Schedule) (Schedule, error) {
@@ -711,8 +755,8 @@ func (s *MemoryStore) UpdateSchedule(_ context.Context, owner string, schedule S
 	schedule.OwnerUsername = owner
 	schedule.CreatedAt = existing.CreatedAt
 	schedule.UpdatedAt = time.Now().UTC()
-	s.schedules[key] = schedule
-	return schedule, nil
+	s.schedules[key] = cloneSchedule(schedule)
+	return cloneSchedule(schedule), nil
 }
 
 func (s *MemoryStore) DeleteSchedule(_ context.Context, owner, projectID, scheduleID string) error {
@@ -727,7 +771,10 @@ func (s *MemoryStore) DeleteSchedule(_ context.Context, owner, projectID, schedu
 	return nil
 }
 
-func (s *MemoryStore) ListDueSchedules(_ context.Context, now time.Time, limit int) ([]Schedule, error) {
+func (s *MemoryStore) ListDueSchedules(ctx context.Context, now time.Time, limit int) ([]Schedule, error) {
+	return s.ListDueSchedulePage(ctx, now, ScheduleCursor{}, limit)
+}
+func (s *MemoryStore) ListDueSchedulePage(_ context.Context, now time.Time, after ScheduleCursor, limit int) ([]Schedule, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if limit <= 0 {
@@ -735,11 +782,13 @@ func (s *MemoryStore) ListDueSchedules(_ context.Context, now time.Time, limit i
 	}
 	due := make([]Schedule, 0)
 	for _, schedule := range s.schedules {
-		if schedule.Enabled && !schedule.NextRunAt.After(now) {
-			due = append(due, schedule)
+		if ((schedule.Enabled && !schedule.NextRunAt.After(now)) || schedule.ActiveRound != "") && scheduleAfter(schedule, after) {
+			due = append(due, cloneSchedule(schedule))
 		}
 	}
-	sort.Slice(due, func(i, j int) bool { return due[i].NextRunAt.Before(due[j].NextRunAt) })
+	sort.Slice(due, func(i, j int) bool {
+		return scheduleAfter(due[j], ScheduleCursor{NextRunAt: due[i].NextRunAt, OwnerUsername: due[i].OwnerUsername, ID: due[i].ID})
+	})
 	if len(due) > limit {
 		due = due[:limit]
 	}
@@ -755,8 +804,8 @@ func (s *MemoryStore) ListBatches(_ context.Context, owner, projectID string) ([
 	}
 	batches := make([]Batch, 0)
 	for _, batch := range s.batches {
-		if batch.ProjectID == projectID {
-			batches = append(batches, batch)
+		if batch.OwnerUsername == owner && batch.ProjectID == projectID {
+			batches = append(batches, cloneBatch(batch))
 		}
 	}
 	sort.Slice(batches, func(i, j int) bool { return batches[i].CreatedAt.After(batches[j].CreatedAt) })
@@ -770,7 +819,7 @@ func (s *MemoryStore) GetBatch(_ context.Context, owner, batchID string) (Batch,
 	if !ok {
 		return Batch{}, &DomainError{Code: ErrProjectNotFound, Message: "batch not found"}
 	}
-	return batch, nil
+	return cloneBatch(batch), nil
 }
 
 func (s *MemoryStore) CreateBatch(_ context.Context, owner string, batch Batch) (Batch, error) {
@@ -792,8 +841,8 @@ func (s *MemoryStore) CreateBatch(_ context.Context, owner string, batch Batch) 
 		batch.CreatedAt = now
 	}
 	batch.UpdatedAt = now
-	s.batches[memoryKey(owner, batch.ID)] = batch
-	return batch, nil
+	s.batches[memoryKey(owner, batch.ID)] = cloneBatch(batch)
+	return cloneBatch(batch), nil
 }
 
 func (s *MemoryStore) UpdateBatch(_ context.Context, owner string, batch Batch) (Batch, error) {
@@ -807,8 +856,8 @@ func (s *MemoryStore) UpdateBatch(_ context.Context, owner string, batch Batch) 
 	batch.OwnerUsername = owner
 	batch.CreatedAt = existing.CreatedAt
 	batch.UpdatedAt = time.Now().UTC()
-	s.batches[key] = batch
-	return batch, nil
+	s.batches[key] = cloneBatch(batch)
+	return cloneBatch(batch), nil
 }
 
 func (s *MemoryStore) ListActiveBatches(_ context.Context, limit int) ([]Batch, error) {
@@ -819,8 +868,12 @@ func (s *MemoryStore) ListActiveBatches(_ context.Context, limit int) ([]Batch, 
 	}
 	active := make([]Batch, 0)
 	for _, batch := range s.batches {
-		if batch.Status == BatchRunning {
-			active = append(active, batch)
+		project, ok := s.projects[memoryKey(batch.OwnerUsername, batch.ProjectID)]
+		if !ok || project.DeletedAt != nil || projectReadOnly(project.Status) {
+			continue
+		}
+		if batch.Status == BatchRunning || batch.Status == BatchPaused || (batch.Status == BatchStopped && batch.ActiveRound != "") {
+			active = append(active, cloneBatch(batch))
 		}
 	}
 	sort.Slice(active, func(i, j int) bool { return active[i].UpdatedAt.Before(active[j].UpdatedAt) })

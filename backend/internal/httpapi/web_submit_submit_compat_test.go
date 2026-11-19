@@ -3,11 +3,13 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +27,66 @@ type configuredSubmitConnector struct {
 type uncertainSubmitConnector struct {
 	submitCalls   int
 	readbackCalls int
+}
+
+type recordingSubmitConnector struct {
+	submitCalls int
+	lastInput   videomanagementconnector.SubmissionInput
+}
+
+func (c *recordingSubmitConnector) Login(context.Context, videomanagementconnector.LoginInput) (videomanagementconnector.Session, error) {
+	return videomanagementconnector.Session{}, nil
+}
+func (c *recordingSubmitConnector) CheckSession(context.Context, videomanagementconnector.Session) error {
+	return nil
+}
+func (c *recordingSubmitConnector) RefreshCatalogs(context.Context, videomanagementconnector.Session) (videomanagementconnector.Catalogs, error) {
+	return videomanagementconnector.Catalogs{}, nil
+}
+func (c *recordingSubmitConnector) Submit(_ context.Context, _ videomanagementconnector.Session, input videomanagementconnector.SubmissionInput) (videomanagementconnector.Submission, error) {
+	c.submitCalls++
+	c.lastInput = input
+	return videomanagementconnector.Submission{ID: "remote-1", Status: "submitted"}, nil
+}
+func (c *recordingSubmitConnector) GetSubmission(context.Context, videomanagementconnector.Session, string) (videomanagementconnector.Submission, error) {
+	return videomanagementconnector.Submission{ID: "remote-1", Status: "submitted", Message: "已确认", ReadbackRaw: map[string]any{"success": true}}, nil
+}
+
+type concurrencySubmitConnector struct {
+	mu      sync.Mutex
+	current int
+	max     int
+	calls   int
+	delay   time.Duration
+}
+
+func (c *concurrencySubmitConnector) Login(context.Context, videomanagementconnector.LoginInput) (videomanagementconnector.Session, error) {
+	return videomanagementconnector.Session{}, nil
+}
+func (c *concurrencySubmitConnector) CheckSession(context.Context, videomanagementconnector.Session) error {
+	return nil
+}
+func (c *concurrencySubmitConnector) RefreshCatalogs(context.Context, videomanagementconnector.Session) (videomanagementconnector.Catalogs, error) {
+	return videomanagementconnector.Catalogs{}, nil
+}
+func (c *concurrencySubmitConnector) Submit(context.Context, videomanagementconnector.Session, videomanagementconnector.SubmissionInput) (videomanagementconnector.Submission, error) {
+	c.mu.Lock()
+	c.current++
+	c.calls++
+	if c.current > c.max {
+		c.max = c.current
+	}
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.current--
+		c.mu.Unlock()
+	}()
+	time.Sleep(c.delay)
+	return videomanagementconnector.Submission{ID: "remote-1", Status: "submitted"}, nil
+}
+func (c *concurrencySubmitConnector) GetSubmission(context.Context, videomanagementconnector.Session, string) (videomanagementconnector.Submission, error) {
+	return videomanagementconnector.Submission{ID: "remote-1", Status: "submitted", Message: "已确认", ReadbackRaw: map[string]any{"success": true}}, nil
 }
 
 func (c *uncertainSubmitConnector) Login(context.Context, videomanagementconnector.LoginInput) (videomanagementconnector.Session, error) {
@@ -194,18 +256,18 @@ func TestWebSubmitPreviewBlocksUnclassifiedStyle(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.PutDocument(context.Background(), "tester", novelfetchworkshop.Document{
-		BookID: "book-preview", Gender: "女频", Meta: map[string]any{"style": "待判定"},
+		BookID: "700001", Gender: "女频", Meta: map[string]any{"style": "待判定", "platformId": "1"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.PutBody(context.Background(), "tester", novelfetchworkshop.BodyRecord{BookID: "book-preview", BodyRef: novelfetchworkshop.BodyRef{VersionID: "ai1"}, Content: "正文"}); err != nil {
+	if _, err := store.PutBody(context.Background(), "tester", novelfetchworkshop.BodyRecord{BookID: "700001", BodyRef: novelfetchworkshop.BodyRef{VersionID: "ai1"}, Content: "正文"}); err != nil {
 		t.Fatal(err)
 	}
 
 	mux := http.NewServeMux()
 	middleware := BridgeAuth{Secret: "secret", Now: func() time.Time { return now }, AuthStore: &authTestStore{account: auth.Account{Username: "tester", Active: true}, session: auth.Session{Username: "tester", Token: "test-session", ExpiresAt: now.Add(time.Hour)}}}
 	RegisterWebSubmitPreviewCompat(mux, middleware, store)
-	req := httptest.NewRequest(http.MethodPost, "/api/batch-rewrite/web-submit/preview", stringsReader(`{"taskIds":["book-preview"],"versions":["ai1"]}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/batch-rewrite/web-submit/preview", stringsReader(`{"taskIds":["700001"],"versions":["ai1"]}`))
 	req.Header.Set("Authorization", "Bearer test-session")
 	res := httptest.NewRecorder()
 	mux.ServeHTTP(res, req)
@@ -227,7 +289,7 @@ func TestWebSubmitPreviewBlocksUnclassifiedStyle(t *testing.T) {
 	if payload.Plan == nil {
 		t.Fatalf("preview must include the plan consumed by the React page: %s", res.Body.String())
 	}
-	if got := payload.Skipped[0]; got["status"] != "blocked" || got["error"] != webSubmitUnclassifiedStyleError {
+	if got := payload.Skipped[0]; got["status"] != "waiting_classify" || got["error"] != "无法映射网站字段：风格类型" {
 		t.Fatalf("skipped=%#v", got)
 	}
 }
@@ -236,7 +298,7 @@ func TestWebSubmitAppliesSavedProfileAndDoesNotResendAfterUncertainSubmit(t *tes
 	now := time.Date(2026, 10, 18, 10, 0, 0, 0, time.UTC)
 	store := novelfetchworkshop.NewMemoryStore()
 	if err := store.PutConfig(context.Background(), "tester", map[string]any{"appConfig": map[string]any{"web_submit": map[string]any{
-		"enabled": true, "retry_times": 1, "min_text_chars": 2, "skip_submitted": false,
+		"enabled": true, "retry_times": 1, "min_file_size": 0, "skip_submitted": false,
 		"organization": "org-9", "selected_profile": "profile-x", "profile_bindings": map[string]any{"ai1": "profile-y"},
 		"upload_profiles": []any{map[string]any{"id": "profile-y", "platform_id": "6", "organization": "org-profile", "advanced": map[string]any{"ziti": 4}}},
 	}}}); err != nil {
@@ -323,7 +385,7 @@ func TestNovelFetchProcessingFingerprintUsesNormalizedRules(t *testing.T) {
 func TestWebSubmitUncertainOutcomeOnlyReadsBackAndNeverUploadsTwice(t *testing.T) {
 	store := novelfetchworkshop.NewMemoryStore()
 	if err := store.PutConfig(context.Background(), "tester", map[string]any{"appConfig": map[string]any{"web_submit": map[string]any{
-		"enabled": true, "retry_times": 0, "skip_submitted": true,
+		"enabled": true, "retry_times": 0, "skip_submitted": true, "min_file_size": 0, "organization": "org-1",
 	}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -359,15 +421,15 @@ func TestWebSubmitUncertainOutcomeOnlyReadsBackAndNeverUploadsTwice(t *testing.T
 func TestWebSubmitBlocksUnclassifiedStyleAndPersistsFailureLog(t *testing.T) {
 	now := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
 	store := novelfetchworkshop.NewMemoryStore()
-	if err := store.PutConfig(context.Background(), "tester", map[string]any{"appConfig": map[string]any{"web_submit": map[string]any{"enabled": true}}}); err != nil {
+	if err := store.PutConfig(context.Background(), "tester", map[string]any{"appConfig": map[string]any{"web_submit": map[string]any{"enabled": true, "min_file_size": 0}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.PutDocument(context.Background(), "tester", novelfetchworkshop.Document{
-		BookID: "book-submit", Gender: "女频", Meta: map[string]any{"style": "未判定"},
+		BookID: "700002", Gender: "女频", Meta: map[string]any{"style": "未判定", "platformId": "1"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.PutBody(context.Background(), "tester", novelfetchworkshop.BodyRecord{BookID: "book-submit", BodyRef: novelfetchworkshop.BodyRef{VersionID: "ai1"}, Content: "正文"}); err != nil {
+	if _, err := store.PutBody(context.Background(), "tester", novelfetchworkshop.BodyRecord{BookID: "700002", BodyRef: novelfetchworkshop.BodyRef{VersionID: "ai1"}, Content: "正文"}); err != nil {
 		t.Fatal(err)
 	}
 	usersDir := t.TempDir()
@@ -381,7 +443,7 @@ func TestWebSubmitBlocksUnclassifiedStyleAndPersistsFailureLog(t *testing.T) {
 	mux := http.NewServeMux()
 	middleware := BridgeAuth{Secret: "secret", Now: func() time.Time { return now }, AuthStore: &authTestStore{account: auth.Account{Username: "tester", Active: true}, session: auth.Session{Username: "tester", Token: "test-session", ExpiresAt: now.Add(time.Hour)}}}
 	RegisterWebSubmitSubmitCompat(mux, middleware, usersDir, store, nil, nil)
-	req := httptest.NewRequest(http.MethodPost, "/api/batch-rewrite/web-submit/submit", stringsReader(`{"taskIds":["book-submit"],"versions":["ai1"]}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/batch-rewrite/web-submit/submit", stringsReader(`{"taskIds":["700002"],"versions":["ai1"]}`))
 	req.Header.Set("Authorization", "Bearer test-session")
 	res := httptest.NewRecorder()
 	mux.ServeHTTP(res, req)
@@ -399,16 +461,16 @@ func TestWebSubmitBlocksUnclassifiedStyleAndPersistsFailureLog(t *testing.T) {
 	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.OK || payload.Result != "all_failed" || payload.SuccessGroups != 0 || payload.FailedGroups != 1 {
-		t.Fatalf("failure must not be reported as success: %s", res.Body.String())
+	if !payload.OK || payload.Result != "all_ok" || payload.SuccessGroups != 0 || payload.FailedGroups != 0 {
+		t.Fatalf("deferred classification must not be reported as a hard failure: %s", res.Body.String())
 	}
-	if len(payload.Results) != 1 || payload.Results[0]["error"] != webSubmitUnclassifiedStyleError {
+	if len(payload.Results) != 1 || payload.Results[0]["error"] != "无法映射网站字段：风格类型" {
 		t.Fatalf("payload=%s", res.Body.String())
 	}
-	if payload.Results[0]["code"] != "WEB_SUBMIT_FAILED" || strings.TrimSpace(toString(payload.Results[0]["message"])) == "" {
-		t.Fatalf("failure item missing actionable code/message: %s", res.Body.String())
+	if payload.Results[0]["status"] != "waiting_classify" || payload.Results[0]["deferred"] != true {
+		t.Fatalf("blocked item must be deferred, not failed: %s", res.Body.String())
 	}
-	doc, err := store.GetDocument(context.Background(), "tester", "book-submit")
+	doc, err := store.GetDocument(context.Background(), "tester", "700002")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,8 +478,11 @@ func TestWebSubmitBlocksUnclassifiedStyleAndPersistsFailureLog(t *testing.T) {
 		t.Fatalf("logs=%#v", doc.Logs)
 	}
 	log := doc.Logs[0].(map[string]any)
-	if log["event"] != "site_submit" || log["version"] != "ai1" || log["status"] != "failed" || log["error"] != webSubmitUnclassifiedStyleError || log["externalRequested"] != false || log["time"] == "" {
+	if log["event"] != "site_submit" || log["version"] != "ai1" || log["status"] != "waiting_classify" || log["error"] != "无法映射网站字段：风格类型" || log["externalRequested"] != false || log["time"] == "" {
 		t.Fatalf("log=%#v", log)
+	}
+	if doc.Meta["siteSubmitStatus"] != "waiting_classify" {
+		t.Fatalf("site status must wait for classification: %#v", doc.Meta)
 	}
 }
 
@@ -455,6 +520,322 @@ func TestDecorateWebSubmitResultsAddsFailureCodes(t *testing.T) {
 	pending := decorated[2].(map[string]any)
 	if pending["code"] != "WEB_SUBMIT_PENDING_CONFIRMATION" || strings.TrimSpace(toString(pending["message"])) == "" {
 		t.Fatalf("pending=%#v", pending)
+	}
+	// 同一套中文状态词汇：接口直接给出 status_label，页面不再显示英文原始状态。
+	if got := decorated[0].(map[string]any)["status_label"]; got != "已提交" {
+		t.Fatalf("submitted label=%#v", got)
+	}
+	if got := bad["status_label"]; got != "失败" {
+		t.Fatalf("failed label=%#v", got)
+	}
+	if got := pending["status_label"]; got != "待远端核验" {
+		t.Fatalf("pending label=%#v", got)
+	}
+	if got := webSubmitStatusText("waiting_configuration"); got != "等待配置" {
+		t.Fatalf("waiting label=%#v", got)
+	}
+}
+
+func TestWebSubmitDryRunPersistsPlanManifest(t *testing.T) {
+	now := time.Date(2026, 10, 18, 10, 0, 0, 0, time.UTC)
+	store := novelfetchworkshop.NewMemoryStore()
+	if err := store.PutConfig(context.Background(), "tester", map[string]any{"appConfig": map[string]any{"web_submit": map[string]any{
+		"enabled": true, "min_file_size": 0, "organization": "org-1",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutDocument(context.Background(), "tester", novelfetchworkshop.Document{BookID: "123456", Gender: "女频", Meta: map[string]any{"style": "现代悬疑", "platformId": "1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutBody(context.Background(), "tester", novelfetchworkshop.BodyRecord{BookID: "123456", BodyRef: novelfetchworkshop.BodyRef{VersionID: "ai1"}, Content: "满足字数的正文"}); err != nil {
+		t.Fatal(err)
+	}
+	usersDir := t.TempDir()
+	mux := http.NewServeMux()
+	middleware := BridgeAuth{Secret: "secret", Now: func() time.Time { return now }, AuthStore: &authTestStore{account: auth.Account{Username: "tester", Active: true}, session: auth.Session{Username: "tester", Token: "test-session", ExpiresAt: now.Add(time.Hour)}}}
+	RegisterWebSubmitSubmitCompat(mux, middleware, usersDir, store, nil, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/batch-rewrite/web-submit/submit", stringsReader(`{"taskIds":["123456"],"versions":["ai1"],"dry_run":true}`))
+	req.Header.Set("Authorization", "Bearer test-session")
+	res := httptest.NewRecorder()
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+	var payload struct {
+		DryRun          bool             `json:"dry_run"`
+		Requested       int              `json:"requested"`
+		GroupCount      int              `json:"group_count"`
+		SubmissionRunID string           `json:"submission_run_id"`
+		PlannedItems    []map[string]any `json:"planned_items"`
+		DeferredItems   []map[string]any `json:"deferred_items"`
+		MissingItems    []map[string]any `json:"missing_items"`
+		Versions        []string         `json:"versions"`
+		PlanComplete    bool             `json:"plan_complete"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.DryRun || payload.Requested != 1 || payload.GroupCount != 1 || payload.SubmissionRunID == "" {
+		t.Fatalf("dry_run payload=%s", res.Body.String())
+	}
+	if len(payload.PlannedItems) != 1 || len(payload.DeferredItems) != 0 || len(payload.MissingItems) != 0 || !payload.PlanComplete {
+		t.Fatalf("plan accounting is incomplete: %s", res.Body.String())
+	}
+	if len(payload.Versions) != 1 || payload.Versions[0] != "ai1" {
+		t.Fatalf("versions=%#v", payload.Versions)
+	}
+	raw, err := os.ReadFile(filepath.Join(usersDir, "tester", "web-submit", "manifests", payload.SubmissionRunID+".json"))
+	if err != nil {
+		t.Fatalf("dry_run manifest was not persisted: %v", err)
+	}
+	var manifest struct {
+		Status         string           `json:"status"`
+		Reason         string           `json:"reason"`
+		RequestedCount int              `json:"requested_count"`
+		Items          []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Status != "dry_run" || manifest.Reason != "dry_run" || manifest.RequestedCount != 1 {
+		t.Fatalf("manifest=%s", string(raw))
+	}
+	if len(manifest.Items) != 1 || manifest.Items[0]["state"] != "ready" {
+		t.Fatalf("manifest items=%#v", manifest.Items)
+	}
+}
+
+func TestWebSubmitExecutingVersionOnlyReadsBack(t *testing.T) {
+	store := novelfetchworkshop.NewMemoryStore()
+	if err := store.PutConfig(context.Background(), "tester", map[string]any{"appConfig": map[string]any{"web_submit": map[string]any{
+		"enabled": true, "min_file_size": 0, "organization": "org-1",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutDocument(context.Background(), "tester", novelfetchworkshop.Document{BookID: "654321", Gender: "女频", Meta: map[string]any{
+		"style": "现代悬疑", "platformId": "1", "siteSubmitExecutingVersions": []any{"ai1"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutBody(context.Background(), "tester", novelfetchworkshop.BodyRecord{BookID: "654321", BodyRef: novelfetchworkshop.BodyRef{VersionID: "ai1"}, Content: "满足字数的正文"}); err != nil {
+		t.Fatal(err)
+	}
+	usersDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(usersDir, "tester"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(usersDir, "tester", "upload-target.json"), []byte(`{"cookie":"session=ok"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	connector := &configuredSubmitConnector{}
+	result, err := executeWebSubmit(context.Background(), "tester", usersDir, store, webSubmitRequest{TaskIDs: []string{"654321"}, Versions: []string{"ai1"}}, nil, connector)
+	if err != nil || connector.submitCalls != 0 || connector.readbackCalls != 1 || result.Success != 1 {
+		t.Fatalf("executing version must only read back: result=%#v err=%v submits=%d readbacks=%d", result, err, connector.submitCalls, connector.readbackCalls)
+	}
+	document, _ := store.GetDocument(context.Background(), "tester", "654321")
+	if containsVersion(document.Meta["siteSubmitExecutingVersions"], "ai1") || !containsVersion(document.Meta["siteSubmitDoneVersions"], "ai1") {
+		t.Fatalf("executing state was not resolved: %#v", document.Meta)
+	}
+}
+
+func TestWebSubmitForceResubmitsConfirmedVersion(t *testing.T) {
+	store := novelfetchworkshop.NewMemoryStore()
+	if err := store.PutConfig(context.Background(), "tester", map[string]any{"appConfig": map[string]any{"web_submit": map[string]any{
+		"enabled": true, "skip_submitted": true, "min_file_size": 0, "organization": "org-1",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutDocument(context.Background(), "tester", novelfetchworkshop.Document{BookID: "777777", Gender: "女频", Meta: map[string]any{
+		"style": "现代悬疑", "platformId": "1", "siteSubmitDoneVersions": []any{"ai1"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutBody(context.Background(), "tester", novelfetchworkshop.BodyRecord{BookID: "777777", BodyRef: novelfetchworkshop.BodyRef{VersionID: "ai1"}, Content: "满足字数的正文"}); err != nil {
+		t.Fatal(err)
+	}
+	usersDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(usersDir, "tester"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(usersDir, "tester", "upload-target.json"), []byte(`{"cookie":"session=ok"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	connector := &uncertainSubmitConnector{}
+	request := webSubmitRequest{TaskIDs: []string{"777777"}, Versions: []string{"ai1"}, Force: true}
+	result, err := executeWebSubmit(context.Background(), "tester", usersDir, store, request, nil, connector)
+	if err != nil || connector.submitCalls != 1 || result.Success != 1 {
+		t.Fatalf("force must resubmit confirmed version: result=%#v err=%v submits=%d", result, err, connector.submitCalls)
+	}
+	request.Force = false
+	result, err = executeWebSubmit(context.Background(), "tester", usersDir, store, request, nil, connector)
+	if err != nil || connector.submitCalls != 1 || result.Success != 0 || len(result.Results) != 1 {
+		t.Fatalf("without force confirmed version must be skipped: result=%#v err=%v submits=%d", result, err, connector.submitCalls)
+	}
+	if row, _ := result.Results[0].(map[string]any); row["status"] != "skipped" {
+		t.Fatalf("result=%#v", result.Results[0])
+	}
+}
+
+func TestWebSubmitUsesSourceBookIDForUpload(t *testing.T) {
+	store := novelfetchworkshop.NewMemoryStore()
+	if err := store.PutConfig(context.Background(), "tester", map[string]any{"appConfig": map[string]any{"web_submit": map[string]any{
+		"enabled": true, "min_file_size": 0, "organization": "org-1",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutDocument(context.Background(), "tester", novelfetchworkshop.Document{BookID: "owner-777", Gender: "女频", Meta: map[string]any{
+		"style": "现代悬疑", "platformId": "1", "source_book_id": "888888",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutBody(context.Background(), "tester", novelfetchworkshop.BodyRecord{BookID: "owner-777", BodyRef: novelfetchworkshop.BodyRef{VersionID: "ai1"}, Content: "满足字数的正文内容，继续描述情节发展。"}); err != nil {
+		t.Fatal(err)
+	}
+	usersDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(usersDir, "tester"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(usersDir, "tester", "upload-target.json"), []byte(`{"cookie":"session=ok"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	connector := &recordingSubmitConnector{}
+	result, err := executeWebSubmit(context.Background(), "tester", usersDir, store, webSubmitRequest{TaskIDs: []string{"owner-777"}, Versions: []string{"ai1"}}, nil, connector)
+	if err != nil || connector.submitCalls != 1 || result.Success != 1 {
+		t.Fatalf("result=%#v err=%v submits=%d", result, err, connector.submitCalls)
+	}
+	if connector.lastInput.BookID != "888888" || connector.lastInput.Filename != "888888.txt" {
+		t.Fatalf("upload must use source book id: %#v", connector.lastInput)
+	}
+}
+
+func TestWebSubmitRejectsInvalidSiteBookID(t *testing.T) {
+	store := novelfetchworkshop.NewMemoryStore()
+	if err := store.PutConfig(context.Background(), "tester", map[string]any{"appConfig": map[string]any{"web_submit": map[string]any{
+		"enabled": true, "min_file_size": 0, "organization": "org-1",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutDocument(context.Background(), "tester", novelfetchworkshop.Document{BookID: "owner-777", Gender: "女频", Meta: map[string]any{
+		"style": "现代悬疑", "platformId": "1",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutBody(context.Background(), "tester", novelfetchworkshop.BodyRecord{BookID: "owner-777", BodyRef: novelfetchworkshop.BodyRef{VersionID: "ai1"}, Content: "满足字数的正文内容，继续描述情节发展。"}); err != nil {
+		t.Fatal(err)
+	}
+	usersDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(usersDir, "tester"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(usersDir, "tester", "upload-target.json"), []byte(`{"cookie":"session=ok"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	connector := &recordingSubmitConnector{}
+	result, err := executeWebSubmit(context.Background(), "tester", usersDir, store, webSubmitRequest{TaskIDs: []string{"owner-777"}, Versions: []string{"ai1"}}, nil, connector)
+	if err != nil || connector.submitCalls != 0 || len(result.Results) != 1 {
+		t.Fatalf("result=%#v err=%v submits=%d", result, err, connector.submitCalls)
+	}
+	row, _ := result.Results[0].(map[string]any)
+	if row["status"] != "waiting_config" || row["reason"] != "invalid_site_book_id" {
+		t.Fatalf("row=%#v", row)
+	}
+}
+
+func TestWebSubmitSkipsDuplicateContent(t *testing.T) {
+	store := novelfetchworkshop.NewMemoryStore()
+	if err := store.PutConfig(context.Background(), "tester", map[string]any{"appConfig": map[string]any{"web_submit": map[string]any{
+		"enabled": true, "min_file_size": 0, "organization": "org-1",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutDocument(context.Background(), "tester", novelfetchworkshop.Document{BookID: "777777", Gender: "女频", Meta: map[string]any{
+		"style": "现代悬疑", "platformId": "1", "siteSubmitDoneVersions": []any{"ai1"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	for version, content := range map[string]string{
+		"ai1": "满足字数的正文内容\r\n继续描述情节发展。",
+		"ai2": "满足字数的正文内容\n继续描述情节发展。",
+	} {
+		if _, err := store.PutBody(context.Background(), "tester", novelfetchworkshop.BodyRecord{BookID: "777777", BodyRef: novelfetchworkshop.BodyRef{VersionID: version}, Content: content}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	usersDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(usersDir, "tester"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(usersDir, "tester", "upload-target.json"), []byte(`{"cookie":"session=ok"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	connector := &recordingSubmitConnector{}
+	result, err := executeWebSubmit(context.Background(), "tester", usersDir, store, webSubmitRequest{TaskIDs: []string{"777777"}, Versions: []string{"ai1", "ai2"}}, nil, connector)
+	if err != nil || connector.submitCalls != 0 {
+		t.Fatalf("duplicate content must not upload: result=%#v err=%v submits=%d", result, err, connector.submitCalls)
+	}
+	found := false
+	for _, item := range result.Results {
+		if row, ok := item.(map[string]any); ok && row["reason"] == "duplicate_content" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing duplicate_content result: %#v", result.Results)
+	}
+}
+
+func TestWebSubmitParallelismDefaults(t *testing.T) {
+	cases := []struct {
+		web  map[string]any
+		want int
+	}{
+		{map[string]any{}, 4},
+		{map[string]any{"parallel_upload_workers": 0}, 4},
+		{map[string]any{"parallel_upload_workers": 1}, 1},
+		{map[string]any{"parallel_upload_workers": 2}, 2},
+		{map[string]any{"parallel_upload_workers": 9}, 4},
+	}
+	for _, tc := range cases {
+		if got := webSubmitParallelism(tc.web); got != tc.want {
+			t.Fatalf("webSubmitParallelism(%#v)=%d, want %d", tc.web, got, tc.want)
+		}
+	}
+}
+
+func TestWebSubmitUploadsBooksConcurrently(t *testing.T) {
+	store := novelfetchworkshop.NewMemoryStore()
+	if err := store.PutConfig(context.Background(), "tester", map[string]any{"appConfig": map[string]any{"web_submit": map[string]any{
+		"enabled": true, "min_file_size": 0, "organization": "org-1", "parallel_upload_workers": 2,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	for index, bookID := range []string{"800001", "800002"} {
+		if err := store.PutDocument(context.Background(), "tester", novelfetchworkshop.Document{BookID: bookID, Gender: "女频", Meta: map[string]any{
+			"style": "现代悬疑", "platformId": "1",
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.PutBody(context.Background(), "tester", novelfetchworkshop.BodyRecord{BookID: bookID, BodyRef: novelfetchworkshop.BodyRef{VersionID: "ai1"}, Content: fmt.Sprintf("满足字数的正文内容，用于并发测试的第 %d 本。", index)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	usersDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(usersDir, "tester"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(usersDir, "tester", "upload-target.json"), []byte(`{"cookie":"session=ok"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	connector := &concurrencySubmitConnector{delay: 40 * time.Millisecond}
+	result, err := executeWebSubmit(context.Background(), "tester", usersDir, store, webSubmitRequest{TaskIDs: []string{"800001", "800002"}, Versions: []string{"ai1"}}, nil, connector)
+	if err != nil || result.Success != 2 || connector.calls != 2 {
+		t.Fatalf("result=%#v err=%v calls=%d", result, err, connector.calls)
+	}
+	connector.mu.Lock()
+	maxConcurrent := connector.max
+	connector.mu.Unlock()
+	if maxConcurrent != 2 {
+		t.Fatalf("max concurrency=%d, want 2", maxConcurrent)
 	}
 }
 

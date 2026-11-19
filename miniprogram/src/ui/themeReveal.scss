@@ -1,8 +1,0 @@
-.mp-theme-reveal{position:fixed;inset:0;z-index:9999;overflow:hidden;pointer-events:auto;background:transparent;clip-path:circle(var(--reveal-radius) at var(--reveal-x) var(--reveal-y));transition:clip-path .52s cubic-bezier(.3,0,.2,1);will-change:clip-path}
-.mp-theme-reveal-page{min-height:100vh}
-.mp-theme-reveal-content{position:absolute;left:0;right:0;top:0;pointer-events:none}
-// The preview is translated to the document scroll offset, but its sticky
-// elements have no scrolling ancestor. Restore their viewport positions.
-.mp-theme-reveal-content .mp-workspace-home .mp-brand-header,
-.mp-theme-reveal-content .home-hero{transform:translateY(var(--preview-scroll))}
-.mp-theme-reveal-content .home-status-card{transform:translateY(max(0px,calc(var(--preview-scroll) - 378rpx)))}

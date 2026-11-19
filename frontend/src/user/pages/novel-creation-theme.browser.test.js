@@ -1,0 +1,39 @@
+import test from 'node:test';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { build } from 'esbuild';
+import { runNovelBrowserDOM } from './novel-creation/browserEvidence.js';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const browser = [process.env.CHROME_PATH, 'C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'].find(p => p && existsSync(p));
+// Read the real application stylesheet imports, in application order. This
+// deliberately has no fixture :root variables that could hide a theme collision.
+const appRoot = process.env.QIANTIE_TEST_NOVEL_THEME_ROOT || path.resolve(here, '..');
+const main = readFileSync(path.join(appRoot, 'main.jsx'), 'utf8');
+const stylePaths = [...main.matchAll(/import\s+'(\.\.\/shared\/styles\/[^']+\.css)'/g)].map(m => path.resolve(appRoot, m[1]));
+const styles = stylePaths.map(p => readFileSync(p, 'utf8')).join('\n') + '\n' + readFileSync(path.join(here, 'NovelCreationPage.css'), 'utf8');
+
+for (const theme of ['dark', 'light']) test(`全站真实glass ${theme}小说Modal归档Drawer及备忘录内容头部完全不透明`, { skip: !browser }, async () => {
+  const code = `import React from 'react';import{createRoot}from'react-dom/client';import{Modal,Drawer,ConfigProvider,theme as antdTheme}from'antd';
+  document.documentElement.dataset.scheme='glass';document.documentElement.dataset.theme=${JSON.stringify(theme)};
+  window.calls=[];const wait=async()=>{for(let n=0;n<100;n++){if(document.querySelector('.ant-modal-content')&&document.querySelector('.ant-drawer-content'))return;await new Promise(r=>setTimeout(r,50))}throw Error('portals missing')};
+  createRoot(document.getElementById('root')).render(<ConfigProvider theme={{algorithm:${theme === 'dark' ? 'antdTheme.darkAlgorithm' : 'antdTheme.defaultAlgorithm'}}}><main className="legacy-shell"><div className="legacy-main"><div className="novel-creation-page"><p>底层创作正文必须被弹窗遮住</p></div></div></main><Modal open title="新建小说作品" footer={null}><p>小说弹窗正文</p></Modal><Drawer open title="导入素材"><p>小说资料正文</p></Drawer><section className="novel-memo-popup"><header className="novel-chat-heading">备忘录</header><p>备忘录正文</p></section></ConfigProvider>);
+  (async()=>{await wait();if(!CSS.supports('backdrop-filter','blur(1px)'))throw Error('glass support required');const result=[];for(const selector of ['.ant-modal-content','.ant-modal-header','.ant-drawer-content','.ant-drawer-header','.novel-memo-popup','.novel-memo-popup .novel-chat-heading']){const el=document.querySelector(selector),s=getComputedStyle(el),color=s.backgroundColor;const alpha=color.startsWith('rgba')?Number(color.split(',').at(-1).replace(')','')):color==='transparent'?0:1;result.push({selector,color,alpha,surface:s.getPropertyValue('--surface-base').trim(),blur:s.backdropFilter});if(alpha!==1)throw Error(${JSON.stringify(theme)}+' '+selector+' background alpha='+alpha+' '+color);if(s.backdropFilter!=='none')throw Error('novel dialog still blurred');}document.body.dataset.computed=JSON.stringify(result);document.body.dataset.result='passed'})().catch(e=>{document.body.dataset.error=e.message;document.body.dataset.result='failed'});`;
+  const bundle = await build({ stdin: { resolveDir: here, loader: 'jsx', contents: code }, bundle: true, write: false, minify: true, jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' }, loader: { '.css': 'empty' } });
+  const base = path.resolve(here, '../../../../_local-archive-20261028/novel-task8-theme');
+  mkdirSync(base, { recursive: true }); const dir = mkdtempSync(path.join(base, theme + '-'));
+  writeFileSync(path.join(dir, 'test.js'), bundle.outputFiles[0].text);
+  const html = path.join(dir, 'test.html'); writeFileSync(html, '<meta charset="utf-8"><style>' + styles + '</style><div id="root"></div><script src="test.js"></script>');
+  await runNovelBrowserDOM(browser, html, dir);
+});
+
+for (const [theme, viewportWidth] of [['light',1440],['dark',420]]) test(`C1b R1 原续写窗 ${theme} ${viewportWidth}宽度圆角与实体背景`, { skip: !browser }, async () => {
+  const code = `import React from 'react';import{createRoot}from'react-dom/client';import{ConfigProvider,theme as antdTheme}from'antd';import Dialog from './novel-creation/ContinuationImportDialog.jsx';
+  document.documentElement.dataset.scheme='glass';document.documentElement.dataset.theme=${JSON.stringify(theme)};
+  window.calls=[];window.fetch=async()=>new Response(JSON.stringify({styles:[]}),{headers:{'Content-Type':'application/json'}});
+  createRoot(document.getElementById('root')).render(<ConfigProvider theme={{algorithm:${theme === 'dark' ? 'antdTheme.darkAlgorithm' : 'antdTheme.defaultAlgorithm'}}}><div className="novel-creation-page"/><Dialog owner="layout-owner" open viewKey="original-form" projects={[]} onCancel={()=>{}} onPersisted={()=>{}} onImported={()=>{}}/></ConfigProvider>);
+  (async()=>{for(let n=0;n<100;n++){const modal=document.querySelector('.novel-continuation-import .ant-modal'),content=modal?.querySelector('.ant-modal-content');if(content){await new Promise(r=>setTimeout(r,350));const style=getComputedStyle(content),actual=modal.getBoundingClientRect().width,expected=Math.min(640,window.innerWidth-32);if(window.innerWidth!==${viewportWidth})throw Error('viewport not applied');if(Math.abs(actual-expected)>1)throw Error('modal width '+actual+' expected '+expected);if(style.borderRadius!=='20px')throw Error('modal radius '+style.borderRadius);if(style.backgroundColor!==${JSON.stringify(theme === 'dark' ? 'rgb(26, 26, 30)' : 'rgb(250, 249, 247)')})throw Error('modal background '+style.backgroundColor);if(style.backdropFilter!=='none'||style.opacity!=='1')throw Error('modal not solid');document.body.dataset.computed=JSON.stringify({width:actual,viewport:window.innerWidth,radius:style.borderRadius,background:style.backgroundColor,blur:style.backdropFilter});document.body.dataset.result='passed';return}await new Promise(r=>setTimeout(r,50))}throw Error('continuation modal missing')})().catch(e=>{document.body.dataset.error=e.message;document.body.dataset.result='failed'});`;
+  const bundle=await build({stdin:{resolveDir:here,loader:'jsx',contents:code},bundle:true,write:false,minify:true,jsx:'automatic',define:{'process.env.NODE_ENV':'"production"'},loader:{'.css':'empty'}});
+  const base=path.resolve(here,'../../../../_local-archive-20261028/novel-task8-theme');mkdirSync(base,{recursive:true});const dir=mkdtempSync(path.join(base,`c1b-r1-${theme}-${viewportWidth}-`));writeFileSync(path.join(dir,'test.js'),bundle.outputFiles[0].text);const html=path.join(dir,'test.html');writeFileSync(html,'<meta charset="utf-8"><style>'+styles+'</style><div id="root"></div><script src="test.js"></script>');await runNovelBrowserDOM(browser,html,dir,{width:viewportWidth,height:900});
+});

@@ -1,9 +1,0 @@
-dist/
-node_modules/
-.swc/
-project.private.config.json
-.env.development
-.env.production
-.superpowers/
-docs/previews/
-tools/login-intro-preview/.build/

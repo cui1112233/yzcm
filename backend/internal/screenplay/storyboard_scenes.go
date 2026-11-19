@@ -78,10 +78,16 @@ func splitStoryboardScenes(content string) ([]storyboardSceneInput, error) {
 	return scenes, nil
 }
 
-func (s *StoryboardService) generateSceneShots(ctx context.Context, req StoryboardRequest, episode episodeInput, units []storyboardSceneInput, selected prompt.CreativePromptSnapshot, roles, scenes, props, style, synopsis, prefix, planning, model string, useHistory bool, aspectRatio string) ([]StoryboardShot, error) {
+func (s *StoryboardService) generateSceneShots(ctx context.Context, req StoryboardRequest, episode episodeInput, units []storyboardSceneInput, selected prompt.CreativePromptSnapshot, roles, scenes, props, style, synopsis, prefix, extra, planning, model string, useHistory bool, aspectRatio string) ([]StoryboardShot, error) {
+	if req.sceneOnlyIndex == nil && selected.SourceID > 0 && !useHistory && len(units) > 1 && s.SceneConcurrency != 1 {
+		return s.generateConcurrentScenes(ctx, req, episode, units, selected, roles, scenes, props, style, synopsis, prefix, extra, planning, model, aspectRatio)
+	}
 	all := []StoryboardShot{}
 	var firstErr error
 	for index, unit := range units {
+		if req.sceneOnlyIndex != nil && index != *req.sceneOnlyIndex {
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			return all, err
 		}
@@ -101,8 +107,18 @@ func (s *StoryboardService) generateSceneShots(ctx context.Context, req Storyboa
 			vars["NEXT_SCENE_CONTENT"] = units[index+1].Content
 		}
 		user := unit.Content
+		if selected.SourceID > 0 {
+			var err error
+			user, err = prompt.StoryboardSceneUserMessage(episode.OriginalContent, unit.Content)
+			if err != nil {
+				return all, fmt.Errorf("第%d集第%d场消息构建失败：%w", episode.No, index+1, err)
+			}
+		}
 		if planning != "" {
 			user += "\n\n【本次分镜规划】\n" + planning
+		}
+		if strings.TrimSpace(extra) != "" {
+			user += "\n\n【额外内容】\n" + strings.TrimSpace(extra)
 		}
 		if useHistory {
 			history := req.generationSession.history(episode.No)
@@ -118,11 +134,28 @@ func (s *StoryboardService) generateSceneShots(ctx context.Context, req Storyboa
 				user += "\n\n【本章此前已完成场景，仅供衔接参考】\n" + string(raw)
 			}
 		}
+		if selected.SourceID == 164 {
+			// Render's braces wrap these keys, matching the ZIP's double-braced Chinese variables.
+			vars["{剧本内容}"] = episode.Content
+			vars["{前场景末尾/后场景开头分镜}"] = ""
+			if useHistory {
+				history := req.generationSession.history(episode.No)
+				if len(all) > 0 {
+					recent := all
+					if len(recent) > 5 {
+						recent = recent[len(recent)-5:]
+					}
+					raw, _ := json.Marshal(storyboardSemanticRows(recent))
+					history += "\n" + string(raw)
+				}
+				vars["{前场景末尾/后场景开头分镜}"] = strings.TrimSpace(history)
+			}
+		}
 		system := luoshui.Render(selected.Body, vars)
 		if strings.TrimSpace(prefix) != "" {
 			system = prefix + "\n\n" + system
 		}
-		response, err := s.generationCall(ctx, req, episode.No, phase, TextRequest{Model: model, SystemPrompt: system, UserPrompt: user, JSONResponse: selected.ResponseMode != "json_with_report" && selected.ResponseMode != "text"})
+		response, err := s.generationCall(ctx, req, episode.No, phase, TextRequest{Model: model, SystemPrompt: system, UserPrompt: user, JSONResponse: selected.ResponseMode != "json_with_report" && selected.ResponseMode != "text", SingleAttempt: true})
 		if err == nil {
 			err = ctx.Err()
 		}
@@ -135,7 +168,7 @@ func (s *StoryboardService) generateSceneShots(ctx context.Context, req Storyboa
 		}
 		if err != nil {
 			err = wrapAIError(err)
-			if ctx.Err() == nil && req.generationSession.attempt.Episodes[episode.No].Calls[phase].Status == "received" {
+			if ctx.Err() == nil && req.generationSession.callStatus(episode.No, phase) == "received" {
 				if saveErr := req.generationSession.mutate(context.WithoutCancel(ctx), func(a *StoryboardGenerationAttempt) error {
 					call := a.Episodes[episode.No].Calls[phase]
 					call.Status = "invalid"
@@ -153,7 +186,7 @@ func (s *StoryboardService) generateSceneShots(ctx context.Context, req Storyboa
 			if firstErr == nil {
 				firstErr = wrapped
 			}
-			if ctx.Err() != nil || req.generationSession.attempt.Episodes[episode.No].Calls[phase].Status == "unknown" {
+			if ctx.Err() != nil || req.generationSession.callStatus(episode.No, phase) == "unknown" {
 				return all, wrapped
 			}
 			continue

@@ -2,8 +2,11 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"qiantie/backend/internal/novelfetchworkshop"
@@ -24,12 +27,17 @@ func RegisterWebSubmitSubmitCompat(root *http.ServeMux, middleware BridgeAuth, u
 			return
 		}
 		var body struct {
-			TaskIDs         []string `json:"taskIds"`
-			IDs             []string `json:"ids"`
-			Versions        []string `json:"versions"`
-			OperationID     string   `json:"operationId"`
-			ReadbackOnly    bool     `json:"readback_only"`
-			PreviewRevision string   `json:"previewRevision"`
+			TaskIDs      []string `json:"taskIds"`
+			IDs          []string `json:"ids"`
+			Mode         string   `json:"mode"`
+			Versions     []string `json:"versions"`
+			OperationID  string   `json:"operationId"`
+			ReadbackOnly bool     `json:"readback_only"`
+			// 参考实现接收 force/grouped/dry_run；其中 force 允许重提已确认版本，
+			// dry_run 只生成计划不执行上传。
+			Force   bool `json:"force"`
+			Grouped bool `json:"grouped"`
+			DryRun  bool `json:"dry_run"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 64<<10)).Decode(&body); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求内容无效"})
@@ -38,15 +46,55 @@ func RegisterWebSubmitSubmitCompat(root *http.ServeMux, middleware BridgeAuth, u
 		if len(body.TaskIDs) == 0 {
 			body.TaskIDs = body.IDs
 		}
-		if body.PreviewRevision != "" {
-			revision, err := webSubmitPreviewRevision(req.Context(), store, identity.Username, body.TaskIDs, body.Versions)
-			if err != nil || revision != body.PreviewRevision {
-				writeJSON(w, http.StatusConflict, map[string]string{"error": "正文、版本或提交配置已变化，请重新生成提交预览后确认"})
-				return
-			}
-		}
-		result, err := executeWebSubmit(req.Context(), identity.Username, usersDir, store, webSubmitRequest{TaskIDs: body.TaskIDs, Versions: body.Versions, OperationID: body.OperationID, ReadbackOnly: body.ReadbackOnly}, genderJudgeResolver, targets...)
+		// 参考实现支持 mode=selected|failed|all 的提交范围；
+		// all 表示当前账号全部可见任务，不受页面日期/搜索过滤影响。
+		resolvedIDs, err := resolveWorkshopTaskIDs(req.Context(), store, identity.Username, body.Mode, body.TaskIDs, workshopSubmitFailed)
 		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取任务失败"})
+			return
+		}
+		body.TaskIDs = resolvedIDs
+		// 参考实现的提交不依赖预览令牌，预览只用于查看。这里保留字段兼容旧前端，
+		// 但不再因为后台 meta 变化而拒绝提交；提交时按最新正文和配置重新生成计划。
+		planPayload, status, message := buildWebSubmitPlanPayload(req.Context(), store, identity.Username, body.TaskIDs, body.Versions, body.Force)
+		if status != http.StatusOK {
+			writeJSON(w, status, map[string]string{"error": message})
+			return
+		}
+		// 无论 dry_run 还是真实提交，都先把计划落盘成 manifest；
+		// 崩溃后可以据此识别 executing/unknown，避免重复派发。
+		runID := newWebSubmitRunID()
+		manifest, manifestErr := newWebSubmitManifest(usersDir, identity.Username, runID, map[bool]string{true: "dry_run", false: "manual_submit"}[body.DryRun], planPayload)
+		if manifestErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "提交计划落盘失败，请检查数据目录后重试"})
+			return
+		}
+		if body.DryRun {
+			manifest.finish("dry_run")
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":                true,
+				"dry_run":           true,
+				"requested":         planPayload["requested"],
+				"group_count":       len(arrayOrEmpty(planPayload["groups"])),
+				"success_groups":    0,
+				"failed_groups":     0,
+				"results":           []any{},
+				"skipped":           planPayload["skipped"],
+				"deferred_items":    planPayload["deferred_items"],
+				"requested_items":   planPayload["requested_items"],
+				"planned_items":     planPayload["planned_items"],
+				"missing_items":     planPayload["missing_items"],
+				"versions":          planPayload["versions"],
+				"plan_complete":     planPayload["plan_complete"],
+				"submission_run_id": runID,
+				"groups":            planPayload["groups"],
+				"plan":              planPayload["plan"],
+			})
+			return
+		}
+		result, err := executeWebSubmit(req.Context(), identity.Username, usersDir, store, webSubmitRequest{TaskIDs: body.TaskIDs, Versions: body.Versions, OperationID: body.OperationID, ReadbackOnly: body.ReadbackOnly, Force: body.Force, Manifest: manifest}, genderJudgeResolver, targets...)
+		if err != nil {
+			manifest.finish("aborted")
 			status := http.StatusInternalServerError
 			if requestErr, ok := err.(*webSubmitRequestError); ok {
 				status = requestErr.Status
@@ -54,15 +102,41 @@ func RegisterWebSubmitSubmitCompat(root *http.ServeMux, middleware BridgeAuth, u
 			writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
+		manifest.finish("completed")
 		// 保持 200 以兼容旧前端：非 2xx 会让老客户端直接进入硬失败分支并丢掉逐版本结果。
 		// 整体成败通过 ok + result(all_ok/partial/all_failed) + 每个失败项的 code/message 表达。
-		writeJSON(w, http.StatusOK, map[string]any{"ok": result.Failed == 0, "result": webSubmitOverallResult(result.Success, result.Failed), "operation_id": result.OperationID, "results": decorateWebSubmitResults(result.Results), "success_groups": result.Success, "failed_groups": result.Failed})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":                result.Failed == 0,
+			"result":            webSubmitOverallResult(result.Success, result.Failed),
+			"operation_id":      result.OperationID,
+			"submission_run_id": runID,
+			"requested":         len(body.TaskIDs),
+			"group_count":       len(arrayOrEmpty(planPayload["groups"])),
+			"success_groups":    result.Success,
+			"failed_groups":     result.Failed,
+			"skipped":           planPayload["skipped"],
+			"deferred_items":    planPayload["deferred_items"],
+			"results":           decorateWebSubmitResults(result.Results),
+		})
 	}))
 	// The legacy workbench calls /api/web-submit/submit, while the canonical
 	// compatibility route lives under /api/batch-rewrite/web-submit/submit.
 	// Keep both paths on the same handler so the Go 4001 page cannot 404.
 	root.Handle("POST /api/batch-rewrite/web-submit/submit", submitHandler)
 	root.Handle("POST /api/web-submit/submit", submitHandler)
+	// 提交清单读取：用于提交历史、排障和崩溃后确认上次轮次的落盘状态。
+	manifestHandler := middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		identity, ok := BridgeIdentityFromContext(req.Context())
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		recoverStaleWebSubmitManifests(usersDir, identity.Username)
+		limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "runs": listWebSubmitManifests(usersDir, identity.Username, limit)})
+	}))
+	root.Handle("GET /api/batch-rewrite/web-submit/manifests", manifestHandler)
+	root.Handle("GET /api/web-submit/manifests", manifestHandler)
 }
 
 func webSubmitSkipSubmitted(web map[string]any) bool {
@@ -104,7 +178,52 @@ func webSubmitAdvanced(web, profile map[string]any) map[string]any {
 }
 
 func webSubmitOrganization(web, profile map[string]any) string {
-	return firstText(web["organization"], profile["organization"], mapOrEmpty(profile["advanced"])["organization"], "1")
+	// 与参考实现一致：配置里没有组织归属时不再默认 "1" 静默提交，
+	// 而是由提交计划阻塞为 waiting_config，提示用户先同步组织。
+	return firstText(web["organization"], profile["organization"], mapOrEmpty(profile["advanced"])["organization"])
+}
+
+// webSubmitMinFileSize 与参考实现一致：默认 3KB，避免把空文件或明显过短的正文推到网站。
+func webSubmitMinFileSize(web map[string]any) int {
+	if value, ok := web["min_file_size"]; ok {
+		return intValue(value)
+	}
+	return 3 * 1024
+}
+
+func submissionResolvedGender(doc novelfetchworkshop.Document) string {
+	gender, _ := submissionGenderStyle(doc)
+	if genderNeedsResolution(gender) {
+		return ""
+	}
+	return strings.TrimSpace(gender)
+}
+
+func submissionResolvedStyle(meta map[string]any) string {
+	if styleNeedsResolution(meta) {
+		return ""
+	}
+	return strings.TrimSpace(firstText(meta["style"], meta["styleName"], meta["style_name"]))
+}
+
+// submissionClassificationGaps 对齐参考实现：平台、男女频、风格类型缺失时
+// 都不允许提交，而不是只阻塞风格。
+func submissionClassificationGaps(platform, gender, style string) []string {
+	gaps := []string{}
+	if strings.TrimSpace(platform) == "" {
+		gaps = append(gaps, "平台")
+	}
+	if strings.TrimSpace(gender) == "" {
+		gaps = append(gaps, "男女频")
+	}
+	if strings.TrimSpace(style) == "" {
+		gaps = append(gaps, "风格类型")
+	}
+	return gaps
+}
+
+func submissionGapError(gaps []string) string {
+	return "无法映射网站字段：" + strings.Join(gaps, "、")
 }
 
 func submissionGenderStyle(doc novelfetchworkshop.Document) (string, string) {
@@ -129,11 +248,65 @@ func resolveSubmissionGender(ctx context.Context, doc *novelfetchworkshop.Docume
 	syncNovelFetchClassificationMetadata(doc)
 }
 
-const webSubmitUnclassifiedStyleError = "该任务尚未识别或选择上传风格，无法提交到视频管理系统。"
-
 func styleNeedsResolution(meta map[string]any) bool {
 	style := strings.TrimSpace(firstText(meta["style"], meta["styleName"], meta["style_name"]))
 	return style == "" || style == "待判定" || style == "未判定"
+}
+
+// webSubmitParallelism 返回同一账号内的传书并发数，默认 4，最大 4。
+func webSubmitParallelism(web map[string]any) int {
+	workers := intValue(web["parallel_upload_workers"])
+	if workers <= 0 {
+		workers = 4
+	}
+	if workers > 4 {
+		workers = 4
+	}
+	return workers
+}
+
+// webSubmitSourceBookID 解析目标站认可的书号。内部任务 ID 可能带账号前缀，
+// 因此优先取 source/display/book 字段；只接受纯数字，与连接器回读约束一致。
+func webSubmitSourceBookID(meta map[string]any, bookID string) (string, bool) {
+	source := strings.TrimSpace(firstText(
+		meta["source_book_id"], meta["sourceBookId"],
+		meta["display_book_id"], meta["displayBookId"],
+		meta["book_id"], meta["bookId"], bookID,
+	))
+	if source == "" {
+		return "", false
+	}
+	for _, char := range source {
+		if char < '0' || char > '9' {
+			return "", false
+		}
+	}
+	return source, true
+}
+
+// webSubmitCanonicalContentHash 与参考实现一致：统一换行后计算 SHA-256，
+// 用于判断不同版本是否承载了完全相同的正文。
+func webSubmitCanonicalContentHash(text string) string {
+	normalized := strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
+	if strings.TrimSpace(normalized) == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(normalized))
+	return hex.EncodeToString(sum[:])
+}
+
+func webSubmitConfirmedContentHashes(ctx context.Context, store novelfetchworkshop.Store, owner, bookID string, versions []string) map[string][]string {
+	hashes := map[string][]string{}
+	for _, version := range uniqueStrings(versions) {
+		body, err := store.GetBody(ctx, owner, bookID, version)
+		if err != nil || strings.TrimSpace(body.Content) == "" {
+			continue
+		}
+		if hash := webSubmitCanonicalContentHash(body.Content); hash != "" {
+			hashes[hash] = append(hashes[hash], version)
+		}
+	}
+	return hashes
 }
 
 func uniqueStrings(values []string) []string {
@@ -181,6 +354,47 @@ func webSubmitOverallResult(success, failed int) string {
 	}
 }
 
+// webSubmitStatusText 把历史状态（pending_upload/error/pending_confirmation）
+// 和新状态（waiting_config/unknown 等）收敛成同一套中文词汇，接口和页面共用。
+func webSubmitStatusText(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "submitted", "success", "done", "uploaded":
+		return "已提交"
+	case "pending_confirmation", "pending_verification":
+		return "待远端核验"
+	case "unknown":
+		return "结果未知"
+	case "partial":
+		return "部分接收"
+	case "pending_upload", "pending", "pending_submit", "queued":
+		return "待提交"
+	case "waiting_configuration", "waiting_config":
+		return "等待配置"
+	case "waiting_login":
+		return "等待登录"
+	case "waiting_classification", "waiting_classify":
+		return "等待确认分类"
+	case "waiting_generate", "pending_generate":
+		return "待生成"
+	case "waiting_original":
+		return "待原文"
+	case "blocked":
+		return "已阻塞"
+	case "executing", "processing", "running":
+		return "执行中"
+	case "deferred":
+		return "已延后"
+	case "skipped":
+		return "已跳过"
+	case "failed", "error":
+		return "失败"
+	case "stopped":
+		return "已停止"
+	default:
+		return strings.TrimSpace(status)
+	}
+}
+
 // decorateWebSubmitResults 为失败项补齐 code/message，便于前端逐条展示可操作原因。
 func decorateWebSubmitResults(items []any) []any {
 	if len(items) == 0 {
@@ -193,9 +407,12 @@ func decorateWebSubmitResults(items []any) []any {
 			decorated = append(decorated, item)
 			continue
 		}
-		cloned := make(map[string]any, len(row)+2)
+		cloned := make(map[string]any, len(row)+3)
 		for key, value := range row {
 			cloned[key] = value
+		}
+		if status := toString(cloned["status"]); strings.TrimSpace(status) != "" {
+			cloned["status_label"] = webSubmitStatusText(status)
 		}
 		switch strings.ToLower(strings.TrimSpace(toString(cloned["status"]))) {
 		case "pending_confirmation":

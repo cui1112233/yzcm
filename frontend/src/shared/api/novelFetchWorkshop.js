@@ -44,8 +44,14 @@ export function workshopRealtimeStatusPath() {
   return '/api/novel-fetch-workshop/realtime/status';
 }
 
-export function getWorkshopRealtimeStatus() {
-  return apiRequest(workshopRealtimeStatusPath());
+// 队列统计必须带批次或日期：后端默认只统计当前批次，旧批次未完成的
+// 任务不会再混进当天横幅。
+export function getWorkshopRealtimeStatus({ batchId = '', date = '' } = {}) {
+  const params = new URLSearchParams();
+  if (batchId) params.set('batch_id', batchId);
+  if (date) params.set('date', date);
+  const query = params.toString();
+  return apiRequest(`${workshopRealtimeStatusPath()}${query ? `?${query}` : ''}`);
 }
 
 export function startWorkshopAutomation() {
@@ -82,6 +88,15 @@ export function stopWorkshopTasks(ids) {
   return apiRequest('/api/novel-fetch-workshop/tasks/stop-selected', {
     method: 'POST',
     body: JSON.stringify({ ids })
+  });
+}
+
+// 按作业停止：传 job_id 时停止该作业；不传时停止当前账号所有未完成任务，
+// 并按参考实现默认暂停自动队列（pause_auto_queue 可显式关闭）。
+export function stopWorkshopProcess(payload = {}) {
+  return apiRequest('/api/novel-fetch-workshop/process/stop', {
+    method: 'POST',
+    body: JSON.stringify(payload)
   });
 }
 

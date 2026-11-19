@@ -51,6 +51,7 @@ import {
 	Upload as AntUpload,
   message
 } from 'antd';
+import { UploadSentButton, useUploadSentState } from '../../../shared/components/UploadSentButton';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 const InputNumber = NativeInputNumber;
@@ -1115,12 +1116,13 @@ function DeferredInlineBookPrompts(props) {
     return () => observer.disconnect();
   }, [loaded]);
   if (loaded) return <InlineBookPrompts {...props} />;
-  return <div ref={placeholderRef} className="shuihuo-workbench-cell batch-factory-storyboard-cell">
+  return <div ref={placeholderRef} className={`shuihuo-workbench-cell batch-factory-storyboard-cell${props.automationActive ? ' is-automation-cell' : ''}`}>
     <div className="batch-factory-cell-empty">滚动到附近后加载分镜提示词。</div>
   </div>;
 }
 
-function InlineBookPrompts({ batch, book, batchId, settingsRevision, productionMode = 'video', selectedVideoId: controlledSelectedVideoId = '', onSelectedVideoChange, onManage }) {
+function InlineBookPrompts({ batch, book, batchId, settingsRevision, productionMode = 'video', automationActive = false, selectedVideoId: controlledSelectedVideoId = '', onSelectedVideoChange, onManage }) {
+  const promptCellClassName = `shuihuo-workbench-cell shuihuo-prompt-cell batch-factory-book-prompt-cell${automationActive ? ' is-automation-cell' : ''}`;
   const videos = book?.videos || [];
 	const h3Cards = h3DirectorCards(book);
   const precompiledWorkspace = resolvePrecompiledVideoWorkspace(book);
@@ -1192,7 +1194,7 @@ function InlineBookPrompts({ batch, book, batchId, settingsRevision, productionM
 			if (next) selectVideo(next.key);
 		};
 		const camera = h3Card.camera || {};
-		return <div className="shuihuo-workbench-cell shuihuo-prompt-cell batch-factory-book-prompt-cell">
+		return <div className={promptCellClassName}>
 			<div className="batch-factory-cell-shell batch-factory-prompt-entry-card is-h3-director-card">
 				<header className="batch-factory-cell-head"><div><b>导演分镜卡 {h3CardIndex + 1}</b><small>视频提示词：{h3VideoPromptLabel} · 已提取，尚未编译 VIDEO</small></div></header>
 				<button type="button" className="batch-factory-cell-content batch-factory-prompt-entry-content" aria-label="打开分镜提示词编辑" onClick={() => onManage?.(h3Frame?.key || '')}>
@@ -1209,12 +1211,12 @@ function InlineBookPrompts({ batch, book, batchId, settingsRevision, productionM
 		</div>;
 	}
 
-  if (!video) return <div className="shuihuo-workbench-cell shuihuo-prompt-cell batch-factory-book-prompt-cell"><div className="batch-factory-cell-shell"><div className="batch-factory-cell-empty">AI 推理后会在这里显示当前书的分镜提示词。</div></div></div>;
+  if (!video) return <div className={promptCellClassName}><div className="batch-factory-cell-shell"><div className="batch-factory-cell-empty">AI 推理后会在这里显示当前书的分镜提示词。</div></div></div>;
 
   const stateLabel = promptKind === 'visual' ? (hasVisualPrompt ? '漫画已生成' : '待生成') : loading ? '编译中' : videoPrompt.trim() ? (smartUnifiedPending ? '基线未获取' : '最终已编译') : '待生成';
   const videoPromptLabel = selectedVideoPromptLabel(effectiveBookSettings(batch, book));
 
-  return <div className="shuihuo-workbench-cell shuihuo-prompt-cell batch-factory-book-prompt-cell">
+  return <div className={promptCellClassName}>
     <div className="batch-factory-cell-shell batch-factory-prompt-entry-card">
       <header className="batch-factory-cell-head">
         <div><b>{productionMode === 'comic' ? `漫画页 ${String(selectedIndex + 1).padStart(2, '0')}` : storyboardVideoLabel(video, selectedIndex)}</b><small>{promptKind === 'visual' ? '漫画提示词' : '最终视频提示词'}</small></div>
@@ -1974,7 +1976,6 @@ function InlineComicLibrary({ batchId, book, selectedVideoId: controlledSelected
   return <div className="batch-factory-cell-shell batch-factory-inline-comic">
     <header className="batch-factory-cell-head"><div><b>漫画页 {String(selectedIndex + 1).padStart(2, '0')}</b><small>{presentation.statusText}</small>{generatingPageCount > 0 ? <small className="batch-factory-comic-stale batch-factory-comic-running"><CmLoader size={13} title="正在生成" />正在生成 {generatingPageCount} 页…</small> : (followActive ? <small className="batch-factory-comic-stale batch-factory-comic-running"><CmLoader size={13} tone="pending" title="等待开始" />已提交重试，等待开始…</small> : null)}{page?.configStale ? <small className="batch-factory-comic-stale">原文已变化，建议重新分析分页与提示词</small> : null}</div><span className={`batch-factory-cell-state${primary ? ' is-ready' : ''}`}>{presentation.stateText}</span></header>
     <div className={`batch-factory-inline-comic-stage${generatingPageCount > 0 ? ' is-busy' : (followActive ? ' is-pending' : '')}`}>
-      {page?.generationError && !primary ? <BatchFactoryErrorNotice lineMode title="漫画页生成失败" error={page.generationError} /> : null}
       <button type="button" className="batch-factory-inline-comic-primary" onClick={() => (presentation.retry ? setReloadKey(key => key + 1) : onManage?.(selectedVideo.id))}>
         {primary?.url ? <AuthenticatedComicPageImage imageUrl={primary.url} thumbnailUrl={primary.thumbnailUrl} alt={`漫画页 ${selectedIndex + 1}`} lazy /> : <>{presentation.tone === 'busy' ? <CmLoader size={30} title="漫画页生成中" /> : <PictureOutlined />}<span>{presentation.placeholder}</span></>}
       </button>
@@ -2004,6 +2005,7 @@ function ComicMediaPanel({ batchId, book, comicPublishSettings = {}, initialVide
   const [busy, setBusy] = useState('');
 	const [referenceUploading, setReferenceUploading] = useState(false);
 	const [publishTarget, setPublishTarget] = useState(null);
+	const comicPublishSent = useUploadSentState();
 	// 发布入口不能因为状态目录短暂读取失败而被锁死；提交时仍由后端做最终校验。
 	const [publishConfigured, setPublishConfigured] = useState(true);
 	const [publishStatusLoaded, setPublishStatusLoaded] = useState(false);
@@ -2297,8 +2299,10 @@ function ComicMediaPanel({ batchId, book, comicPublishSettings = {}, initialVide
 			});
 			const published = resultData(response, 'publish');
 			setPublishedByCollection(current => ({ ...current, [publishTarget.id]: published }));
-			setPublishTarget(null);
+			// 让「纸飞机飞出 + 上传成功」在确认按钮上播完再收起弹窗。
+			comicPublishSent.markSent();
 			message.success(`漫画合集已发布：${published?.name || book.title}`);
+			window.setTimeout(() => setPublishTarget(null), 1700);
 		} catch (error) { message.error(error?.message || '发布漫画合集失败'); }
 		finally { setBusy(''); }
 	}
@@ -2339,7 +2343,7 @@ function ComicMediaPanel({ batchId, book, comicPublishSettings = {}, initialVide
 		<section className="batch-factory-comic-media-section batch-factory-comic-page-reference"><header><div><b>本页参考图</b><small>约束人物、服装和画风</small></div><span>{selectedPage?.referenceImageUrls?.length ? `已设置 ${selectedPage.referenceImageUrls.length} 张` : '未设置'}</span></header><Space wrap>{(selectedPage?.referenceImageUrls || []).map(referenceURL => <AuthenticatedComicPageReference key={referenceURL} referenceURL={referenceURL} />)}<AntUpload accept="image/png,image/jpeg,image/webp" showUploadList={false} beforeUpload={uploadPageReference} disabled={!selectedVideoId || referenceUploading || Boolean(busy)}><Button size="small" icon={<UploadOutlined />} loading={referenceUploading}>上传参考图</Button></AntUpload><Button size="small" disabled={!selectedPage?.referenceImageUrls?.length || Boolean(busy)} loading={busy === 'reference-all'} onClick={applyPageReferenceToAll}>应用到全部</Button>{selectedPage?.referenceImageUrls?.length ? <Button size="small" danger disabled={Boolean(busy)} loading={busy === 'reference'} onClick={() => savePageReferences([], '当前漫画页参考图已清空。')}>清空</Button> : null}</Space></section>
 		<section className="batch-factory-comic-media-section batch-factory-comic-media-source"><ComicSourceContent segment={sourceSegment} ordinal={selectedIndex} onSplit={splitSource} embedded /></section>
 	</div>;
-	const collectionTab = <div className="batch-factory-comic-collections"><div className="batch-factory-comic-collection-actions"><div><b>漫画合集</b><small>按页码范围收集当前主图；同一本书可以分批生成多个合集。</small></div><Tag color={publishConfigured ? 'success' : 'warning'}>{publishStatusLoaded ? (publishConfigured ? '漫画后台已连接' : '漫画后台未配置') : '检查连接中'}</Tag></div><section className="batch-factory-comic-collection-range"><header><div><b>生成漫画合集</b><small>发布接口支持 2–35 页，未选中的页不会进入本合集。</small></div><Tag color={canMakeCollection ? 'success' : 'warning'}>{selectedCollectionPageCount} 页 · 已就绪 {selectedReadyPageCount} 页</Tag></header><div className="batch-factory-comic-collection-range-fields"><span>第</span><InputNumber min={1} max={maxCollectionPage} value={normalizedCollectionStart} onChange={value => updateCollectionRange(value, normalizedCollectionEnd)} /><span>页至</span><InputNumber min={normalizedCollectionStart} max={maxCollectionPage} value={normalizedCollectionEnd} onChange={value => updateCollectionRange(normalizedCollectionStart, value)} /><span>页</span></div><div className="batch-factory-comic-collection-range-shortcuts"><Button type="link" size="small" onClick={() => updateCollectionRange(1, Math.min(maxCollectionPage, 35))}>前 35 页</Button><Button type="link" size="small" onClick={() => updateCollectionRange(Math.max(1, maxCollectionPage - 34), maxCollectionPage)}>后 35 页</Button></div><Button className="batch-factory-comic-collection-range-submit" type="primary" loading={busy === 'collection'} disabled={!canMakeCollection || Boolean(busy)} onClick={makeCollection}>整理所选页为合集</Button></section>{collections.slice().reverse().map(collection => { const published = publishedByCollection[collection.id]; return <section key={collection.id}><header><b>{new Date(collection.createdAt).toLocaleString()}</b><Space><Tag color="success">{collection.items?.length || 0} 页</Tag><Button size="small" icon={<DownloadOutlined />} disabled={!collection.items?.length || Boolean(busy)} loading={busy === `collection-download-${collection.id}`} onClick={() => downloadCollectionImages(collection)}>下载图片</Button>{published ? <Tag color="blue">已发布 #{published.carouselId}</Tag> : <Button size="small" disabled={!publishConfigured || (collection.items?.length || 0) < 2 || (collection.items?.length || 0) > 35} loading={busy === `publish-${collection.id}`} onClick={() => openComicPublish(collection)}>发布到漫画后台</Button>}</Space></header><div>{(collection.items || []).map(item => <figure key={`${collection.id}-${item.ordinal}`}><AuthenticatedComicPageImage imageUrl={item.url} thumbnailUrl={item.thumbnailUrl} alt={`第 ${item.ordinal} 页`} lazy /><figcaption>第 ${item.ordinal} 页</figcaption></figure>)}</div></section>; })}{!collections.length ? <div className="batch-factory-cell-empty">先选择页码范围，再整理当前选中页的主图。</div> : null}</div>;
+	const collectionTab = <div className="batch-factory-comic-collections"><div className="batch-factory-comic-collection-actions"><div><b>漫画合集</b><small>按页码范围收集当前主图；同一本书可以分批生成多个合集。</small></div><Tag color={publishConfigured ? 'success' : 'warning'}>{publishStatusLoaded ? (publishConfigured ? '漫画后台已连接' : '漫画后台未配置') : '检查连接中'}</Tag></div><section className="batch-factory-comic-collection-range"><header><div><b>生成漫画合集</b><small>发布接口支持 2–35 页，未选中的页不会进入本合集。</small></div><Tag color={canMakeCollection ? 'success' : 'warning'}>{selectedCollectionPageCount} 页 · 已就绪 {selectedReadyPageCount} 页</Tag></header><div className="batch-factory-comic-collection-range-fields"><span>第</span><InputNumber min={1} max={maxCollectionPage} value={normalizedCollectionStart} onChange={value => updateCollectionRange(value, normalizedCollectionEnd)} /><span>页至</span><InputNumber min={normalizedCollectionStart} max={maxCollectionPage} value={normalizedCollectionEnd} onChange={value => updateCollectionRange(normalizedCollectionStart, value)} /><span>页</span></div><div className="batch-factory-comic-collection-range-shortcuts"><Button type="link" size="small" onClick={() => updateCollectionRange(1, Math.min(maxCollectionPage, 35))}>前 35 页</Button><Button type="link" size="small" onClick={() => updateCollectionRange(Math.max(1, maxCollectionPage - 34), maxCollectionPage)}>后 35 页</Button></div><Button className="batch-factory-comic-collection-range-submit" type="primary" loading={busy === 'collection'} disabled={!canMakeCollection || Boolean(busy)} onClick={makeCollection}>整理所选页为合集</Button></section>{collections.slice().reverse().map(collection => { const published = publishedByCollection[collection.id]; return <section key={collection.id}><header><b>{new Date(collection.createdAt).toLocaleString()}</b><Space><Tag color="success">{collection.items?.length || 0} 页</Tag><Button size="small" icon={<DownloadOutlined />} disabled={!collection.items?.length || Boolean(busy)} loading={busy === `collection-download-${collection.id}`} onClick={() => downloadCollectionImages(collection)}>下载图片</Button>{published ? <Tag color="blue">已发布 #{published.carouselId}</Tag> : <Button className="batch-factory-comic-publish-entry" size="small" disabled={!publishConfigured || (collection.items?.length || 0) < 2 || (collection.items?.length || 0) > 35} loading={busy === `publish-${collection.id}`} onClick={() => openComicPublish(collection)}>发布到漫画后台</Button>}</Space></header><div>{(collection.items || []).map(item => <figure key={`${collection.id}-${item.ordinal}`}><AuthenticatedComicPageImage imageUrl={item.url} thumbnailUrl={item.thumbnailUrl} alt={`第 ${item.ordinal} 页`} lazy /><figcaption>第 ${item.ordinal} 页</figcaption></figure>)}</div></section>; })}{!collections.length ? <div className="batch-factory-cell-empty">先选择页码范围，再整理当前选中页的主图。</div> : null}</div>;
 	return <><div className="batch-factory-comic-media-workbench">
 		<section className="batch-factory-comic-media-preview">{primary?.url ? <AuthenticatedComicPageImage imageUrl={primary.url} thumbnailUrl={primary.thumbnailUrl} alt="当前漫画主图" preview /> : <div className="batch-factory-comic-media-preview-empty"><PictureOutlined /><strong>{selectedPage ? '当前漫画页还没有主图' : '当前分镜还没有漫画候选图'}</strong><span>{selectedComicPageStatus}</span><small>{pageAccessMessage || `整体完成度 ${readyComicPageCount} / ${videos.length} 页（${comicCompletionPercent}%）`}</small></div>}</section>
 		<aside className="batch-factory-comic-media-tools">
@@ -2348,7 +2352,7 @@ function ComicMediaPanel({ batchId, book, comicPublishSettings = {}, initialVide
 			<div className="batch-factory-comic-media-scroll">{activeView === 'pages' ? pageTab : collectionTab}</div>
 			<footer className="batch-factory-comic-media-footer"><div><Button disabled={selectedIndex === 0} aria-label="上一页" icon={<LeftOutlined />} onClick={() => setSelectedVideoId(videos[selectedIndex - 1]?.id)} /><span><b>{String(selectedIndex + 1).padStart(2, '0')}</b> / {String(videos.length).padStart(2, '0')}</span><Button disabled={selectedIndex >= videos.length - 1} aria-label="下一页" icon={<RightOutlined />} onClick={() => setSelectedVideoId(videos[selectedIndex + 1]?.id)} /></div><Button icon={<ReloadOutlined />} loading={generatingPage} disabled={!selectedVideoId || Boolean(busy) || generatingPage || !onGeneratePage} onClick={regenerateCurrentPage}>重新生成本页</Button></footer>
 		</aside>
-	</div><Modal title="确认发布漫画合集" open={Boolean(publishTarget)} onCancel={() => setPublishTarget(null)} onOk={confirmComicPublish} okText="确认发布" confirmLoading={String(busy).startsWith('publish-')} okButtonProps={{ disabled: !canPublish }} destroyOnClose><Space direction="vertical" size={14} style={{ width: '100%' }}><Alert type={publishConfigured ? 'info' : 'warning'} showIcon message={publishConfigured ? '漫画后台接口已连接' : '服务器尚未配置漫画后台接口密钥'} description="发布后会按当前主图顺序上传，不会上传候选图。每个合集只能创建一次，重复点击会返回原发布记录。" />{producerAccountsWarning ? <Alert type="warning" showIcon message={producerAccountsWarning} /> : null}<Descriptions size="small" column={1} bordered items={[{ key: 'name', label: '合集名称', children: publishNamePreview || '选择制作者账号后生成' }, { key: 'pages', label: '漫画页', children: `${publishPageCount} 页（接口要求 2 到 35 页）` }, { key: 'organization', label: '所属组织', children: organizations.find(item => String(item.id) === String(publishForm.organizationId))?.name ? `${organizations.find(item => String(item.id) === String(publishForm.organizationId)).name}（组织 ${publishForm.organizationId}）` : `组织 ${publishForm.organizationId || '未填'}` }, { key: 'category', label: '音频分类', children: comicPublishSettings.audioCategoryName ? `${comicPublishSettings.audioCategoryName}（ID ${publishForm.audioCategoryId || '未填'}）` : `ID ${publishForm.audioCategoryId || '未填'}` }]} /><label className="batch-factory-engine-field"><span><b>制作者账号（创意者）</b></span><Select showSearch optionFilterProp="label" value={publishForm.producerAdminName || undefined} options={producerOptions} disabled={publishStatusLoaded && producerOptions.length === 0} onChange={producerAdminName => setPublishForm(current => ({ ...current, producerAdminName }))} placeholder={producerOptions.length ? '请选择制作者账号' : '账号目录尚未配置'} /></label><label className="batch-factory-engine-field"><span><b>所属组织</b></span><Select value={String(publishForm.organizationId || '') || undefined} options={organizations.map(item => ({ value: String(item.id), label: `${item.name}（组织 ${item.id}）` }))} placeholder="请选择 N8 组织" onChange={organizationId => setPublishForm(current => ({ ...current, organizationId: String(organizationId || '') }))} /></label><label className="batch-factory-engine-field"><span><b>音频分类 ID</b></span><InputNumber min={1} precision={0} value={publishForm.audioCategoryId} onChange={audioCategoryId => setPublishForm(current => ({ ...current, audioCategoryId }))} placeholder="启用中的音频分类 ID" style={{ width: '100%' }} /></label>{workSelect}<label className="batch-factory-engine-field"><span><b>手动作品 ID（备用）</b></span><Input value={publishForm.workIdsText} onChange={event => setPublishForm(current => ({ ...current, workIdsText: event.target.value }))} placeholder="查询不到时填写一个或多个作品 ID" /></label></Space></Modal></>;
+	</div><Modal title="确认发布漫画合集" open={Boolean(publishTarget)} onCancel={() => setPublishTarget(null)} footer={<Space><Button onClick={() => setPublishTarget(null)}>取消</Button><UploadSentButton type="primary" sent={comicPublishSent.sent} loading={String(busy).startsWith('publish-')} disabled={!canPublish} onClick={confirmComicPublish}>确认发布</UploadSentButton></Space>} destroyOnClose><Space direction="vertical" size={14} style={{ width: '100%' }}><Alert type={publishConfigured ? 'info' : 'warning'} showIcon message={publishConfigured ? '漫画后台接口已连接' : '服务器尚未配置漫画后台接口密钥'} description="发布后会按当前主图顺序上传，不会上传候选图。每个合集只能创建一次，重复点击会返回原发布记录。" />{producerAccountsWarning ? <Alert type="warning" showIcon message={producerAccountsWarning} /> : null}<Descriptions size="small" column={1} bordered items={[{ key: 'name', label: '合集名称', children: publishNamePreview || '选择制作者账号后生成' }, { key: 'pages', label: '漫画页', children: `${publishPageCount} 页（接口要求 2 到 35 页）` }, { key: 'organization', label: '所属组织', children: organizations.find(item => String(item.id) === String(publishForm.organizationId))?.name ? `${organizations.find(item => String(item.id) === String(publishForm.organizationId)).name}（组织 ${publishForm.organizationId}）` : `组织 ${publishForm.organizationId || '未填'}` }, { key: 'category', label: '音频分类', children: comicPublishSettings.audioCategoryName ? `${comicPublishSettings.audioCategoryName}（ID ${publishForm.audioCategoryId || '未填'}）` : `ID ${publishForm.audioCategoryId || '未填'}` }]} /><label className="batch-factory-engine-field"><span><b>制作者账号（创意者）</b></span><Select showSearch optionFilterProp="label" value={publishForm.producerAdminName || undefined} options={producerOptions} disabled={publishStatusLoaded && producerOptions.length === 0} onChange={producerAdminName => setPublishForm(current => ({ ...current, producerAdminName }))} placeholder={producerOptions.length ? '请选择制作者账号' : '账号目录尚未配置'} /></label><label className="batch-factory-engine-field"><span><b>所属组织</b></span><Select value={String(publishForm.organizationId || '') || undefined} options={organizations.map(item => ({ value: String(item.id), label: `${item.name}（组织 ${item.id}）` }))} placeholder="请选择 N8 组织" onChange={organizationId => setPublishForm(current => ({ ...current, organizationId: String(organizationId || '') }))} /></label><label className="batch-factory-engine-field"><span><b>音频分类 ID</b></span><InputNumber min={1} precision={0} value={publishForm.audioCategoryId} onChange={audioCategoryId => setPublishForm(current => ({ ...current, audioCategoryId }))} placeholder="启用中的音频分类 ID" style={{ width: '100%' }} /></label>{workSelect}<label className="batch-factory-engine-field"><span><b>手动作品 ID（备用）</b></span><Input value={publishForm.workIdsText} onChange={event => setPublishForm(current => ({ ...current, workIdsText: event.target.value }))} placeholder="查询不到时填写一个或多个作品 ID" /></label></Space></Modal></>;
 }
 
 function MediaVersionPanel({ book, batchId, productionStatus, mergeJob, mergeJobs = [], mergeSettings = {}, mergeSpeed, onMergeSpeedChange, onMerge, onUpload, mergeAvailable = false, mergeReason = '', merging = false, onSaved, onDeleted, onRegenerate, onRetry, regenerating, productionAvailable = false, productionReason = '', initialVideoId = '', initialTab = 'clips', onOpenDirector }) {
@@ -3204,6 +3208,22 @@ function DeferredInlineComicLibrary(props) {
   </div>;
 }
 
+
+// 自动生产执行中，流动光带围绕“当前阶段对应的格子”转，而不是整条书行：
+// 资产类阶段围绕“资产设置”，分段/提示词/配音围绕提示词格，
+// 漫画图片围绕漫画格，发布围绕操作格。
+const AUTOMATION_STAGE_CELL = {
+  comic_assets: 'assets',
+  comic_asset_images: 'assets',
+  comic_bootstrap: 'prompts',
+  comic_prompt_recovery: 'prompts',
+  comic_resume: 'prompts',
+  audio_planning: 'prompts',
+  comic_images: 'comic',
+  comic_publish: 'actions',
+  waiting_submit: 'actions',
+};
+
 function mergeAutomationLogSnapshot(previous, next) {
   if (!next || typeof next !== 'object') return previous;
   const previousBooks = Array.isArray(previous?.books) ? previous.books : [];
@@ -3362,6 +3382,7 @@ function UploadNetwork({ batch, books, selectedBookIds, productionStatus, mergeS
   const [results, setResults] = useState([]);
   const [busy, setBusy] = useState(false);
   const [uploadingBookId, setUploadingBookId] = useState('');
+  const uploadSent = useUploadSentState();
   const [organizations, setOrganizations] = useState([]);
   const [organizationID, setOrganizationID] = useState('');
   const [organizationsError, setOrganizationsError] = useState('');
@@ -3467,7 +3488,7 @@ function UploadNetwork({ batch, books, selectedBookIds, productionStatus, mergeS
       setResults(submitted);
       const failed = submitted.filter(item => !item.ok);
       if (failed.length) message.warning(`${failed.length} 本提交失败，其余 ${submitted.length - failed.length} 本已继续提交；失败原因已逐本保留。`);
-      else message.success(submitted.every(item => item.result?.status === 'confirmed') ? '已提交到 121，并已完成后台列表回读。' : '已提交到 121，正在等待后台列表回读。');
+      else { message.success(submitted.every(item => item.result?.status === 'confirmed') ? '已提交到 121，并已完成后台列表回读。' : '已提交到 121，正在等待后台列表回读。'); uploadSent.markSent(); }
     } catch (error) { message.error(error?.message || '121 提交失败'); } finally { setUploadingBookId(''); setBusy(false); }
   }
   const liveUploadBook = books.find(book => book.id === uploadingBookId);
@@ -3509,7 +3530,7 @@ function UploadNetwork({ batch, books, selectedBookIds, productionStatus, mergeS
           </Tooltip>
         );
       })() : null}
-      {manifest ? <><Descriptions size="small" column={1} bordered items={manifest.map(item => ({ key: item.id, label: item.title, children: <span>{item.txt} + {item.mp4Files.join('、')}（{item.videoCount} 个{item.videoType}，解压 {item.jieyaNum}）</span> }))} /><Alert type="warning" showIcon message={reupload ? '确认后将重新提交到视频管理系统' : '确认后将直接提交到视频管理系统'} description="提交到接口只表示对方已接收；本页会显示等待视频管理系统后台列表回读，不能替代后台完成状态。" /><Button danger type="primary" onClick={submitTo121} loading={busy}>{reupload ? '确认重新上传到视频管理系统' : '确认并上传到视频管理系统'}</Button></> : null}
+      {manifest ? <><Descriptions size="small" column={1} bordered items={manifest.map(item => ({ key: item.id, label: item.title, children: <span>{item.txt} + {item.mp4Files.join('、')}（{item.videoCount} 个{item.videoType}，解压 {item.jieyaNum}）</span> }))} /><Alert type="warning" showIcon message={reupload ? '确认后将重新提交到视频管理系统' : '确认后将直接提交到视频管理系统'} description="提交到接口只表示对方已接收；本页会显示等待视频管理系统后台列表回读，不能替代后台完成状态。" /><UploadSentButton danger type="primary" onClick={submitTo121} loading={busy} sent={uploadSent.sent}>{reupload ? '确认重新上传到视频管理系统' : '确认并上传到视频管理系统'}</UploadSentButton></> : null}
       {liveUploadBook ? <Alert type="info" showIcon message={`${liveUploadBook.title || liveUploadBook.bookId}：${liveUploadProgress?.message || '正在创建上传任务'}`} description={liveUploadProgress?.phase ? `当前阶段：${liveUploadProgress.phase}` : '正在等待服务端返回当前阶段。'} /> : null}
       {results.map(item => <Alert key={item.id} type={item.pending ? 'info' : item.ok ? 'info' : 'error'} showIcon message={`${item.title}：${item.pending ? item.message : item.ok ? (item.result?.status === 'confirmed' ? '已提交，视频管理系统已回读' : '已提交，等待视频管理系统回读') : '提交失败'}`} description={item.pending ? '上传过程中的实际阶段会写入当前书状态；完成或失败后自动回读。' : item.ok ? `${item.result?.sourceTextFile || ''} + ${(item.result?.aiHeadVideoFiles || [item.result?.aiHeadVideoFile]).filter(Boolean).join('、')}${item.result?.receipt?.remote_record?.detail ? `；${item.result.receipt.remote_record.detail}` : ''}` : item.error} />)}
     </Space>
@@ -3521,6 +3542,9 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
   const [isDeveloper, setIsDeveloper] = useState(false);
   const [viewingBook, setViewingBookRaw] = useState(null);
   const [sensitiveDetailBook, setSensitiveDetailBook] = useState(null);
+  // 详情弹窗里的处理提醒（敏感处理/AI 判断）只在需要人工处理时展示；
+  // 用户收起后按 书ID+类型 记住，不再常驻。
+  const [detailNoticeDismissed, setDetailNoticeDismissed] = useState({});
   const [rawSourceBook, setRawSourceBook] = useState(null);
   const [sourceEditorBook, setSourceEditorBook] = useState(null);
   const [sourceEditorValue, setSourceEditorValue] = useState('');
@@ -5861,11 +5885,12 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
               automationState,
               automationBook,
             });
-            // 自动生产正在执行时给整行加流动光边：阶段不同颜色不同，
-            // 用户在长列表里也能直接看到“这本文在跑什么”。
+            // 自动生产正在执行时：整行保留一圈静态微光方便定位这本书，
+            // 流动光带围绕“当前阶段对应的格子”边框转（CSS 按阶段取色）。
             const automationRunningStage = automationState === 'running' && String(automationBook?.status || '').toLowerCase() === 'running'
               ? String(automationBook?.stage || '').trim()
               : '';
+            const automationActiveCell = AUTOMATION_STAGE_CELL[automationRunningStage] || '';
             return (
               <article
                 className={`shuihuo-workbench-row batch-factory-book-row${automationRunningStage ? ' is-automation-running' : ''}`}
@@ -6024,7 +6049,7 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
                         <button
                           type="button"
                           key={region.key}
-                          className={`batch-factory-book-config-region is-${status.tone}`}
+                          className={`batch-factory-book-config-region is-${status.tone}${automationActiveCell === 'assets' && region.key === 'assets' ? ' is-automation-cell' : ''}`}
                           onClick={() =>
                             region.key === "assets"
                               ? setAssetBook(book)
@@ -6044,6 +6069,7 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
                   batchId={batch?.id}
                   settingsRevision={batch?.settingsState?.revision}
                   productionMode={productionMode}
+                  automationActive={automationActiveCell === 'prompts'}
                   selectedVideoId={
                     rowStoryboardSelection[book.id] || videos[0]?.id || ""
                   }
@@ -6058,7 +6084,7 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
                     setPromptBook(book);
                   }}
                 />
-                <div className="shuihuo-workbench-cell shuihuo-library-cell batch-factory-book-library-cell">
+                <div className={`shuihuo-workbench-cell shuihuo-library-cell batch-factory-book-library-cell${automationActiveCell === 'comic' ? ' is-automation-cell' : ''}`}>
                   {productionMode === "comic" ? (
                     <DeferredInlineComicLibrary
                       batchId={batch?.id}
@@ -6114,7 +6140,7 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
                     />
                   )}
                 </div>
-                <div className="shuihuo-workbench-cell batch-factory-actions">
+                <div className={`shuihuo-workbench-cell batch-factory-actions${automationActiveCell === 'actions' ? ' is-automation-cell' : ''}`}>
                   <div className="batch-factory-action-group is-utility">
                     <span>资料与流程</span>
                     <div className="batch-factory-action-button-grid">
@@ -6564,18 +6590,25 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
                     {sensitiveDetail.stages.length ? sensitiveDetail.stages.map(stage => `${stage.title || stage.stage}${stage.changed ? '（已处理）' : ''}`).join(' → ') : '—'}
                   </Descriptions.Item>
                 </Descriptions>
-                {sensitiveDetail.status ? (
+                {sensitiveDetail.status && !['failed', 'review_required', 'partial'].includes(sensitiveDetail.status) && sensitiveDetail.items.length ? (
+                  <Button size="small" type="link" onClick={() => setSensitiveDetailBook(viewingBook)}>查看敏感替换明细（{sensitiveDetail.items.length} 处）</Button>
+                ) : null}
+                {sensitiveDetail.status && ['failed', 'review_required', 'partial'].includes(sensitiveDetail.status) && !detailNoticeDismissed[`${viewingBook.id}:sensitive`] ? (
                   <Alert
-                    type={['failed', 'review_required', 'partial'].includes(sensitiveDetail.status) ? "warning" : "success"}
+                    type="warning"
                     showIcon
+                    closable
+                    onClose={() => setDetailNoticeDismissed(map => ({ ...map, [`${viewingBook.id}:sensitive`]: true }))}
                     message={`敏感处理：命中 ${sensitiveDetail.hitCount} 处，已替换 ${sensitiveDetail.replacedCount} 处${sensitiveDetail.status === 'review_required' ? '，有未处理命中待人工确认' : ''}`}
-                    description={sensitiveDetail.items.length ? <Button size="small" onClick={() => setSensitiveDetailBook(viewingBook)}>查看替换明细</Button> : '未发现需替换内容。'}
+                    description={sensitiveDetail.items.length ? <Button size="small" onClick={() => setSensitiveDetailBook(viewingBook)}>查看替换明细</Button> : '未发现需替换内容。完整处理状态可在上方资料区或任务/日志中查看。'}
                   />
                 ) : null}
-                {!classifyBusy ? (
+                {!classifyBusy && classifyFailed && !detailNoticeDismissed[`${viewingBook.id}:classify`] ? (
                   <Alert
-                    type={classifyFailed ? "warning" : "info"}
+                    type="warning"
                     showIcon
+                    closable
+                    onClose={() => setDetailNoticeDismissed(map => ({ ...map, [`${viewingBook.id}:classify`]: true }))}
                     message={`AI 判断：${classificationLabel(viewingBook.sourceMetadata)}`}
                     description={classificationDetail(
                       viewingBook.sourceMetadata,

@@ -68,6 +68,60 @@ export function novelFetchBatchResultSummary(result = {}) {
   return `请求 ${requested} 项，已处理 ${updated} 项，跳过 ${skipped} 项，失败 ${failed} 项`;
 }
 
+const submitStatusLabels = {
+  submitted: '已提交',
+  success: '已提交',
+  done: '已提交',
+  uploaded: '已提交',
+  pending_confirmation: '待远端核验',
+  pending_verification: '待远端核验',
+  unknown: '结果未知',
+  partial: '部分接收',
+  pending_upload: '待提交',
+  pending: '待提交',
+  pending_submit: '待提交',
+  queued: '待提交',
+  waiting_configuration: '等待配置',
+  waiting_config: '等待配置',
+  waiting_login: '等待登录',
+  waiting_classification: '等待确认分类',
+  waiting_classify: '等待确认分类',
+  waiting_generate: '待生成',
+  pending_generate: '待生成',
+  waiting_original: '待原文',
+  blocked: '已阻塞',
+  executing: '执行中',
+  processing: '执行中',
+  running: '执行中',
+  deferred: '已延后',
+  skipped: '已跳过',
+  failed: '失败',
+  error: '失败',
+  stopped: '已停止'
+};
+
+// 提交状态只保留一套展示词汇：后端历史字段（pending_upload/error 等）
+// 和新字段（waiting_config/unknown 等）都从这里翻译，页面不再直接显示英文状态。
+export function webSubmitStatusLabel(status) {
+  const key = text(status);
+  return submitStatusLabels[key] || String(status ?? '').trim() || '未开始';
+}
+
+const submitRunStatusLabels = {
+  planned: '已计划',
+  executing: '执行中',
+  completed: '已完成',
+  aborted: '已中止',
+  recovered: '已恢复',
+  dry_run: '演练'
+};
+
+// 提交轮次（manifest）状态使用独立词汇，避免与逐本提交状态混淆。
+export function webSubmitRunStatusLabel(status) {
+  const key = text(status);
+  return submitRunStatusLabels[key] || webSubmitStatusLabel(status);
+}
+
 export function novelFetchSubmissionLabel(row = {}) {
   const submitStatus = text(row.siteSubmitStatus ?? row.site_submit_status);
   const versions = key => (Array.isArray(row[key]) ? row[key] : []).map(value => String(value || '').trim()).filter(Boolean).join('、');
@@ -83,7 +137,7 @@ export function novelFetchSubmissionLabel(row = {}) {
     const waiting = versions('site_submit_waiting_generate_versions');
     return `待生成${waiting ? ` ${waiting.toUpperCase()}` : ''}`;
   }
-  if (submitStatus) return novelFetchStageLabel(submitStatus);
+  if (submitStatus) return webSubmitStatusLabel(submitStatus);
   const aiStatus = row.aiStatus ?? row.ai_status;
   const aiCount = Number(row.aiGeneratedCount ?? row.ai_generated_count) || 0;
   return aiCount > 0 || done(aiStatus) ? '待提交' : '—';
@@ -119,26 +173,18 @@ export function novelFetchTaskDateKey(row = {}) {
   return Number.isNaN(date.getTime()) ? raw.slice(0, 10) : beijingDateKey(date);
 }
 
-function dateKeyDayNumber(value) {
-  const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) return Number.NaN;
-  return Math.floor(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])) / 86400000);
-}
-
 export function filterNovelFetchTasks(rows = [], options = {}) {
   const source = Array.isArray(rows) ? rows : [];
   const query = String(options.query || '').trim().toLowerCase();
   const mode = options.mode === 'date' ? 'date' : 'default';
   const selectedDate = String(options.date || '').trim();
-  const today = dateKeyDayNumber(beijingDateKey(options.now instanceof Date ? options.now : new Date()));
+  // 参考实现的默认视图返回当前身份的全部可见任务，只有显式切到日期视图
+  // 才按日期过滤；这里保持同一语义，不再用「近 3 天」截断历史任务。
   return source.filter(row => {
     const identity = `${row.bookId ?? row.book_id ?? row.id ?? ''} ${row.bookName ?? row.book_name ?? row.title ?? ''}`.toLowerCase();
     if (query && !identity.includes(query)) return false;
-    const taskDate = novelFetchTaskDateKey(row);
-    if (mode === 'date') return taskDate === selectedDate;
-    if (novelFetchTaskStatus(row).status !== 'completed') return true;
-    const taskDay = dateKeyDayNumber(taskDate);
-    return Number.isFinite(taskDay) && taskDay >= today - 2 && taskDay <= today;
+    if (mode === 'date') return novelFetchTaskDateKey(row) === selectedDate;
+    return true;
   });
 }
 
@@ -194,6 +240,9 @@ export function novelFetchQueueSummary(status = {}) {
   const running = Number(status.processing_count ?? status.processingCount ?? counts.running) || 0;
   const queued = Number(status.pending_count ?? status.pendingCount ?? counts.queued) || 0;
   const waitingRetry = Number(counts.waiting_retry ?? counts.waitingRetry) || 0;
+  const scope = status.scope && typeof status.scope === 'object' ? status.scope : {};
+  const scopeDate = String(scope.date ?? '');
+  const scopeBatchId = String(scope.batch_id ?? scope.batchId ?? '');
   return {
     label: running + queued + waitingRetry > 0 ? '队列运行中' : '队列空闲',
     enabled: Boolean(status.auto_queue_enabled ?? status.autoQueueEnabled ?? status.enabled),
@@ -202,6 +251,10 @@ export function novelFetchQueueSummary(status = {}) {
     running,
     queued,
     waitingRetry,
+    scopeDate,
+    scopeBatchId,
+    scopeLabel: scopeDate || (scopeBatchId ? '当前批次' : '全部任务'),
+    matchedDocuments: Number(scope.matched_documents ?? scope.matchedDocuments) || 0,
     updatedAt: String(status.updated_at ?? status.updatedAt ?? '')
   };
 }

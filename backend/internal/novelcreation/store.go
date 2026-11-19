@@ -10,6 +10,23 @@ import (
 // Store is the durable boundary for the novel-creation domain. Production
 // implementations persist through MySQL; MemoryStore exists for unit tests.
 type Store interface {
+	LongImitationStore
+	StudioStore
+	ChapterImportStore
+	ContentStore
+	ContentManagementStore
+	HasSavedRun(context.Context, string, string) (bool, error)
+	InsertAutomationRound(context.Context, string, string, string, string, string, time.Time) error
+	Clock(context.Context) (time.Time, error)
+	Atomic(context.Context, string, string, func(Store) error) error
+	GetExecution(context.Context, string, string) (Execution, bool, error)
+	PutExecution(context.Context, Execution) error
+	GetSlot(context.Context, string, string) (ProjectSlot, error)
+	PutSlot(context.Context, string, string, ProjectSlot) error
+	ListDispatch(context.Context, int) ([]Execution, error)
+	GetStyleProfile(context.Context, string, string) (StyleProfile, error)
+	ListStyleProfiles(context.Context, string) ([]StyleProfileSummary, error)
+	SaveStyleProfile(context.Context, string, StyleProfile) (StyleProfile, error)
 	CreateProject(context.Context, string, CreateProjectInput) (Project, error)
 	GetProject(context.Context, string, string) (Project, error)
 	ListProjects(context.Context, string) ([]Project, error)
@@ -25,6 +42,7 @@ type Store interface {
 	AppendRunEvent(context.Context, string, RunEvent) (RunEvent, error)
 	ListRunEvents(context.Context, string, string, int64) ([]RunEvent, error)
 	ListChapters(context.Context, string, string) ([]Chapter, error)
+	GetChapterMemory(context.Context, string, string, string) (Memory, bool, error)
 	SaveChapterBundle(context.Context, string, ChapterBundle) error
 	// GetProjectSettings returns the project-level style profile and creation
 	// rules. A project without a saved row returns zero values, not an error.
@@ -52,6 +70,7 @@ type Store interface {
 	UpdateSchedule(context.Context, string, Schedule) (Schedule, error)
 	DeleteSchedule(context.Context, string, string, string) error
 	ListDueSchedules(context.Context, time.Time, int) ([]Schedule, error)
+	ListDueSchedulePage(context.Context, time.Time, ScheduleCursor, int) ([]Schedule, error)
 	// Batches drive continuous multi-chapter generation.
 	ListBatches(context.Context, string, string) ([]Batch, error)
 	GetBatch(context.Context, string, string) (Batch, error)
@@ -97,15 +116,16 @@ type CreateSessionInput struct {
 }
 
 type Session struct {
-	ID            string    `json:"id"`
-	ProjectID     string    `json:"projectId"`
-	Mode          string    `json:"mode"`
-	Title         string    `json:"title"`
-	ContextBudget int       `json:"contextBudget"`
-	MessageCursor int64     `json:"messageCursor"`
-	CurrentRunID  string    `json:"currentRunId,omitempty"`
-	CreatedAt     time.Time `json:"createdAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	ArchivedAt    *time.Time `json:"archivedAt,omitempty"`
+	ID            string     `json:"id"`
+	ProjectID     string     `json:"projectId"`
+	Mode          string     `json:"mode"`
+	Title         string     `json:"title"`
+	ContextBudget int        `json:"contextBudget"`
+	MessageCursor int64      `json:"messageCursor"`
+	CurrentRunID  string     `json:"currentRunId,omitempty"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	UpdatedAt     time.Time  `json:"updatedAt"`
 }
 
 type Message struct {
@@ -206,12 +226,14 @@ type Foundation struct {
 }
 
 type Memory struct {
-	ID        string
-	ProjectID string
-	ChapterID string
-	Snapshot  json.RawMessage
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ChapterVersion int
+	PreviousTruth  json.RawMessage
+	ID             string
+	ProjectID      string
+	ChapterID      string
+	Snapshot       json.RawMessage
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 type Audit struct {

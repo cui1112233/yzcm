@@ -26,8 +26,8 @@ import (
 	"qiantie/backend/internal/mergeworker"
 	"qiantie/backend/internal/novelcreation"
 	"qiantie/backend/internal/novelfetchworkshop"
-	"qiantie/backend/internal/prompt"
 	"qiantie/backend/internal/projectretention"
+	"qiantie/backend/internal/prompt"
 	"qiantie/backend/internal/releasenotes"
 	"qiantie/backend/internal/runtimeaudit"
 	"qiantie/backend/internal/screenplay"
@@ -220,8 +220,13 @@ func NewRouter(options RouterOptions) http.Handler {
 		// 启动时默认不自动恢复（只做 RecoverInterruptedJobs 标记）。自动恢复会
 		// 把书重新置为 running 并立即重新派发，缺少执行器/发布配置时会产生
 		// 一批无效重试；需要显式开启 QIANTIE_AUTOMATION_RESUME_ON_BOOT=1。
-		resumeAutomationOnBoot(options.AutomationCoordinator)
-		options.AutomationCoordinator.StartScheduledDispatcher()
+		// 恢复过程会做全局预检（含网络探测），生产上曾阻塞 37 秒才开始监听 4000；
+		// 改为后台执行，保证 HTTP 先就绪，避免重启窗口内 nginx 502。
+		coordinator := options.AutomationCoordinator
+		go func() {
+			resumeAutomationOnBoot(coordinator)
+			coordinator.StartScheduledDispatcher()
+		}()
 	}
 	// 生产任务心跳超时兜底：启动时清理历史遗留的 running/queued，
 	// 避免服务中断后父任务永久停在“制作中”。阈值取 30 分钟。
@@ -783,12 +788,30 @@ func NewRouter(options RouterOptions) http.Handler {
 		}
 		root.Handle("/api/batch-rewrite/knowledge/", novelAuth.Middleware(http.HandlerFunc(legacyWorkshopAlias)))
 		root.Handle("/api/batch-rewrite/knowledge", novelAuth.Middleware(http.HandlerFunc(legacyKnowledgeSummaryAlias)))
+		// 参考实现还暴露裸 /api/knowledge 与 GET /api/work-form，补兼容别名。
+		root.Handle("GET /api/knowledge", novelAuth.Middleware(http.HandlerFunc(legacyKnowledgeSummaryAlias)))
+		root.Handle("GET /api/work-form", novelCompatAuth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			clone := req.Clone(req.Context())
+			clone.URL.Path = "/api/batch-rewrite/work-form"
+			root.ServeHTTP(w, clone)
+		})))
 		root.Handle("/api/batch-rewrite/opening/", novelAuth.Middleware(http.HandlerFunc(legacyWorkshopAlias)))
 		root.Handle("/api/batch-rewrite/ai/", novelAuth.Middleware(http.HandlerFunc(legacyWorkshopAlias)))
 		root.Handle("/api/batch-rewrite/process", novelAuth.Middleware(http.HandlerFunc(legacyWorkshopAlias)))
 		root.Handle("/api/batch-rewrite/process/", novelAuth.Middleware(http.HandlerFunc(legacyWorkshopAlias)))
 		root.Handle("/api/batch-rewrite/rules/ai-suggest", novelAuth.Middleware(http.HandlerFunc(legacyRulesSuggestAlias)))
 		root.Handle("/api/batch-rewrite/rules/preview", novelAuth.Middleware(http.HandlerFunc(legacyRulesPreviewAlias)))
+		// 参考实现直接暴露 /api/rules/*；补齐同名入口，避免旧页面或脚本 404。
+		legacyRootRulesAlias := func(to string) http.HandlerFunc {
+			return func(w http.ResponseWriter, req *http.Request) {
+				clone := req.Clone(req.Context())
+				clone.URL.Path = to
+				novelFetch.ServeHTTP(w, clone)
+			}
+		}
+		root.Handle("POST /api/rules/preview", novelAuth.Middleware(legacyRootRulesAlias("/api/novel-fetch-workshop/rules/preview")))
+		root.Handle("POST /api/rules/trace", novelAuth.Middleware(legacyRootRulesAlias("/api/novel-fetch-workshop/rules/trace")))
+		root.Handle("POST /api/rules/ai-suggest", novelAuth.Middleware(legacyRootRulesAlias("/api/novel-fetch-workshop/rules/suggest")))
 		root.Handle("GET /api/batch-rewrite/logs", novelAuth.Middleware(http.HandlerFunc(legacyWorkshopAlias)))
 		root.Handle("GET /api/batch-rewrite/schedules", novelAuth.Middleware(http.HandlerFunc(legacyWorkshopAlias)))
 		root.Handle("POST /api/batch-rewrite/schedules", novelAuth.Middleware(http.HandlerFunc(legacyWorkshopAlias)))
@@ -858,13 +881,7 @@ func NewRouter(options RouterOptions) http.Handler {
 		root.Handle("POST /api/process", novelAuth.Middleware(http.HandlerFunc(legacyProcessAlias)))
 		root.Handle("POST /api/process/start", novelAuth.Middleware(http.HandlerFunc(legacyProcessAlias)))
 		root.Handle("POST /api/process/stop", novelAuth.Middleware(http.HandlerFunc(legacyProcessAlias)))
-		root.Handle("POST /api/process/queue/start", novelAuth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			// The Go worker's automation switch is the durable replacement for the
-			// old in-memory manual queue starter.
-			clone := req.Clone(req.Context())
-			clone.URL.Path = "/api/novel-fetch-workshop/automation/start"
-			novelFetch.ServeHTTP(w, clone)
-		})))
+		root.Handle("POST /api/process/queue/start", novelAuth.Middleware(http.HandlerFunc(legacyProcessAlias)))
 		root.Handle("GET /api/process/queue/status", novelAuth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			clone := req.Clone(req.Context())
 			clone.URL.Path = "/api/novel-fetch-workshop/realtime/status"
@@ -900,6 +917,7 @@ func NewRouter(options RouterOptions) http.Handler {
 		root.Handle("PUT /api/tasks/", novelAuth.Middleware(http.HandlerFunc(legacyTaskAlias)))
 		root.Handle("DELETE /api/tasks/", novelAuth.Middleware(http.HandlerFunc(legacyTaskAlias)))
 		root.Handle("/api/web-submit/", sessionOnlyNovelAuth.Middleware(http.HandlerFunc(legacyWebSubmitAlias)))
+		RegisterNovelFetchIntegrations(root, sessionOnlyNovelAuth, options.NovelFetchStore, options.NovelFetchQueue)
 		registerCanonicalNovelFetchWebSubmitAliases(root, auth)
 		registerModelCatalogRoutes(root, novelAuth, options.NovelFetchStore, options.UserConfigStore, options.AuthStore, options.MemberProfileStore)
 	}

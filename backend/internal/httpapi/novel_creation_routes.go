@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"qiantie/backend/internal/novelcreation"
+	"qiantie/backend/internal/projectretention"
+	novelprompt "qiantie/backend/internal/prompt/novelcreation"
 )
 
 const novelCreationJSONLimit = 4 << 20
@@ -53,6 +55,12 @@ func RegisterNovelCreationRoutes(mux *http.ServeMux, auth BridgeAuth, service *n
 		return true
 	}
 
+	registerNovelContentRoutes(handle, decode, service)
+	registerNovelImportRoutes(handle, service)
+	registerNovelStudioRoutes(handle, decode, service, starter)
+	registerNovelLongImitationRoutes(handle, service, starter)
+	registerNovelShortStoryRoutes(handle, service, starter)
+	registerNovelSchedulerAdapterRoutes(handle, service)
 	handle("GET /api/novel-creation/modes", func(w http.ResponseWriter, _ *http.Request, _ string) {
 		modes := make([]map[string]any, 0, len(novelCreationModes))
 		for _, mode := range novelCreationModes {
@@ -113,15 +121,25 @@ func RegisterNovelCreationRoutes(mux *http.ServeMux, auth BridgeAuth, service *n
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"session": session})
 	})
+	handle("GET /api/novel-creation/sessions/{sessionID}/snapshot", func(w http.ResponseWriter, req *http.Request, owner string) {
+		snapshot, err := service.GetSessionSnapshot(req.Context(), owner, req.PathValue("sessionID"))
+		if err != nil {
+			writeNovelCreationError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, snapshot)
+	})
 	handle("POST /api/novel-creation/sessions/{sessionID}/messages", func(w http.ResponseWriter, req *http.Request, owner string) {
 		var input struct {
-			ProjectID     string            `json:"projectId"`
-			Content       string            `json:"content"`
-			ModelID       string            `json:"modelId"`
-			ThinkingLevel string            `json:"thinkingLevel"`
-			Idempotency   string            `json:"idempotencyKey"`
-			ModeInputs    map[string]string `json:"modeInputs"`
-			KnowledgeIDs  []string          `json:"knowledgeIds"`
+			ProjectID      string            `json:"projectId"`
+			Content        string            `json:"content"`
+			ModelID        string            `json:"modelId"`
+			ThinkingLevel  string            `json:"thinkingLevel"`
+			Idempotency    string            `json:"idempotencyKey"`
+			ModeInputs     map[string]string `json:"modeInputs"`
+			KnowledgeIDs   []string          `json:"knowledgeIds"`
+			NoteIDs        []string          `json:"noteIds"`
+			StyleProfileID string            `json:"styleProfileId"`
 		}
 		if !decode(w, req, &input) {
 			return
@@ -129,7 +147,7 @@ func RegisterNovelCreationRoutes(mux *http.ServeMux, auth BridgeAuth, service *n
 		run, err := service.SendMessage(req.Context(), owner, novelcreation.SendMessageInput{
 			SessionID: req.PathValue("sessionID"), ProjectID: input.ProjectID, Content: input.Content,
 			ModelID: input.ModelID, ThinkingLevel: input.ThinkingLevel, IdempotencyKey: input.Idempotency,
-			ModeInputs: input.ModeInputs, KnowledgeIDs: input.KnowledgeIDs,
+			ModeInputs: input.ModeInputs, KnowledgeIDs: input.KnowledgeIDs, NoteIDs: input.NoteIDs, StyleProfileID: input.StyleProfileID,
 		})
 		if err != nil {
 			writeNovelCreationError(w, err)
@@ -170,12 +188,19 @@ func RegisterNovelCreationRoutes(mux *http.ServeMux, auth BridgeAuth, service *n
 	})
 	handle("POST /api/novel-creation/runs/{runID}/confirm", func(w http.ResponseWriter, req *http.Request, owner string) {
 		var input struct {
-			Blueprint json.RawMessage `json:"blueprint"`
+			Blueprint      json.RawMessage `json:"blueprint"`
+			ConfirmationID string          `json:"confirmationId"`
 		}
 		if !decode(w, req, &input) {
 			return
 		}
-		run, err := service.ConfirmRun(req.Context(), owner, req.PathValue("runID"), input.Blueprint)
+		var run novelcreation.Run
+		var err error
+		if input.ConfirmationID != "" {
+			run, err = service.ConfirmModelCall(req.Context(), owner, req.PathValue("runID"), input.ConfirmationID)
+		} else {
+			run, err = service.ConfirmRun(req.Context(), owner, req.PathValue("runID"), input.Blueprint)
+		}
 		if err != nil {
 			writeNovelCreationError(w, err)
 			return
@@ -191,7 +216,7 @@ func RegisterNovelCreationRoutes(mux *http.ServeMux, auth BridgeAuth, service *n
 			writeNovelCreationError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
+		writeJSON(w, http.StatusOK, map[string]any{"settings": settings, "reviewDimensionCatalog": novelprompt.ReviewDimensionCatalog()})
 	})
 	handle("PUT /api/novel-creation/projects/{projectID}/settings", func(w http.ResponseWriter, req *http.Request, owner string) {
 		var input struct {
@@ -209,7 +234,7 @@ func RegisterNovelCreationRoutes(mux *http.ServeMux, auth BridgeAuth, service *n
 			writeNovelCreationError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
+		writeJSON(w, http.StatusOK, map[string]any{"settings": settings, "reviewDimensionCatalog": novelprompt.ReviewDimensionCatalog()})
 	})
 	handle("GET /api/novel-creation/projects/{projectID}/materials", func(w http.ResponseWriter, req *http.Request, owner string) {
 		materials, err := service.ListMaterials(req.Context(), owner, req.PathValue("projectID"))
@@ -350,6 +375,46 @@ func RegisterNovelCreationRoutes(mux *http.ServeMux, auth BridgeAuth, service *n
 		}
 		writeJSON(w, http.StatusAccepted, map[string]any{"run": run})
 	})
+
+	for _, action := range []string{"pause", "resume", "stop"} {
+		action := action
+		handle("POST /api/novel-creation/projects/{projectID}/schedules/{scheduleID}/"+action, func(w http.ResponseWriter, req *http.Request, owner string) {
+			p, e := service.ControlSchedule(req.Context(), owner, req.PathValue("projectID"), req.PathValue("scheduleID"), action)
+			if e != nil {
+				writeNovelCreationError(w, e)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"schedule": p})
+		})
+	}
+	handle("GET /api/novel-creation/projects/{projectID}/schedules/{scheduleID}/logs", func(w http.ResponseWriter, req *http.Request, owner string) {
+		plans, e := service.ListSchedules(req.Context(), owner, req.PathValue("projectID"))
+		if e != nil {
+			writeNovelCreationError(w, e)
+			return
+		}
+		for _, p := range plans {
+			if p.ID == req.PathValue("scheduleID") {
+				writeJSON(w, http.StatusOK, map[string]any{"rounds": p.Rounds})
+				return
+			}
+		}
+		writeNovelCreationError(w, &novelcreation.DomainError{Code: novelcreation.ErrProjectNotFound, Message: "定时任务不存在"})
+	})
+	handle("GET /api/novel-creation/projects/{projectID}/batches/{batchID}/logs", func(w http.ResponseWriter, req *http.Request, owner string) {
+		plans, e := service.ListBatches(req.Context(), owner, req.PathValue("projectID"))
+		if e != nil {
+			writeNovelCreationError(w, e)
+			return
+		}
+		for _, p := range plans {
+			if p.ID == req.PathValue("batchID") {
+				writeJSON(w, http.StatusOK, map[string]any{"rounds": p.Rounds})
+				return
+			}
+		}
+		writeNovelCreationError(w, &novelcreation.DomainError{Code: novelcreation.ErrProjectNotFound, Message: "批量任务不存在"})
+	})
 	handle("GET /api/novel-creation/projects/{projectID}/batches", func(w http.ResponseWriter, req *http.Request, owner string) {
 		batches, err := service.ListBatches(req.Context(), owner, req.PathValue("projectID"))
 		if err != nil {
@@ -360,18 +425,25 @@ func RegisterNovelCreationRoutes(mux *http.ServeMux, auth BridgeAuth, service *n
 	})
 	handle("POST /api/novel-creation/projects/{projectID}/batches", func(w http.ResponseWriter, req *http.Request, owner string) {
 		var input struct {
-			SessionID     string `json:"sessionId"`
-			TotalChapters int    `json:"totalChapters"`
-			Prompt        string `json:"prompt"`
-			ModelID       string `json:"modelId"`
-			ThinkingLevel string `json:"thinkingLevel"`
+			IdempotencyKey         string            `json:"idempotencyKey"`
+			SessionID              string            `json:"sessionId"`
+			TotalChapters          int               `json:"totalChapters"`
+			MaxConsecutiveFailures int               `json:"maxConsecutiveFailures"`
+			Prompt                 string            `json:"prompt"`
+			ModelID                string            `json:"modelId"`
+			ThinkingLevel          string            `json:"thinkingLevel"`
+			ModeInputs             map[string]string `json:"modeInputs"`
+			KnowledgeIDs           []string          `json:"knowledgeIds"`
+			NoteIDs                []string          `json:"noteIds"`
+			StyleProfileID         string            `json:"styleProfileId"`
 		}
 		if !decode(w, req, &input) {
 			return
 		}
 		batch, err := service.CreateBatch(req.Context(), owner, req.PathValue("projectID"), novelcreation.BatchInput{
-			SessionID: input.SessionID, TotalChapters: input.TotalChapters, Prompt: input.Prompt,
-			ModelID: input.ModelID, ThinkingLevel: input.ThinkingLevel,
+			IdempotencyKey:         input.IdempotencyKey,
+			MaxConsecutiveFailures: input.MaxConsecutiveFailures, SessionID: input.SessionID, TotalChapters: input.TotalChapters, Prompt: input.Prompt,
+			ModelID: input.ModelID, ThinkingLevel: input.ThinkingLevel, ModeInputs: input.ModeInputs, KnowledgeIDs: input.KnowledgeIDs, NoteIDs: input.NoteIDs, StyleProfileID: input.StyleProfileID,
 		})
 		if err != nil {
 			writeNovelCreationError(w, err)
@@ -403,6 +475,26 @@ func RegisterNovelCreationRoutes(mux *http.ServeMux, auth BridgeAuth, service *n
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"batch": batch})
 	})
+	handle("POST /api/novel-creation/style-profiles", func(w http.ResponseWriter, req *http.Request, owner string) {
+		var input novelcreation.StyleProfile
+		if !decode(w, req, &input) {
+			return
+		}
+		result, err := service.SaveStyleProfile(req.Context(), owner, input)
+		if err != nil {
+			writeNovelCreationError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"styleProfile": result})
+	})
+	handle("GET /api/novel-creation/style-profiles/{styleID}", func(w http.ResponseWriter, req *http.Request, owner string) {
+		result, err := service.GetStyleProfile(req.Context(), owner, req.PathValue("styleID"))
+		if err != nil {
+			writeNovelCreationError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"styleProfile": result})
+	})
 	handle("GET /api/novel-creation/projects/{projectID}/export", func(w http.ResponseWriter, req *http.Request, owner string) {
 		document, err := service.ExportProject(req.Context(), owner, req.PathValue("projectID"), req.URL.Query().Get("format"))
 		if err != nil {
@@ -418,12 +510,19 @@ func RegisterNovelCreationRoutes(mux *http.ServeMux, auth BridgeAuth, service *n
 // novelScheduleRequest keeps "enabled" optional while defaulting it to true on
 // creation, matching the frontend switch.
 type novelScheduleRequest struct {
-	SessionID       string `json:"sessionId"`
-	IntervalMinutes int    `json:"intervalMinutes"`
-	Enabled         *bool  `json:"enabled"`
-	Prompt          string `json:"prompt"`
-	ModelID         string `json:"modelId"`
-	ThinkingLevel   string `json:"thinkingLevel"`
+	IdempotencyKey         string            `json:"idempotencyKey"`
+	DailyChapterCap        int               `json:"dailyChapterCap"`
+	MaxConsecutiveFailures int               `json:"maxConsecutiveFailures"`
+	SessionID              string            `json:"sessionId"`
+	IntervalMinutes        int               `json:"intervalMinutes"`
+	Enabled                *bool             `json:"enabled"`
+	Prompt                 string            `json:"prompt"`
+	ModelID                string            `json:"modelId"`
+	ThinkingLevel          string            `json:"thinkingLevel"`
+	ModeInputs             map[string]string `json:"modeInputs"`
+	KnowledgeIDs           []string          `json:"knowledgeIds"`
+	NoteIDs                []string          `json:"noteIds"`
+	StyleProfileID         string            `json:"styleProfileId"`
 }
 
 func (r novelScheduleRequest) toInput() novelcreation.ScheduleInput {
@@ -432,8 +531,9 @@ func (r novelScheduleRequest) toInput() novelcreation.ScheduleInput {
 		enabled = *r.Enabled
 	}
 	return novelcreation.ScheduleInput{
-		SessionID: r.SessionID, IntervalMinutes: r.IntervalMinutes, Enabled: enabled,
-		Prompt: r.Prompt, ModelID: r.ModelID, ThinkingLevel: r.ThinkingLevel,
+		IdempotencyKey:  r.IdempotencyKey,
+		DailyChapterCap: r.DailyChapterCap, MaxConsecutiveFailures: r.MaxConsecutiveFailures, SessionID: r.SessionID, IntervalMinutes: r.IntervalMinutes, Enabled: enabled,
+		Prompt: r.Prompt, ModelID: r.ModelID, ThinkingLevel: r.ThinkingLevel, ModeInputs: r.ModeInputs, KnowledgeIDs: r.KnowledgeIDs, NoteIDs: r.NoteIDs, StyleProfileID: r.StyleProfileID,
 	}
 }
 
@@ -447,6 +547,10 @@ func validNovelCreationMode(value string) bool {
 }
 
 func writeNovelCreationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, projectretention.ErrPurging) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error(), "code": "PROJECT_PURGING"})
+		return
+	}
 	status := http.StatusInternalServerError
 	message := "小说创作暂时无法处理，请稍后重试"
 	var domainErr *novelcreation.DomainError
@@ -455,6 +559,9 @@ func writeNovelCreationError(w http.ResponseWriter, err error) {
 		switch domainErr.Code {
 		case novelcreation.ErrInputRequired:
 			status = http.StatusBadRequest
+		case novelcreation.ErrIdempotencyConflict:
+			writeJSON(w, http.StatusConflict, map[string]string{"error": message, "code": domainErr.Code})
+			return
 		case novelcreation.ErrProjectNotFound, novelcreation.ErrSessionNotFound:
 			status = http.StatusNotFound
 		case novelcreation.ErrRunInProgress, novelcreation.ErrProjectLocked, novelcreation.ErrInvalidTransition:

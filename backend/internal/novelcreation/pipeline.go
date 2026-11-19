@@ -40,15 +40,19 @@ type EventSink interface {
 // Runtime is used only for cancellation checks; durable writes remain the
 // caller's responsibility after Run returns a complete ChapterBundle.
 type RunContext struct {
-	OwnerUsername  string
-	Run            Run
-	Project        Project
-	Session        Session
-	UserMessage    string
-	ChapterNumber  int
-	PreviousTruth  json.RawMessage
-	PreviousMemory json.RawMessage
-	Runtime        Runtime
+	LongImitation         *LongImitationCreation
+	ImitationAnalysis     *LongImitationAnalysis
+	ImitationRequirements *LongImitationRequirements
+	OwnerUsername         string
+	Run                   Run
+	Project               Project
+	Session               Session
+	UserMessage           string
+	ChapterNumber         int
+	PreviousChapters      []PreviousChapter
+	PreviousTruth         json.RawMessage
+	PreviousMemory        json.RawMessage
+	Runtime               Runtime
 	// ModeInputs is the validated mode-specific contract payload.
 	ModeInputs map[string]string
 	// StyleProfile and Rules are project-level writing constraints injected into
@@ -62,9 +66,11 @@ type RunContext struct {
 	// user-confirmed blueprint.
 	ConfirmedFoundation json.RawMessage
 	// KnowledgeMaterials is the bounded snapshot of user-selected materials.
+	Notes              []ProjectNote
 	KnowledgeMaterials []KnowledgeMaterial
 	// MaxRevisionRounds overrides the default audit-revision loop bound.
 	MaxRevisionRounds int
+	Agent             *AgentSettings
 }
 
 type Pipeline struct {
@@ -184,6 +190,7 @@ type memoryOpenThread struct {
 }
 
 type modelCallSpec struct {
+	key         string
 	definition  promptcatalog.Definition
 	step        RunStatus
 	userPayload any
@@ -199,18 +206,30 @@ func (p *Pipeline) Run(ctx context.Context, input RunContext, sink EventSink) (C
 	if err := p.checkCancelled(ctx, input); err != nil {
 		return ChapterBundle{}, err
 	}
+	if input.LongImitation != nil && input.ChapterNumber > input.LongImitation.Input.TargetChapters {
+		return ChapterBundle{}, &DomainError{Code: ErrInvalidTransition, Message: "已达到目标章数"}
+	}
+	if input.LongImitation != nil {
+		input.ModeInputs = nil
+	}
+	requirements, requirementsErr := p.imitationRequirements(ctx, input, sink)
+	if requirementsErr != nil {
+		return ChapterBundle{}, requirementsErr
+	}
+	input.ImitationRequirements = requirements
+	if input.LongImitation != nil && input.ImitationAnalysis == nil && len(input.ConfirmedFoundation) == 0 {
+		if e := p.emitStage(ctx, input, sink, RunPlanning, "正在拆解参考文风、情绪曲线与原创方向", 5); e != nil {
+			return ChapterBundle{}, e
+		}
+	}
+	analysis, analysisErr := p.imitationAnalysis(ctx, input, sink)
+	if analysisErr != nil {
+		return ChapterBundle{}, analysisErr
+	}
+	input.ImitationAnalysis = analysis
 
-	modelID := strings.TrimSpace(input.Run.ModelID)
-	if modelID == "" {
-		modelID = strings.TrimSpace(input.Project.ModelID)
-	}
-	provider, err := p.resolveProvider(ctx, strings.TrimSpace(input.OwnerUsername), modelID)
-	if err != nil {
-		return ChapterBundle{}, mapModelError(err)
-	}
-	if provider == nil {
-		return ChapterBundle{}, &DomainError{Code: ErrModelUnavailable, Message: "novel model is unavailable"}
-	}
+	var provider batchfactoryv11.DirectorProvider
+	var err error
 
 	if err := p.emitStage(ctx, input, sink, RunPlanning, "正在生成基础设定和章节计划", 10); err != nil {
 		return ChapterBundle{}, err
@@ -220,6 +239,7 @@ func (p *Pipeline) Run(ctx context.Context, input RunContext, sink EventSink) (C
 		"mode_inputs":         input.ModeInputs,
 		"style_profile":       input.StyleProfile,
 		"rules":               input.Rules,
+		"notes":               input.Notes,
 		"knowledge_materials": input.KnowledgeMaterials,
 		"project_brief": map[string]any{
 			"title": input.Project.Title, "genre": input.Project.Genre,
@@ -229,11 +249,15 @@ func (p *Pipeline) Run(ctx context.Context, input RunContext, sink EventSink) (C
 		},
 		"user_message": input.UserMessage,
 	}
+	if input.LongImitation != nil {
+		foundationPayload["creation_brief"] = imitationModelBrief(input)
+		foundationPayload["long_imitation_analysis"] = analysis
+	}
 	var foundation foundationPlanOutput
 	var foundationRaw json.RawMessage
 	if len(input.ConfirmedFoundation) > 0 {
 		if err := decodeAndValidate(string(input.ConfirmedFoundation), &foundation, func() error {
-			return validateFoundation(foundation)
+			return validateImitationFoundation(foundation, input.LongImitation)
 		}); err != nil {
 			return ChapterBundle{}, &DomainError{Code: ErrInvalidOutput, Message: "confirmed foundation is invalid", Cause: err}
 		}
@@ -242,7 +266,7 @@ func (p *Pipeline) Run(ctx context.Context, input RunContext, sink EventSink) (C
 		foundationRaw, err = p.callJSON(ctx, input, sink, provider, modelCallSpec{
 			definition: novelprompt.FoundationPlan, step: RunPlanning,
 			userPayload: foundationPayload, temperature: 0.4, maxTokens: 6000,
-			validate: func() error { return validateFoundation(foundation) },
+			validate: func() error { return validateImitationFoundation(foundation, input.LongImitation) },
 		}, &foundation)
 		if err != nil {
 			return ChapterBundle{}, err
@@ -264,15 +288,20 @@ func (p *Pipeline) Run(ctx context.Context, input RunContext, sink EventSink) (C
 			"mode_inputs":          input.ModeInputs,
 			"style_profile":        input.StyleProfile,
 			"rules":                input.Rules,
+			"notes":                input.Notes,
 			"knowledge_materials":  input.KnowledgeMaterials,
 			"foundation_plan":      foundation,
 			"chapter_number":       chapterNumber,
 			"target_chapter_words": input.Project.TargetChapterWords,
+			"previous_truth":       rawJSONValue(input.PreviousTruth),
+			"previous_chapters":    input.PreviousChapters,
 			"memory_context":       rawJSONValue(input.PreviousMemory),
 			"user_message":         input.UserMessage,
 		},
 		temperature: 0.35, maxTokens: 3500,
-		validate: func() error { return validateChapterPlan(plan, chapterNumber, foundation.Volumes) },
+		validate: func() error {
+			return validateImitationPlan(plan, chapterNumber, foundation.Volumes, input.LongImitation)
+		},
 	}, &plan)
 	if err != nil {
 		return ChapterBundle{}, err
@@ -293,9 +322,12 @@ func (p *Pipeline) Run(ctx context.Context, input RunContext, sink EventSink) (C
 			"mode_inputs":         input.ModeInputs,
 			"style_profile":       input.StyleProfile,
 			"rules":               input.Rules,
+			"notes":               input.Notes,
 			"knowledge_materials": input.KnowledgeMaterials,
 			"foundation_plan":     foundation,
 			"chapter_plan":        plan,
+			"previous_truth":      rawJSONValue(input.PreviousTruth),
+			"previous_chapters":   input.PreviousChapters,
 			"memory_context":      rawJSONValue(input.PreviousMemory),
 		},
 		temperature: 0.75, maxTokens: 12000,
@@ -311,13 +343,22 @@ func (p *Pipeline) Run(ctx context.Context, input RunContext, sink EventSink) (C
 	draft.Content = strings.TrimSpace(draft.Content)
 	bestContent := draft.Content
 	bestContentRaw := draftRaw
+	if input.Agent != nil && input.Agent.EnableLengthNorm && needsLengthNormalization(bestContent, input.Project.TargetChapterWords) {
+		var processed chapterDraftOutput
+		processedRaw, callErr := p.callJSON(ctx, input, sink, provider, modelCallSpec{definition: novelprompt.LengthNormalize, step: RunNormalizing, userPayload: map[string]any{"chapter_content": bestContent, "chapter_plan": plan, "target_chapter_words": input.Project.TargetChapterWords, "rules": input.Rules, "style_profile": input.StyleProfile}, maxTokens: 12000, validate: func() error { return requireText("content", processed.Content) }}, &processed)
+		if callErr != nil {
+			return ChapterBundle{}, callErr
+		}
+		bestContent = strings.TrimSpace(processed.Content)
+		bestContentRaw = processedRaw
+	}
 
 	if err := p.emitStage(ctx, input, sink, RunAuditing, "正在审核章节", 55); err != nil {
 		return ChapterBundle{}, err
 	}
 	audits := make([]Audit, 0, p.maxRevisions+1)
 	revisions := make([]Revision, 0, p.maxRevisions)
-	currentAudit, currentAuditRaw, err := p.auditChapter(ctx, input, sink, provider, foundation, plan, bestContent)
+	currentAudit, currentAuditRaw, err := p.auditChapter(ctx, input, sink, provider, foundation, plan, bestContent, 0)
 	if err != nil {
 		return ChapterBundle{}, err
 	}
@@ -325,12 +366,15 @@ func (p *Pipeline) Run(ctx context.Context, input RunContext, sink EventSink) (C
 	bestAudit := currentAudit
 	bestAuditRaw := currentAuditRaw
 
+	threshold := p.threshold(input)
 	revisingStageEmitted := false
 	maxRevisions := p.maxRevisions
-	if input.MaxRevisionRounds > 0 {
+	if input.Agent != nil {
+		maxRevisions = input.Agent.MaxRevisionRounds
+	} else if input.MaxRevisionRounds > 0 {
 		maxRevisions = input.MaxRevisionRounds
 	}
-	for round := 1; !auditPasses(bestAudit, p.auditThreshold) && round <= maxRevisions; round++ {
+	for round := 1; !auditPasses(bestAudit, threshold) && round <= maxRevisions; round++ {
 		if len(bestAudit.Issues) == 0 {
 			break
 		}
@@ -343,13 +387,15 @@ func (p *Pipeline) Run(ctx context.Context, input RunContext, sink EventSink) (C
 
 		var revision chapterRevisionOutput
 		revisionRaw, callErr := p.callJSON(ctx, input, sink, provider, modelCallSpec{
-			definition: novelprompt.ChapterRevision, step: RunRevising,
-			userPayload: map[string]any{
-				"chapter_content": bestContent,
-				"chapter_plan":    plan,
-				"audit_issues":    bestAudit.Issues,
-				"memory_context":  rawJSONValue(input.PreviousMemory),
-			},
+			definition: novelprompt.ChapterRevision, step: RunRevising, key: fmt.Sprintf(":%d", round),
+			userPayload: withReviewDimensionContext(input, map[string]any{
+				"chapter_content":   bestContent,
+				"chapter_plan":      plan,
+				"audit_issues":      bestAudit.Issues,
+				"previous_truth":    rawJSONValue(input.PreviousTruth),
+				"previous_chapters": input.PreviousChapters,
+				"memory_context":    rawJSONValue(input.PreviousMemory),
+			}, foundation),
 			temperature: 0.55, maxTokens: 12000,
 			validate: func() error { return validateRevision(revision, bestAudit.Issues) },
 		}, &revision)
@@ -358,12 +404,12 @@ func (p *Pipeline) Run(ctx context.Context, input RunContext, sink EventSink) (C
 		}
 		revisions = append(revisions, newRevision(input, round, revision, revisionRaw))
 
-		candidateAudit, candidateAuditRaw, auditErr := p.auditChapter(ctx, input, sink, provider, foundation, plan, revision.Content)
+		candidateAudit, candidateAuditRaw, auditErr := p.auditChapter(ctx, input, sink, provider, foundation, plan, revision.Content, round)
 		if auditErr != nil {
 			return ChapterBundle{}, auditErr
 		}
 		audits = append(audits, newAudit(input, len(audits)+1, candidateAudit, candidateAuditRaw))
-		if betterAudit(candidateAudit, bestAudit, p.auditThreshold) {
+		if betterAudit(candidateAudit, bestAudit, threshold) {
 			bestContent = strings.TrimSpace(revision.Content)
 			bestContentRaw = revisionRaw
 			bestAudit = candidateAudit
@@ -372,8 +418,35 @@ func (p *Pipeline) Run(ctx context.Context, input RunContext, sink EventSink) (C
 	}
 
 	finalStatus := RunSucceeded
-	if !auditPasses(bestAudit, p.auditThreshold) {
+	if !auditPasses(bestAudit, threshold) {
 		finalStatus = RunSucceededWithWarnings
+	}
+
+	var localChecks json.RawMessage
+	if input.Agent != nil && (input.Agent.EnablePostWrite || input.Agent.EnableAiTells) {
+		checks := map[string]any{"model_calls": 0, "content_rewritten": false}
+		if input.Agent.EnablePostWrite {
+			titles := []string{}
+			// Full previous chapter texts are not currently present in RunContext.
+			// Do not feed bounded endings to the full cross-chapter check.
+			result := ValidatePostWrite(bestContent, PostWriteInput{Title: plan.Title, ExistingTitles: titles})
+			checks["post_write"] = result
+			checks["cross_chapter_status"] = "not_checked_missing_full_text"
+			if !result.Passed {
+				finalStatus = RunSucceededWithWarnings
+			}
+		}
+		if input.Agent.EnableAiTells {
+			checks["expression_metrics"] = localExpressionMetrics(bestContent)
+		}
+		payload, marshalErr := json.Marshal(checks)
+		if marshalErr != nil {
+			return ChapterBundle{}, marshalErr
+		}
+		localChecks = payload
+		if err := p.emit(ctx, input, sink, RunEvent{Type: "run.local_checks", Step: string(RunNormalizing), Status: RunNormalizing, Message: "本地文字检查完成，未调用模型、未改写正文", Progress: 75, Payload: payload}); err != nil {
+			return ChapterBundle{}, err
+		}
 	}
 
 	if err := p.emitStage(ctx, input, sink, RunSettling, "正在结算事实、人物变化和伏笔", 80); err != nil {
@@ -421,6 +494,17 @@ func (p *Pipeline) Run(ctx context.Context, input RunContext, sink EventSink) (C
 	if err != nil {
 		return ChapterBundle{}, &DomainError{Code: ErrPersistenceFailed, Message: "failed to assemble chapter bundle", Cause: err}
 	}
+	if len(localChecks) > 0 {
+		var snapshot map[string]json.RawMessage
+		if err = json.Unmarshal(bundle.RuntimeSnapshot, &snapshot); err != nil {
+			return ChapterBundle{}, err
+		}
+		snapshot["localChecks"] = localChecks
+		bundle.RuntimeSnapshot, err = json.Marshal(snapshot)
+		if err != nil {
+			return ChapterBundle{}, err
+		}
+	}
 	return bundle, nil
 }
 
@@ -440,46 +524,93 @@ func modeContract(mode string) map[string]string {
 	return contracts["long_original"]
 }
 
-func (p *Pipeline) auditChapter(ctx context.Context, input RunContext, sink EventSink, provider batchfactoryv11.DirectorProvider, foundation foundationPlanOutput, plan chapterPlanOutput, content string) (chapterAuditOutput, json.RawMessage, error) {
+func (p *Pipeline) auditChapter(ctx context.Context, input RunContext, sink EventSink, provider batchfactoryv11.DirectorProvider, foundation foundationPlanOutput, plan chapterPlanOutput, content string, round int) (chapterAuditOutput, json.RawMessage, error) {
 	var audit chapterAuditOutput
+	definition := novelprompt.ChapterAudit
+	if input.Agent != nil {
+		definition = novelprompt.AgentChapterAudit
+	}
 	raw, err := p.callJSON(ctx, input, sink, provider, modelCallSpec{
-		definition: novelprompt.ChapterAudit, step: RunAuditing,
-		userPayload: map[string]any{
+		definition: definition, step: RunAuditing, key: fmt.Sprintf(":%d", round),
+		userPayload: withReviewDimensionContext(input, map[string]any{
 			"foundation_plan":     foundation,
 			"chapter_plan":        plan,
 			"chapter_content":     content,
+			"pass_score":          p.threshold(input),
 			"rules":               input.Rules,
+			"notes":               input.Notes,
 			"knowledge_materials": input.KnowledgeMaterials,
+			"previous_truth":      rawJSONValue(input.PreviousTruth),
+			"previous_chapters":   input.PreviousChapters,
 			"memory_context":      rawJSONValue(input.PreviousMemory),
-		},
+		}, foundation),
 		temperature: 0.2, maxTokens: 4500,
-		validate: func() error { return validateAudit(audit, p.auditThreshold) },
+		validate: func() error { return validateAudit(audit, p.threshold(input)) },
 	}, &audit)
 	return audit, raw, err
 }
 
 func (p *Pipeline) callJSON(ctx context.Context, input RunContext, sink EventSink, provider batchfactoryv11.DirectorProvider, spec modelCallSpec, target any) (json.RawMessage, error) {
+	if input.LongImitation != nil && spec.definition.ID != novelprompt.LongImitationRequirements.ID {
+		spec.definition.SystemPrompt += novelprompt.LongImitationSystemSupplement
+		if payload, ok := spec.userPayload.(map[string]any); ok {
+			copy := map[string]any{}
+			for k, v := range payload {
+				copy[k] = v
+			}
+			copy["creation_brief"] = imitationModelBrief(input)
+			copy["long_imitation_analysis"] = input.ImitationAnalysis
+			spec.userPayload = copy
+		}
+		if input.Project.TargetChapterWords > 8000 && spec.maxTokens >= 12000 {
+			spec.maxTokens = input.Project.TargetChapterWords*2 + 4000
+		}
+	}
+	if input.Agent != nil {
+		spec.temperature = input.Agent.BaseTemperature
+		if spec.definition.ID == novelprompt.ChapterRevision.ID {
+			var round int
+			fmt.Sscanf(spec.key, ":%d", &round)
+			spec.temperature = boundedAgentNumber(spec.temperature+float64(round)*input.Agent.TemperatureStep, 0, 2, 0)
+		}
+	}
+	if input.Agent == nil && spec.definition.ID == novelprompt.ChapterAudit.ID {
+		if fields, ok := spec.userPayload.(map[string]any); ok {
+			delete(fields, "pass_score")
+		}
+	}
 	userPrompt, err := marshalPromptPayload(withThinkingLevel(spec.userPayload, input.Run.ThinkingLevel))
 	if err != nil {
 		return nil, &DomainError{Code: ErrInvalidOutput, Message: "failed to build model input", Cause: err}
 	}
 	request := batchfactoryv11.TextCompletionRequest{
-		SystemPrompt: outputContractSystemPrompt(spec.definition),
+		SystemPrompt: agentRequirementsSystemPrompt(input, spec.definition),
 		UserPrompt:   userPrompt,
 		Temperature:  spec.temperature,
 		MaxTokens:    spec.maxTokens,
 	}
-	reply, err := p.complete(ctx, input, sink, provider, spec.step, request)
+	reply, err := p.complete(ctx, input, sink, provider, spec.step, spec.definition.ID+spec.key, request, spec.definition.Version)
 	if err != nil {
 		return nil, err
+	}
+	// Apply the same envelope guard before either decode path, including a
+	// schema-repair response, so malformed oversize results stay locally cached.
+	if input.LongImitation != nil {
+		if limitError := checkImitationRawReply(spec.definition.ID, reply); limitError != nil {
+			return nil, limitError
+		}
 	}
 	validationErr := decodeAndValidate(reply, target, spec.validate)
 	if validationErr == nil {
 		return json.RawMessage(reply), nil
 	}
+	var imitationLimit *imitationOutputLimitError
+	if input.LongImitation != nil && errors.As(validationErr, &imitationLimit) {
+		return nil, imitationLimitFailure(imitationLimit)
+	}
 
 	repairPrompt, marshalErr := marshalPromptPayload(map[string]any{
-		"instruction":      "上一轮输出不符合合同，只返回修复后的完整 JSON 对象",
+		"instruction":      novelprompt.StructureRepairInstruction,
 		"thinking_level":   strings.TrimSpace(input.Run.ThinkingLevel),
 		"original_request": json.RawMessage(userPrompt),
 		"invalid_output":   reply,
@@ -489,26 +620,94 @@ func (p *Pipeline) callJSON(ctx context.Context, input RunContext, sink EventSin
 		return nil, invalidOutputError(spec.definition, validationErr)
 	}
 	repairRequest := batchfactoryv11.TextCompletionRequest{
-		SystemPrompt: outputContractSystemPrompt(spec.definition) + "\n\n上一轮输出无法通过合同校验。现在只返回一个修复后的完整 JSON 对象，不要解释。",
+		SystemPrompt: agentRequirementsSystemPrompt(input, spec.definition) + "\n\n" + novelprompt.StructureRepairSystem,
 		UserPrompt:   repairPrompt,
 		Temperature:  0.1,
 		MaxTokens:    spec.maxTokens,
 	}
-	repairedReply, err := p.complete(ctx, input, sink, provider, spec.step, repairRequest)
+	repairedReply, err := p.complete(ctx, input, sink, provider, spec.step, spec.definition.ID+spec.key+":repair", repairRequest, spec.definition.Version)
 	if err != nil {
 		return nil, err
 	}
+	if input.LongImitation != nil {
+		if limitError := checkImitationRawReply(spec.definition.ID, repairedReply); limitError != nil {
+			return nil, limitError
+		}
+	}
 	if err := decodeAndValidate(repairedReply, target, spec.validate); err != nil {
+		var imitationLimit *imitationOutputLimitError
+		if input.LongImitation != nil && errors.As(err, &imitationLimit) {
+			return nil, imitationLimitFailure(imitationLimit)
+		}
 		return nil, invalidOutputError(spec.definition, err)
 	}
 	return json.RawMessage(repairedReply), nil
 }
 
-func (p *Pipeline) complete(ctx context.Context, input RunContext, sink EventSink, provider batchfactoryv11.DirectorProvider, step RunStatus, request batchfactoryv11.TextCompletionRequest) (string, error) {
+func (p *Pipeline) complete(ctx context.Context, input RunContext, sink EventSink, provider batchfactoryv11.DirectorProvider, step RunStatus, key string, request batchfactoryv11.TextCompletionRequest, promptVersion int) (string, error) {
 	if err := p.checkCancelled(ctx, input); err != nil {
 		return "", err
 	}
-	reply, err := provider.Complete(ctx, request)
+	reply, err := journalCompletePrepared(ctx, key, provider, request, input.Agent != nil && input.Agent.RequireSecondaryConfirm, func() (batchfactoryv11.DirectorProvider, batchfactoryv11.TextCompletionRequest, *ModelCallMetadata, error) {
+		if input.Agent == nil {
+			id := strings.TrimSpace(input.Run.ModelID)
+			if id == "" {
+				id = strings.TrimSpace(input.Project.ModelID)
+			}
+			actual, err := p.resolveProvider(ctx, input.OwnerUsername, id)
+			if err != nil {
+				return nil, request, nil, mapModelError(err)
+			}
+			if actual == nil {
+				return nil, request, nil, &DomainError{Code: ErrModelUnavailable, Message: "所选文本模型当前不可用"}
+			}
+			return actual, request, nil, nil
+		}
+		route := strings.Split(strings.TrimPrefix(key, "novel-creation."), ":")[0]
+		routeKey := route
+		if route == "style-analysis" || route == "long-imitation-analysis" || route == "long-imitation-requirements" {
+			routeKey = "foundation-plan"
+		}
+		switch route {
+		case "short-source-analysis", "short-outline", "short-outline-revision":
+			routeKey = "foundation-plan"
+		case "short-body":
+			routeKey = "chapter-draft"
+		case "short-review":
+			routeKey = "chapter-audit"
+		case "short-body-revision":
+			routeKey = "chapter-revision"
+		case "short-recommendation", "short-continuity":
+			routeKey = "memory-index"
+		}
+		modelID := input.Agent.ModelRoutes[routeKey]
+		if modelID == "" {
+			modelID = input.Run.ModelID
+		}
+		if modelID == "" {
+			modelID = input.Project.ModelID
+		}
+		actual, resolveErr := p.resolveProvider(ctx, input.OwnerUsername, modelID)
+		if resolveErr != nil {
+			return nil, request, nil, mapModelError(resolveErr)
+		}
+		if actual == nil {
+			return nil, request, nil, &DomainError{Code: ErrModelUnavailable, Message: "所选文本模型当前不可用"}
+		}
+		meta := ModelCallMetadata{ChosenModelID: modelID, PromptID: "novel-creation." + route, PromptVersion: promptVersion, Temperature: request.Temperature, MaxTokens: request.MaxTokens, TemperatureStatus: "sent", MaxTokensStatus: "sent"}
+		if withMeta, ok := actual.(batchfactoryv11.TextModelMetadataProvider); ok {
+			meta.Provider = withMeta.TextModelMetadata()
+			if meta.Provider.SupportsTemperature != nil && !*meta.Provider.SupportsTemperature {
+				request.OmitTemperature = true
+				meta.TemperatureStatus = "不支持，未发送"
+			}
+			if meta.Provider.SupportsMaxTokens != nil && !*meta.Provider.SupportsMaxTokens {
+				request.OmitMaxTokens = true
+				meta.MaxTokensStatus = "不支持，未发送"
+			}
+		}
+		return actual, request, &meta, nil
+	})
 	if err != nil {
 		return "", mapModelError(err)
 	}
@@ -680,7 +879,7 @@ func classifyUpstreamModelError(err error) error {
 	text := strings.ToLower(err.Error())
 	switch {
 	case upstreamAuthStatus.MatchString(text), containsAny(text, "unauthorized", "forbidden", "invalid api key", "incorrect api key", "authentication failed", "鉴权"):
-		return &DomainError{Code: ErrModelAuthFailed, Message: "文本模型鉴权失败，请到 API 配置检查", Cause: err}
+		return &DomainError{Code: ErrModelAuthFailed, Message: "所选文本模型当前不可用，请联系管理员或选择其他授权模型", Cause: err}
 	case upstreamHTTPStatus.FindString(text) == "429", containsAny(text, "rate limit", "too many requests", "requests per minute", "限流"):
 		return &DomainError{Code: ErrModelRateLimited, Message: "模型服务限流，请稍后重试", Cause: err}
 	case upstreamHTTPStatus.MatchString(text),
@@ -1017,6 +1216,7 @@ func buildChapterBundle(input RunContext, volume foundationVolume, foundationRaw
 		return ChapterBundle{}, err
 	}
 	versionSnapshot, err := json.Marshal(map[string]any{
+		"truthSettlement": json.RawMessage(settlementRaw), "memoryIndex": json.RawMessage(memoryRaw),
 		"chapterPlan": json.RawMessage(planRaw), "modelOutput": json.RawMessage(contentRaw), "finalAudit": json.RawMessage(auditRaw),
 	})
 	if err != nil {
@@ -1065,4 +1265,11 @@ func countVisibleRunes(value string) int {
 		}
 	}
 	return count
+}
+
+func (p *Pipeline) threshold(input RunContext) float64 {
+	if input.Agent != nil {
+		return input.Agent.PassScore
+	}
+	return p.auditThreshold
 }

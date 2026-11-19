@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -155,7 +156,7 @@ func TestServiceSendMessageReturnsExistingRunForSameIdempotencyKey(t *testing.T)
 	}
 }
 
-func TestServiceSendMessageQueueFailurePersistsFailedTerminalAndCanRetry(t *testing.T) {
+func TestServiceSendMessageRedisFailureStillPersistsDispatch(t *testing.T) {
 	store := NewMemoryStore()
 	baseRuntime := NewMemoryRuntime()
 	runtime := failingEnqueueRuntime{Runtime: baseRuntime, err: errors.New("redis unavailable")}
@@ -171,24 +172,29 @@ func TestServiceSendMessageQueueFailurePersistsFailedTerminalAndCanRetry(t *test
 	run, err := service.SendMessage(context.Background(), "alice", SendMessageInput{
 		SessionID: session.ID, ProjectID: project.ID, Content: "写第一章", ModelID: "text-1", IdempotencyKey: "send-fail",
 	})
-	if err == nil || !IsCode(err, ErrPersistenceFailed) {
-		t.Fatalf("run=%+v err=%v, want %s", run, err, ErrPersistenceFailed)
+	if err != nil {
+		t.Fatal(err)
 	}
 	snapshot, getErr := service.GetSnapshot(context.Background(), "alice", run.ID, 0)
 	if getErr != nil {
 		t.Fatal(getErr)
 	}
-	if snapshot.Run.Status != RunFailed || snapshot.Run.ErrorCode != ErrPersistenceFailed || snapshot.Run.FinishedAt == nil {
-		t.Fatalf("failed run was not durable: %+v", snapshot.Run)
+	if snapshot.Run.Status != RunQueued {
+		t.Fatalf("redis wake failure changed durable run: %s", snapshot.Run.Status)
 	}
-	if len(snapshot.Events) != 2 || snapshot.Events[1].Type != "run.failed" {
-		t.Fatalf("events=%+v, want queued then failed", snapshot.Events)
+	pending, err := store.ListDispatch(context.Background(), 10)
+	if err != nil || len(pending) != 1 || pending[0].RunID != run.ID {
+		t.Fatalf("dispatch lost: %+v %v", pending, err)
 	}
+	if len(snapshot.Events) != 1 || snapshot.Events[0].Type != "run.queued" {
+		t.Fatalf("events=%+v", snapshot.Events)
+	}
+
 }
 
 func TestServiceRunUsesServerOwnerAcquiresLockPersistsEventsAndBundle(t *testing.T) {
 	provider := &queuedPipelineProvider{responses: []string{
-		foundationJSON, chapterPlanJSON, draftJSON, passedAuditJSON, settlementJSON, memoryJSON,
+		foundationJSON, chapterPlanJSON, draftJSON, draftJSON, passedAuditJSON, settlementJSON, memoryJSON,
 	}}
 	store := NewMemoryStore()
 	runtime := NewMemoryRuntime()
@@ -220,8 +226,14 @@ func TestServiceRunUsesServerOwnerAcquiresLockPersistsEventsAndBundle(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if completed.Status != RunSucceeded || len(provider.requests) != 6 {
+	if completed.Status != RunSucceeded || len(provider.requests) != 7 {
 		t.Fatalf("completed=%+v provider requests=%d", completed, len(provider.requests))
+	}
+	var checkSnapshot struct {
+		LocalChecks map[string]json.RawMessage `json:"localChecks"`
+	}
+	if json.Unmarshal(completed.RuntimeSnapshot, &checkSnapshot) != nil || len(checkSnapshot.LocalChecks["post_write"]) == 0 {
+		t.Fatal("saved run lost local validation report")
 	}
 	snapshot, err := service.GetSnapshot(context.Background(), "alice", run.ID, 0)
 	if err != nil {
@@ -843,7 +855,7 @@ func TestServiceScheduleDispatchCreatesRunAndAdvancesNextRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reloaded.LastRunID != dispatched[0].Run.ID || !reloaded.NextRunAt.After(now) {
+	if reloaded.LastRunID != dispatched[0].Run.ID || !reloaded.NextRunAt.Equal(schedule.NextRunAt) {
 		t.Fatalf("schedule after dispatch=%+v", reloaded)
 	}
 	second, err := fixture.service.DispatchDueSchedules(context.Background(), now)
@@ -853,6 +865,7 @@ func TestServiceScheduleDispatchCreatesRunAndAdvancesNextRun(t *testing.T) {
 	if len(second) != 0 {
 		t.Fatalf("second dispatch=%+v, want none", second)
 	}
+	finishQueuedRun(t, fixture.store, "alice", dispatched[0].Run, RunSucceeded, "")
 	run, err := fixture.service.RunSchedule(context.Background(), "alice", fixture.project.ID, schedule.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -870,6 +883,23 @@ func finishQueuedRun(t *testing.T, store *MemoryStore, owner string, run Run, st
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if status == RunSucceeded || status == RunSucceededWithWarnings {
+		n := len(store.chapterVersions) + 1
+		if e := store.SaveChapterBundle(context.Background(), owner, ChapterBundle{ProjectID: run.ProjectID, RunID: run.ID, Chapter: Chapter{ID: fmt.Sprintf("chapter-%d", n), ProjectID: run.ProjectID, Number: n, Content: "正文", Version: 1}, ChapterVersion: ChapterVersion{ID: fmt.Sprintf("version-%d", n), ChapterID: fmt.Sprintf("chapter-%d", n), RunID: run.ID, Version: 1, Content: "正文"}, Memories: []Memory{{ID: fmt.Sprintf("memory-%d", n), ChapterID: fmt.Sprintf("chapter-%d", n), Snapshot: json.RawMessage(`{"summary":"已保存的前文"}`)}}, RuntimeSnapshot: json.RawMessage(`{"truthSettlement":{"facts":["已发生"]},"memoryIndex":{"summary":"已保存的前文"}}`), FinalRunStatus: status}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	e, ok, err := store.GetExecution(context.Background(), owner, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		e.State = "done"
+		if err = store.PutExecution(context.Background(), e); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 }
 
 func TestServiceBatchAdvancesChaptersAndCompletes(t *testing.T) {

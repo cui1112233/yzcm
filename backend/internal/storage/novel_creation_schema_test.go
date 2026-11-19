@@ -8,8 +8,8 @@ import (
 
 func TestNovelCreationMigrationCreatesOwnerScopedLongFormDomain(t *testing.T) {
 	migrations := NovelCreationMigrations()
-	if len(migrations) != 4 {
-		t.Fatalf("migrations=%d, want 4", len(migrations))
+	if len(migrations) != 10 {
+		t.Fatalf("migrations=%d, want 10", len(migrations))
 	}
 	migration := migrations[0]
 	if migration.Version != 8800300 {
@@ -123,6 +123,54 @@ func TestNovelCreationSchemaKeepsProjectBindingsConsistent(t *testing.T) {
 	} {
 		if !strings.Contains(statementFor("novel_runs"), constraint) && !strings.Contains(statementFor("novel_run_events"), constraint) {
 			t.Fatalf("missing composite project binding: %s", constraint)
+		}
+	}
+}
+
+func TestNovelCreationAutomationInputMigration(t *testing.T) {
+	migrations := NovelCreationMigrations()
+	m := migrations[4]
+	if m.Version != 8800311 {
+		t.Fatalf("migration=%+v", m)
+	}
+	sql := strings.Join(m.SQL, "\n")
+	for _, part := range []string{"ALTER TABLE novel_schedules ADD COLUMN input_snapshot_json JSON NULL", "ALTER TABLE novel_batches ADD COLUMN input_snapshot_json JSON NULL", "CREATE TABLE IF NOT EXISTS novel_style_profiles", "PRIMARY KEY (owner_username, style_profile_id)"} {
+		if !strings.Contains(sql, part) {
+			t.Fatalf("missing %s", part)
+		}
+	}
+	seen := map[int]bool{}
+	for _, m := range AppMigrations() {
+		if seen[m.Version] {
+			t.Fatalf("duplicate migration %d", m.Version)
+		}
+		seen[m.Version] = true
+	}
+}
+
+func TestNovelWorkerMigrationUsesDurableDispatchAndProjectSlot(t *testing.T) {
+	migrations := NovelCreationMigrations()
+	m := migrations[5]
+	if m.Version != 8800312 {
+		t.Fatalf("worker migration=%d", m.Version)
+	}
+	sql := strings.Join(m.SQL, "\n")
+	for _, part := range []string{"novel_run_dispatch", "execution_json JSON NOT NULL", "PRIMARY KEY (owner_username, run_id)", "novel_project_slots", "fence BIGINT NOT NULL", "lease_until DATETIME(6)", "PRIMARY KEY (owner_username, project_id)"} {
+		if !strings.Contains(sql, part) {
+			t.Fatalf("missing %s", part)
+		}
+	}
+}
+
+func TestNovelAutomationRoundMigrationUniquePlanAndRun(t *testing.T) {
+	m := NovelCreationMigrations()[6]
+	if m.Version != 8800313 {
+		t.Fatal(m.Version)
+	}
+	sql := strings.Join(m.SQL, "\n")
+	for _, part := range []string{"PRIMARY KEY (owner_username, kind, plan_id, round_key)", "UNIQUE KEY uq_novel_automation_run (owner_username, run_id)", "planned_at DATETIME(6)", "REFERENCES novel_runs(owner_username, run_id)"} {
+		if !strings.Contains(sql, part) {
+			t.Fatal("missing " + part)
 		}
 	}
 }

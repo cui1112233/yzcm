@@ -305,5 +305,54 @@ func NovelCreationMigrations() []Migration {
   CONSTRAINT fk_novel_batches_session FOREIGN KEY (owner_username, session_id, project_id) REFERENCES novel_sessions(owner_username, session_id, project_id)
 ) ENGINE=InnoDB`,
 		},
-	}}
+	}, {
+		Version:          8800311,
+		CallbackChecksum: "v88-novel-creation-automation-input-v1",
+		SQL: []string{
+			`ALTER TABLE novel_schedules ADD COLUMN input_snapshot_json JSON NULL`,
+			`ALTER TABLE novel_batches ADD COLUMN input_snapshot_json JSON NULL`,
+			`CREATE TABLE IF NOT EXISTS novel_style_profiles (
+ owner_username VARCHAR(191) NOT NULL,
+ style_profile_id VARCHAR(96) NOT NULL,
+ title VARCHAR(255) NOT NULL DEFAULT '',
+ content LONGTEXT NOT NULL,
+ PRIMARY KEY (owner_username, style_profile_id)
+ ) ENGINE=InnoDB`,
+		},
+	}, {
+		Version:          8800312,
+		CallbackChecksum: "v88-novel-durable-worker-v1",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS novel_run_dispatch (
+ owner_username VARCHAR(191) NOT NULL,
+ run_id VARCHAR(96) NOT NULL,
+ project_id VARCHAR(96) NOT NULL,
+ state VARCHAR(32) NOT NULL,
+ lease_until DATETIME(6) NULL,
+ execution_json JSON NOT NULL,
+ PRIMARY KEY (owner_username, run_id),
+ KEY idx_novel_dispatch_scan (state, lease_until),
+ CONSTRAINT fk_novel_dispatch_run FOREIGN KEY (owner_username, run_id) REFERENCES novel_runs(owner_username, run_id)
+ ) ENGINE=InnoDB`,
+			`CREATE TABLE IF NOT EXISTS novel_project_slots (
+ owner_username VARCHAR(191) NOT NULL,
+ project_id VARCHAR(96) NOT NULL,
+ active_run_id VARCHAR(96) NOT NULL,
+ fence BIGINT NOT NULL,
+ lease_until DATETIME(6) NULL,
+ PRIMARY KEY (owner_username, project_id),
+ CONSTRAINT fk_novel_slot_project FOREIGN KEY (owner_username, project_id) REFERENCES novel_projects(owner_username, project_id)
+ ) ENGINE=InnoDB`,
+		},
+	}, {Version: 8800313, CallbackChecksum: "v88-novel-automation-rounds-v1", SQL: []string{`CREATE TABLE IF NOT EXISTS novel_automation_rounds (
+ owner_username VARCHAR(191) NOT NULL,
+ kind VARCHAR(16) NOT NULL,
+ plan_id VARCHAR(96) NOT NULL,
+ round_key VARCHAR(128) NOT NULL,
+ run_id VARCHAR(96) NOT NULL,
+ planned_at DATETIME(6) NOT NULL,
+ PRIMARY KEY (owner_username, kind, plan_id, round_key),
+ UNIQUE KEY uq_novel_automation_run (owner_username, run_id),
+ CONSTRAINT fk_novel_automation_run FOREIGN KEY (owner_username, run_id) REFERENCES novel_runs(owner_username, run_id)
+ ) ENGINE=InnoDB`}}, {Version: 8800314, CallbackChecksum: "v88-novel-documents-content-v1", SQL: novelContentStatements()}, {Version: 8800315, CallbackChecksum: "v88-novel-submission-receipts-v1", SQL: novelSubmissionReceiptStatements()}, {Version: 8800316, CallbackChecksum: "v88-novel-studio-sessions-v1", SQL: novelStudioStatements()}}
 }

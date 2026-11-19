@@ -44,6 +44,14 @@ import (
 	"qiantie/backend/internal/videomanagementconnector"
 )
 
+// novelFetchClassificationTimeout caps each classification LLM call (男女频/
+// 风格判断)。这些调用只产出几十字节 JSON，但底层 OpenAICompatibleProvider 的
+// 请求超时是 directorProviderRequestTimeout（300 秒）且内部还会重试 3 次，
+// 外层 style 判断又重试 3 次——模型网关挂起时「AI 判断发布信息」要转
+// 二十多分钟才兜底。给分类链路单独一个短超时，快速失败走默认风格兜底。
+// 包级变量以便测试在必要时收紧验证。
+var novelFetchClassificationTimeout = 60 * time.Second
+
 type novelFetchRewriteAdapter struct {
 	provider *batchfactoryv11.OpenAICompatibleProvider
 }
@@ -87,7 +95,9 @@ func (p ownerTextProvider) Complete(ctx context.Context, request batchfactoryv11
 }
 
 func (a novelFetchRewriteAdapter) Complete(ctx context.Context, request novelfetchworkshop.RewriteRequest) (string, error) {
-	return a.provider.Complete(ctx, batchfactoryv11.TextCompletionRequest{
+	callCtx, cancel := context.WithTimeout(ctx, novelFetchClassificationTimeout)
+	defer cancel()
+	return a.provider.Complete(callCtx, batchfactoryv11.TextCompletionRequest{
 		SystemPrompt:        request.SystemPrompt,
 		UserPrompt:          request.UserPrompt,
 		Temperature:         request.Temperature,
@@ -127,6 +137,7 @@ func configuredTextProvider(settings map[string]any, selected string) (*batchfac
 			endpoint += "/chat/completions"
 		}
 		provider := &batchfactoryv11.OpenAICompatibleProvider{
+			Metadata: batchfactoryv11.NewTextModelMetadata(modelID, id, endpoint, model),
 			Endpoint: endpoint,
 			APIKey:   strings.TrimSpace(fmt.Sprint(model["credential"])),
 			Model:    modelID,
@@ -280,7 +291,9 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	var novelFetchRewriteResolver func(context.Context, string) (novelfetchworkshop.RewriteProvider, error)
 	if textProvider != nil {
 		novelFetchAIGenderJudge = func(ctx context.Context, info novelfetchworkshop.BookInfo) (string, error) {
-			return textProvider.Complete(ctx, batchfactoryv11.TextCompletionRequest{
+			judgeCtx, cancel := context.WithTimeout(ctx, novelFetchClassificationTimeout)
+			defer cancel()
+			return textProvider.Complete(judgeCtx, batchfactoryv11.TextCompletionRequest{
 				SystemPrompt:        "你是小说男女频分类助手。只输出 JSON：{\"gender\":\"男频或女频\",\"confidence\":0.0,\"reason\":\"判断依据\"}。confidence 范围为 0 到 1；依据不足时 gender 留空、confidence 设为 0 并说明原因。不要输出 JSON 以外的内容。",
 				UserPrompt:          "请根据以下分类信息和正文片段判断小说男女频：分类=" + info.Category + "；题材=" + info.Genre + "；正文片段=" + genderTextExcerpt(info.Text),
 				Temperature:         0,
@@ -357,20 +370,17 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 		}
 		novelCreationRuntime = novelcreation.NewRedisRuntime("qiantie:novel-creation", novelcreation.RedisDoFunc(redisTransport.Do))
 	}
-	novelCreationService := novelcreation.NewService(novelCreationStore, novelCreationRuntime, novelcreation.NewPipeline(textProviderForModel))
-	novelCreationRunStarter := func(_ context.Context, owner, runID string) {
-		go func() {
-			runCtx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
-			defer cancel()
-			if _, runErr := novelCreationService.Run(runCtx, owner, runID); runErr != nil {
-				fmt.Printf("novel creation run %s failed: %v\n", runID, runErr)
-			}
-		}()
+	memberProfiles := httpapi.NewMemberProfileStore(cfg.MemberSystemDir)
+	novelCreationService := novelcreation.NewService(novelCreationStore, novelCreationRuntime, novelcreation.NewPipeline(novelcreation.ProviderResolver(httpapi.NovelCreationTextResolver(authStore, memberProfiles, textProviderForModel))))
+	if cfg.AgentAssetTOSBucket != "" {
+		documentObjects, documentErr := novelcreation.NewTOSDocumentStore(novelcreation.DocumentTOSConfig{Endpoint: cfg.AgentAssetTOSEndpoint, Region: cfg.AgentAssetTOSRegion, Bucket: cfg.AgentAssetTOSBucket, AccessKey: cfg.AgentAssetTOSAccessKey, SecretKey: cfg.AgentAssetTOSSecretKey})
+		if documentErr != nil {
+			return nil, documentErr
+		}
+		novelCreationService.ConfigureDocuments(documentObjects, nil)
 	}
-	// The scheduler is a process-lifetime worker: Build's ctx is a startup
-	// timeout, not a server lifecycle context.
-	novelcreation.StartScheduler(context.Background(), novelCreationService, novelCreationRunStarter, time.Minute)
-	novelcreation.StartBatchWorker(context.Background(), novelCreationService, novelCreationRunStarter, 5*time.Second)
+	novelCreationRunStarter := novelCreationService.Notify
+	novelStartup := &novelCreationStartup{service: novelCreationService}
 	novelFetchRewriteResolver = func(ctx context.Context, owner string) (novelfetchworkshop.RewriteProvider, error) {
 		provider, providerErr := resolveCatalogTextProviderWithSelection(ctx, owner, novelfetchworkshop.ProcessTextModel(ctx))
 		if providerErr != nil {
@@ -612,6 +622,10 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	// Expiry must also run on local-only installations without TOS. 全站统一：
 	// 每天 00:00 重算保留期，到期只归档、不自动删除。
 	projectRetention := projectretention.NewService(db, store.MySQLStore, artifactStore, retentionRemote, retentionDays)
+	novelCreationService.ConfigureRetention(projectRetention.ArchiveNovel, func(ctx context.Context, owner, project string) error {
+		return projectRetention.Restore(ctx, owner, projectretention.ModuleNovelCreation, project)
+	})
+	projectRetention.NovelObjects = novelCreationService.PurgeDocumentObjects
 	projectRetention.CanvasAssets = agentAssetStore
 	projectRetention.CanvasObjects = agentAssetObjects
 	projectRetention.Grace = projectretention.DefaultArchiveGrace
@@ -738,7 +752,11 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	n8ProducerDirectory := n8catalog.NewClient(nil, cfg.N8AdminBaseURL, cfg.QingyuN8AdminToken)
 	n8ComicWorks := n8catalog.NewWorksClientWithPath(nil, cfg.N8ComicBaseURL, cfg.QingyuN8AdminToken, os.Getenv("QIANTIE_N8_WORKS_PATH"))
 	upscaleService := upscale.NewService(upscale.NewClient(cfg.VolcanoMediaKitBaseURL, cfg.VolcanoMediaKitAPIKey), time.Now)
-	return httpapi.NewRouter(httpapi.RouterOptions{AgentVideoWorkerContext: context.Background(), AgentScriptSplitWorkerContext: context.Background(), AgentImageWorkerContext: context.Background(), AgentAudioWorkerContext: context.Background(), BridgeSecret: cfg.BridgeSecret, ReleaseSHA: cfg.ReleaseSHA, RuntimeManifestPath: os.Getenv("QIANTIE_RUNTIME_MANIFEST_PATH"), Health: databaseHealth(db), AuthRateLimits: httpapi.AuthRateLimitConfig{LoginWindow: cfg.AuthRateLimitLoginWindow, LoginMaxFailures: cfg.AuthRateLimitLoginMaxFailures, LoginLockout: cfg.AuthRateLimitLoginLockout, RegisterWindow: cfg.AuthRateLimitRegisterWindow, RegisterMax: cfg.AuthRateLimitRegisterMax, RegisterLockout: cfg.AuthRateLimitRegisterLockout, PasswordResetWindow: cfg.AuthRateLimitPasswordResetWindow, PasswordResetMax: cfg.AuthRateLimitPasswordResetMax, PasswordResetLockout: cfg.AuthRateLimitPasswordResetLockout}, Users: storage.BridgeUsers{DB: db}, AuthStore: authStore, SessionResolver: nil, Slice: cfg.Slice, Store: store, Director: director, Compiler: compiler, Production: production, Merge: merge, MergeOutput: mergeOutput, External: externalPublish, NovelFetchStore: novelFetchStore, NovelFetchQueue: novelFetchQueue, NovelFetchAIGenderJudge: novelFetchAIGenderJudge, NovelFetchAIGenderJudgeResolver: novelFetchAIGenderJudgeResolver, NovelFetchFetcher: &novelfetchworkshop.UpstreamFetcher{Endpoint: cfg.NovelFetch121Endpoint, Client: safehttp.NewClientWithTimeout(cfg.NovelFetch121Timeout)}, NovelFetchRewrite: novelFetchRewrite, NovelFetchRewriteResolver: novelFetchRewriteResolver, LocalExecutors: localExecutorService, GiantMaterialExecutor: giantMaterialExecutorService, GiantMaterialResolver: giantMaterialResolver, LocalArtifacts: artifactStore, ImageGenerationCache: imageGenerationCache, LocalExecutorDownloadsDir: cfg.LocalExecutorDownloadsDir, PresetCatalog: prompt.NewCatalog(cfg.PresetPath), AutomationPresetStore: automationPresetStore, AutomationStatusReader: httpapi.NewFileAutomationStatusReader(cfg.AutomationStatePath), AutomationStateStore: httpapi.NewMySQLAutomationStateStore(db), PersonalPromptStore: prompt.NewPersonalStore(cfg.PersonalPromptPath), ScriptHistoryStore: httpapi.NewScriptHistoryStore(cfg.ScriptHistoryDir), MemberProfileStore: httpapi.NewMemberProfileStore(cfg.MemberSystemDir), MemberAvatarDir: cfg.MemberAvatarDir, UserDataDir: cfg.ScriptHistoryDir, UserConfigStore: userConfigStore, TextProvider: effectiveTextProvider, TextProviderResolver: textProviderForModel, AgentWorkspace: agentWorkspaceStore, AgentProxy: agentProxyStore, AICut: aiCutStore, AICutPersonalTemplates: aicut.NewMySQLPersonalTemplateStore(db), AICutTimelines: aiCutTimelines, Screenplay: screenplayStore, NovelCreation: novelCreationService, ProjectRetention: projectRetention, NovelCreationRunStarter: novelCreationRunStarter, AICutASR: aiCutASRService, AICutExport: aiCutExportService, AICutAgentStore: aiCutStore, AICutAgentStarter: aiCutAgentStarter, Upscale: upscaleService, AgentAssets: agentAssetStore, AgentAssetObjects: agentAssetObjects, RedisURL: cfg.RedisURL, ImageCapacity: imageCapacityController, RegisterV11: register, VideoManagementConnector: &videomanagementconnector.TargetHTTPService{BaseURL: targetBaseURL}, N8ComicPublisher: &httpapi.BatchFactoryN8ComicPublisher{Store: store, LocalFiles: artifactStore, Client: n8ComicClient, ProducerDirectory: n8ProducerDirectory, WorksDirectory: n8ComicWorks, ProducerAccounts: cfg.N8ComicProducerAccounts, WorkTitleMapPath: os.Getenv("QIANTIE_N8_WORK_TITLE_MAP_PATH")}, ComicDirectRecordPath: comicDirectRecordPath(cfg)}), nil
+	router := httpapi.NewRouter(httpapi.RouterOptions{AgentVideoWorkerContext: context.Background(), AgentScriptSplitWorkerContext: context.Background(), AgentImageWorkerContext: context.Background(), AgentAudioWorkerContext: context.Background(), BridgeSecret: cfg.BridgeSecret, ReleaseSHA: cfg.ReleaseSHA, RuntimeManifestPath: os.Getenv("QIANTIE_RUNTIME_MANIFEST_PATH"), Health: databaseHealth(db), AuthRateLimits: httpapi.AuthRateLimitConfig{LoginWindow: cfg.AuthRateLimitLoginWindow, LoginMaxFailures: cfg.AuthRateLimitLoginMaxFailures, LoginLockout: cfg.AuthRateLimitLoginLockout, RegisterWindow: cfg.AuthRateLimitRegisterWindow, RegisterMax: cfg.AuthRateLimitRegisterMax, RegisterLockout: cfg.AuthRateLimitRegisterLockout, PasswordResetWindow: cfg.AuthRateLimitPasswordResetWindow, PasswordResetMax: cfg.AuthRateLimitPasswordResetMax, PasswordResetLockout: cfg.AuthRateLimitPasswordResetLockout}, Users: storage.BridgeUsers{DB: db}, AuthStore: authStore, SessionResolver: nil, Slice: cfg.Slice, Store: store, Director: director, Compiler: compiler, Production: production, Merge: merge, MergeOutput: mergeOutput, External: externalPublish, NovelFetchStore: novelFetchStore, NovelFetchQueue: novelFetchQueue, NovelFetchAIGenderJudge: novelFetchAIGenderJudge, NovelFetchAIGenderJudgeResolver: novelFetchAIGenderJudgeResolver, NovelFetchFetcher: &novelfetchworkshop.UpstreamFetcher{Endpoint: cfg.NovelFetch121Endpoint, Client: safehttp.NewClientWithTimeout(cfg.NovelFetch121Timeout)}, NovelFetchRewrite: novelFetchRewrite, NovelFetchRewriteResolver: novelFetchRewriteResolver, LocalExecutors: localExecutorService, GiantMaterialExecutor: giantMaterialExecutorService, GiantMaterialResolver: giantMaterialResolver, LocalArtifacts: artifactStore, ImageGenerationCache: imageGenerationCache, LocalExecutorDownloadsDir: cfg.LocalExecutorDownloadsDir, PresetCatalog: prompt.NewCatalog(cfg.PresetPath), AutomationPresetStore: automationPresetStore, AutomationStatusReader: httpapi.NewFileAutomationStatusReader(cfg.AutomationStatePath), AutomationStateStore: httpapi.NewMySQLAutomationStateStore(db), PersonalPromptStore: prompt.NewPersonalStore(cfg.PersonalPromptPath), ScriptHistoryStore: httpapi.NewScriptHistoryStore(cfg.ScriptHistoryDir), MemberProfileStore: memberProfiles, MemberAvatarDir: cfg.MemberAvatarDir, UserDataDir: cfg.ScriptHistoryDir, UserConfigStore: userConfigStore, TextProvider: effectiveTextProvider, TextProviderResolver: textProviderForModel, AgentWorkspace: agentWorkspaceStore, AgentProxy: agentProxyStore, AICut: aiCutStore, AICutPersonalTemplates: aicut.NewMySQLPersonalTemplateStore(db), AICutTimelines: aiCutTimelines, Screenplay: screenplayStore, NovelCreation: novelCreationService, ProjectRetention: projectRetention, NovelCreationRunStarter: novelCreationRunStarter, AICutASR: aiCutASRService, AICutExport: aiCutExportService, AICutAgentStore: aiCutStore, AICutAgentStarter: aiCutAgentStarter, Upscale: upscaleService, AgentAssets: agentAssetStore, AgentAssetObjects: agentAssetObjects, RedisURL: cfg.RedisURL, ImageCapacity: imageCapacityController, RegisterV11: register, VideoManagementConnector: &videomanagementconnector.TargetHTTPService{BaseURL: targetBaseURL}, N8ComicPublisher: &httpapi.BatchFactoryN8ComicPublisher{Store: store, LocalFiles: artifactStore, Client: n8ComicClient, ProducerDirectory: n8ProducerDirectory, WorksDirectory: n8ComicWorks, ProducerAccounts: cfg.N8ComicProducerAccounts, WorkTitleMapPath: os.Getenv("QIANTIE_N8_WORK_TITLE_MAP_PATH")}, ComicDirectRecordPath: comicDirectRecordPath(cfg)})
+	// Build's ctx is a startup timeout, not the server lifetime. Start only
+	// after every execution dependency and all fallible preparation are ready.
+	novelStartup.Start(context.Background())
+	return router, nil
 }
 
 func shouldStartLocalArtifactPurger(cfg config.Config) bool {

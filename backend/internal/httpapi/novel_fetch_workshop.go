@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"sort"
@@ -298,7 +299,7 @@ func (worker *workshopProcessWorker) process(ctx context.Context, job novelfetch
 	if len(activeBookIDs) == 0 {
 		_ = updateWorkshopRun(worker.store, job, "stopped", "任务已停止", startedAt, true)
 		_ = updateNovelFetchScheduleRuntimeStatus(ctx, worker.store, job.Owner, job.ScheduleID, "stopped", "")
-		worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "status": "stopped", "queue_state": "stopped", "started_at": startedAt, "updated_at": startedAt, "attempts": job.Attempts, "steps": []any{}, "progress": []any{}})
+		worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": "stopped", "queue_state": "stopped", "started_at": startedAt, "updated_at": startedAt, "attempts": job.Attempts, "steps": []any{}, "progress": []any{}})
 		_ = worker.queue.Ack(ctx, job)
 		return
 	}
@@ -306,7 +307,7 @@ func (worker *workshopProcessWorker) process(ctx context.Context, job novelfetch
 	activeJob.BookIDs = activeBookIDs
 	_ = updateWorkshopRun(worker.store, job, "running", "", startedAt, false)
 	_ = updateNovelFetchScheduleRuntimeStatus(ctx, worker.store, job.Owner, job.ScheduleID, "running", "")
-	worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "status": "running", "queue_state": "running", "started_at": startedAt, "updated_at": startedAt, "attempts": job.Attempts, "steps": progress, "progress": progress})
+	worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": "running", "queue_state": "running", "started_at": startedAt, "updated_at": startedAt, "attempts": job.Attempts, "steps": progress, "progress": progress})
 	retry := job.Attempts < 3
 	deferredOriginalFetchRetry := false
 	failedBookIDs := make([]string, 0)
@@ -352,7 +353,7 @@ func (worker *workshopProcessWorker) process(ctx context.Context, job novelfetch
 			results <- bookProcessResult{bookID: bookID, bookName: bookName, err: err, stopped: worker.bookCancelled(ctx, job.Owner, bookID)}
 		}()
 	}
-	worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "status": "running", "queue_state": "running", "started_at": startedAt, "updated_at": time.Now().UTC().Format(time.RFC3339Nano), "attempts": job.Attempts, "steps": progress, "progress": progress})
+	worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": "running", "queue_state": "running", "started_at": startedAt, "updated_at": time.Now().UTC().Format(time.RFC3339Nano), "attempts": job.Attempts, "steps": progress, "progress": progress})
 	go func() {
 		processing.Wait()
 		close(results)
@@ -395,7 +396,7 @@ func (worker *workshopProcessWorker) process(ctx context.Context, job novelfetch
 				_ = updateWorkshopTaskRuntimeState(ctx, worker.store, job.Owner, bookID, status, result.err.Error())
 			}
 			progress = append(progress, workshopProgressItem("error", "处理失败："+result.err.Error(), bookID, bookName))
-			worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "status": status, "queue_state": "running", "started_at": startedAt, "updated_at": time.Now().UTC().Format(time.RFC3339Nano), "attempts": job.Attempts, "steps": progress, "progress": progress})
+			worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": status, "queue_state": "running", "started_at": startedAt, "updated_at": time.Now().UTC().Format(time.RFC3339Nano), "attempts": job.Attempts, "steps": progress, "progress": progress})
 			continue
 		}
 		if result.stopped {
@@ -407,7 +408,7 @@ func (worker *workshopProcessWorker) process(ctx context.Context, job novelfetch
 		_ = clearNovelFetchOriginalFetchRetry(ctx, worker.store, job.Owner, bookID)
 		_ = updateWorkshopTaskRuntimeState(ctx, worker.store, job.Owner, bookID, "completed", "")
 		progress = append(progress, workshopProgressItem("success", "处理完成", bookID, bookName))
-		worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "status": "running", "queue_state": "running", "started_at": startedAt, "updated_at": time.Now().UTC().Format(time.RFC3339Nano), "attempts": job.Attempts, "steps": progress, "progress": progress})
+		worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": "running", "queue_state": "running", "started_at": startedAt, "updated_at": time.Now().UTC().Format(time.RFC3339Nano), "attempts": job.Attempts, "steps": progress, "progress": progress})
 		if job.AutoSubmit && worker.autoSubmit != nil && !worker.bookCancelled(ctx, job.Owner, bookID) {
 			bookJob := job
 			bookJob.BookIDs = []string{bookID}
@@ -427,7 +428,7 @@ func (worker *workshopProcessWorker) process(ctx context.Context, job novelfetch
 			}
 			_ = appendWorkshopTaskLog(ctx, worker.store, job.Owner, bookID, "auto_submit_started", "本书处理完成，开始提交到视频管理系统")
 			progress = append(progress, workshopProgressItem("processing", "本书开始上传", bookID, bookName))
-			worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "status": "running", "queue_state": "running", "started_at": startedAt, "updated_at": time.Now().UTC().Format(time.RFC3339Nano), "attempts": job.Attempts, "steps": progress, "progress": progress})
+			worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": "running", "queue_state": "running", "started_at": startedAt, "updated_at": time.Now().UTC().Format(time.RFC3339Nano), "attempts": job.Attempts, "steps": progress, "progress": progress})
 			if err := worker.autoSubmit(ctx, bookJob); err != nil {
 				uploadFailures = append(uploadFailures, bookID+"："+err.Error())
 				failedBookIDs = append(failedBookIDs, bookID)
@@ -469,7 +470,7 @@ func (worker *workshopProcessWorker) process(ctx context.Context, job novelfetch
 			documents, _ := worker.store.ListDocuments(ctx, job.Owner)
 			result := map[string]any{"batch_id": job.BatchID, "current_batch_id": job.BatchID, "tasks": documents, "completed": completed, "failed": len(failedBookIDs), "failed_book_ids": failedBookIDs}
 			progress = append(progress, workshopProgressItem("warning", "原文未抓到，等待下次自动抓取", "", ""))
-			worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "status": status, "queue_state": queueState, "started_at": startedAt, "updated_at": finishedAt, "attempts": job.Attempts, "error": errorMessage, "result": result, "steps": progress, "progress": progress})
+			worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": status, "queue_state": queueState, "started_at": startedAt, "updated_at": finishedAt, "attempts": job.Attempts, "error": errorMessage, "result": result, "steps": progress, "progress": progress})
 			_ = worker.queue.Fail(ctx, job, false)
 			return
 		}
@@ -504,7 +505,7 @@ func (worker *workshopProcessWorker) process(ctx context.Context, job novelfetch
 			progressMessage = "处理结束，任务失败"
 		}
 		progress = append(progress, workshopProgressItem("warning", progressMessage, "", ""))
-		worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "status": status, "queue_state": queueState, "started_at": startedAt, "updated_at": finishedAt, "attempts": job.Attempts, "error": errorMessage, "result": result, "steps": progress, "progress": progress})
+		worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": status, "queue_state": queueState, "started_at": startedAt, "updated_at": finishedAt, "attempts": job.Attempts, "error": errorMessage, "result": result, "steps": progress, "progress": progress})
 		retryJob := job
 		retryJob.BookIDs = retryBookIDs
 		_ = worker.queue.Fail(ctx, retryJob, retryEnabled)
@@ -537,7 +538,7 @@ func (worker *workshopProcessWorker) process(ctx context.Context, job novelfetch
 	} else if finalStatus == "upload_pending" {
 		progress = append(progress, workshopProgressItem("warning", "内容处理完成，等待自动上传重试", "", ""))
 	}
-	worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "status": finalStatus, "queue_state": finalStatus, "started_at": startedAt, "updated_at": finishedAt, "attempts": job.Attempts, "result": result, "steps": progress, "progress": progress})
+	worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": finalStatus, "queue_state": finalStatus, "started_at": startedAt, "updated_at": finishedAt, "attempts": job.Attempts, "result": result, "steps": progress, "progress": progress})
 	_ = worker.queue.Ack(ctx, job)
 }
 
@@ -988,7 +989,7 @@ func runNovelFetchScheduleDispatcher(ctx context.Context, store novelfetchworksh
 				continue
 			}
 			updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
-			registry.put(owner, job.ID, map[string]any{"id": job.ID, "status": "queued", "queue_state": "queued", "started_at": updatedAt, "updated_at": updatedAt, "steps": []any{}, "progress": []any{}})
+			registry.put(owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": "queued", "queue_state": "queued", "started_at": updatedAt, "updated_at": updatedAt, "steps": []any{}, "progress": []any{}})
 		}
 	}
 
@@ -1391,6 +1392,7 @@ func workshopProcessParsedResult(ctx context.Context, store novelfetchworkshop.S
 			}
 			existing.Meta["platformId"] = platformID
 			existing.Meta["currentBatchId"] = batchID
+			existing.Meta["batchCreatedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
 			metadata.apply(existing.Meta)
 			if err := store.PutDocument(ctx, owner, existing); err != nil {
 				return nil, nil, nil, err
@@ -1406,6 +1408,7 @@ func workshopProcessParsedResult(ctx context.Context, store novelfetchworkshop.S
 		}
 		document.Meta["platformId"] = platformID
 		document.Meta["currentBatchId"] = batchID
+		document.Meta["batchCreatedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
 		document.Meta["processingFingerprint"] = processingFingerprint
 		document.Meta["processingConfigRevision"] = "novel-fetch-rules-v1"
 		metadata.apply(document.Meta)
@@ -2295,6 +2298,25 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 				batchSize = 1000
 			}
 			for _, ids := range novelFetchSubmitChunks(job.BookIDs, batchSize) {
+				// 自动提交与手动提交一样，在上传前把本批计划落盘；
+				// 崩溃后可按 run id 判断 executing/unknown，而不是只依赖文档 meta。
+				if planPayload, planStatus, _ := buildWebSubmitPlanPayload(ctx, store, job.Owner, ids, job.SelectedVersions, false); planStatus == http.StatusOK {
+					if manifest, manifestErr := newWebSubmitManifest(usersDir, job.Owner, newWebSubmitRunID(), "auto_submit", planPayload); manifestErr == nil {
+						result, submitErr := executeWebSubmit(ctx, job.Owner, usersDir, store, webSubmitRequest{TaskIDs: ids, Versions: job.SelectedVersions, Queue: queue, Manifest: manifest}, func(ctx context.Context, owner string) (novelfetchworkshop.AIGenderJudge, error) {
+							return resolveGenderJudgeFor(ctx, owner), nil
+						}, uploadTarget)
+						if submitErr == nil && result.Failed > 0 {
+							submitErr = fmt.Errorf("%d 个版本待上传", result.Failed)
+						}
+						if submitErr != nil {
+							manifest.finish("aborted")
+							markNovelFetchAutomationSubmitResult(ctx, store, job.Owner, ids, submitErr)
+							return submitErr
+						}
+						manifest.finish("completed")
+						continue
+					}
+				}
 				result, submitErr := executeWebSubmit(ctx, job.Owner, usersDir, store, webSubmitRequest{TaskIDs: ids, Versions: job.SelectedVersions, Queue: queue}, func(ctx context.Context, owner string) (novelfetchworkshop.AIGenderJudge, error) {
 					return resolveGenderJudgeFor(ctx, owner), nil
 				}, uploadTarget)
@@ -2333,7 +2355,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		}
 		if job != nil {
 			now := time.Now().UTC().Format(time.RFC3339Nano)
-			registry.put(identity.Username, job.ID, map[string]any{"id": job.ID, "status": "queued", "queue_state": "queued", "started_at": now, "updated_at": now, "steps": []any{}, "progress": []any{}})
+			registry.put(identity.Username, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": "queued", "queue_state": "queued", "started_at": now, "updated_at": now, "steps": []any{}, "progress": []any{}})
 		}
 		status, err := novelFetchAutomationStatus(req.Context(), store, registry, identity.Username)
 		if err != nil {
@@ -2444,6 +2466,39 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		writeJSON(w, http.StatusOK, result)
 	})
 
+	// 手动入队：参考实现的 /api/process/queue/start 只处理显式选中的任务，
+	// 不能复用 automation/start（那会启动整批自动队列）。
+	mux.HandleFunc("POST /api/novel-fetch-workshop/process/queue/start", func(w http.ResponseWriter, req *http.Request) {
+		identity, ok := BridgeIdentityFromContext(req.Context())
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		var input struct {
+			IDs     []string `json:"ids"`
+			TaskIDs []string `json:"taskIds"`
+			Mode    string   `json:"mode"`
+		}
+		if err := decodeNovelFetchJSON(w, req, &input); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求内容无效"})
+			return
+		}
+		if len(input.IDs) == 0 {
+			input.IDs = input.TaskIDs
+		}
+		resolved, err := resolveWorkshopTaskIDs(req.Context(), store, identity.Username, input.Mode, input.IDs, workshopTaskFailed)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取任务失败"})
+			return
+		}
+		jobIDs, skipped, err := dispatchNovelFetchManualQueue(req.Context(), store, queue, identity.Username, resolved, time.Now())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "入队失败"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "requested": len(resolved), "queued": len(jobIDs) > 0, "job_ids": jobIDs, "skipped": skipped})
+	})
+
 	mux.HandleFunc("POST /api/novel-fetch-workshop/process/start", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
 		var input struct {
@@ -2503,7 +2558,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		now := time.Now().UTC().Format(time.RFC3339Nano)
 		id := fmt.Sprintf("go-workshop-%d", time.Now().UnixNano())
 		batchID := fmt.Sprintf("batch-%d", time.Now().UnixNano())
-		jobView := map[string]any{"id": id, "status": "queued", "queue_state": "queued", "started_at": now, "updated_at": now, "attempts": 0, "steps": []any{}, "progress": []any{}}
+		jobView := map[string]any{"id": id, "batch_id": batchID, "status": "queued", "queue_state": "queued", "started_at": now, "updated_at": now, "attempts": 0, "steps": []any{}, "progress": []any{}}
 		// 空选择表示使用账号默认文本模型；不能写入“未指定”占位符，
 		// 否则解析器会把它当成显式模型而跳过默认回退，AI 阶段必然失败。
 		textModelID := strings.TrimSpace(input.TextModelID)
@@ -2537,7 +2592,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusOK, jobView)
 			return
 		}
-		processJob := novelfetchworkshop.ProcessJob{ID: id, Owner: identity.Username, BatchID: batchID, BookIDs: bookIDs, PlatformID: input.PlatformID, MaxTxt: input.MaxTxt, SensitiveAIEnabled: input.SensitiveAIEnabled, AutoSubmit: result["auto_queue_enabled"] == true, SelectedVersions: input.SelectedVersions, RewriteMethods: input.RewriteMethods, TextModelID: textModelID}
+		processJob := novelfetchworkshop.ProcessJob{ID: id, Owner: identity.Username, BatchID: batchID, BookIDs: bookIDs, PlatformID: input.PlatformID, MaxTxt: input.MaxTxt, SensitiveAIEnabled: input.SensitiveAIEnabled, AutoSubmit: true, SelectedVersions: input.SelectedVersions, RewriteMethods: input.RewriteMethods, TextModelID: textModelID}
 		if err := novelFetchSnapshotBeforeQueue(req.Context(), store, processJob); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存执行参数失败"})
 			return
@@ -2562,10 +2617,12 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		if conflictQueue, ok := queue.(novelfetchworkshop.ProcessBookConflictQueue); ok {
 			detected, err := conflictQueue.ConflictingBookIDs(req.Context(), processJob)
 			if err != nil {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "Redis 队列状态读取失败"})
-				return
+				// 占用预检只是优化：真正防重复由 EnqueueUniqueBooks 的原子去重保证。
+				// Redis 读抖动时退回整批原子入队，不能因为一次 MGET 失败就阻断开始。
+				log.Printf("novel fetch conflict check failed owner=%s batch=%s err=%v; falling back to atomic enqueue", identity.Username, batchID, err)
+			} else {
+				conflicts = detected
 			}
-			conflicts = detected
 		}
 		queuedBookIDs := make([]string, 0, len(bookIDs))
 		conflictBookIDs := make([]string, 0, len(conflicts))
@@ -2722,7 +2779,14 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 	// so a refresh does not fall through to the default 404 page.
 	mux.HandleFunc("GET /api/novel-fetch-workshop/realtime/status", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		status, err := novelFetchAutomationStatus(req.Context(), store, registry, identity.Username)
+		query := req.URL.Query()
+		// 队列统计必须跟随页面当前查看的批次/日期，否则旧批次未完成的书
+		// 会混进当天队列横幅，让“处理中/排队”数字与当天书单对不上。
+		scope := novelFetchQueueScope{
+			BatchID: strings.TrimSpace(query.Get("batch_id")),
+			Date:    strings.TrimSpace(query.Get("date")),
+		}
+		status, err := novelFetchAutomationStatusScoped(req.Context(), store, registry, identity.Username, scope)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取任务队列失败"})
 			return
@@ -2759,15 +2823,21 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		identity, _ := BridgeIdentityFromContext(req.Context())
 		var input struct {
 			IDs                []string `json:"ids"`
+			Mode               string   `json:"mode"`
 			SensitiveAIEnabled bool     `json:"sensitive_ai_enabled"`
 		}
 		if err := decodeNovelFetchJSON(w, req, &input); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请求内容无效"})
 			return
 		}
-		ids := make([]string, 0, len(input.IDs))
+		resolvedIDs, err := resolveWorkshopTaskIDs(req.Context(), store, identity.Username, input.Mode, input.IDs, workshopTaskFailed)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取任务失败"})
+			return
+		}
+		ids := make([]string, 0, len(resolvedIDs))
 		seen := map[string]bool{}
-		for _, raw := range input.IDs {
+		for _, raw := range resolvedIDs {
 			id := strings.TrimSpace(raw)
 			if !novelFetchBookIDPattern.MatchString(id) {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "非法的书籍ID"})
@@ -3156,12 +3226,26 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "AI 改文模型未配置"})
 			return
 		}
+		// 参考实现 /api/rules/ai-suggest 使用 snake_case 的 rule_type/sample_text；
+		// 这里同时接受两种写法，避免旧页面调用时拿到空文本。
 		var input struct {
-			Text     string `json:"text"`
-			RuleType string `json:"ruleType"`
-			Goal     string `json:"goal"`
+			Text          string `json:"text"`
+			SampleText    string `json:"sample_text"`
+			RuleType      string `json:"ruleType"`
+			RuleTypeSnake string `json:"rule_type"`
+			Goal          string `json:"goal"`
 		}
-		if err := decodeNovelFetchJSON(w, req, &input); err != nil || strings.TrimSpace(input.Text) == "" {
+		if err := decodeNovelFetchJSON(w, req, &input); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请求内容无效"})
+			return
+		}
+		if strings.TrimSpace(input.Text) == "" {
+			input.Text = input.SampleText
+		}
+		if strings.TrimSpace(input.RuleType) == "" {
+			input.RuleType = input.RuleTypeSnake
+		}
+		if strings.TrimSpace(input.Text) == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请输入待分析文本"})
 			return
 		}
@@ -3173,7 +3257,9 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "suggestions": content})
 	})
 
-	mux.HandleFunc("POST /api/novel-fetch-workshop/rules/preview", func(w http.ResponseWriter, req *http.Request) {
+	// 参考实现的 /api/rules/preview 与 /api/rules/trace 复用同一套规则处理，
+	// 只是 trace 只返回分阶段结果。这里保持同样的输入解析和配置覆盖逻辑。
+	previewWorkshopRules := func(w http.ResponseWriter, req *http.Request, traceOnly bool) {
 		var input struct {
 			Text         string         `json:"text"`
 			Scope        string         `json:"scope"`
@@ -3224,8 +3310,14 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		if len(layout) == 0 {
 			layout = mapOrEmpty(settings["layout"])
 		}
+		if traceOnly {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "stages": trace})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "text": result, "result": result, "trace": trace, "config": layout})
-	})
+	}
+	mux.HandleFunc("POST /api/novel-fetch-workshop/rules/preview", func(w http.ResponseWriter, req *http.Request) { previewWorkshopRules(w, req, false) })
+	mux.HandleFunc("POST /api/novel-fetch-workshop/rules/trace", func(w http.ResponseWriter, req *http.Request) { previewWorkshopRules(w, req, true) })
 
 	mux.HandleFunc("POST /api/novel-fetch-workshop/knowledge/repair-imported-sensitive", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
@@ -3559,14 +3651,20 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 	mux.HandleFunc("DELETE /api/novel-fetch-workshop/tasks", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
 		var body struct {
-			IDs []string `json:"ids"`
+			IDs  []string `json:"ids"`
+			Mode string   `json:"mode"`
 		}
 		if err := decodeNovelFetchJSON(w, req, &body); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求内容无效"})
 			return
 		}
-		ids := make([]string, 0, len(body.IDs))
-		for _, raw := range body.IDs {
+		resolvedIDs, err := resolveWorkshopTaskIDs(req.Context(), store, identity.Username, body.Mode, body.IDs, workshopTaskFailed)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取任务失败"})
+			return
+		}
+		ids := make([]string, 0, len(resolvedIDs))
+		for _, raw := range resolvedIDs {
 			id := strings.TrimSpace(raw)
 			if !novelFetchBookIDPattern.MatchString(id) {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "非法的书籍ID"})
@@ -3811,7 +3909,7 @@ func novelFetchClassificationResolved(document novelfetchworkshop.Document) bool
 }
 
 // canonicalNovelFetchAIVersion maps aliases such as ai01/ai001 to the
-// canonical ai1..ai20 identifier. Anything outside that range is rejected so a
+// canonical ai1..ai5 identifier. Anything outside that range is rejected so a
 // single job cannot request an unbounded number of AI rewrites per book.
 func canonicalNovelFetchAIVersion(value string) (string, bool) {
 	name := strings.ToLower(strings.TrimSpace(value))
@@ -3819,7 +3917,7 @@ func canonicalNovelFetchAIVersion(value string) (string, bool) {
 		return "", false
 	}
 	index, err := strconv.Atoi(strings.TrimPrefix(name, "ai"))
-	if err != nil || index < 1 || index > 20 {
+	if err != nil || index < 1 || index > 5 {
 		return "", false
 	}
 	return "ai" + strconv.Itoa(index), true
@@ -3844,7 +3942,7 @@ func normalizeNovelFetchAIVersions(values []string) ([]string, error) {
 		}
 		canonical, ok := canonicalNovelFetchAIVersion(value)
 		if !ok {
-			return nil, fmt.Errorf("不支持的AI版本：%s（仅支持 ai1 到 ai20）", value)
+			return nil, fmt.Errorf("不支持的AI版本：%s（仅支持 ai1 到 ai5）", value)
 		}
 		if seen[canonical] {
 			continue
@@ -3997,41 +4095,7 @@ func applyNovelFetchSensitiveRulesDetailed(ctx context.Context, store novelfetch
 }
 
 func setSensitiveDetails(meta map[string]any, items []map[string]any, count int) {
-	if meta == nil {
-		return
-	}
-	updated := time.Now().UTC().Format(time.RFC3339Nano)
-	hits := make([]any, 0, len(items))
-	fixed := make([]any, 0, len(items))
-	failedCount := 0
-	mode := "system_rule"
-	for _, item := range items {
-		itemSource := strings.ToLower(strings.TrimSpace(fmt.Sprint(item["source"])))
-		if itemSource == "ai_group" || itemSource == "group" {
-			mode = "ai_group"
-		} else if itemSource == "ai" || itemSource == "ai_each" {
-			mode = "ai_each"
-		}
-		hits = append(hits, map[string]any{
-			"hit_index": item["hit_index"], "keyword": item["keyword"],
-			"start": item["start"], "end": item["end"],
-			"snippet": item["before"], "status": item["status"],
-		})
-		fixed = append(fixed, item)
-		if strings.EqualFold(strings.TrimSpace(fmt.Sprint(item["status"])), "failed") {
-			failedCount++
-		}
-	}
-	fixedCount := count - failedCount
-	if fixedCount < 0 {
-		fixedCount = 0
-	}
-	meta["sensitiveHits"] = map[string]any{"mode": mode, "status": "done", "hit_count": count, "updated_at": updated, "hits": hits}
-	status := "done"
-	if failedCount > 0 {
-		status = "failed"
-	}
-	meta["sensitiveFixed"] = map[string]any{"mode": mode, "status": status, "fixed_count": fixedCount, "failed_count": failedCount, "updated_at": updated, "items": fixed}
+	novelfetchworkshop.SetSensitiveDetails(meta, items, count)
 }
 
 // novelFetchAppConfig restores the flat config contract used by the 3001
@@ -4218,7 +4282,14 @@ func legacyNovelFetchTask(document novelfetchworkshop.Document) map[string]any {
 	result["effective_status"] = result["status"]
 	result["effectiveStatus"] = result["status"]
 	result["queue_state"] = metaString("queueState", "queue_state")
-	createdAt := metaString("createdAt", "created_at", "createdTime", "created_time")
+	// 日期视图必须按批次创建时间分组。旧文档没有 createdAt，直接回退到
+	// updatedAt 会把历史批次显示成“今天”，导致天数筛选形同虚设。
+	createdAt := metaString("batchCreatedAt", "batch_created_at", "createdAt", "created_at", "createdTime", "created_time")
+	if createdAt == "" {
+		if batchAt := novelFetchBatchTime(metaString("currentBatchId", "current_batch_id")); !batchAt.IsZero() {
+			createdAt = batchAt.UTC().Format(time.RFC3339Nano)
+		}
+	}
 	if createdAt == "" {
 		createdAt = document.UpdatedAt
 	}
