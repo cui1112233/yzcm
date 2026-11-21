@@ -169,6 +169,7 @@ import { checkWebSubmitEnvironment, getWebSubmitConfig, testWebSubmitVisible } f
 import { YIZHANSHENGMING_EXECUTOR_PROVIDER, localExecutorTaskToast } from './batchFactoryLocalExecutor.js';
 import { batchFactoryPlatformOptions } from './batchFactoryPlatformOptions';
 import { currentMergeJobsByOpening, publishMergeFiles } from './batchFactoryMergeGroups.js';
+import { formatMergeJobSpeed, mergeJobDurationSeconds } from './batchFactoryMergePresentation.js';
 import { BOOK_CONFIG_REGIONS, bookAssetSummary, bookConfigRegionStatus } from './batchFactoryBookConfigRegions';
 import { videoProviderForModel } from './videoProviderBinding';
 import { modelOptionsForProvider } from './providerModelBinding';
@@ -1896,7 +1897,7 @@ function InlineMediaLibrary({ book, productionStatus, mergeJob, aspectRatio = '1
   const running = currentProgress?.status === 'running' || currentProgress?.status === 'queued';
   const mergeStatus = String(mergeJob?.status || '').toLowerCase();
   const mergeReady = mergeStatus === 'succeeded' && String(mergeJob?.outputUrl || '').trim();
-  const mergeText = mergeReady ? `最终成片 ${batchFactoryStableMediaLabel('M', mergeJob.id)} · ${mergeJobSpeed(mergeJob).toFixed(1)}x`
+  const mergeText = mergeReady ? `最终成片 ${batchFactoryStableMediaLabel('M', mergeJob.id)} · ${formatMergeJobSpeed(mergeJob)}`
     : mergeStatus === 'running' || mergeStatus === 'queued' ? '最终成片 · 合成中'
     : mergeStatus === 'failed' ? '最终成片 · 合成失败' : '最终成片 · 尚未合成';
   return <div className={`batch-factory-cell-shell batch-factory-inline-media is-${mediaFrameLayout}`}>
@@ -2442,7 +2443,7 @@ function MediaVersionPanel({ book, batchId, productionStatus, mergeJob, mergeJob
       key,
       width,
       height,
-      duration: Number(cached.duration || job?.durationSeconds || 0),
+      duration: Number(cached.duration || mergeJobDurationSeconds(job)),
       ratio,
       orientation: batchFactoryMediaOrientation(ratio),
       ratioText: batchFactoryRatioText(width, height, ratio)
@@ -2686,7 +2687,7 @@ function MediaVersionPanel({ book, batchId, productionStatus, mergeJob, mergeJob
   const uploadOptions = [
     ...completedMerges.map(job => ({
       value: `merged:${job.id}`,
-      label: `成片 ${batchFactoryStableMediaLabel('M', job.id)} · ${mergeJobSpeed(job).toFixed(1)}x`
+      label: `成片 ${batchFactoryStableMediaLabel('M', job.id)} · ${formatMergeJobSpeed(job)}`
     })),
     ...videos.flatMap(video => {
       const state = videoState(video);
@@ -2702,7 +2703,7 @@ function MediaVersionPanel({ book, batchId, productionStatus, mergeJob, mergeJob
       ? `${label(uploadVideo)} · ${batchFactoryStableMediaLabel('V', uploadVersion.id)}`
       : '所选分镜来源暂不可用')
     : mergedReady
-      ? `合成成片 · ${batchFactoryStableMediaLabel('M', selectedMerge?.id)} · ${mergeJobSpeed(selectedMerge).toFixed(1)}x`
+      ? `合成成片 · ${batchFactoryStableMediaLabel('M', selectedMerge?.id)} · ${formatMergeJobSpeed(selectedMerge)}`
       : '尚未选择可上传视频';
 
   function visibleHeightForSheetAnchor(anchor, height) {
@@ -2897,7 +2898,7 @@ function MediaVersionPanel({ book, batchId, productionStatus, mergeJob, mergeJob
         {current.status === 'succeeded' && String(current.outputUrl || '').trim()
           ? renderThumb(current, currentInfo, `合成成片 ${batchFactoryStableMediaLabel('M', current.id)}`)
           : <PassiveMediaPoster className="batch-factory-media-pickstation-thumb is-landscape" label="等待成片" detail={current.status === 'failed' ? '合成失败' : '处理中'} />}
-        <span><b>{current.openingLabel || '原开头'} · {batchFactoryStableMediaLabel('M', current.id)}</b><small>{formatDurationSeconds(currentInfo.duration)} · {mergeJobSpeed(current).toFixed(1)}x · {currentInfo.ratioText}</small><em>{mergeJobsNewest.length > 1 ? '上传组成' : selectedMerge?.id === current.id ? '当前上传来源' : '合成成片'}</em></span>
+        <span><b>{current.openingLabel || '原开头'} · {batchFactoryStableMediaLabel('M', current.id)}</b><small>{formatDurationSeconds(currentInfo.duration)} · {formatMergeJobSpeed(current)} · {currentInfo.ratioText}</small><em>{mergeJobsNewest.length > 1 ? '上传组成' : selectedMerge?.id === current.id ? '当前上传来源' : '合成成片'}</em></span>
       </button> : <div className="batch-factory-media-pickstation-empty">全部分镜选定主版本后，可在底部发起合成。</div>}
       <div className="batch-factory-media-pickstation-versions">
         {mergeJobsNewest.map(job => {
@@ -2988,7 +2989,7 @@ function MediaVersionPanel({ book, batchId, productionStatus, mergeJob, mergeJob
     ? (viewerMerge ? `合成成片 ${batchFactoryStableMediaLabel('M', viewerMerge.id)}` : '合成成片')
     : (viewerVideo ? label(viewerVideo) : '分镜');
   const viewerMeta = viewerKind === 'merge'
-    ? (viewerMerge ? `${formatDurationSeconds(viewerInfo.duration)} · ${mergeJobSpeed(viewerMerge).toFixed(1)}x · ${viewerInfo.ratioText}` : '—')
+    ? (viewerMerge ? `${formatDurationSeconds(viewerInfo.duration)} · ${formatMergeJobSpeed(viewerMerge)} · ${viewerInfo.ratioText}` : '—')
     : (viewerVersion ? `${batchFactoryStableMediaLabel('V', viewerVersion.id)} · ${viewerInfo.ratioText}` : '—');
 
   const primaryVideoDurationRows = videos.map(video => {

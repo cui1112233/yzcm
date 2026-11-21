@@ -44,26 +44,28 @@ type MergeOptions struct {
 }
 
 type MergeJob struct {
-	ID                  string       `json:"id"`
-	Owner               string       `json:"-"`
-	BatchID             string       `json:"batchId"`
-	BookID              string       `json:"bookId,omitempty"`
-	OpeningVariantIndex int          `json:"openingVariantIndex,omitempty"`
-	RequestID           string       `json:"requestId"`
-	TimingMode          string       `json:"timingMode,omitempty"`
-	AudioSource         string       `json:"audioSource,omitempty"`
-	AudioArtifactID     string       `json:"audioArtifactId,omitempty"`
-	Speed               float64      `json:"speed,omitempty"`
-	ProviderTaskID      string       `json:"providerTaskId,omitempty"`
-	Status              MergeState   `json:"status"`
-	ProgressPhase       string       `json:"progressPhase,omitempty"`
-	ProgressCurrent     int          `json:"progressCurrent,omitempty"`
-	ProgressTotal       int          `json:"progressTotal,omitempty"`
-	Sources             []MergeMedia `json:"sources"`
-	OutputURL           string       `json:"outputUrl,omitempty"`
-	ErrorMessage        string       `json:"errorMessage,omitempty"`
-	CreatedAt           time.Time    `json:"createdAt"`
-	UpdatedAt           time.Time    `json:"updatedAt"`
+	ID                   string       `json:"id"`
+	Owner                string       `json:"-"`
+	BatchID              string       `json:"batchId"`
+	BookID               string       `json:"bookId,omitempty"`
+	OpeningVariantIndex  int          `json:"openingVariantIndex,omitempty"`
+	RequestID            string       `json:"requestId"`
+	TimingMode           string       `json:"timingMode,omitempty"`
+	AudioSource          string       `json:"audioSource,omitempty"`
+	AudioArtifactID      string       `json:"audioArtifactId,omitempty"`
+	Speed                float64      `json:"speed,omitempty"`
+	TTSSpeed             float64      `json:"ttsSpeed,omitempty"`
+	AudioDurationSeconds float64      `json:"audioDurationSeconds,omitempty"`
+	ProviderTaskID       string       `json:"providerTaskId,omitempty"`
+	Status               MergeState   `json:"status"`
+	ProgressPhase        string       `json:"progressPhase,omitempty"`
+	ProgressCurrent      int          `json:"progressCurrent,omitempty"`
+	ProgressTotal        int          `json:"progressTotal,omitempty"`
+	Sources              []MergeMedia `json:"sources"`
+	OutputURL            string       `json:"outputUrl,omitempty"`
+	ErrorMessage         string       `json:"errorMessage,omitempty"`
+	CreatedAt            time.Time    `json:"createdAt"`
+	UpdatedAt            time.Time    `json:"updatedAt"`
 }
 
 type MergeAdapter interface {
@@ -456,7 +458,7 @@ func (s *MergeService) submitMerge(ctx context.Context, owner, batchID, onlyBook
 		}
 	}
 	now := time.Now().UTC()
-	candidate := MergeJob{Owner: owner, BatchID: batchID, BookID: onlyBookID, OpeningVariantIndex: variantIndex, RequestID: requestID, TimingMode: options.TimingMode, AudioSource: options.AudioSource, AudioArtifactID: options.AudioArtifactID, Speed: options.Speed, Status: MergeQueued, ProgressPhase: "queued", ProgressTotal: len(sources), Sources: sources, CreatedAt: now, UpdatedAt: now}
+	candidate := MergeJob{Owner: owner, BatchID: batchID, BookID: onlyBookID, OpeningVariantIndex: variantIndex, RequestID: requestID, TimingMode: options.TimingMode, AudioSource: options.AudioSource, AudioArtifactID: options.AudioArtifactID, Speed: options.Speed, TTSSpeed: options.TTSSpeed, AudioDurationSeconds: options.AudioDurationSeconds, Status: MergeQueued, ProgressPhase: "queued", ProgressTotal: len(sources), Sources: sources, CreatedAt: now, UpdatedAt: now}
 	job, reused, err := s.mergeVersion(ctx, repository, owner, batchID, candidate)
 	if err != nil {
 		return MergeJob{}, err

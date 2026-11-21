@@ -38,12 +38,12 @@ test('媒体库主版本徽标：缺失/0 显示未知，有值显示一位小�
 test('合成成片卡片与合成 viewer 的时长同样缺失即未知', () => {
   assert.match(
     novelList,
-    /<small>\{formatDurationSeconds\(currentInfo\.duration\)\} · \{mergeJobSpeed\(current\)\.toFixed\(1\)\}x/,
+    /<small>\{formatDurationSeconds\(currentInfo\.duration\)\} · \{formatMergeJobSpeed\(current\)\}/,
     '合成成片卡片必须走 formatDurationSeconds'
   );
   assert.match(
     novelList,
-    /\$\{formatDurationSeconds\(viewerInfo\.duration\)\} · \$\{mergeJobSpeed\(viewerMerge\)\.toFixed\(1\)\}x/,
+    /\$\{formatDurationSeconds\(viewerInfo\.duration\)\} · \$\{formatMergeJobSpeed\(viewerMerge\)\}/,
     '合成 viewer meta 必须走 formatDurationSeconds'
   );
   assert.doesNotMatch(novelList, /currentInfo\.duration > 0 \?/, '合成卡片不许再隐藏未知时长');

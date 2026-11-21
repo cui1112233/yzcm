@@ -261,12 +261,12 @@ func TestLocalMergeAdapterStoresCompletedOutputInTOS(t *testing.T) {
 			if got, want := result.OutputURL, "https://media.example/batch-merged/"+queued.ProviderTaskID+".mp4"; got != want {
 				t.Fatalf("output=%q want=%q", got, want)
 			}
-			entries, readErr := os.ReadDir(artifactDir)
+			backup, readErr := os.ReadFile(filepath.Join(artifactDir, queued.ProviderTaskID+".mp4"))
 			if readErr != nil {
-				t.Fatalf("read artifact dir: %v", readErr)
+				t.Fatalf("remote merge must retain a local playback backup: %v", readErr)
 			}
-			if len(entries) != 0 {
-				t.Fatalf("TOS merge must not persist a local finished artifact: %v", entries)
+			if got, want := string(backup), "0000ftypisom-local-merged-video"; got != want {
+				t.Fatalf("local playback backup=%q want=%q", got, want)
 			}
 			return
 		}
