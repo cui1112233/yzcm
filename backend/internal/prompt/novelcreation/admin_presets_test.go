@@ -18,14 +18,14 @@ func TestNovelAdminPresetsSeedAndPublishedSnapshot(t *testing.T) {
 	}
 	store := catalog.NewAdminStore(path)
 	rows, e := store.List(AdminModule)
-	if e != nil || len(rows) != 24 {
-		t.Fatalf("expected24 active prompt entries, got%d %v", len(rows), e)
+	if e != nil || len(rows) != 41 {
+		t.Fatalf("expected41 active prompt entries, got%d %v", len(rows), e)
 	}
 	bodies, e := catalog.NewCatalog(path).PublishedBodies(AdminModule)
 	if e != nil {
 		t.Fatal(e)
 	}
-	for _, id := range []string{NativeRevisionPresetID, PatchOnlyPresetID, RewriteOnlyPresetID, IncrementalSettlementPresetID, ChapterDraft.ID} {
+	for _, id := range []string{ShortFullWriter.ID, ShortFullWriterUserID, ShortFullContinuationUserID, ShortFullReview.ID, ShortFullReviewUserID, ShortFullRevisionUserID, ShortFullPackage.ID, ShortFullPackageUserID, ShortFullChapterBlockID, ShortWriterRevisionFollowupID, NativeRevisionPresetID, PatchOnlyPresetID, RewriteOnlyPresetID, IncrementalSettlementPresetID, ChapterDraft.ID, ShortImitationDeconstruction.ID, ShortImitationDirections.ID, ShortImitationBlueprint.ID, ShortImitationWritingID, ShortImitationEditorial.ID} {
 		found := false
 		for _, v := range bodies {
 			if v.ID == id && v.Body != "" {

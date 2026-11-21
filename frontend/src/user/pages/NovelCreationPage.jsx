@@ -21,7 +21,10 @@ import ChaptersPanel from './novel-creation/ChaptersPanel.jsx';
 import RunCard from './novel-creation/RunCard.jsx';
 import BlueprintEditor from './novel-creation/BlueprintEditor.jsx';
 import StudioChat from './novel-creation/StudioChat.jsx';
+import { isStudioMode, studioSelectionKey, studioCreationKey } from './novel-creation/studioModes.js';
 import ContinuationImportDialog from './novel-creation/ContinuationImportDialog.jsx';
+import SpinoffDialog from './novel-creation/SpinoffDialog.jsx';
+import SpinoffContext from './novel-creation/SpinoffContext.jsx';
 import useWorkspaceScope from './novel-creation/useWorkspaceScope.js';
 import { MODE_FIELDS, MODES, STATUS, TERMINAL, availableModel, draftKey, mergeSnapshot, modelOptions, readSaved, validRun } from './novel-creation/contracts.js';
 import './NovelCreationPage.css';
@@ -43,6 +46,8 @@ export default function NovelCreationPage() {
   const [longImitationCreation,setLongImitationCreation]=useState(null);
   const [shortDialog, setShortDialog] = useState(null), [shortStoryData, setShortStoryData] = useState(null);
   const [continuationOpen, setContinuationOpen] = useState(false), [projectChapters, setProjectChapters] = useState(null), [sessionsLoadedKey, setSessionsLoadedKey] = useState('');
+  const [spinoffOpen,setSpinoffOpen]=useState(false);
+  const [spinoffData,setSpinoffData]=useState(null);
   const memoPopup = useRef(null);
   const [projectModal, setProjectModal] = useState(false), [manage, setManage] = useState(null), [archiveOpen, setArchiveOpen] = useState(false);
   const [blueprint, setBlueprint] = useState(null), [batchOpen, setBatchOpen] = useState(false), [dashboard, setDashboard] = useState(null);
@@ -59,6 +64,7 @@ export default function NovelCreationPage() {
   if(studioNavigation.current.key!==studioViewKey)studioNavigation.current={key:studioViewKey,epoch:studioNavigation.current.epoch+1};
   currentView.current = { owner, projectId, scopeKey, studioEpoch:studioNavigation.current.epoch };
   const chapterRevision = chapterRevisions.current.get(projectReadKey) || 0;
+  const hasSpinoffCreation=spinoffData?.key===projectReadKey && !!spinoffData.creation;
   const hasLongImitationCreation=longImitationCreation?.key===projectReadKey && !!longImitationCreation.creation;
   const key = draftKey(owner, projectId, sessionId, activeMode), project = projects.find(p => p.id === projectId);
   const defaultDraft = { content: '', modeInputs: {}, knowledgeIds: [], noteIds: [], styleProfileId: '', modelId: project?.modelId || models[0]?.value || '', thinkingLevel: 'standard' };
@@ -85,7 +91,7 @@ export default function NovelCreationPage() {
     }
   }
   const request = (path, input, options = {}) => novelProjectRequest(projectId, path, input, { signal: scope.signal, ...options });
-  const studioView = !projectId && activeMode === 'long_original';
+  const studioView = !projectId && isStudioMode(activeMode);
   const modeName = MODES.find(([id]) => id === activeMode)?.[1] || '创作';
   useEffect(() => {
     if (!projectId) { setShortStoryData(null); return; }
@@ -98,7 +104,8 @@ export default function NovelCreationPage() {
   function enterCreation(id) {
     setTool('');
     if (id === 'long_imitation') { setLongImitationEntry(n=>n+1); setLongImitationOpen(true); return; }
-    if (id === 'continuation' || id === 'fanfiction') {
+    if (id === 'fanfiction') { setSpinoffOpen(true); return; }
+    if (id === 'continuation') {
       setActiveMode(id);
       if (id === 'continuation') setContinuationOpen(true);
       return;
@@ -107,6 +114,7 @@ export default function NovelCreationPage() {
     // to be selected. Keep that book accessible only through its own entry.
     setProjectId(''); setSessionId(''); setSnapshot(null); setShortStoryData(null);
     localStorage.setItem('novel:view:'+owner,'studio'); setActiveMode(id);
+    if(isStudioMode(id))setStudioSessionId(localStorage.getItem(studioSelectionKey(owner,id))||'');
     if (id === 'short_imitation') setShortDialog(id);
     if (id === 'continuation') setContinuationOpen(true);
   }
@@ -117,7 +125,7 @@ export default function NovelCreationPage() {
     return () => { window.removeEventListener('storage', check); clearInterval(timer); };
   }, []);
   useEffect(() => {
-    setLoading(true); setShortDialog(null); setShortStoryData(null); setProjectId(''); setSessionId(''); setSnapshot(null); setSessions([]); setModels([]); setTool(''); setImportOpen(false); setMemoOpen(false); setContinuationOpen(false); setLongImitationOpen(false); setProjectChapters(null); setSessionsLoadedKey(''); setStudioSessions([]); setStudioSessionId(localStorage.getItem('novel:studio:selected:'+owner)||'');
+    setLoading(true); setSpinoffOpen(false); setShortDialog(null); setShortStoryData(null); setProjectId(''); setSessionId(''); setSnapshot(null); setSessions([]); setModels([]); setTool(''); setImportOpen(false); setMemoOpen(false); setContinuationOpen(false); setLongImitationOpen(false); setProjectChapters(null); setSessionsLoadedKey(''); setStudioSessions([]); setStudioSessionId(localStorage.getItem(studioSelectionKey(owner,localStorage.getItem('novel:mode:'+owner)||'long_original'))||'');
     ownerScope.call(novelRequest('/studio-sessions',undefined,{signal:ownerScope.signal}),r=>setStudioSessions(r.sessions||[])).catch(()=>{});
     ownerScope.call(Promise.allSettled([novelRequest('/projects', undefined, { signal: ownerScope.signal }), listAvailableModels('text'), getProjectRetention(), getCurrentAccount(), getConfig()]), results => {
       if (results[0].status === 'fulfilled') { const items = results[0].value.projects || []; setProjects(items); const saved = localStorage.getItem('novel:project:' + owner); setProjectId(localStorage.getItem('novel:view:'+owner)==='studio'?'':items.some(p => p.id === saved) ? saved : items[0]?.id || ''); }
@@ -210,15 +218,15 @@ export default function NovelCreationPage() {
 
   async function createUnboundSession() {
     if (flight.current || !ownerScope.isCurrent()) return;
-    const token={};flight.current=token;const startedEpoch=currentView.current.studioEpoch;const cache='novel:studio:create-intent:'+owner;
+    const token={};flight.current=token;const startedEpoch=currentView.current.studioEpoch;const cache=studioCreationKey(owner,activeMode);
     try {
       let creation=readSaved(cache,null);
-      if(!creation){creation={idempotencyKey:crypto.randomUUID(),mode:'long_original'};localStorage.setItem(cache,JSON.stringify(creation));}
+      if(!creation){creation={idempotencyKey:crypto.randomUUID(),mode:activeMode};localStorage.setItem(cache,JSON.stringify(creation));}
       const result=await ownerScope.call(novelRequest('/studio-sessions',creation,{signal:ownerScope.signal}));
       if(!result?.session?.id)return;
       localStorage.removeItem(cache);setStudioSessions(old=>[result.session,...old.filter(x=>x.id!==result.session.id)]);
       if(currentView.current.owner===owner&&currentView.current.projectId===''&&currentView.current.studioEpoch===startedEpoch){
-        setStudioSessionId(result.session.id);localStorage.setItem('novel:studio:selected:'+owner,result.session.id);localStorage.setItem('novel:view:'+owner,'studio');setTool('');
+        setStudioSessionId(result.session.id);localStorage.setItem(studioSelectionKey(owner,result.session.mode||activeMode),result.session.id);localStorage.setItem('novel:view:'+owner,'studio');setTool('');
       }
       return result.session;
     } catch(e){if(ownerScope.isCurrent())message.error(e.message||'创作会话暂时无法创建，原编号已保留');}
@@ -226,7 +234,7 @@ export default function NovelCreationPage() {
   }
   async function createSession(explicit = true) {
     if (!scope.isCurrent()) return;
-    if (!projectId && activeMode==='long_original') return createUnboundSession();
+    if (!projectId && isStudioMode(activeMode)) return createUnboundSession();
     if (!projectId) { setProjectModal(true); return; }
     if (archived || flight.current === key + ':session') return;
     flight.current = key + ':session';
@@ -256,7 +264,7 @@ export default function NovelCreationPage() {
       if (!draft.content.trim()) { message.warning('请输入创作要求'); return; }
       if (!availableModel(models, draft.modelId)) { message.warning('所选文本模型当前不可用，请重新选择'); return; }
       const field = MODE_FIELDS[activeMode];
-      if (field && !(activeMode==='long_imitation' && hasLongImitationCreation) && !String(sendDraft.modeInputs?.[field[0]] || '').trim() && !(activeMode.includes('imitation') && (draft.styleProfileId || draft.knowledgeIds?.length))) { message.warning(activeMode.includes('imitation') ? '请导入参考文本或选择文风' : '请填写' + field[1] + '或引用已保存内容'); return; }
+      if (field && !(activeMode==='long_imitation' && hasLongImitationCreation) && !(activeMode==='fanfiction' && hasSpinoffCreation) && !String(sendDraft.modeInputs?.[field[0]] || '').trim() && !(activeMode.includes('imitation') && (draft.styleProfileId || draft.knowledgeIds?.length))) { message.warning(activeMode.includes('imitation') ? '请导入参考文本或选择文风' : '请填写' + field[1] + '或引用已保存内容'); return; }
     }
     flight.current = key; setSendKey(key); let actualKey = key;
     try {
@@ -344,18 +352,19 @@ export default function NovelCreationPage() {
         <h3>开始创作</h3><div className="novel-creation-mode-tabs">{MODES.map(([id, name]) => { const Icon=creationIcons[id]; return <button type="button" className={(longImitationOpen ? id==='long_imitation' : activeMode === id) ? 'active' : ''} key={id} onClick={() => enterCreation(id)}><Icon size={15} aria-hidden="true"/><span>{name}</span></button>; })}</div>
         <div className="novel-sidebar-heading"><b>我的作品 {visibleProjects.length}</b><Button aria-label="新建作品" type="text" icon={<Plus size={16} />} onClick={() => setProjectModal(true)} /><Button aria-label="作品归档库" type="text" icon={<Archive size={16} />} onClick={() => setArchiveOpen(true)} /></div>
         <div className="novel-projects">{visibleProjects.map(p => <div key={p.id} className="novel-project"><button type="button" aria-label={`选择作品${p.title}`} className={projectId === p.id ? 'active' : ''} onClick={() => { localStorage.setItem('novel:view:'+owner,'book');setProjectId(p.id);const savedMode=localStorage.getItem(`novel:project-mode:${owner}:${p.id}`);if(savedMode)setActiveMode(savedMode);setTool(''); }}>{p.title}</button>{projectId === p.id && <div className="novel-actions"><Button size="small" onClick={() => setManage({ type: 'project', action: 'rename', title: p.title })}>重命名作品</Button><Button size="small" onClick={() => setManage({ type: 'project', action: 'archive' })}>归档作品</Button></div>}</div>)}</div>
-        {studioSessions.length>0&&<><div className="novel-session-heading">创作会话记录</div><div className="novel-sessions">{studioSessions.map(item=><div className="novel-session" key={item.id}><button type="button" className={studioView&&studioSessionId===item.id?'active':''} onClick={()=>{setActiveMode('long_original');setProjectId('');setStudioSessionId(item.id);setTool('');localStorage.setItem('novel:studio:selected:'+owner,item.id);localStorage.setItem('novel:view:'+owner,'studio');}}>{item.title}{item.projectId?' · 已建作品':''}</button></div>)}</div></>}
-        <div className="novel-session-heading">{studioView?'未关联作品的长篇原创会话':modeName+'会话'}</div><div className="novel-sessions">{sessions.filter(s => s.mode === activeMode).map(s => <div className="novel-session" key={s.id}><button type="button" disabled={!!s.archivedAt} className={sessionId === s.id ? 'active' : ''} onClick={() => { setSessionId(s.id); setTool(''); }}>{s.title}{s.archivedAt ? '（已归档）' : s.currentRunId ? ' · 有任务' : ''}</button><div className="novel-actions"><Button size="small" onClick={() => setManage({ type: 'session', id: s.id, action: 'rename', title: s.title })}>重命名会话</Button><Button size="small" onClick={() => setManage({ type: 'session', id: s.id, action: s.archivedAt ? 'restore' : 'archive' })}>{s.archivedAt ? '恢复会话' : '归档会话'}</Button></div></div>)}</div><Button onClick={() => createSession()} icon={<Plus size={14} />} disabled={archived}>新建会话</Button>
+        {studioSessions.some(item=>(item.mode||'long_original')===activeMode)&&<><div className="novel-session-heading">创作会话记录</div><div className="novel-sessions">{studioSessions.filter(item=>(item.mode||'long_original')===activeMode).map(item=><div className="novel-session" key={item.id}><button type="button" className={studioView&&studioSessionId===item.id?'active':''} onClick={()=>{setActiveMode(item.mode||'long_original');setProjectId('');setStudioSessionId(item.id);setTool('');localStorage.setItem(studioSelectionKey(owner,item.mode||'long_original'),item.id);localStorage.setItem('novel:view:'+owner,'studio');}}>{item.title}{item.projectId?' · 已建作品':''}</button></div>)}</div></>}
+        <div className="novel-session-heading">{studioView?'未关联作品的'+modeName+'会话':modeName+'会话'}</div><div className="novel-sessions">{sessions.filter(s => s.mode === activeMode).map(s => <div className="novel-session" key={s.id}><button type="button" disabled={!!s.archivedAt} className={sessionId === s.id ? 'active' : ''} onClick={() => { setSessionId(s.id); setTool(''); }}>{s.title}{s.archivedAt ? '（已归档）' : s.currentRunId ? ' · 有任务' : ''}</button><div className="novel-actions"><Button size="small" onClick={() => setManage({ type: 'session', id: s.id, action: 'rename', title: s.title })}>重命名会话</Button><Button size="small" onClick={() => setManage({ type: 'session', id: s.id, action: s.archivedAt ? 'restore' : 'archive' })}>{s.archivedAt ? '恢复会话' : '归档会话'}</Button></div></div>)}</div><Button onClick={() => createSession()} icon={<Plus size={14} />} disabled={archived}>新建会话</Button>
         </div><nav className="novel-creation-toolbar" aria-label="创作工具">{TOOLS.map(([label, Icon]) => <Button key={label} type="text" className={tool === label ? 'active' : ''} icon={<Icon size={16} />} onClick={() => openTool(label)}>{label}</Button>)}</nav>
       </aside>
       {tool ? <section className="novel-creation-tool-workspace" aria-label={tool}>
         <header className="novel-chat-heading"><Button onClick={() => setTool('')}>返回对话</Button><b>{tool}</b></header>
-        <div className="novel-tool-content" key={scopeKey + ':' + tool}>{tool === '定时写作' ? <SchedulerPanel key={projectReadKey} owner={owner} projectId={projectId} sessionId={sessionId} mode={activeMode} modelId={draft.modelId} models={models} ensureSession={() => createSession(false)} onOpenSession={openScheduledSession}/> : !projectId ? <Empty description="请先选择作品后使用此工具" /> : tool === 'Agent设置' ? <AgentPanel projectId={projectId} models={models} mode={activeMode} /> : tool === '写作风格' ? <MaterialsPanel {...materialsProps} styleMode /> : <div className="novel-panel"><p>统计已保存正文，失败次数不计为章节。</p>{dashboard ? <dl>{[['章节数', dashboard.chapterCount], ['总字数', dashboard.totalWords], ['任务总数', dashboard.runTotal], ['成功率', `${Number(dashboard.successRate ?? 0).toFixed(1)}%`]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl> : <Empty description="暂无统计" />}</div>}</div>
-      </section> : studioView ? <StudioChat key={`${owner}:${studioSessionId}`} owner={owner} sessionId={studioSessionId} models={models} onSessionSelected={id=>setStudioSessionId(id)} onSessionCreated={item=>setStudioSessions(old=>[item,...old.filter(x=>x.id!==item.id)])} onTransition={result=>{setProjects(old=>[result.project,...old.filter(x=>x.id!==result.project.id)]);localStorage.setItem('novel:view:'+owner,'book');localStorage.setItem('novel:project:'+owner,result.project.id);localStorage.setItem(`novel:session:${owner}:${result.project.id}:long_original`,result.productionSession.id);setProjectId(result.project.id);setActiveMode('long_original');setSessionId(result.productionSession.id);setTool('');setRefresh(v=>v+1);}}/> : <><section className="novel-creation-conversation">
+        <div className="novel-tool-content" key={scopeKey + ':' + tool}>{tool === '定时写作' ? <SchedulerPanel key={projectReadKey} owner={owner} projectId={projectId} sessionId={sessionId} mode={activeMode} modelId={draft.modelId} models={models} ensureSession={() => createSession(false)} onOpenSession={openScheduledSession}/> : tool === 'Agent设置' ? <AgentPanel projectId={projectId} models={models} mode={activeMode} /> : !projectId ? <Empty description="请先选择作品后使用此工具" /> : tool === '写作风格' ? <MaterialsPanel {...materialsProps} styleMode /> : <div className="novel-panel"><p>统计已保存正文，失败次数不计为章节。</p>{dashboard ? <dl>{[['章节数', dashboard.chapterCount], ['总字数', dashboard.totalWords], ['任务总数', dashboard.runTotal], ['成功率', `${Number(dashboard.successRate ?? 0).toFixed(1)}%`]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl> : <Empty description="暂无统计" />}</div>}</div>
+      </section> : studioView ? <StudioChat key={`${owner}:${activeMode}:${studioSessionId}`} owner={owner} mode={activeMode} sessionId={studioSessionId} models={models} onSessionSelected={id=>setStudioSessionId(id)} onSessionCreated={item=>setStudioSessions(old=>[item,...old.filter(x=>x.id!==item.id)])} onTransition={result=>{if(result.assistedAction){if(result.targetRoute==='imitation'){setLongImitationEntry(n=>n+1);setLongImitationOpen(true);}else if(result.targetRoute==='chapters')setContinuationOpen(true);return;}setProjects(old=>[result.project,...old.filter(x=>x.id!==result.project.id)]);localStorage.setItem('novel:view:'+owner,'book');localStorage.setItem('novel:project:'+owner,result.project.id);const mode=result.productionSession.mode;localStorage.setItem(`novel:session:${owner}:${result.project.id}:${mode}`,result.productionSession.id);localStorage.setItem(`novel:project-mode:${owner}:${result.project.id}`,mode);setProjectId(result.project.id);setActiveMode(mode);setSessionId(result.productionSession.id);if(result.story)setShortStoryData({key:`${owner}:${result.project.id}`,story:result.story});setTool('');setRefresh(v=>v+1);}}/> : <><section className="novel-creation-conversation">
         <header className="novel-chat-heading"><b>{currentSession?.title || modeName}</b>{connection && <button type="button" className="novel-connection" onClick={() => setRefresh(v => v + 1)}>{connection}</button>}</header>
         <div className="novel-creation-chat-scroll">{!snapshot?.messages?.length && !run && <div className="novel-creation-welcome"><p>告诉我你想写什么——题材、世界观、主角、核心冲突。</p></div>}
           {(snapshot?.messages || []).map((m, i) => <article key={m.id || i} className={`novel-creation-message ${m.role}`}><b>{m.role === 'user' ? '我' : '创作助手'}</b><p>{m.content}</p></article>)}
           {activeMode==='long_imitation' && projectId && <LongImitationContext key={projectReadKey} owner={owner} projectId={projectId} refreshKey={`${refresh}:${snapshot?.run?.status||''}`} onLoaded={(id,creation)=>setLongImitationCreation({key:`${owner}:${id}`,creation})}/>}
+          {activeMode==='fanfiction' && projectId && <SpinoffContext key={projectReadKey} projectId={projectId} onLoaded={(id,creation)=>setSpinoffData({key:`${owner}:${id}`,creation})} refreshKey={`${refresh}:${run?.status||''}`}/>}
           <RunCard snapshot={snapshot} onAction={runAction} onBlueprint={setBlueprint} busy={actionBusy} />
         </div>
         <div className="novel-creation-composer novel-creation-composer--compact">
@@ -363,7 +372,7 @@ export default function NovelCreationPage() {
 
           <Input.TextArea aria-label="创作要求" value={draft.content} disabled={!!intent || sending} rows={3} placeholder="输入创作要求（Enter发送，Shift+Enter换行）" onChange={e => changeDraft({ content: e.target.value })} onCompositionStart={() => { composition.current = true; }} onCompositionEnd={() => { composition.current = false; }} onPressEnter={e => { if (!e.shiftKey && !composition.current && !e.nativeEvent?.isComposing && e.nativeEvent?.keyCode !== 229) { e.preventDefault(); send(); } }} />
           {(!!draft.knowledgeIds?.length || !!draft.noteIds?.length || !!draft.styleProfileId) && <div className="novel-reference-summary">参考资料 {draft.knowledgeIds?.length || 0} 份 · 备忘录 {draft.noteIds?.length || 0} 份 · {draft.styleProfileId ? '已选择文风' : '未选择文风'}</div>}
-          <ComposerToolbar referenceControl={activeMode !== 'short_imitation' && activeMode !== 'continuation' && !(activeMode==='long_imitation' && hasLongImitationCreation) && MODE_FIELDS[activeMode] && <details key={activeMode} className="novel-reference-editor"><summary><BookOpen size={14}/>{String(draft.modeInputs?.[MODE_FIELDS[activeMode]?.[0]] || '').trim() ? '参考文本 · 已添加' : '添加参考文本'}</summary><div className="novel-reference-editor-panel"><label>{MODE_FIELDS[activeMode][1]}<Input.TextArea aria-label={MODE_FIELDS[activeMode][1]} rows={2} value={draft.modeInputs?.[MODE_FIELDS[activeMode][0]] || ''} onChange={e => changeDraft({ modeInputs: { ...draft.modeInputs, [MODE_FIELDS[activeMode][0]]: e.target.value } })} placeholder={activeMode.includes('imitation') ? '参考文本与已保存文风可以二选一' : '也可在导入素材中选择正文或设定'} />{activeMode === 'fanfiction' && <Button size="small" disabled={!project?.world && !project?.protagonist} onClick={() => changeDraft({ modeInputs: { ...draft.modeInputs, existingSetting: [project.world, project.protagonist, project.coreConflict].filter(Boolean).join('\n') } })}>使用本作品人物与世界设定</Button>}</label></div></details>} models={modelOptions(models, draft.modelId)} modelId={draft.modelId} onModelChange={modelId=>changeDraft({modelId})} thinkingLevel={draft.thinkingLevel} onThinkingChange={thinkingLevel=>changeDraft({thinkingLevel})} locked={sending||!!intent} sending={sending} disabled={archived||active||!!intent} hasContent={!!draft.content.trim()} sendLabel="开始创作" onSend={()=>send()}/>
+          <ComposerToolbar referenceControl={activeMode !== 'short_imitation' && activeMode !== 'continuation' && !(activeMode==='long_imitation' && hasLongImitationCreation) && !(activeMode==='fanfiction' && hasSpinoffCreation) && MODE_FIELDS[activeMode] && <details key={activeMode} className="novel-reference-editor"><summary><BookOpen size={14}/>{String(draft.modeInputs?.[MODE_FIELDS[activeMode]?.[0]] || '').trim() ? '参考文本 · 已添加' : '添加参考文本'}</summary><div className="novel-reference-editor-panel"><label>{MODE_FIELDS[activeMode][1]}<Input.TextArea aria-label={MODE_FIELDS[activeMode][1]} rows={2} value={draft.modeInputs?.[MODE_FIELDS[activeMode][0]] || ''} onChange={e => changeDraft({ modeInputs: { ...draft.modeInputs, [MODE_FIELDS[activeMode][0]]: e.target.value } })} placeholder={activeMode.includes('imitation') ? '参考文本与已保存文风可以二选一' : '也可在导入素材中选择正文或设定'} />{activeMode === 'fanfiction' && <Button size="small" disabled={!project?.world && !project?.protagonist} onClick={() => changeDraft({ modeInputs: { ...draft.modeInputs, existingSetting: [project.world, project.protagonist, project.coreConflict].filter(Boolean).join('\n') } })}>使用本作品人物与世界设定</Button>}</label></div></details>} models={modelOptions(models, draft.modelId)} modelId={draft.modelId} onModelChange={modelId=>changeDraft({modelId})} thinkingLevel={draft.thinkingLevel} onThinkingChange={thinkingLevel=>changeDraft({thinkingLevel})} locked={sending||!!intent} sending={sending} disabled={archived||active||!!intent} hasContent={!!draft.content.trim()} sendLabel="开始创作" onSend={()=>send()}/>
           {draft.modelId && !availableModel(models, draft.modelId) && <p role="alert">原来选择的模型已不可用，请重新选择授权模型。</p>}
           {!models.length && <p>{account?.canManageApi === true ? '暂无可用文本模型，请在模型管理中检查配置。' : '暂无授权文本模型，请联系管理员。'}</p>}
           {intent && <div className="novel-notice" role="status">上次提交结果尚未核对。草稿已保留，恢复时只重复原来的提交编号。<Button loading={sending} onClick={() => send(true)}>恢复原提交</Button></div>}
@@ -371,7 +380,7 @@ export default function NovelCreationPage() {
         </div>
       </section>
       {projectId && !!(shortStory || chapters.length > 0 || run || draft.knowledgeIds?.length) && <><div className="novel-creation-resizer" role="separator" aria-label="调整资料栏宽度" onPointerDown={() => { resize.current = true; document.body.classList.add('novel-creation-resizing'); }} />
-      <aside className="novel-creation-inspector">{shortStory ? <ShortStoryPanel key={projectReadKey} owner={owner} projectId={projectId} refreshKey={`${refresh}:${snapshot?.run?.status || ""}`} onRun={nextRun=>{setSnapshot(old=>({...old,run:nextRun,events:[]}));setRefresh(v=>v+1);}} onTitle={title=>setProjects(old=>old.map(p=>p.id===projectId && title ? {...p,title} : p))}/> : <><div className="novel-current-reference"><h3>当前资料</h3><p>{project?.title} · {project?.genre}</p>{(draft.knowledgeIds || []).map(id => <small key={id}>{references.find(r => r.id === id)?.title || '已保存参考范围'}</small>)}</div>
+      <aside className="novel-creation-inspector">{shortStory ? <ShortStoryPanel key={projectReadKey} owner={owner} projectId={projectId} modelId={draft.modelId} thinkingLevel={draft.thinkingLevel} refreshKey={`${refresh}:${snapshot?.run?.status || ""}:${snapshot?.events?.at(-1)?.eventId || ""}`} onRun={nextRun=>{setSnapshot(old=>({...old,run:nextRun,events:[]}));setRefresh(v=>v+1);}} onTitle={title=>setProjects(old=>old.map(p=>p.id===projectId && title ? {...p,title} : p))}/> : <><div className="novel-current-reference"><h3>当前资料</h3><p>{project?.title} · {project?.genre}</p>{(draft.knowledgeIds || []).map(id => <small key={id}>{references.find(r => r.id === id)?.title || '已保存参考范围'}</small>)}</div>
         <Tabs defaultActiveKey="chapters" items={[
           { key: 'chapters', label: `正文${chapters.length ? '（' + chapters.length + '）' : ''}`, children: projectId ? <ChaptersPanel key={scopeKey} projectId={projectId} sessionId={sessionId} chapters={chapters} run={run} canExportShort={snapshot?.canExportShort === true} onChapter={chapter => sessionId ? setSnapshot(old => ({ ...old, chapters: (old?.chapters || []).map(c => c.id === chapter.id ? chapter : c) })) : setProjectChapters(old => old?.key === projectReadKey ? { ...old, chapters: old.chapters.map(c => c.id === chapter.id ? chapter : c) } : old)} onMaintenance={maintenance} onBatch={() => setBatchOpen(true)} /> : <Empty description="选择作品后查看正文" /> },
           ...(run ? [{ key: 'progress', label: '创作进度', children: <ol className="novel-timeline">{(snapshot.events || []).filter(e => e.type !== 'assistant.delta').map(e => <li key={e.eventId}><b>{STATUS[e.status] || '处理进度'}</b><p>{e.message}</p></li>)}</ol> }] : [])
@@ -384,6 +393,12 @@ export default function NovelCreationPage() {
     <ShortStoryDialog key={`${owner}:${shortDialog || 'short_imitation'}`} owner={owner} mode={shortDialog || 'short_imitation'} open={!!shortDialog} viewKey={scopeKey + ':' + tool} models={models} modelId={draft.modelId} thinkingLevel={draft.thinkingLevel} projects={visibleProjects} onCancel={()=>setShortDialog(null)} onPersisted={result=>setProjects(old=>[result.project,...old.filter(p=>p.id!==result.project.id)])} onCreated={result=>{
       localStorage.setItem('novel:view:'+owner,'book');localStorage.setItem('novel:project:'+owner,result.project.id);localStorage.setItem(`novel:session:${owner}:${result.project.id}:${result.story.input.mode}`,result.session.id);localStorage.setItem(`novel:project-mode:${owner}:${result.project.id}`,result.story.input.mode);
       setProjectId(result.project.id);setSessionId(result.session.id);setActiveMode(result.story.input.mode);setShortStoryData({key:`${owner}:${result.project.id}`,story:result.story});setShortDialog(null);setSnapshot({run:result.run,messages:[],events:[]});setRefresh(n=>n+1);
+    }}/>
+    <SpinoffDialog key={'spinoff:'+owner} owner={owner} open={spinoffOpen} models={models} viewKey={scopeKey+':'+tool} projects={projects} modelId={draft.modelId || models[0]?.value} thinkingLevel={draft.thinkingLevel} onCancel={()=>setSpinoffOpen(false)} onPersisted={recordImportedBook} onCreated={result=>{
+      if(!ownerScope.isCurrent())return;
+      localStorage.setItem('novel:view:'+owner,'book');localStorage.setItem('novel:project:'+owner,result.book.id);
+      localStorage.setItem(`novel:project-mode:${owner}:${result.book.id}`,'fanfiction');localStorage.setItem(`novel:session:${owner}:${result.book.id}:fanfiction`,result.session.id);
+      setProjectId(result.book.id);setActiveMode('fanfiction');setSessionId(result.session.id);setSnapshot(null);setTool('');setSpinoffOpen(false);setRefresh(v=>v+1);
     }}/>
     <ContinuationImportDialog key={owner} owner={owner} open={continuationOpen} viewKey={scopeKey + ':' + tool} projects={projects} onCancel={() => setContinuationOpen(false)} onPersisted={recordImportedBook} onImported={result => {
       if (!ownerScope.isCurrent()) return;

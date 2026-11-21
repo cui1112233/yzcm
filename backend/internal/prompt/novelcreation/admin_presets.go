@@ -8,7 +8,7 @@ const PatchOnlyPresetID = "novel-creation.revision-patch-only"
 const RewriteOnlyPresetID = "novel-creation.revision-rewrite-only"
 const IncrementalSettlementPresetID = "novel-creation.settlement-incremental"
 const ImitationSupplementPresetID = "novel-creation.imitation-supplement"
-const StudioPlanningPresetID = "novel-creation.studio-planning"
+const StudioPlanningPresetID = "novel-creation.studio-planning-v4"
 
 type AdminPrompt struct {
 	ID, Name, Slot string
@@ -18,6 +18,23 @@ type AdminPrompt struct {
 // Runtime and administrator defaults share these definitions; no frontend copy.
 func AdminPrompts() []AdminPrompt {
 	return []AdminPrompt{
+		{SpinoffCanonID, "番外创作·正传正典压缩", "novel.spinoff", catalog.Definition{SystemPrompt: SpinoffCanonSystem}},
+		{SpinoffFoundation.ID, "番外创作·基础设定", "novel.spinoff", SpinoffFoundation},
+		{ShortFullWriter.ID, "短篇全篇·正文写作系统要求", "novel.short", ShortFullWriter},
+		{ShortFullWriterUserID, "短篇全篇·首稿任务模板", "novel.short", catalog.Definition{SystemPrompt: ShortFullWriterUserTemplate}},
+		{ShortFullContinuationUserID, "短篇全篇·缺章补写模板", "novel.short", catalog.Definition{SystemPrompt: ShortFullContinuationUserTemplate}},
+		{ShortFullReview.ID, "短篇全篇·文字审稿系统要求", "novel.short", ShortFullReview},
+		{ShortFullReviewUserID, "短篇全篇·文字审稿任务模板", "novel.short", catalog.Definition{SystemPrompt: ShortFullReviewUserTemplate}},
+		{ShortFullRevisionUserID, "短篇全篇·第二稿跟进模板", "novel.short", catalog.Definition{SystemPrompt: ShortFullRevisionUserTemplate}},
+		{ShortFullPackage.ID, "短篇全篇·成品包装系统要求", "novel.short", ShortFullPackage},
+		{ShortFullPackageUserID, "短篇全篇·成品包装任务模板", "novel.short", catalog.Definition{SystemPrompt: ShortFullPackageUserTemplate}},
+		{ShortFullChapterBlockID, "短篇全篇·章节输出区块模板", "novel.short", catalog.Definition{SystemPrompt: ShortFullChapterBlockTemplate}},
+		{ShortWriterRevisionFollowupID, "短篇写作·修订跟进要求（四消息）", "novel.short", catalog.Definition{SystemPrompt: ShortWriterRevisionFollowupSystem}},
+		{ShortImitationDeconstruction.ID, "短篇仿写·六维拆书", "novel.short", ShortImitationDeconstruction},
+		{ShortImitationDirections.ID, "短篇仿写·三个方向", "novel.short", ShortImitationDirections},
+		{ShortImitationBlueprint.ID, "短篇仿写·创作蓝图", "novel.short", ShortImitationBlueprint},
+		{ShortImitationWritingID, "短篇仿写·写作附加约束", "novel.short", catalog.Definition{SystemPrompt: ShortImitationWritingSystem}},
+		{ShortImitationEditorial.ID, "短篇仿写·编辑终审", "novel.short", ShortImitationEditorial},
 		{FoundationPlan.ID, "长篇创作蓝图", "novel.long", FoundationPlan},
 		{ChapterPlan.ID, "章节规划", "novel.long", ChapterPlan},
 		{ChapterDraft.ID, "章节正文", "novel.long", ChapterDraft},
@@ -41,7 +58,7 @@ func AdminPrompts() []AdminPrompt {
 		{ShortBodyRevision.ID, "短篇正文修订", "novel.short", ShortBodyRevision},
 		{ShortRecommendation.ID, "短篇推荐文案", "novel.short", ShortRecommendation},
 		{StyleAnalysis.ID, "写作文风分析", "novel.tools", StyleAnalysis},
-		{StudioPlanningPresetID, "创作对话与建书建议", "novel.tools", catalog.Definition{SystemPrompt: StudioPlanningSystem}},
+		{StudioPlanningPresetID, "创作对话·长短篇会话与素材分流", "novel.tools", catalog.Definition{SystemPrompt: StudioPlanningSystem}},
 	}
 }
 

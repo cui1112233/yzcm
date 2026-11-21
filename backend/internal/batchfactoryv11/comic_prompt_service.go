@@ -79,7 +79,7 @@ const comicPageStructureLock = "【漫画页面结构约束】成图为{{image_a
 // comicIllustratedTextStructureLock 是「CM·文字插画版」专用的版式锁：单页
 // 图文卡，上半文字区逐字排版、下半插画，不分格、不画气泡。它替代分格漫画
 // 的 comicPageStructureLock，否则模型会被强制回多格漫画。
-const comicIllustratedTextStructureLock = "【单页图文卡结构约束】成图为{{image_aspect_ratio}}{{image_orientation}}的中文单页图文卡：上半部分是文字区，按原文逐字排版，手写感楷体、深墨色、行距舒展；下半部分是插画区，画本页人物、动作、场景、光影与机位。两区自然过渡，留白充分；不画分格线、不做海报式拼贴、不出现对白气泡，画面内不出现任何文字、标题、页码、水印或签名。具体线稿、上色、材质、人物比例和渲染方式只听所选画风预设，不得固定为其他画风。"
+const comicIllustratedTextStructureLock = "【单页图文卡结构约束】成图为{{image_aspect_ratio}}{{image_orientation}}的中文单页图文卡：上半部分是文字区，按原文逐字排版，手写感楷体、深墨色、行距舒展；下半部分是插画区，画本页人物、动作、场景、光影与机位。两区自然过渡，留白充分；不画分格线、不做海报式拼贴、不出现对白气泡。除上半原文文字区外，插画区不得出现额外文字、标题、页码、水印或签名。具体线稿、上色、材质、人物比例和渲染方式只听所选画风预设，不得固定为其他画风。"
 
 func comicPromptTextForAspect(value, aspectRatio string) string {
 	orientation := ImageAspectRatioOrientation(aspectRatio)
@@ -143,7 +143,7 @@ func BuildComicPromptContract(book Book, videos []Video, pageIndex int, snapshot
 		comicAssetIdentityRule,
 	}
 	if illustratedText {
-		parts = append(parts, "本页必须生成一张完整"+aspectRatio+"单页图文卡：上半为文字区、下半为插画区，两区自然过渡；不画分格线、不出现对白气泡、画面内不出现任何文字。禁止后期拼图。")
+		parts = append(parts, "本页必须生成一张完整"+aspectRatio+"单页图文卡：上半为文字区，按 current_page 原文逐字排版；下半为插画区，两区自然过渡。不画分格线、不出现对白气泡；除上半原文文字区外，插画区不得出现额外文字。禁止后期拼图。")
 	} else {
 		parts = append(parts, "本页必须生成一张完整"+aspectRatio+ImageAspectRatioOrientation(aspectRatio)+"漫画页，直接包含分格、角色、场景、动作、表情、旁白框、对话气泡及必须出现的中文文案。禁止后期拼图或另行叠字。")
 	}
@@ -157,6 +157,9 @@ func BuildComicPromptContract(book Book, videos []Video, pageIndex int, snapshot
 	pagePreset := config.Comic.body()
 	if strings.TrimSpace(config.Comic.Style.Body) != "" {
 		pagePreset = stripLegacyComicStyle(pagePreset)
+	}
+	if illustratedText {
+		pagePreset = normalizeIllustratedTextInstructions(pagePreset)
 	}
 	previousPage, nextPage := "", ""
 	if pageIndex > 0 {
@@ -212,6 +215,12 @@ func BuildComicPromptContract(book Book, videos []Video, pageIndex int, snapshot
 		return PromptContract{}, err
 	}
 	return PromptContract{SystemPrompt: strings.Join(parts, "\n\n"), UserPrompt: string(payload), Temperature: 0.25, MaxTokens: 4800}, nil
+}
+
+func normalizeIllustratedTextInstructions(value string) string {
+	value = strings.ReplaceAll(value, "画面内不出现任何文字", "插画区域内不得出现额外文字")
+	value = strings.ReplaceAll(value, "成图不绘制任何文字", "插画区域内不得出现额外文字")
+	return value
 }
 
 func expandRecoveredComicPreset(body string, book Book, localContext string, withDescriptions bool) string {
@@ -451,7 +460,14 @@ func (s *DirectorService) RunMissingComicPromptExtraction(ctx context.Context, o
 	return s.runComicPromptExtraction(ctx, owner, batchID, bookID, true)
 }
 
-func (s *DirectorService) runComicPromptExtraction(ctx context.Context, owner, batchID, bookID string, onlyMissing bool) (ComicPromptExtractionResult, error) {
+// RunComicPromptExtractionForPages re-extracts only the given pages. It is
+// used to repair pages whose stored prompt was polluted by a truncated JSON
+// envelope; completed sibling pages are left untouched.
+func (s *DirectorService) RunComicPromptExtractionForPages(ctx context.Context, owner, batchID, bookID string, videoIDs []string) (ComicPromptExtractionResult, error) {
+	return s.runComicPromptExtraction(ctx, owner, batchID, bookID, false, videoIDs...)
+}
+
+func (s *DirectorService) runComicPromptExtraction(ctx context.Context, owner, batchID, bookID string, onlyMissing bool, onlyVideoIDs ...string) (ComicPromptExtractionResult, error) {
 	empty := ComicPromptExtractionResult{Updated: []Video{}}
 	if err := s.validate(); err != nil {
 		return empty, err
@@ -496,11 +512,26 @@ func (s *DirectorService) runComicPromptExtraction(ctx context.Context, owner, b
 		return empty, fmt.Errorf("%w: 当前书为视频生成模式", ErrConflict)
 	}
 	targets := book.Videos
-	if onlyMissing {
-		targets = missingComicPromptVideos(book.Videos, snapshot)
-		if len(targets) == 0 {
-			return empty, nil
+	if len(onlyVideoIDs) > 0 {
+		wanted := make(map[string]struct{}, len(onlyVideoIDs))
+		for _, id := range onlyVideoIDs {
+			if trimmed := strings.TrimSpace(id); trimmed != "" {
+				wanted[trimmed] = struct{}{}
+			}
 		}
+		filtered := make([]Video, 0, len(wanted))
+		for _, video := range book.Videos {
+			if _, ok := wanted[video.ID]; ok {
+				filtered = append(filtered, video)
+			}
+		}
+		targets = filtered
+	}
+	if onlyMissing {
+		targets = missingComicPromptVideos(targets, snapshot)
+	}
+	if len(targets) == 0 {
+		return empty, nil
 	}
 	// Book-level concurrency does not help when a batch contains one book.
 	// Keep one request per page, but process at most five pages in parallel so
@@ -741,7 +772,7 @@ func isDirectorContentPolicyError(err error) bool {
 }
 
 func missingComicPromptVideos(videos []Video, snapshot DirectorSnapshot) []Video {
-	light := aiReasoningPromptConfig(snapshot.Effective).Comic.ID == "batch-comic-page-light"
+	light := ComicPageLightPipeline(snapshot.Effective)
 	missing := make([]Video, 0, len(videos))
 	for _, video := range videos {
 		if strings.TrimSpace(video.ComicPrompt) == "" || (!light && strings.TrimSpace(video.ComicImagePrompt) == "") {
@@ -755,6 +786,9 @@ func (s *DirectorService) persistComicPromptResults(ctx context.Context, owner, 
 	updated := make([]Video, 0, len(videos))
 	for _, video := range videos {
 		parsed := results[video.ID]
+		if comicPromptIsJSONLike(parsed.ScreenPrompt) || comicPromptIsJSONLike(parsed.ImagePrompt) {
+			return nil, fmt.Errorf("%w: 漫画提示词是原始 JSON，拒绝写入", ErrInvalid)
+		}
 		encodedScreen, _ := json.Marshal(parsed.ScreenPrompt)
 		encodedImage, _ := json.Marshal(parsed.ImagePrompt)
 		encodedRoles, _ := json.Marshal(parsed.Roles)
@@ -801,7 +835,9 @@ func parseComicBookPromptResults(completion string, videos []Video, snapshot Dir
 			return nil, fmt.Errorf("%w: 漫画提示词为空", ErrInvalid)
 		}
 		legacy.VideoID = videos[0].ID
-		return map[string]comicPromptResult{legacy.VideoID: legacy}, nil
+		results := map[string]comicPromptResult{legacy.VideoID: legacy}
+		finalizeIllustratedTextPromptResults(results, videos, snapshot)
+		return results, nil
 	}
 	var envelope struct {
 		Pages []comicPromptResult `json:"pages"`
@@ -822,6 +858,12 @@ func parseComicBookPromptResults(completion string, videos []Video, snapshot Dir
 		page.VideoID = strings.TrimSpace(page.VideoID)
 		page.ScreenPrompt = strings.TrimSpace(page.ScreenPrompt)
 		page.ImagePrompt = strings.TrimSpace(page.ImagePrompt)
+		if comicPromptIsJSONLike(page.ScreenPrompt) {
+			page.ScreenPrompt = ""
+		}
+		if comicPromptIsJSONLike(page.ImagePrompt) {
+			page.ImagePrompt = ""
+		}
 		page.Roles = normalizedStringList(page.Roles)
 		page.ScenePresets = normalizedStringList(page.ScenePresets)
 		page.RoleStage = normalizedStringMap(page.RoleStage)
@@ -847,7 +889,9 @@ func parseComicBookPromptResults(completion string, videos []Video, snapshot Dir
 		if matched.ScreenPrompt == "" || (!light && matched.ImagePrompt == "") {
 			return nil, fmt.Errorf("%w: 漫画提示词为空", ErrInvalid)
 		}
-		return map[string]comicPromptResult{targetID: *matched}, nil
+		results := map[string]comicPromptResult{targetID: *matched}
+		finalizeIllustratedTextPromptResults(results, videos, snapshot)
+		return results, nil
 	}
 	if len(videos) > 1 {
 		wanted := make(map[string]struct{}, len(videos))
@@ -871,9 +915,27 @@ func parseComicBookPromptResults(completion string, videos []Video, snapshot Dir
 		if len(results) != len(videos) {
 			return nil, newComicPageCountError(videos, normalizedPages)
 		}
+		finalizeIllustratedTextPromptResults(results, videos, snapshot)
 		return results, nil
 	}
 	return nil, newComicPageCountError(videos, normalizedPages)
+}
+
+// finalizeIllustratedTextPromptResults makes the literal page text a backend
+// guarantee. The text model may describe the layout but must not be trusted to
+// copy current_page into image_prompt correctly.
+func finalizeIllustratedTextPromptResults(results map[string]comicPromptResult, videos []Video, snapshot DirectorSnapshot) {
+	if !ComicPageIllustratedTextPreset(snapshot.Effective) {
+		return
+	}
+	for _, video := range videos {
+		result, ok := results[video.ID]
+		if !ok {
+			continue
+		}
+		result.ImagePrompt, _ = AppendComicPageLiteralText(result.ImagePrompt, comicPageSourceText(video))
+		results[video.ID] = result
+	}
 }
 
 // comicPageCountError 保留期望/实际/缺失/多出的明细，让日志和界面可以直接
@@ -964,9 +1026,24 @@ func parseComicPromptResult(completion string) comicPromptResult {
 			}
 		}
 	}
+	// 模型被截断时会把 {"pages":[...]} 这类原始 JSON 当成正文返回。
+	// 绝不能把 JSON 当出图提示词落库，否则图片模型会忽略文字区指令。
+	if comicPromptIsJSONLike(completion) {
+		return comicPromptResult{}
+	}
 	// Older providers returned one final prompt. Keep those books usable while
 	// new presets return the structured pair above.
 	return comicPromptResult{ScreenPrompt: completion, ImagePrompt: completion}
+}
+
+// comicPromptIsJSONLike 识别模型原始 JSON 或被截断的 JSON 信封。
+// 正常提示词是中文描述，不会以 { 或 [ 开头。
+func comicPromptIsJSONLike(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	return trimmed[0] == '{' || trimmed[0] == '['
 }
 
 func normalizedStringList(values []string) []string {

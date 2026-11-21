@@ -1981,7 +1981,7 @@ func (c *BatchAutomationCoordinator) Start(ctx context.Context, owner, batchID s
 		"scheduleMode": scheduleMode, "scheduledAt": scheduledAt,
 		"concurrency": automationNumberValue(input["concurrency"], 1), "preset": map[string]any{"id": preset.ID, "name": preset.Name, "version": preset.Version},
 		"productionMode": productionMode,
-		"createdAt": c.now(), "updatedAt": c.now(),
+		"createdAt":      c.now(), "updatedAt": c.now(),
 		"counts": automationCounts(len(targetBooks), len(targetBooks), 0, 0), "books": map[string]any{},
 	}
 	if initialState == "running" {
@@ -2546,8 +2546,15 @@ func comicBootstrapReady(book batchfactoryv11.Book, effective batchfactoryv11.Se
 	if !comicAssetsReady(book) || len(book.Videos) == 0 {
 		return false
 	}
+	// 轻量分镜版允许页面没有独立的 image_prompt（出图编译回退到
+	// screen_prompt）；必须与 missingComicPromptVideos 同口径，否则准备阶段
+	// 永远判「缺提示词」，补齐阶段又是空转，出图阶段照样拒绝。
+	light := batchfactoryv11.ComicPageLightPipeline(effective)
 	for _, page := range book.Videos {
-		if page.ComicSourceSegment == nil || strings.TrimSpace(page.ComicSourceSegment.SourceText) == "" || strings.TrimSpace(page.ComicPrompt) == "" || strings.TrimSpace(page.ComicImagePrompt) == "" {
+		if page.ComicSourceSegment == nil || strings.TrimSpace(page.ComicSourceSegment.SourceText) == "" || strings.TrimSpace(page.ComicPrompt) == "" {
+			return false
+		}
+		if !light && strings.TrimSpace(page.ComicImagePrompt) == "" {
 			return false
 		}
 	}
@@ -3289,29 +3296,70 @@ func automationMergeAudioDuration(book batchfactoryv11.Book, _ batchfactoryv11.P
 	return duration, nil
 }
 
+// ttsSemanticHashKey 保存这一版配音对应的语义输入指纹。ttsFingerprint 是
+// 实际音频字节的哈希，同一文案重新合成也会变化；判断能否复用必须看语义输入。
+const ttsSemanticHashKey = "ttsSemanticHash"
+
+const (
+	automationTTSVoice = "zh-CN-XiaoxiaoNeural"
+	automationTTSSpeed = 1.8
+	automationTTSPitch = "10"
+	automationTTSStyle = "general"
+)
+
+// automationTTSSemanticHash 只由文案、音色参数和所选音频模型决定。
+// 顺序与模型配置都参与哈希，保证「同一输入得到同一指纹」。
+func automationTTSSemanticHash(lines []string, model map[string]any, modelConfigured bool) string {
+	hash := sha256.New()
+	write := func(value string) {
+		_, _ = fmt.Fprintf(hash, "%d:%s|", len(value), value)
+	}
+	for _, line := range lines {
+		write(line)
+	}
+	write(automationTTSVoice)
+	write(fmt.Sprintf("%.2f", automationTTSSpeed))
+	write(automationTTSPitch)
+	write(automationTTSStyle)
+	if modelConfigured {
+		write(modelString(model, "id"))
+		write(modelString(model, "endpoint"))
+		write(modelString(model, "baseUrl"))
+		write(modelString(model, "requestTemplate"))
+	}
+	return fmt.Sprintf("ttssem-%x", hash.Sum(nil)[:16])
+}
+
 func (c *BatchAutomationCoordinator) ensureAudioPlan(ctx context.Context, owner, batchID string, book batchfactoryv11.Book) (string, float64, error) {
 	if c == nil || c.ttsStore == nil || c.store == nil {
 		return "", 0, fmt.Errorf("配音与逐行时长服务未配置")
-	}
-	if hasReusableAudioPlan(book) {
-		var artifactID string
-		_ = json.Unmarshal(book.SettingsState.Patch["ttsAudioArtifactId"], &artifactID)
-		if strings.TrimSpace(artifactID) != "" && c.localFiles != nil {
-			if file, err := c.localFiles.Open(strings.TrimSpace(artifactID) + ".mp3"); err == nil {
-				_ = file.Close()
-				duration, durationErr := automationMergeAudioDuration(book, batchfactoryv11.ProductionJob{})
-				return strings.TrimSpace(artifactID), duration, durationErr
-			}
-		}
-	}
-	if c.localFiles == nil {
-		return "", 0, fmt.Errorf("TTS 音频存储未配置")
 	}
 	lines := productionLines(book)
 	if len(lines) == 0 {
 		return "", 0, fmt.Errorf("正文没有可测量的生产行")
 	}
 	model, ok := configuredTTSModel(ctx, c.ttsStore, owner)
+	semanticHash := automationTTSSemanticHash(lines, model, ok)
+	if hasReusableAudioPlan(book) {
+		var artifactID string
+		_ = json.Unmarshal(book.SettingsState.Patch["ttsAudioArtifactId"], &artifactID)
+		if strings.TrimSpace(artifactID) != "" && c.localFiles != nil {
+			if file, err := c.localFiles.Open(strings.TrimSpace(artifactID) + ".mp3"); err == nil {
+				_ = file.Close()
+				var storedSemanticHash string
+				_ = json.Unmarshal(book.SettingsState.Patch[ttsSemanticHashKey], &storedSemanticHash)
+				// 旧计划没有语义指纹时继续复用，避免升级后无谓重新配音；
+				// 有新指纹时必须与当前文案/音色/模型一致，否则重新生成。
+				if storedSemanticHash == "" || storedSemanticHash == semanticHash {
+					duration, durationErr := automationMergeAudioDuration(book, batchfactoryv11.ProductionJob{})
+					return strings.TrimSpace(artifactID), duration, durationErr
+				}
+			}
+		}
+	}
+	if c.localFiles == nil {
+		return "", 0, fmt.Errorf("TTS 音频存储未配置")
+	}
 	probe := c.audioProbe
 	if probe == nil {
 		probe = batchfactoryv11.FFprobeH3AudioDuration{}
@@ -3327,7 +3375,7 @@ func (c *BatchAutomationCoordinator) ensureAudioPlan(ctx context.Context, owner,
 	hash := sha256.New()
 	for index, line := range lines {
 		lineCtx, cancel := context.WithTimeout(ctx, 75*time.Second)
-		ttsInput := ttsRequest{Input: line, Voice: "zh-CN-XiaoxiaoNeural", Speed: 1.8, Pitch: "10", Style: "general"}
+		ttsInput := ttsRequest{Input: line, Voice: automationTTSVoice, Speed: automationTTSSpeed, Pitch: automationTTSPitch, Style: automationTTSStyle}
 		var audio []byte
 		var err error
 		if ok {
@@ -3399,6 +3447,7 @@ func (c *BatchAutomationCoordinator) ensureAudioPlan(ctx context.Context, owner,
 				"audioLineDurations":     lineRaw,
 				"ttsFingerprint":         json.RawMessage(fmt.Sprintf("%q", func() string { digest := hash.Sum(nil); return fmt.Sprintf("tts-%x", digest[:12]) }())),
 				"ttsAudioArtifactId":     json.RawMessage(fmt.Sprintf("%q", artifactID)),
+				"ttsSemanticHash":        json.RawMessage(fmt.Sprintf("%q", semanticHash)),
 			},
 			ExpectedRevision: candidate.Revision,
 		})

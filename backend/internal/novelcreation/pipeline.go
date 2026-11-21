@@ -69,11 +69,17 @@ type RunContext struct {
 	Notes              []ProjectNote
 	KnowledgeMaterials []KnowledgeMaterial
 	// MaxRevisionRounds overrides the default audit-revision loop bound.
-	MaxRevisionRounds  int
-	Agent              *AgentSettings
-	ReviewCycleVersion int
-	SystemPrompts      *SystemPromptSnapshot
-	ShortReviewVersion int
+	MaxRevisionRounds              int
+	Agent                          *AgentSettings
+	ReviewCycleVersion             int
+	SystemPrompts                  *SystemPromptSnapshot
+	ShortReviewVersion             int
+	ShortFullDraftVersion          int
+	allowEmptyCompletion           bool
+	ShortWriterConversationVersion int
+	shortWriterConversation        *shortWriterConversation
+	ShortImitationVersion          int
+	SaveShortStage                 func(context.Context, ShortStory) error `json:"-"`
 }
 
 type Pipeline struct {
@@ -585,6 +591,13 @@ func (p *Pipeline) callJSON(ctx context.Context, input RunContext, sink EventSin
 			return nil, e
 		}
 	}
+	if input.ShortImitationVersion >= 1 && (spec.definition.ID == novelprompt.ShortBodyPrompt.ID || spec.definition.ID == novelprompt.ShortBodyRevision.ID) {
+		supplement, e := frozenSystemText(input, novelprompt.ShortImitationWritingID, novelprompt.ShortImitationWritingSystem)
+		if e != nil {
+			return nil, e
+		}
+		spec.definition.SystemPrompt += "\n\n" + supplement
+	}
 	if input.LongImitation != nil && spec.definition.ID != novelprompt.LongImitationRequirements.ID {
 		supplement, e := frozenSystemText(input, novelprompt.ImitationSupplementPresetID, novelprompt.LongImitationSystemSupplement)
 		if e != nil {
@@ -630,6 +643,12 @@ func (p *Pipeline) callJSON(ctx context.Context, input RunContext, sink EventSin
 		Temperature:  spec.temperature,
 		MaxTokens:    spec.maxTokens,
 	}
+	if shortWriterConversationCall(input, spec.definition.ID) && spec.definition.ID == novelprompt.ShortBodyRevision.ID {
+		request, err = shortWriterRevisionRequest(input, request)
+		if err != nil {
+			return nil, err
+		}
+	}
 	reply, err := p.complete(ctx, input, sink, provider, spec.step, spec.definition.ID+spec.key, request, spec.definition.Version)
 	if err != nil {
 		return nil, err
@@ -643,6 +662,7 @@ func (p *Pipeline) callJSON(ctx context.Context, input RunContext, sink EventSin
 	}
 	validationErr := decodeAndValidate(reply, target, spec.validate)
 	if validationErr == nil {
+		rememberShortWriterDraft(input, spec.definition.ID, request, reply)
 		return json.RawMessage(reply), nil
 	}
 	var imitationLimit *imitationOutputLimitError
@@ -666,6 +686,11 @@ func (p *Pipeline) callJSON(ctx context.Context, input RunContext, sink EventSin
 		Temperature:  0.1,
 		MaxTokens:    spec.maxTokens,
 	}
+	if shortWriterConversationCall(input, spec.definition.ID) {
+		repairRequest.SystemPrompt = request.SystemPrompt
+		repairRequest.UserPrompt = novelprompt.StructureRepairSystem + "\n\n" + repairPrompt
+		repairRequest.Messages = append(request.CompletionMessages(), batchfactoryv11.TextCompletionMessage{Role: "assistant", Content: reply}, batchfactoryv11.TextCompletionMessage{Role: "user", Content: repairRequest.UserPrompt})
+	}
 	repairedReply, err := p.complete(ctx, input, sink, provider, spec.step, spec.definition.ID+spec.key+":repair", repairRequest, spec.definition.Version)
 	if err != nil {
 		return nil, err
@@ -682,6 +707,7 @@ func (p *Pipeline) callJSON(ctx context.Context, input RunContext, sink EventSin
 		}
 		return nil, invalidOutputError(spec.definition, err)
 	}
+	rememberShortWriterDraft(input, spec.definition.ID, request, repairedReply)
 	return json.RawMessage(repairedReply), nil
 }
 
@@ -710,15 +736,15 @@ func (p *Pipeline) complete(ctx context.Context, input RunContext, sink EventSin
 			routeKey = "foundation-plan"
 		}
 		switch route {
-		case "short-source-analysis", "short-outline", "short-outline-revision":
+		case "short-source-analysis", "short-outline", "short-outline-revision", "short-imitation-deconstruction", "short-imitation-directions", "short-imitation-blueprint":
 			routeKey = "foundation-plan"
-		case "short-body":
+		case "short-body", "short-full-draft", "short-full-continuation":
 			routeKey = "chapter-draft"
-		case "short-review":
+		case "short-review", "short-imitation-editorial", "short-full-review":
 			routeKey = "chapter-audit"
-		case "short-body-revision":
+		case "short-body-revision", "short-full-revision":
 			routeKey = "chapter-revision"
-		case "short-recommendation", "short-continuity":
+		case "short-recommendation", "short-continuity", "short-full-package":
 			routeKey = "memory-index"
 		}
 		modelID := input.Agent.ModelRoutes[routeKey]
@@ -736,6 +762,9 @@ func (p *Pipeline) complete(ctx context.Context, input RunContext, sink EventSin
 			return nil, request, nil, &DomainError{Code: ErrModelUnavailable, Message: "所选文本模型当前不可用"}
 		}
 		meta := ModelCallMetadata{ChosenModelID: modelID, PromptID: "novel-creation." + route, PromptVersion: promptVersion, Temperature: request.Temperature, MaxTokens: request.MaxTokens, TemperatureStatus: "sent", MaxTokensStatus: "sent"}
+		if (input.ShortWriterConversationVersion == 1 && (route == "short-body" || route == "short-body-revision")) || (input.ShortFullDraftVersion == 1 && strings.HasPrefix(route, "short-full-")) {
+			meta.Messages = request.CompletionMessages()
+		}
 		if withMeta, ok := actual.(batchfactoryv11.TextModelMetadataProvider); ok {
 			meta.Provider = withMeta.TextModelMetadata()
 			if meta.Provider.SupportsTemperature != nil && !*meta.Provider.SupportsTemperature {
@@ -755,7 +784,7 @@ func (p *Pipeline) complete(ctx context.Context, input RunContext, sink EventSin
 	if err := p.checkCancelled(ctx, input); err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(reply) == "" {
+	if strings.TrimSpace(reply) == "" && !input.allowEmptyCompletion {
 		return "", &DomainError{Code: ErrInvalidOutput, Message: "model returned empty output"}
 	}
 	payload, _ := json.Marshal(map[string]string{"delta": reply})

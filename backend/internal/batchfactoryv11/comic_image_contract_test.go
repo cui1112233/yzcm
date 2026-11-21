@@ -283,7 +283,7 @@ func illustratedTextPromptSettings(t *testing.T, presetID string) SettingsPatch 
 		"aiPromptConfig": rawSetting(t, map[string]any{"comic": map[string]any{
 			"enabled":  true,
 			"presetId": presetID,
-			"body":     "单页图文卡：上半文字区按原文排版，下半插画，不分格，不画气泡。",
+			"body":     "单页图文卡：上半文字区按原文排版，下半插画，不分格，不画气泡。\n【插画区】\n- 画面内不出现任何文字：无对白气泡、无标题、无水印。",
 			"style": map[string]any{
 				"presetId": "batch-comic-style-08",
 				"body":     "韩漫条漫画风",
@@ -310,6 +310,12 @@ func TestIllustratedTextPresetUsesCardStructureLock(t *testing.T) {
 	}
 	if !strings.Contains(contract.SystemPrompt, "上半为文字区") {
 		t.Fatalf("文字插画版必须声明上半文字区/下半插画区:\n%s", contract.SystemPrompt)
+	}
+	if !strings.Contains(contract.SystemPrompt, "按原文逐字排版") {
+		t.Fatalf("文字插画版必须要求把原文排入上半文字区:\n%s", contract.SystemPrompt)
+	}
+	if strings.Contains(contract.SystemPrompt, "画面内不出现任何文字") {
+		t.Fatalf("文字插画版不能再用全画面禁字指令覆盖原文排版:\n%s", contract.SystemPrompt)
 	}
 }
 
@@ -382,15 +388,34 @@ func TestAppendComicPageLiteralTextKeepsSourceVerbatim(t *testing.T) {
 	}
 }
 
-func TestAppendComicPageLiteralTextDedupesExistingSource(t *testing.T) {
-	source := "我推开门。\n「你来了。」"
-	prompt := "版式说明\n\n" + source
+func TestAppendComicPageLiteralTextOverridesLegacyNoTextInstruction(t *testing.T) {
+	source := "林笙期待筹备了一年的订婚宴，因为未婚夫回国的白月光，彻底沦为一个笑话。"
+	prompt := "上半部约占五成，作为文字区，但成图不绘制任何文字；下半部为插画。"
+
 	got, appended := AppendComicPageLiteralText(prompt, source)
-	if appended {
-		t.Fatal("已带原文时不得重复拼接")
+	if !appended {
+		t.Fatal("旧的无字提示词仍必须追加原文排版覆盖块")
+	}
+	if !strings.Contains(got, "前文任何禁止文字") || !strings.Contains(got, "必须逐字出现在上半文字区") {
+		t.Fatalf("最终 prompt 必须明确覆盖旧的全画面禁字指令:\n%s", got)
+	}
+	if !strings.Contains(got, source) {
+		t.Fatalf("最终 prompt 必须携带本页原文:\n%s", got)
+	}
+}
+
+func TestAppendComicPageLiteralTextAddsOverrideWithoutDuplicatingExistingSource(t *testing.T) {
+	source := "我推开门。\n「你来了。」"
+	prompt := "上半文字区，但成图不绘制任何文字。\n\n" + source
+	got, appended := AppendComicPageLiteralText(prompt, source)
+	if !appended {
+		t.Fatal("已带原文但没有最高优先级覆盖声明时，仍必须追加覆盖声明")
 	}
 	if strings.Count(got, source) != 1 {
 		t.Fatalf("原文只应保留一份:\n%s", got)
+	}
+	if !strings.Contains(got, "前文任何禁止文字或不显示文字的要求全部作废") {
+		t.Fatalf("必须覆盖模型返回的禁字命令:\n%s", got)
 	}
 }
 

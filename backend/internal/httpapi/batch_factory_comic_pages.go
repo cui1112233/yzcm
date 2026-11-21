@@ -1052,6 +1052,11 @@ func (g comicPageGenerator) generatePage(ctx context.Context, owner, batchID, bo
 			input.GenerationError = comicPageCarryAutoRetryMarker(storedPage.GenerationError)
 		}
 	}
+	if strings.TrimSpace(input.ImagePrompt) == "" && batchfactoryv11.ComicPageLightPipeline(effective) {
+		// 轻量分镜版允许页面没有独立的 image prompt：回退用 screen_prompt
+		// 参与出图编译，避免「准备阶段判缺提示词、出图阶段拒绝」的死结。
+		input.ImagePrompt = input.ComicPrompt
+	}
 	if strings.TrimSpace(input.ImagePrompt) == "" {
 		return batchfactoryv11.ComicPage{}, batchfactoryv11.ComicPageImage{}, fmt.Errorf("%w: %s 缺少独立的图片提示词", batchfactoryv11.ErrConflict, selectedPage.Label)
 	}
@@ -1496,9 +1501,12 @@ func (g comicPageGenerator) generateBook(ctx context.Context, owner, batchID, bo
 		return true
 	}
 	work := make([]comicPageWorkItem, 0, len(continuation.Pending))
+	light := batchfactoryv11.ComicPageLightPipeline(effective)
 	for _, page := range continuation.Pending {
 		// 缺提示词的页只登记该页，不再中止整本；其余页照常出图。
-		if strings.TrimSpace(page.ComicPrompt) == "" || strings.TrimSpace(page.ComicImagePrompt) == "" {
+		// 轻量分镜版允许页面没有独立的 image prompt：出图编译会回退到
+		// screen_prompt 内容（comicPagePromptContent），不能按缺失拒绝。
+		if strings.TrimSpace(page.ComicPrompt) == "" || (!light && strings.TrimSpace(page.ComicImagePrompt) == "") {
 			message := fmt.Sprintf("%s 还没有漫画提示词", page.Label)
 			if strings.TrimSpace(page.ComicPrompt) != "" {
 				message = fmt.Sprintf("%s 缺少独立的图片提示词", page.Label)
@@ -1827,6 +1835,16 @@ func comicPromptPreviewDeveloper(ctx context.Context, owner string, accounts aut
 	return toString(authAccountPayload(account, profiles)["role"]) == "dev"
 }
 
+// comicPromptTextIsJSON 识别被截断 JSON 信封污染的提示词。正常提示词是
+// 中文描述，不会以 { 或 [ 开头。
+func comicPromptTextIsJSON(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	return trimmed[0] == '{' || trimmed[0] == '['
+}
+
 func registerComicPageRoutes(mux *http.ServeMux, store batchfactoryv11.Store, files *localartifact.Store, localExecutors *localexecutor.Service, catalogStore novelfetchworkshop.Store, userConfig *UserConfigStore, presetCatalog *prompt.Catalog, accounts auth.Store, profiles *MemberProfileStore, director *batchfactoryv11.DirectorService, generationGate *comicPageGenerationGate, imageCache imagegenerationcache.Repository) {
 	registerComicSourceSegmentRoutes(mux, store, director)
 	comicStore, ok := store.(batchfactoryv11.ComicPageStore)
@@ -1835,6 +1853,7 @@ func registerComicPageRoutes(mux *http.ServeMux, store batchfactoryv11.Store, fi
 	}
 	const pages = "/api/batch-factory/v12/batches/{batchId}/books/{bookId}/comic-pages"
 	const page = pages + "/{videoId}"
+	const repairPrompts = pages + "/repair-prompts"
 	const promptZip = pages + "/download-zip"
 	// images-zip 只打包每页主图；提示词与资产图仍走 download-zip。
 	const imagesZip = pages + "/images-zip"
@@ -2057,9 +2076,10 @@ func registerComicPageRoutes(mux *http.ServeMux, store batchfactoryv11.Store, fi
 			writeStoreError(w, err)
 			return
 		}
+		compiledPrompt, _ := comicPageFinalImagePrompt(contract.Prompt, effective, *targetVideo)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"comicPrompt": input.ComicPrompt, "imagePrompt": input.ImagePrompt,
-			"compiledPrompt": contract.Prompt, "referenceImageUrls": contract.ReferenceImageURLs,
+			"compiledPrompt": compiledPrompt, "referenceImageUrls": contract.ReferenceImageURLs,
 			"referenceImages": comicReferenceImageResponses(effective, *targetBook, contract.ReferenceImageURLs, input.ReferenceImageURLs),
 			"stylePresetId":   contract.StylePresetID, "snapshotHash": contract.SnapshotHash,
 		})
@@ -2098,11 +2118,11 @@ func registerComicPageRoutes(mux *http.ServeMux, store batchfactoryv11.Store, fi
 				}
 				break
 			}
-			if targetBook == nil || targetVideo == nil || strings.TrimSpace(targetVideo.ComicPrompt) == "" || strings.TrimSpace(targetVideo.ComicImagePrompt) == "" {
+			effective := batchfactoryv11.ResolveSettings(batch.SettingsState.Patch, targetBook.SettingsState.Patch)
+			if targetBook == nil || targetVideo == nil || strings.TrimSpace(targetVideo.ComicPrompt) == "" || (!batchfactoryv11.ComicPageLightPipeline(effective) && strings.TrimSpace(targetVideo.ComicImagePrompt) == "") {
 				writeJSON(w, http.StatusConflict, map[string]string{"error": "请先提取当前分镜的漫画提示词"})
 				return
 			}
-			effective := batchfactoryv11.ResolveSettings(batch.SettingsState.Patch, targetBook.SettingsState.Patch)
 			_, err = comicStore.UpsertComicPage(r.Context(), owner, batch.ID, targetBook.ID, targetVideo.ID, batchfactoryv11.UpsertComicPageInput{
 				ComicPrompt: targetVideo.ComicPrompt, ImagePrompt: targetVideo.ComicImagePrompt,
 				ModelID: comicSettingString(effective, "imageModelId", ""), AspectRatio: batchfactoryv11.EffectiveImageAspectRatio(effective),
@@ -2169,6 +2189,62 @@ func registerComicPageRoutes(mux *http.ServeMux, store batchfactoryv11.Store, fi
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"updated": updated})
+	})
+	mux.HandleFunc("POST "+repairPrompts, func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := bridgeOwner(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		if director == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "漫画提示词服务未配置"})
+			return
+		}
+		pagesList, err := comicStore.ListComicPages(r.Context(), owner, r.PathValue("batchId"), r.PathValue("bookId"))
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		videoIDs := make([]string, 0)
+		for _, page := range pagesList {
+			// 只有被截断 JSON 污染过的页才重抽，正常页保持用户已接受的内容。
+			if comicPromptTextIsJSON(page.ComicPrompt) || comicPromptTextIsJSON(page.ImagePrompt) {
+				videoIDs = append(videoIDs, page.VideoID)
+			}
+		}
+		if len(videoIDs) == 0 {
+			writeJSON(w, http.StatusOK, map[string]any{"candidatePages": 0, "updated": 0, "failed": 0})
+			return
+		}
+		result, runErr := director.RunComicPromptExtractionForPages(r.Context(), owner, r.PathValue("batchId"), r.PathValue("bookId"), videoIDs)
+		// 提示词提取只写视频级设置；漫画页行才是出图时的唯一提示词来源，
+		// 因此重抽成功后必须同步回页行，并把页面标记为待重新生成。
+		synced, syncFailed := 0, 0
+		if patcher, ok := comicStore.(batchfactoryv11.ComicPagePatcher); ok {
+			for _, video := range result.Updated {
+				comicPrompt := video.ComicPrompt
+				imagePrompt := video.ComicImagePrompt
+				status := "prompt_ready"
+				if _, patchErr := patcher.PatchComicPage(r.Context(), owner, r.PathValue("batchId"), r.PathValue("bookId"), video.ID, batchfactoryv11.PatchComicPageInput{
+					ComicPrompt: &comicPrompt, ImagePrompt: &imagePrompt, Status: &status,
+				}); patchErr != nil {
+					syncFailed++
+					continue
+				}
+				synced++
+			}
+		}
+		payload := map[string]any{
+			"candidatePages": len(videoIDs),
+			"updated":        len(result.Updated),
+			"failed":         len(result.Failed),
+			"syncedPages":    synced,
+			"syncFailed":     syncFailed,
+		}
+		if runErr != nil {
+			payload["error"] = runErr.Error()
+		}
+		writeJSON(w, http.StatusOK, payload)
 	})
 	mux.HandleFunc("POST "+page+"/generate", func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
@@ -3126,6 +3202,7 @@ func planComicPromptZip(ctx context.Context, store batchfactoryv11.Store, comicS
 				compiled = "完整提示词暂不可生成：" + contractErr.Error()
 			} else {
 				compiled = contract.Prompt
+				compiled, _ = comicPageFinalImagePrompt(compiled, effective, video)
 			}
 		}
 		label := safeComicZipPart(video.Label)

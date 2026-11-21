@@ -785,6 +785,8 @@ body.batch-factory-column-resizing, body.batch-factory-column-resizing * { curso
 @media (max-width:900px) { .batch-factory-automation-modal.ant-modal { width:calc(100vw - 96px)!important; } .batch-factory-automation-grid { grid-template-columns:1fr; } .batch-factory-automation-footer { justify-content:flex-end; } .batch-factory-automation-footer > span { display:none; } }
 @media (max-width:560px) { .batch-factory-automation-modal.ant-modal { width:calc(100vw - 24px)!important; } .batch-factory-automation-modal .ant-modal-header,.batch-factory-automation-modal .ant-modal-body { padding-left:16px; padding-right:16px; } .batch-factory-automation-footer { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); } .batch-factory-automation-footer .ant-btn { width:100%; margin:0; } }
 .batch-factory-engine-field .ant-segmented { width:max-content; max-width:100%; }
+/* 图片画幅有 8 个选项，半行控制列放不下会溢出到相邻卡片外；跨满整行给足宽度。 */
+.batch-factory-engine-field.is-aspect-row { grid-column: 1 / -1; }
 /* Grid items stretch by default; switches must remain controls, never become progress bars. */
 .batch-factory-engine-field > .ant-switch, .batch-factory-audio-option > .ant-switch { justify-self:start; width:auto; min-width:44px; }
 .batch-factory-book-audio { display:grid; gap:12px; padding:14px; border:1px solid var(--sh-line); border-radius:10px; background:var(--sh-panel); }
@@ -4322,6 +4324,9 @@ body.shuihuo-reference-shell
 .batch-factory-comic-media-preview-empty strong{color:var(--sh-text);font-size:14px;font-weight:600}
 .batch-factory-comic-media-preview-empty span{color:var(--sh-accent)}
 .batch-factory-comic-media-preview-empty small{font-size:11px;color:var(--sh-muted)}
+.batch-factory-comic-media-generating{position:absolute;inset:0;z-index:3;display:grid;place-content:center;justify-items:center;gap:8px;padding:24px;background:color-mix(in srgb,var(--sh-bg) 82%,transparent);text-align:center}
+.batch-factory-comic-media-generating strong{color:var(--sh-text);font-size:14px;font-weight:600}
+.batch-factory-comic-media-generating span{color:var(--sh-muted);font-size:11px}
 .batch-factory-comic-media-tools{display:grid;min-width:0;min-height:0;grid-template-rows:auto auto minmax(0,1fr) auto;overflow:hidden;background:var(--sh-panel)}
 .batch-factory-comic-media-header{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;min-height:0;padding:10px 14px;border-bottom:1px solid var(--sh-line);background:var(--sh-panel-strong)}
 .batch-factory-comic-media-title{display:flex;order:1;flex:1 1 100%;align-items:center;flex-wrap:wrap;min-width:0;gap:3px 8px}

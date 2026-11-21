@@ -1,13 +1,21 @@
 import { Check, ChevronDown, Layers } from 'lucide-react';
 import { Dropdown, message } from 'antd';
 import { useState } from 'react';
-import { WORK_MODES, WORK_MODE_DUET, workModeForPath } from './workMode.js';
+import { getToken } from '../api/client.js';
+import {
+  WORK_MODES,
+  WORK_MODE_DUET,
+  WORK_MODE_MAGIC_CUT,
+  magicCutBootstrapRequest,
+  workModeForLocation,
+  workModeHref
+} from './workMode.js';
 import './work-mode.css';
 
 // 品牌行即工作模式入口：样式跟我们的主题走，交互形态参考洛水的三段式下拉。
 export default function WorkModeMenu({ pathname, className = '', children, ariaLabel = '选择工作模式' }) {
   const [open, setOpen] = useState(false);
-  const current = workModeForPath(pathname);
+  const current = workModeForLocation({ pathname, port: window.location.port });
 
   const items = WORK_MODES.map(mode => ({
     key: mode.id,
@@ -26,16 +34,36 @@ export default function WorkModeMenu({ pathname, className = '', children, ariaL
     )
   }));
 
-  function handleMenuClick({ key }) {
+  async function handleMenuClick({ key }) {
     if (key === WORK_MODE_DUET) {
       message.info('Duet 模式尚未实现');
       return;
     }
     if (key === current) return;
-    const mode = WORK_MODES.find(item => item.id === key);
-    if (!mode?.href) return;
+    const target = workModeHref(key, window.location);
+    if (!target) return;
+    const targetURL = new URL(target, window.location.href);
+    if (targetURL.origin !== window.location.origin) {
+      if (key === WORK_MODE_MAGIC_CUT) {
+        const bootstrap = magicCutBootstrapRequest(getToken(), targetURL.href);
+        if (bootstrap) {
+          try {
+            const response = await fetch(bootstrap.url, bootstrap.options);
+            if (!response.ok) {
+              message.error('魔剪账号连接失败，请确认 4040 已启动');
+              return;
+            }
+          } catch (_) {
+            message.error('无法连接魔剪，请确认 4040 已启动');
+            return;
+          }
+        }
+      }
+      window.location.assign(targetURL.href);
+      return;
+    }
     // 与 shared/components/Link 使用同一套导航方式：应用没有 React Router。
-    window.history.pushState({}, '', mode.href);
+    window.history.pushState({}, '', `${targetURL.pathname}${targetURL.search}${targetURL.hash}`);
     window.dispatchEvent(new PopStateEvent('popstate'));
   }
 

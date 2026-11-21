@@ -419,6 +419,34 @@ func TestBuildComicPromptContractCarriesPageContextAndImageDerivation(t *testing
 	}
 }
 
+func TestParseComicPromptResultRejectsTruncatedJSON(t *testing.T) {
+	raw := `{"pages":[{"video_id":"video-1","screen_prompt":"单页图文卡，本页文字八句`
+	result := parseComicPromptResult(raw)
+	if result.ScreenPrompt != "" || result.ImagePrompt != "" {
+		t.Fatalf("截断 JSON 不得作为提示词: %+v", result)
+	}
+}
+
+func TestParseComicBookPromptResultsAcceptsSinglePageEnvelope(t *testing.T) {
+	videos := []Video{{ID: "video-1", Label: "漫画页 01"}}
+	completion := `{"pages":[{"video_id":"video-1","screen_prompt":"导演说明","image_prompt":"上半文字区，下半插画"}]}`
+	results, err := parseComicBookPromptResults(completion, videos, DirectorSnapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := results["video-1"].ImagePrompt; got != "上半文字区，下半插画" {
+		t.Fatalf("image_prompt=%q", got)
+	}
+}
+
+func TestParseComicBookPromptResultsRejectsJSONImagePrompt(t *testing.T) {
+	videos := []Video{{ID: "video-1", Label: "漫画页 01"}}
+	completion := `{"pages":[{"video_id":"video-1","screen_prompt":"导演说明","image_prompt":"{\"pages\":[]}"}]}`
+	if _, err := parseComicBookPromptResults(completion, videos, DirectorSnapshot{}); err == nil {
+		t.Fatal("JSON 形态的 image_prompt 必须被拒绝")
+	}
+}
+
 func TestBuildComicBookPromptContractUsesBoundSourceSegmentsAsPageContent(t *testing.T) {
 	settings := rawSetting(t, map[string]any{"comic": map[string]any{"enabled": true, "body": "漫画规则"}})
 	book := Book{ID: "book-1", Title: "连续分页", SourceText: "第一段原文。第二段原文。", AssetRecords: []BookAsset{{Kind: "character", Name: "林晚", Prompt: "黑发女性", Source: "comic"}}}
@@ -1102,6 +1130,35 @@ func TestParseComicBookPromptResultsAutoFillsMissingVideoIDForSinglePage(t *test
 	}
 }
 
+func TestParseComicBookPromptResultsInjectsIllustratedPageSourceWhenModelOmitsIt(t *testing.T) {
+	source := "闺蜜好到什么都要和我用同款。\n我们一同怀孕，她主动搬到我家。"
+	videos := []Video{{
+		ID:                 "video-1",
+		Label:              "漫画页 01",
+		ComicSourceSegment: &ComicSourceSegment{SourceText: source},
+	}}
+	snapshot := DirectorSnapshot{Effective: SettingsPatch{
+		"productionMode": rawSetting(t, "comic"),
+		"aiPromptConfig": rawSetting(t, map[string]any{"comic": map[string]any{
+			"enabled":  true,
+			"presetId": ComicPageIllustratedTextPresetID,
+		}}),
+	}}
+	completion := `{"pages":[{"video_id":"video-1","screen_prompt":"上半留白，下半插画","image_prompt":"上半文字区，但成图不绘制任何文字；下半插画"}]}`
+
+	results, err := parseComicBookPromptResults(completion, videos, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imagePrompt := results["video-1"].ImagePrompt
+	if !strings.Contains(imagePrompt, source) {
+		t.Fatalf("图文版提示词必须由后端逐字补入 current_page 原文:\n%s", imagePrompt)
+	}
+	if !strings.Contains(imagePrompt, "前文任何禁止文字或不显示文字的要求全部作废") {
+		t.Fatalf("图文版提示词必须明确覆盖模型返回的禁字命令:\n%s", imagePrompt)
+	}
+}
+
 func TestParseComicBookPromptResultsAcceptsAlignedPagesAndIgnoresExtras(t *testing.T) {
 	videos := []Video{{ID: "video-1", Label: "漫画页 01"}, {ID: "video-2", Label: "漫画页 02"}}
 	completion := `{"pages":[
@@ -1164,5 +1221,20 @@ func TestComicPromptMessagesNeverExposeEnglishSentinels(t *testing.T) {
 	}
 	if !strings.Contains(partial.Error(), "漫画页提示词 1/1 张失败") {
 		t.Fatalf("partial message must keep the failure count in Chinese: %s", partial.Error())
+	}
+}
+
+func TestComicPagePersistenceRejectsJSONPrompts(t *testing.T) {
+	valid := UpsertComicPageInput{ComicPrompt: "导演说明", ImagePrompt: "上半文字区，下半插画"}
+	if _, err := normalizeComicPageInput(valid); err != nil {
+		t.Fatalf("正常提示词不应被拒绝: %v", err)
+	}
+	truncated := `{"pages":[{"video_id":"video-1","screen_prompt":"...`
+	if _, err := normalizeComicPageInput(UpsertComicPageInput{ComicPrompt: "导演说明", ImagePrompt: truncated}); err == nil {
+		t.Fatal("截断 JSON 不能写入 image_prompt")
+	}
+	bad := `{"pages":[]}`
+	if _, err := applyComicPagePatch(UpsertComicPageInput{ComicPrompt: "导演说明", ImagePrompt: "正常画面"}, PatchComicPageInput{ImagePrompt: &bad}); err == nil {
+		t.Fatal("JSON 形态的 image_prompt 不能在补丁写入")
 	}
 }

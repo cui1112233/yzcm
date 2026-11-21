@@ -10,6 +10,7 @@ import (
 const shortStoryKind = "short_story"
 
 type ShortStoryInput struct {
+	SelectedDirection string                   `json:"selectedDirection,omitempty"`
 	IdempotencyKey    string                   `json:"idempotencyKey"`
 	Mode              string                   `json:"mode"`
 	ModelID           string                   `json:"modelId"`
@@ -43,30 +44,35 @@ type ShortChapter struct {
 	Content string `json:"content"`
 }
 type ShortArtifact struct {
-	Key     string `json:"key"`
-	Title   string `json:"title"`
-	Content string `json:"content"`
+	Editable bool   `json:"editable"`
+	Key      string `json:"key"`
+	Title    string `json:"title"`
+	Content  string `json:"content"`
 }
 type ShortStory struct {
-	ID             string            `json:"storyId"`
-	ProjectID      string            `json:"projectId"`
-	SessionID      string            `json:"sessionId"`
-	RunID          string            `json:"runId"`
-	Version        int               `json:"version"`
-	Status         string            `json:"status"`
-	Title          string            `json:"title"`
-	Input          ShortStoryInput   `json:"input"`
-	Outline        *ShortOutline     `json:"outline"`
-	Chapters       []ShortChapter    `json:"chapters"`
-	Artifacts      []ShortArtifact   `json:"artifacts"`
-	Recommendation string            `json:"recommendation"`
-	Styles         []StyleProfile    `json:"styles"`
-	Notes          []ProjectNote     `json:"notes"`
-	LinkedContext  string            `json:"linkedContext,omitempty"`
-	OutlineAudit   json.RawMessage   `json:"outlineAudit,omitempty"`
-	ChapterAudits  []json.RawMessage `json:"chapterAudits"`
-	CreatedAt      time.Time         `json:"createdAt"`
-	UpdatedAt      time.Time         `json:"updatedAt"`
+	FullDraft      *ShortFullDraftState `json:"fullDraft,omitempty"`
+	Checkpoint     string               `json:"checkpoint,omitempty"`
+	QualityStale   bool                 `json:"qualityStale,omitempty"`
+	Imitation      *ShortImitationData  `json:"imitation,omitempty"`
+	ID             string               `json:"storyId"`
+	ProjectID      string               `json:"projectId"`
+	SessionID      string               `json:"sessionId"`
+	RunID          string               `json:"runId"`
+	Version        int                  `json:"version"`
+	Status         string               `json:"status"`
+	Title          string               `json:"title"`
+	Input          ShortStoryInput      `json:"input"`
+	Outline        *ShortOutline        `json:"outline"`
+	Chapters       []ShortChapter       `json:"chapters"`
+	Artifacts      []ShortArtifact      `json:"artifacts"`
+	Recommendation string               `json:"recommendation"`
+	Styles         []StyleProfile       `json:"styles"`
+	Notes          []ProjectNote        `json:"notes"`
+	LinkedContext  string               `json:"linkedContext,omitempty"`
+	OutlineAudit   json.RawMessage      `json:"outlineAudit,omitempty"`
+	ChapterAudits  []json.RawMessage    `json:"chapterAudits"`
+	CreatedAt      time.Time            `json:"createdAt"`
+	UpdatedAt      time.Time            `json:"updatedAt"`
 }
 type ShortStoryResult struct {
 	Project Project    `json:"project"`
@@ -95,6 +101,10 @@ func normalizeShortStory(in ShortStoryInput) (ShortStoryInput, error) {
 	}
 	in.Title = jsTrim(in.Title)
 	in.ReferenceText = jsTrim(in.ReferenceText)
+	in.SelectedDirection = jsTrim(in.SelectedDirection)
+	if jsLength(in.SelectedDirection) > 24000 {
+		return in, inputError("所选仿写方向超出上限")
+	}
 	in.Requirements = jsTrim(in.Requirements)
 	if in.Mode == "short_imitation" && jsNonspaceLength(in.ReferenceText) < 100 {
 		return in, inputError("参考原文至少需要100字（不计空白）")
@@ -130,8 +140,24 @@ func (s *Service) StartShortStory(ctx context.Context, owner string, input Short
 	if err != nil {
 		return out, err
 	}
-	digest := fingerprint(in)
 	err = s.store.AtomicCreate(ctx, owner, func(tx Store) error {
+		child := NewService(tx, quietRuntime{s.runtime}, s.pipeline)
+		child.promptCatalog = s.promptCatalog
+		out, err = child.startShortStoryInTransaction(ctx, owner, in)
+		return err
+	})
+	if err == nil {
+		s.Notify(ctx, owner, out.Run.ID)
+	}
+	return
+}
+
+// Caller owns the account transaction, including its durable confirmation receipt.
+// Never notify a worker until that outer transaction has committed.
+func (s *Service) startShortStoryInTransaction(ctx context.Context, owner string, in ShortStoryInput) (out ShortStoryResult, err error) {
+	tx := s.store
+	digest := fingerprint(in)
+	err = func() error {
 		receipt, e := tx.ReserveSubmission(ctx, owner, shortStoryKind, in.IdempotencyKey, digest)
 		if e != nil {
 			return e
@@ -192,6 +218,9 @@ func (s *Service) StartShortStory(ctx context.Context, owner string, input Short
 		if e != nil {
 			return e
 		}
+		if e = inheritAgentDefaults(ctx, tx, owner, p); e != nil {
+			return e
+		}
 		session, e := tx.CreateSession(ctx, owner, CreateSessionInput{ProjectID: p.ID, Mode: in.Mode, Title: title})
 		if e != nil {
 			return e
@@ -207,7 +236,18 @@ func (s *Service) StartShortStory(ctx context.Context, owner string, input Short
 		if e != nil {
 			return e
 		}
-		raw, _ := json.Marshal(map[string]any{"short_story": story, "project_settings": settings, "agent_contract_version": 1, "short_review_version": 1, "mode": in.Mode, "system_prompts": systemPrompts})
+		imitationVersion := 0
+		writerConversationVersion := 0
+		if in.Mode == "short_imitation" {
+			imitationVersion = 2
+			writerConversationVersion = 1
+		}
+		snapshot := map[string]any{"short_imitation_version": imitationVersion, "short_story": story, "project_settings": settings, "agent_contract_version": 1, "short_review_version": 1, "mode": in.Mode, "system_prompts": systemPrompts}
+		if writerConversationVersion > 0 {
+			snapshot["short_writer_conversation_version"] = writerConversationVersion
+			snapshot["short_full_draft_version"] = 1
+		}
+		raw, _ := json.Marshal(snapshot)
 		run, e := tx.CreateRun(ctx, owner, Run{ProjectID: p.ID, SessionID: session.ID, ModelID: in.ModelID, ThinkingLevel: in.ThinkingLevel, IdempotencyKey: "short:" + fingerprint([]string{owner, in.IdempotencyKey}), Status: RunQueued, PromptSnapshot: raw})
 		if e != nil {
 			return e
@@ -226,12 +266,10 @@ func (s *Service) StartShortStory(ctx context.Context, owner string, input Short
 		out = ShortStoryResult{p, session, run, story}
 		result, _ := json.Marshal(out)
 		return tx.CompleteSubmission(ctx, owner, shortStoryKind, in.IdempotencyKey, submissionReceipt{Fingerprint: digest, ProjectID: p.ID, Result: result})
-	})
-	if err == nil {
-		s.Notify(ctx, owner, out.Run.ID)
-	}
+	}()
 	return
 }
+
 func (s *Service) GetShortStoryRequest(ctx context.Context, owner, key string) (out ShortStoryResult, err error) {
 	owner, err = requiredOwner(owner)
 	if err != nil {
@@ -274,6 +312,7 @@ func (s *Service) GetShortStory(ctx context.Context, owner, project string) (out
 			out.Status = string(run.Status)
 		}
 	}
+	decorateShortArtifacts(&out)
 	return out, nil
 }
 func validateShortOutline(v ShortOutline, count int) error {
@@ -298,7 +337,7 @@ func (s *Service) EditShortStoryOutline(ctx context.Context, owner, project stri
 		if v.Version != version {
 			return conflict()
 		}
-		if v.Status != "awaiting_confirmation" {
+		if v.Status != "awaiting_confirmation" || v.Checkpoint == "blueprint" {
 			return inputError("当前大纲不在可编辑的确认阶段")
 		}
 		if _, e = writableSession(ctx, tx, owner, project, v.SessionID); e != nil {
@@ -316,16 +355,51 @@ func (s *Service) EditShortStoryOutline(ctx context.Context, owner, project stri
 	})
 	return
 }
-func (s *Service) ConfirmShortStory(ctx context.Context, owner, id string, version int) (out Run, err error) {
+func (s *Service) ConfirmShortStory(ctx context.Context, owner, id string, version int) (Run, error) {
+	return s.ConfirmShortStoryWithModel(ctx, owner, id, version, "", "")
+}
+func (s *Service) ConfirmShortStoryWithModel(ctx context.Context, owner, id string, version int, modelID, thinkingLevel string) (out Run, err error) {
 	source, err := s.store.GetRun(ctx, owner, id)
 	if err != nil {
 		return
 	}
-	return s.queueAtomic(ctx, owner, source.ProjectID, fingerprint(version), func(child *Service) (Run, error) {
+	model := source.ModelID
+	thinking := source.ThinkingLevel
+	if strings.TrimSpace(modelID) != "" {
+		model = strings.TrimSpace(modelID)
+	}
+	if len(model) > 96 {
+		return out, inputError("请选择有效的文本模型")
+	}
+	if strings.TrimSpace(thinkingLevel) != "" {
+		thinking, err = normalizeStudioThinking(thinkingLevel)
+		if err != nil {
+			return
+		}
+	}
+	var protocol struct {
+		Version int `json:"short_imitation_version"`
+	}
+	if err = json.Unmarshal(source.PromptSnapshot, &protocol); err != nil {
+		return
+	}
+	if protocol.Version < 2 && (model != source.ModelID || thinking != source.ThinkingLevel) {
+		return out, inputError("旧版短篇任务继续使用创建时的模型设置")
+	}
+	return s.queueAtomic(ctx, owner, source.ProjectID, fingerprint([]any{version, model, thinking}), func(child *Service) (Run, error) {
 		key := "confirm-short:" + id
 		if run, ok, e := child.store.FindRunByIdempotencyKey(ctx, owner, key); e != nil {
 			return Run{}, e
 		} else if ok {
+			var previous struct {
+				Story ShortStory `json:"short_story"`
+			}
+			if e = json.Unmarshal(run.PromptSnapshot, &previous); e != nil {
+				return Run{}, e
+			}
+			if previous.Story.Version != version || run.ModelID != model || run.ThinkingLevel != thinking {
+				return Run{}, conflict()
+			}
 			return run, nil
 		}
 		v, e := child.GetShortStory(ctx, owner, source.ProjectID)
@@ -335,11 +409,27 @@ func (s *Service) ConfirmShortStory(ctx context.Context, owner, id string, versi
 		if v.Version != version {
 			return Run{}, conflict()
 		}
-		if v.Status != "awaiting_confirmation" || source.Status != RunAwaitingConfirmation || v.Outline == nil {
+		if v.Status != "awaiting_confirmation" || source.Status != RunAwaitingConfirmation || v.RunID != source.ID || v.SessionID != source.SessionID {
 			return Run{}, inputError("短篇尚未等待内容确认")
 		}
-		if e = validateShortOutline(*v.Outline, v.Input.TargetChapters); e != nil {
-			return Run{}, e
+		if v.Checkpoint == "blueprint" {
+			var protocol struct {
+				Version int `json:"short_imitation_version"`
+			}
+			_ = json.Unmarshal(source.PromptSnapshot, &protocol)
+			if protocol.Version != 2 {
+				return Run{}, inputError("蓝图确认协议无效")
+			}
+			if e = validateSavedShortImitation(v.Imitation, v.Input.TargetWordCount); e != nil {
+				return Run{}, e
+			}
+		} else {
+			if v.Outline == nil {
+				return Run{}, inputError("缺少已确认短篇大纲")
+			}
+			if e = validateShortOutline(*v.Outline, v.Input.TargetChapters); e != nil {
+				return Run{}, e
+			}
 		}
 		if _, e = writableSession(ctx, child.store, owner, source.ProjectID, source.SessionID); e != nil {
 			return Run{}, e
@@ -348,10 +438,12 @@ func (s *Service) ConfirmShortStory(ctx context.Context, owner, id string, versi
 		if e = json.Unmarshal(source.PromptSnapshot, &snap); e != nil {
 			return Run{}, e
 		}
+		v.Input.ModelID = model
+		v.Input.ThinkingLevel = thinking
 		snap["short_story"] = v
 		snap["short_outline_confirmed"] = true
 		raw, _ := json.Marshal(snap)
-		run, e := child.store.CreateRun(ctx, owner, Run{ProjectID: source.ProjectID, SessionID: source.SessionID, ModelID: source.ModelID, ThinkingLevel: source.ThinkingLevel, IdempotencyKey: key, Status: RunQueued, PromptSnapshot: raw})
+		run, e := child.store.CreateRun(ctx, owner, Run{ProjectID: source.ProjectID, SessionID: source.SessionID, ModelID: model, ThinkingLevel: thinking, IdempotencyKey: key, Status: RunQueued, PromptSnapshot: raw})
 		if e != nil {
 			return Run{}, e
 		}

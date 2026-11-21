@@ -23,14 +23,15 @@ const (
 )
 
 type ModelCallMetadata struct {
-	ChosenModelID     string                            `json:"chosenModelId"`
-	Provider          batchfactoryv11.TextModelMetadata `json:"provider"`
-	PromptID          string                            `json:"promptId"`
-	PromptVersion     int                               `json:"promptVersion"`
-	Temperature       float64                           `json:"temperature"`
-	MaxTokens         int                               `json:"maxTokens"`
-	TemperatureStatus string                            `json:"temperatureStatus"`
-	MaxTokensStatus   string                            `json:"maxTokensStatus"`
+	Messages          []batchfactoryv11.TextCompletionMessage `json:"messages,omitempty"`
+	ChosenModelID     string                                  `json:"chosenModelId"`
+	Provider          batchfactoryv11.TextModelMetadata       `json:"provider"`
+	PromptID          string                                  `json:"promptId"`
+	PromptVersion     int                                     `json:"promptVersion"`
+	Temperature       float64                                 `json:"temperature"`
+	MaxTokens         int                                     `json:"maxTokens"`
+	TemperatureStatus string                                  `json:"temperatureStatus"`
+	MaxTokensStatus   string                                  `json:"maxTokensStatus"`
 }
 
 type CallRecord struct {
@@ -147,6 +148,7 @@ func (s *MemoryStore) atomicCreate(ctx context.Context, owner, project string, r
 	c.chapterBundles = maps.Clone(s.chapterBundles)
 	c.chapterVersions = maps.Clone(s.chapterVersions)
 	c.settings = maps.Clone(s.settings)
+	c.agentDefaults = maps.Clone(s.agentDefaults)
 	c.foundations = maps.Clone(s.foundations)
 	c.materials = maps.Clone(s.materials)
 	c.notes = maps.Clone(s.notes)
@@ -164,6 +166,7 @@ func (s *MemoryStore) atomicCreate(ctx context.Context, owner, project string, r
 	}
 	s.nextID, s.nextEventID = c.nextID, c.nextEventID
 	s.submissions = c.submissions
+	s.agentDefaults = c.agentDefaults
 	s.studios = c.studios
 	s.contentRecords = c.contentRecords
 	s.projects, s.sessions, s.messages, s.runs, s.runByKey, s.runEvents = c.projects, c.sessions, c.messages, c.runs, c.runByKey, c.runEvents

@@ -165,6 +165,8 @@ func TestShortStoryIndependentResultCheckpointEditAndReadback(t *testing.T) {
 		`{"score":96,"issues":[]}`,
 		`{"content":"一场雨夜揭开的真相。"}`,
 	}}
+	provider.responses = append(imitationStageReplies()[:3], provider.responses[1:]...)
+	provider.responses = append(provider.responses, imitationStageReplies()[8])
 	s := NewService(st, NewMemoryRuntime(), NewPipeline(func(context.Context, string, string) (batchfactoryv11.DirectorProvider, error) { return provider, nil }))
 	in := shortInput("flow")
 	in.PauseAfterOutline = true
@@ -173,6 +175,16 @@ func TestShortStoryIndependentResultCheckpointEditAndReadback(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	// Freeze a pre-v2 task: old outline checkpoints remain editable and resumable.
+	var legacySnapshot map[string]any
+	_ = json.Unmarshal(out.Run.PromptSnapshot, &legacySnapshot)
+	legacySnapshot["short_full_draft_version"] = 0
+	legacySnapshot["short_imitation_version"] = 1
+	legacySnapshot["short_writer_conversation_version"] = 0
+	legacyRaw, _ := json.Marshal(legacySnapshot)
+	legacyRun := st.runs[memoryKey("alice", out.Run.ID)]
+	legacyRun.PromptSnapshot = legacyRaw
+	st.runs[memoryKey("alice", out.Run.ID)] = legacyRun
 	run, e := s.Run(ctx, "alice", out.Run.ID)
 	if e != nil || run.Status != RunAwaitingConfirmation {
 		t.Fatal("not checkpointed", run, e)
@@ -188,6 +200,9 @@ func TestShortStoryIndependentResultCheckpointEditAndReadback(t *testing.T) {
 	}
 	if _, e = s.EditShortStoryOutline(ctx, "alice", out.Project.ID, story.Version, *story.Outline); e == nil {
 		t.Fatal("stale edit accepted")
+	}
+	if _, e = s.ConfirmShortStoryWithModel(ctx, "alice", out.Run.ID, updated.Version, "different", "deep"); e == nil {
+		t.Fatal("legacy model freeze changed")
 	}
 	continued, e := s.ConfirmShortStory(ctx, "alice", out.Run.ID, updated.Version)
 	if e != nil {
@@ -231,6 +246,9 @@ func TestShortStoryTwentyThousandWordsKeepsOneChapterAndBoundedRequests(t *testi
 		}
 	}
 	provider.responses = append(provider.responses, `{"content":"雨夜中的追寻与真相。"}`)
+	provider.responses = append(imitationStageReplies()[:3], provider.responses[1:]...)
+	provider.responses[2] = imitationBlueprintReply(20000)
+	provider.responses = append(provider.responses, imitationStageReplies()[8])
 	s := NewService(st, NewMemoryRuntime(), NewPipeline(func(context.Context, string, string) (batchfactoryv11.DirectorProvider, error) { return provider, nil }))
 	in := shortInput("twenty-thousand")
 	in.TargetWordCount = 20000
@@ -238,6 +256,7 @@ func TestShortStoryTwentyThousandWordsKeepsOneChapterAndBoundedRequests(t *testi
 	if e != nil {
 		t.Fatal(e)
 	}
+	freezeLegacyShortFullDraft(t, s, "alice", out.Run.ID)
 	run, e := s.Run(ctx, "alice", out.Run.ID)
 	if e != nil || run.Status != RunSucceeded {
 		t.Fatal(run.Status, e)
@@ -246,9 +265,15 @@ func TestShortStoryTwentyThousandWordsKeepsOneChapterAndBoundedRequests(t *testi
 	if e != nil || len(got.Chapters) != 1 || len([]rune(got.Chapters[0].Content)) < 20000 {
 		t.Fatal("lost selected chapter count or content", e)
 	}
-	for _, req := range provider.requests {
+	for index, req := range provider.requests {
 		b, _ := json.Marshal(req)
-		if len(b) > 60000 {
+		limit := 60000
+		// The dedicated final editorial review reads the complete saved manuscript;
+		// ordinary writing/continuity requests remain bounded independently.
+		if index == len(provider.requests)-1 {
+			limit = in.TargetWordCount*3 + 20000
+		}
+		if len(b) > limit {
 			t.Fatal("unbounded model request", len(b))
 		}
 	}
