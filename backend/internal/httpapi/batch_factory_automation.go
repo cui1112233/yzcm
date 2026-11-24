@@ -2313,10 +2313,7 @@ func hasAutomationPublishProfile(publish map[string]any) bool {
 // ResolveSettings(batch, book) 再叠加一次，最终优先级为
 // 单书显式值 > 批次统一配置 > 预设默认。
 func mergeAutomationPresetConfig(current, config map[string]any) map[string]any {
-	merged := map[string]any{}
-	for key, value := range config {
-		merged[key] = value
-	}
+	merged := automationPresetUserSettings(config)
 	for key, value := range current {
 		merged[key] = value
 	}
@@ -3999,7 +3996,7 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 						persist()
 					}
 					target := "collection"
-					upload := pinned != "" || jobRunMode == "full_submit" || jobAutoPublish || string(settings["textAutoUpload"]) == "true"
+					upload := pinned != "" || jobRunMode == "full_submit" || jobAutoPublish
 					if upload && !jobSubmitDeferred {
 						target = "published"
 					}

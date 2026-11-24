@@ -4,14 +4,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 )
 
 var ErrQueueEmpty = errors.New("novel fetch queue is empty")
+var ErrBookCancelled = errors.New("novel fetch book was cancelled")
+
+// CancelledBooksError identifies the markers seen by the atomic enqueue. An
+// explicit retry may clear those markers before the caller handles the error.
+type CancelledBooksError struct{ BookIDs []string }
+
+func (e *CancelledBooksError) Error() string { return ErrBookCancelled.Error() }
+func (e *CancelledBooksError) Unwrap() error { return ErrBookCancelled }
 
 type ProcessJob struct {
+	LeaseToken         string            `json:"-"`
 	ID                 string            `json:"id"`
 	Owner              string            `json:"owner"`
 	BatchID            string            `json:"batchId"`
@@ -68,10 +78,11 @@ type MemoryQueue struct {
 	inflight  map[string]ProcessJob
 	cancelled map[string]bool
 	dedupe    map[string]string
+	changed   chan struct{}
 }
 
 func NewMemoryQueue() *MemoryQueue {
-	return &MemoryQueue{pending: make(chan ProcessJob, 64), inflight: map[string]ProcessJob{}, cancelled: map[string]bool{}, dedupe: map[string]string{}}
+	return &MemoryQueue{pending: make(chan ProcessJob, 64), inflight: map[string]ProcessJob{}, cancelled: map[string]bool{}, dedupe: map[string]string{}, changed: make(chan struct{})}
 }
 
 func (q *MemoryQueue) EnqueueUnique(ctx context.Context, key string, job ProcessJob, _ time.Duration) (bool, error) {
@@ -102,30 +113,48 @@ func (q *MemoryQueue) EnqueueUniqueBooks(ctx context.Context, job ProcessJob, _ 
 		return false, "", fmt.Errorf("platform and source book ids are required for unique enqueue")
 	}
 	keys := processBookDedupeKeys(job)
-	q.mu.Lock()
-	for _, key := range keys {
-		if existingID := q.dedupe[key]; existingID != "" {
-			q.mu.Unlock()
-			return false, existingID, nil
-		}
-	}
-	for _, key := range keys {
-		q.dedupe[key] = job.ID
-	}
 	job.DedupeKey = processBookDedupeMarker(job)
 	job.DedupeBookIDs = append([]string{}, job.BookIDs...)
-	q.mu.Unlock()
-	if err := q.Enqueue(ctx, job); err != nil {
-		q.mu.Lock()
-		for _, key := range keys {
-			if q.dedupe[key] == job.ID {
-				delete(q.dedupe, key)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for {
+		var stopped []string
+		for _, id := range job.BookIDs {
+			if q.cancelled[cancellationKey(job.Owner, id)] {
+				id = strings.TrimSpace(id)
+				if !slices.Contains(stopped, id) {
+					stopped = append(stopped, id)
+				}
 			}
 		}
+		if len(stopped) != 0 {
+			return false, "", &CancelledBooksError{BookIDs: stopped}
+		}
+		for _, key := range keys {
+			if existing := q.dedupe[key]; existing != "" {
+				return false, existing, nil
+			}
+		}
+		select {
+		case q.pending <- job:
+			for _, key := range keys {
+				q.dedupe[key] = job.ID
+			}
+			return true, job.ID, nil
+		default:
+		}
+		// Wait for a slot without blocking a stop on a full queue.
+		changed := q.changed
 		q.mu.Unlock()
-		return false, "", err
+		select {
+		case <-changed:
+		case <-ctx.Done():
+		}
+		q.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			return false, "", err
+		}
 	}
-	return true, job.ID, nil
 }
 
 func processBookDedupeMarker(job ProcessJob) string {
@@ -178,6 +207,8 @@ func (q *MemoryQueue) CancelBooks(_ context.Context, owner string, bookIDs []str
 	for _, bookID := range bookIDs {
 		q.cancelled[cancellationKey(owner, bookID)] = true
 	}
+	close(q.changed)
+	q.changed = make(chan struct{})
 	return nil
 }
 
@@ -219,6 +250,8 @@ func (q *MemoryQueue) Claim(ctx context.Context, wait time.Duration) (ProcessJob
 		job = processJobWithDedupeScope(job)
 		q.mu.Lock()
 		q.inflight[job.ID] = job
+		close(q.changed)
+		q.changed = make(chan struct{})
 		q.mu.Unlock()
 		return job, nil
 	case <-timer.C:

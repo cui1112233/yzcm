@@ -151,7 +151,7 @@ func scheduleColumnKey(value string) string {
 	return ""
 }
 
-func scheduleBookSkipReason(ctx context.Context, store novelfetchworkshop.Store, owner string, doc novelfetchworkshop.Document, item map[string]any) string {
+func workshopBookSkipReason(ctx context.Context, store novelfetchworkshop.Store, owner string, doc novelfetchworkshop.Document, scheduleID string, versions []string, autoSubmit bool) string {
 	meta := doc.Meta
 	status := strings.ToLower(firstText(meta["status"], meta["queueState"]))
 	if status == "running" || status == "queued" || status == "processing" {
@@ -160,23 +160,22 @@ func scheduleBookSkipReason(ctx context.Context, store novelfetchworkshop.Store,
 	if novelFetchStopped(status) || meta["manualOnly"] == true || meta["manual_only"] == true || meta["rewriteValidationHold"] == true || novelFetchRetryScheduleHasManualHold(meta) {
 		return "任务已停止或需要人工处理，请先明确重试"
 	}
-	if meta["scheduledHold"] == true && firstText(meta["scheduleId"], meta["schedule_id"]) != firstText(item["id"]) {
+	if !autoSubmit {
+		switch strings.ToLower(firstText(meta["queueState"], meta["queue_state"])) {
+		case "queued", "running", "processing", "ai_processing", "waiting_retry":
+			return "已有任务正在执行，不重复启动"
+		}
+	}
+	if meta["scheduledHold"] == true && firstText(meta["scheduleId"], meta["schedule_id"]) != scheduleID {
 		return "已由其他定时任务安排，不重复占用"
 	}
-	versions := scheduleStringSlice(item["selected_versions"])
-	if len(versions) == 0 {
-		versions = []string{"original"}
-	}
-	if item["auto_submit"] != false {
-		done := scheduleStringSlice(firstConfiguredValue(meta["siteSubmitDoneVersions"], meta["site_submit_done_versions"]))
-		for _, version := range versions {
-			if !seenString(done, version) {
-				return ""
-			}
+	if autoSubmit {
+		if novelFetchVersionsSubmitted(doc, versions) {
+			return "所选版本已经提交成功"
 		}
-		return "所选版本已经提交成功"
+		return ""
 	}
-	for _, version := range versions {
+	for _, version := range novelFetchRequiredVersions(versions) {
 		if version == "original" {
 			if strings.TrimSpace(firstText(doc.ProcessedText, doc.Original)) != "" {
 				continue
@@ -191,6 +190,47 @@ func scheduleBookSkipReason(ctx context.Context, store novelfetchworkshop.Store,
 		}
 	}
 	return "所选内容已经生成完成"
+}
+
+func scheduleOwnsBook(meta, item map[string]any) bool {
+	if scheduleID := firstText(meta["scheduleId"], meta["schedule_id"]); scheduleID != "" {
+		return scheduleID == firstText(item["id"])
+	}
+	// Some interrupted dispatches only stamped the batch ID on their books.
+	batchID := firstText(item["batch_id"])
+	return item["auto_submit"] == false && item["status"] == "dispatching" && batchID != "" &&
+		batchID == firstText(meta["currentBatchId"], meta["current_batch_id"])
+}
+
+const novelFetchShortOriginalSkipReason = "原文过短，已跳过改写"
+
+func scheduleSkipFinishesBook(reason string) bool {
+	return reason == "所选版本已经提交成功" || reason == "所选内容已经生成完成" || reason == novelFetchShortOriginalSkipReason
+}
+
+// A generate-only schedule continues to observe its own active or blocked books.
+func scheduleBookDisposition(ctx context.Context, store novelfetchworkshop.Store, owner string, doc novelfetchworkshop.Document, item map[string]any) (reason string, observe bool) {
+	scheduleID := firstText(item["id"])
+	versions := scheduleStringSlice(item["selected_versions"])
+	if item["auto_submit"] != false {
+		return workshopBookSkipReason(ctx, store, owner, doc, scheduleID, versions, true), false
+	}
+	if doc.Meta["scheduledHold"] == true && !scheduleOwnsBook(doc.Meta, item) {
+		return "已由其他定时任务安排，不重复占用", false
+	}
+	decision := novelFetchScheduleGenerationDecision(ctx, store, owner, doc, versions)
+	switch {
+	case decision.dispatch:
+		return "", false
+	case decision.skipReason != "":
+		return decision.skipReason, false
+	case decision.status == "completed":
+		return "所选内容已经生成完成", false
+	case decision.status == "failed" || decision.status == "stopped":
+		return "任务已停止或需要人工处理，请先明确重试", true
+	default:
+		return "已有任务正在执行，不重复启动", true
+	}
 }
 
 // An interrupted preparation is repeatable: it retains the schedule ID and
@@ -223,6 +263,12 @@ func prepareNovelFetchScheduleTasks(ctx context.Context, store novelfetchworksho
 	ids, created, requested, skippedIDs := []string{}, scheduleStringSlice(item["created_ids"]), []string{}, []string{}
 	skipped := []any{}
 	allComplete := true
+	trackBook := func(doc novelfetchworkshop.Document) {
+		ids = append(ids, doc.BookID)
+		if firstText(doc.Meta["scheduleCreatedBy"]) == firstText(item["id"]) && !seenString(created, doc.BookID) {
+			created = append(created, doc.BookID)
+		}
+	}
 	for _, incoming := range documents {
 		requested = append(requested, incoming.BookID)
 		doc, lookupErr := store.GetDocument(ctx, owner, incoming.BookID)
@@ -233,10 +279,18 @@ func prepareNovelFetchScheduleTasks(ctx context.Context, store novelfetchworksho
 		if isNew {
 			doc = incoming
 		} else {
-			if reason := scheduleBookSkipReason(ctx, store, owner, doc, item); reason != "" {
+			reason, observe := scheduleBookDisposition(ctx, store, owner, doc, item)
+			if observe && scheduleOwnsBook(doc.Meta, item) {
+				trackBook(doc)
+				continue
+			}
+			if reason != "" {
+				if reason == novelFetchShortOriginalSkipReason && scheduleOwnsBook(doc.Meta, item) {
+					trackBook(doc)
+				}
 				skippedIDs = append(skippedIDs, doc.BookID)
 				skipped = append(skipped, map[string]any{"book_id": doc.BookID, "reason": reason})
-				if reason != "所选版本已经提交成功" && reason != "所选内容已经生成完成" {
+				if !scheduleSkipFinishesBook(reason) {
 					allComplete = false
 				}
 				continue
@@ -259,10 +313,7 @@ func prepareNovelFetchScheduleTasks(ctx context.Context, store novelfetchworksho
 		if err := store.PutDocument(ctx, owner, doc); err != nil {
 			return err
 		}
-		ids = append(ids, doc.BookID)
-		if firstText(doc.Meta["scheduleCreatedBy"]) == firstText(item["id"]) && !seenString(created, doc.BookID) {
-			created = append(created, doc.BookID)
-		}
+		trackBook(doc)
 	}
 	item["book_ids"], item["created_ids"], item["requested_book_ids"] = ids, created, requested
 	item["skipped_existing_book_ids"], item["skipped_books"] = skippedIDs, skipped
@@ -283,35 +334,50 @@ func prepareNovelFetchScheduleTasks(ctx context.Context, store novelfetchworksho
 	return nil
 }
 
-func filterDueScheduleBooks(ctx context.Context, store novelfetchworkshop.Store, owner string, item map[string]any) ([]string, bool, error) {
-	eligible := []string{}
-	allComplete := true
+type dueScheduleBooks struct {
+	eligible, observed []string
+	allComplete        bool
+}
+
+func filterDueScheduleBooks(ctx context.Context, store novelfetchworkshop.Store, owner string, item map[string]any) (dueScheduleBooks, error) {
+	books := dueScheduleBooks{allComplete: true}
 	skipped := arrayOrEmpty(item["skipped_books"])
 	for _, id := range scheduleStringSlice(item["book_ids"]) {
 		doc, err := store.GetDocument(ctx, owner, id)
 		if err != nil {
-			return nil, false, err
+			return books, err
 		}
-		reason := scheduleBookSkipReason(ctx, store, owner, doc, item)
+		reason, observe := scheduleBookDisposition(ctx, store, owner, doc, item)
+		owned := scheduleOwnsBook(doc.Meta, item)
+		if owned && reason == novelFetchShortOriginalSkipReason {
+			books.observed = append(books.observed, id)
+			skipped = append(skipped, map[string]any{"book_id": id, "reason": reason})
+			continue
+		}
+		if observe && owned {
+			books.observed = append(books.observed, id)
+			books.allComplete = false
+			continue
+		}
 		// A task that became busy after preparation still belongs to this
 		// schedule. Queue deduplication will defer this book independently.
-		if reason == "已有任务正在执行，不重复启动" && firstText(doc.Meta["scheduleId"], doc.Meta["schedule_id"]) == firstText(item["id"]) {
+		if reason == "已有任务正在执行，不重复启动" && owned {
 			reason = ""
 		}
-		if reason == "" && firstText(doc.Meta["scheduleId"], doc.Meta["schedule_id"]) != firstText(item["id"]) {
+		if reason == "" && !owned {
 			reason = "书籍已由其他任务接管，本定时任务不再派发"
 		}
 		if reason == "" {
-			eligible = append(eligible, id)
+			books.eligible = append(books.eligible, id)
 			continue
 		}
-		if reason != "所选版本已经提交成功" && reason != "所选内容已经生成完成" {
-			allComplete = false
+		if !scheduleSkipFinishesBook(reason) {
+			books.allComplete = false
 		}
 		skipped = append(skipped, map[string]any{"book_id": id, "reason": reason})
 	}
 	item["skipped_books"] = skipped
-	return eligible, allComplete, nil
+	return books, nil
 }
 
 // Recreate only missing IDs from the same interrupted dispatch's saved input.

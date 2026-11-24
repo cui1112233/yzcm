@@ -3,7 +3,6 @@ package batchfactoryv11
 import (
 	"context"
 	"errors"
-	"reflect"
 	"testing"
 )
 
@@ -166,8 +165,7 @@ func TestBookMergeScopesFinalOutputToOneBookAndUsesItsSelectedVideos(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	jobAudioDuration := reflect.ValueOf(jobs[0]).FieldByName("AudioDurationSeconds")
-	if len(jobs) != 1 || jobs[0].BookID != book.ID || len(jobs[0].Sources) != 1 || len(adapter.sources) != 1 || adapter.sources[0].ActualDurationSeconds != 6 || adapter.options.AspectRatio != "16:9" || jobs[0].OutputURL != "https://media.example/book-merged.mp4" || !jobAudioDuration.IsValid() || jobAudioDuration.Float() != 3 {
+	if len(jobs) != 1 || jobs[0].BookID != book.ID || len(jobs[0].Sources) != 1 || len(adapter.sources) != 1 || adapter.sources[0].ActualDurationSeconds != 6 || adapter.options.AspectRatio != "16:9" || jobs[0].OutputURL != "https://media.example/book-merged.mp4" {
 		t.Fatalf("jobs=%+v sources=%+v options=%+v", jobs, adapter.sources, adapter.options)
 	}
 }

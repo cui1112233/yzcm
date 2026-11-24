@@ -20,6 +20,13 @@ test('text content editor uses the captured full text and text-specific copy', (
   assert.match(source, /productionMode === "text"\s*\? `正文总字数 \$\{batchFactoryCleanSourceText\(book\.sourceText\)\.length\} 字 · 单页约 \$\{Number\(settings\.textPageTarget \|\| 150\)\} 字`/);
 });
 
+test('text rows delegate assigned copy and rendered page navigation to the shared workbench', () => {
+  assert.match(source, /import InlineTextBookPages from '\.\/InlineTextBookPages\.jsx'/);
+  assert.match(source, /<InlineTextBookPages/);
+  assert.match(source, /onOpen=\{pageId => openTextBook\(book, 'pages', pageId\)\}/);
+  assert.doesNotMatch(source, /function DeferredInlineTextPages\(/);
+});
+
 test('saving pasted text promotes it to the formal source instead of leaving fetch-original failed', () => {
   assert.match(source, /if \(editingContentProductionMode !== 'text'\) await saveDraft\(\{ key: `working-front:\$\{editingContentBook\.id\}`/);
   assert.match(source, /editingContentProductionMode === 'text'[\s\S]*await updateBookSource\(batch\.id, editingContentBook\.id, \{ sourceText, rawSourceText: sourceText, replaceSource: true, expectedRevision:/);

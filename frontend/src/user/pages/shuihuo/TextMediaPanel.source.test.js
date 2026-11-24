@@ -14,8 +14,15 @@ test('项目和书目将文本交给文字媒体库', () => {
   assert.match(list, /mediaMode === 'text' \? <TextMediaDialog\b/);
   assert.match(list, /mediaMode === 'comic' \? <ComicMediaPanel/);
   const library = readFileSync(new URL('./ProjectsView.jsx', import.meta.url), 'utf8');
-  assert.match(library, /project.factoryMode === 'text'.*<AuthenticatedTextPageImage/);
+  assert.match(library, /project.factoryMode === 'text'[\s\S]*?<AuthenticatedTextPageImage/);
   assert.match(library, /value:'text',label:'文本'/);
+});
+
+test('文本合集预览只列文字页，不把作品封面放进合集', () => {
+  const source = readFileSync(new URL('./TextMediaPanel.jsx', import.meta.url), 'utf8');
+  assert.match(source, /collectionItems\[0\]\?\.contentUrl/);
+  assert.doesNotMatch(source, /currentCollection\?\.coverContentUrl/);
+  assert.doesNotMatch(source, /setCollectionImage\(''\)>封面/);
 });
 
 const browser = [process.env.CHROME_PATH, 'C:/Program Files/Google/Chrome/Application/chrome.exe',
@@ -28,23 +35,27 @@ test('媒体库标签、翻页、刷新保留选中页，仅在生成中轮询',
       import React from 'react';
       import { createRoot } from 'react-dom/client';
       import TextMediaDialog from './TextMediaDialog.jsx';
+      window.addEventListener('error',event=>{document.body.dataset.runtimeError=event.error?.message || event.message});
       const root = createRoot(document.getElementById('root'));
       const sleep = t=>new Promise(r=>setTimeout(r,t));
       async function until(f){for(let i=0;i<300;i++){if(f())return;await sleep(20)}throw Error(document.body.innerText)}
       let reads=0, rendering=true,requests=[],previewBodies=[],saved,aborted=false,restores=0,locked=false,coverLocked=false;
       const mutations=[];
+      const downloads=[];HTMLAnchorElement.prototype.click=function(){downloads.push({name:this.download,url:this.href})};
       let confirmRestore=false, confirmCount=0, releaseSave, single=true;
       let bookRevision=7, bookWrites=0, ready=false, collection, publishes=0;
-      window.confirm=()=>{confirmCount++;return confirmRestore};
+      let uploadSummary='';
+      window.confirm=message=>{if(message.startsWith('上传确认')){uploadSummary=message;if(!message.includes('确认再次上传？'))return true}confirmCount++;return confirmRestore};
       window.fetch=async(path,opts)=>{
         requests.push([path,opts.method]); if(opts.method==='POST')mutations.push([path,opts.body]);
         let items=[];
+        if(path.endsWith('text-collections/c/download'))return new Response(new Blob(['zip'],{type:'application/zip'}));
         if(path.endsWith('/preview')){
           const body=JSON.parse(opts.body);
           previewBodies.push(body);
           if(body.text==='较慢的草稿。') return new Promise((resolve,reject)=>opts.signal.addEventListener('abort',()=>{aborted=true;reject(new DOMException('取消','AbortError'))},{once:true}));
           if(body.text==='太长的草稿。')return new Response('{"error":"文字超出页面"}',{status:400});
-          return new Response(new Blob([Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='),c=>c.charCodeAt(0))],{type:'image/png'}),{headers:{'X-Text-Contrast':'low'}});
+          return new Response(new Blob([Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='),c=>c.charCodeAt(0))],{type:'image/png'}),{headers:{'X-Text-Contrast':'low','X-Text-Preview-Pages':'2'}});
         }else if(opts.method==='PATCH'){saved=JSON.parse(opts.body);await new Promise(resolve=>{releaseSave=resolve});
           items={affectedPageIds:['p2','downstream'],pages:[{id:'p1',revision:2},{id:'p2',revision:4,ordinal:2,status:'pending'},{id:'downstream',revision:5,ordinal:3,status:'pending'}]};}
         else if(opts.method==='PUT'){
@@ -86,8 +97,15 @@ test('媒体库标签、翻页、刷新保留选中页，仅在生成中轮询',
         if(!button('在完整句子后拆页').disabled)throw Error('空句末列表仍可拆分');
         single=false;button('更新文字页').click();
         await until(()=>document.body.innerText.includes('第一段完整。'));
-        for(const label of ['本页背景','页面内容','封面','文字页','文本合集','展开','合成当前书','上传网络'])if(!document.body.innerText.includes(label))throw Error('缺少 '+label);
-        if(!button('合成当前书').disabled)throw Error('缺封面时未禁用合成');
+        for(const label of ['本页背景','页面内容','封面','文字页','文本合集','页目录','合成当前书','上传网络','页面操作','拆分与合并','整书操作'])if(!document.body.innerText.includes(label))throw Error('缺少 '+label);
+        await sleep(350);
+        for(const group of document.querySelectorAll('.text-media-operation-grid')){
+          const boxes=[...group.children].map(item=>item.getBoundingClientRect());
+          if(boxes.some(box=>box.width<70 || box.height<35))throw Error('操作按钮尺寸不一致 '+boxes.map(box=>Math.round(box.width)+'x'+Math.round(box.height)).join(','));
+          if(Math.max(...boxes.map(box=>box.top))-Math.min(...boxes.map(box=>box.top))>1)throw Error('分组按钮未对齐');
+          if(group.scrollWidth>group.clientWidth+2)throw Error('操作分组横向溢出');
+        }
+        if(!button('合成当前书').disabled)throw Error('文字页未就绪时未禁用合成');
         button('下一页').click();
         await until(()=>document.body.innerText.includes('第二段完整。'));
         const beforePoll=reads;rendering=false;await until(()=>reads>beforePoll);
@@ -97,13 +115,48 @@ test('媒体库标签、翻页、刷新保留选中页，仅在生成中轮询',
         edit.click();
         const area=()=>document.querySelector('textarea[aria-label="页面正文"]');
         await until(area);
+        const originalDraft=area().value;
+        if(document.querySelector('.text-page-editor input[type=color]'))throw Error('颜色控件仍是原生横条');
+        if(document.querySelector('.text-page-editor input[type=file]'))throw Error('编辑区仍有重复的背景上传入口');
+        const colorTrigger=document.querySelector('button[aria-label="文字颜色"]');colorTrigger.click();
+        await until(()=>document.querySelector('.batch-factory-theme-color-picker .ant-popover-inner'));
+        const popup=document.querySelector('.batch-factory-theme-color-picker .ant-popover-inner');
+        if(getComputedStyle(popup).backgroundColor!=='rgb(32, 38, 51)')throw Error('取色弹窗未使用主题背景：'+getComputedStyle(popup).backgroundColor);
+        colorTrigger.click();
+        const gallery=document.querySelector('.text-editor-gallery');
+        if(gallery.querySelector('.ant-btn').getBoundingClientRect().top<gallery.querySelector('span').getBoundingClientRect().bottom)throw Error('图库按钮挤在标题旁');
+        for(const [label,fontSize,fontId] of [['舒适阅读',40,'noto-sans-sc'],['纸感手写',44,'long-cang'],['清晰黑体',46,'lxgw-wenkai']]){
+          const count=previewBodies.length;button(label).click();
+          await until(()=>previewBodies.length>count && previewBodies.at(-1).layout.fontSize===fontSize);
+          if(previewBodies.at(-1).layout.fontId!==fontId)throw Error('预设没有更新实际预览字体');
+        }
+        button('浅色文字').click();await until(()=>previewBodies.at(-1)?.layout.highlightRules==='dialogue');
+        const highlightSelect=document.querySelector('[aria-label="标红规则"]');
+        highlightSelect.closest('.ant-select').querySelector('.ant-select-selector').dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));
+        await until(()=>[...document.querySelectorAll('.ant-select-item-option-content')].some(el=>el.textContent==='对话'));
+
+        await until(()=>previewBodies.at(-1)?.layout.highlightRules?.includes('dialogue'));
+        [...document.querySelectorAll('.ant-select-item-option-content')].find(el=>el.textContent==='指定行').click();
+        await until(()=>previewBodies.at(-1)?.layout.highlightRules?.includes('dialogue') && previewBodies.at(-1)?.layout.highlightRules?.includes('lines'));
+        if(previewBodies.at(-1).layout.highlightLines!=='1,3')throw Error('单页没有传递实际标红行号');
+        document.body.click();
+        button('深色文字').click();await until(()=>previewBodies.at(-1)?.layout.textColor==='#222222');
+        if(previewBodies.at(-1).background.color!=='#F6EFDF')throw Error('深色字没有搭配浅色背景');
+        button('浅色文字').click();await until(()=>previewBodies.at(-1)?.layout.textColor==='#FFFFFF');
+        if(previewBodies.at(-1).background.color!=='#111318')throw Error('浅色字没有搭配深色背景');
+        const customColor=document.querySelector('[aria-label="文字颜色色值"]');
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(customColor,'#222222');customColor.dispatchEvent(new Event('input',{bubbles:true}));customColor.dispatchEvent(new Event('change',{bubbles:true}));
+        await until(()=>previewBodies.at(-1)?.layout.textColor==='#222222' && button('一键调整文字颜色'));
+        button('一键调整文字颜色').click();await until(()=>previewBodies.at(-1)?.layout.textColor==='#FFFFFF');
+        if(previewBodies.at(-1).background.color!=='#111318')throw Error('调整文字颜色改动了自选背景');
+        if(area().value!==originalDraft)throw Error('选择预设改动了正文内容');
         const change=(s)=>{Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(area(),s);area().dispatchEvent(new Event('input',{bubbles:true}))};
         change('较慢的草稿。');await until(()=>previewBodies.some(p=>p.text==='较慢的草稿。'));
         change('较新的草稿。');await until(()=>aborted && document.querySelector('img[alt="排版预览"]'));
         if(!document.body.innerText.includes('对比度较低'))throw Error('未显示颜色提示');
-        const last=document.querySelector('img[alt="排版预览"]').src;
+        if(!document.body.innerText.includes('本页内容将分为 2 页'))throw Error('未说明完整内容会续页');
         change('太长的草稿。'); await until(()=>document.body.innerText.includes('文字超出页面'));
-        if(document.querySelector('img[alt="排版预览"]').src!==last)throw Error('预览失败丢失上一张图');
+        if(document.querySelector('.text-media-preview img'))throw Error('预览失败仍显示旧图，会误认为预设没有生效');
         change('最终手改。'); await until(()=>previewBodies.some(p=>p.text==='最终手改。'));
         const esc=()=>document.querySelector('.ant-modal-wrap').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',keyCode:27,bubbles:true}));
         const mask=()=>document.querySelector('.ant-modal-wrap').click();
@@ -149,7 +202,11 @@ test('媒体库标签、翻页、刷新保留选中页，仅在生成中轮询',
         ready=true;button('文字页').click();await until(()=>button('更新文字页'));
         button('更新文字页').click();await until(()=>button('合成当前书')?.disabled===false);
         button('合成当前书').click();await until(()=>button('重新合成')&&button('上传网络')?.disabled===false);
+        button('下载合集').click();await until(()=>downloads.length===1 && button('下载合集')?.disabled===false);
+        if(downloads[0].name!=='测试书.zip' || !requests.some(([path])=>path.endsWith('text-collections/c/download')))throw Error('没有下载当前选中的文本合集');
+        if(publishes!==0)throw Error('下载触发了上传');
         button('上传网络').click();await until(()=>button('再次上传'));
+        if(!uploadSummary.includes('作品：测试书') || !uploadSummary.includes('页数：'))throw Error('上传前未核对作品和页数');
         confirmRestore=false;button('再次上传').click();await sleep(50);if(publishes!==1)throw Error('取消后重复上传');
         confirmRestore=true;await until(()=>button('再次上传')?.disabled===false);button('再次上传').click();await sleep(100);
         await until(()=>publishes===2&&button('关闭文本媒体库')?.disabled===false);
@@ -157,13 +214,15 @@ test('媒体库标签、翻页、刷新保留选中页，仅在生成中轮询',
         if(requests.some(([url,m])=>m!=='PUT'&&!url.includes('/text-')&&!url.includes('/client-errors')))throw Error('文本库请求了其他模式接口');
         document.body.dataset.result='passed'
       }run().catch(e=>document.body.dataset.error=e.message+'（上传 '+publishes+' 次）');
-    `},bundle:true,write:false,format:'iife',loader:{'.css':'empty'},define:{'process.env.NODE_ENV':'"production"'},minify:true});
+    `},bundle:true,jsx:'automatic',write:false,format:'iife',loader:{'.css':'empty'},define:{'process.env.NODE_ENV':'"production"'},minify:true});
     writeFileSync(join(dir,'app.js'),result.outputFiles[0].contents);
     const html=join(dir,'index.html');
-    writeFileSync(html,'<meta charset="utf-8"><div id="root"></div><script src="app.js"></script>');
+    const styles=readFileSync(new URL('../shuihuo-production.css',import.meta.url),'utf8')+'\n'+readFileSync(new URL('./text-media-panel.css',import.meta.url),'utf8')+'\n'+readFileSync(new URL('./publish-settings.css',import.meta.url),'utf8');
+    writeFileSync(join(dir,'styles.css'),styles);
+    writeFileSync(html,'<meta charset="utf-8"><link rel="stylesheet" href="styles.css"><style>:root{--sh-panel:#202633;--sh-panel-strong:#293241;--sh-text:#eeeeee;--sh-muted:#bec8d5;--sh-line:#546078;--sh-accent:#67dac1}.ant-modal{animation:none!important;transform:none!important;transition:none!important}</style><div id="root"></div><script>'+result.outputFiles[0].text.replaceAll('</script','<\\/script')+'</script>');
     const dom=execFileSync(browser,['--headless=new','--disable-gpu','--no-first-run','--disable-background-networking',
       '--host-resolver-rules=MAP * ~NOTFOUND','--user-data-dir='+join(dir,'profile'),'--virtual-time-budget=24000',
       '--dump-dom',pathToFileURL(html).href],{timeout:45000,windowsHide:true,encoding:'utf8',stdio:['ignore','pipe','pipe']});
-    assert.ok(dom.includes('data-result="passed"'), dom.match(/data-error="([^"]*)"/)?.[1] || '浏览器未完成验证');
+    assert.ok(dom.includes('data-result="passed"'), dom.match(/data-runtime-error="([^"]*)"/)?.[1] || dom.match(/data-error="([^"]*)"/)?.[1] || '浏览器未完成验证');
   } finally { rmSync(dir,{recursive:true,force:true,maxRetries:4,retryDelay:150}); }
 });

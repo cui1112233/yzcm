@@ -2,10 +2,15 @@ package novelfetchworkshop
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"qiantie/backend/internal/mergeworker"
 )
 
 func TestMemoryQueueClaimAckAndRetry(t *testing.T) {
@@ -86,6 +91,84 @@ func TestMemoryQueuePreservesScheduledAutoSubmit(t *testing.T) {
 	}
 }
 
+func TestMemoryQueueCancelledBookRejectsWholeEnqueue(t *testing.T) {
+	ctx := context.Background()
+	q := NewMemoryQueue()
+	job := ProcessJob{ID: "cancelled-batch", Owner: "owner", BatchID: "batch", PlatformID: "2", BookIDs: []string{"free", "stopped"}}
+	if err := q.CancelBooks(ctx, job.Owner, []string{"stopped"}); err != nil {
+		t.Fatal(err)
+	}
+	queued, existing, err := q.EnqueueUniqueBooks(ctx, job, time.Hour)
+	if queued || existing != "" || !errors.Is(err, ErrBookCancelled) {
+		t.Errorf("cancelled batch queued=%v existing=%q err=%v", queued, existing, err)
+	}
+	checkRejectedBooks(t, err, "stopped")
+	if len(q.pending) != 0 || len(q.dedupe) != 0 {
+		t.Fatalf("rejected batch left pending=%d dedupe=%d", len(q.pending), len(q.dedupe))
+	}
+	if err := q.ClearCancelledBooks(ctx, job.Owner, []string{"stopped"}); err != nil {
+		t.Fatal(err)
+	}
+	queued, _, err = q.EnqueueUniqueBooks(ctx, job, time.Hour)
+	if !queued || err != nil || len(q.pending) != 1 {
+		t.Fatalf("explicit retry queued=%v pending=%d err=%v", queued, len(q.pending), err)
+	}
+}
+
+func TestRedisQueueCancelledBookRejectsWholeEnqueue(t *testing.T) {
+	url := os.Getenv("V88_NOVEL_FETCH_TEST_REDIS_URL")
+	if url == "" {
+		t.Skip("explicit isolated Redis endpoint required")
+	}
+	prefix := fmt.Sprintf("cancel-enqueue-test:%d", time.Now().UnixNano())
+	transport, err := mergeworker.NewRedisStore(url, prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	q := NewRedisQueueWithDo(prefix, RedisDoFunc(transport.Do))
+	job := ProcessJob{ID: "mixed", Owner: "owner", BatchID: "batch", PlatformID: "2", BookIDs: []string{"free", "stopped", "free"}}
+	if err = q.CancelBooks(ctx, job.Owner, []string{"stopped"}); err != nil {
+		t.Fatal(err)
+	}
+	defer q.ClearCancelledBooks(ctx, job.Owner, []string{"stopped"})
+	queued, existing, err := q.EnqueueUniqueBooks(ctx, job, time.Hour)
+	if queued || existing != "" || !errors.Is(err, ErrBookCancelled) {
+		t.Fatalf("queued=%v existing=%q err=%v", queued, existing, err)
+	}
+	checkRejectedBooks(t, err, "stopped")
+	count, err := transport.Do(ctx, "EXISTS", q.jobKey(job.ID), q.pendingKey(), q.bookDedupeKey(job.Owner, "2", "free"), q.bookDedupeKey(job.Owner, "2", "stopped"))
+	if err != nil || count != int64(0) {
+		t.Fatalf("rejected batch left keys: %v %v", count, err)
+	}
+	marked, err := q.IsBookCancelled(ctx, job.Owner, "stopped")
+	if err != nil || !marked {
+		t.Fatal(marked, err)
+	}
+	if err := q.ClearCancelledBooks(ctx, job.Owner, []string{"stopped"}); err != nil {
+		t.Fatal(err)
+	}
+	queued, _, err = q.EnqueueUniqueBooks(ctx, job, time.Hour)
+	if err != nil || !queued {
+		t.Fatal(queued, err)
+	}
+	got, err := q.Claim(ctx, time.Second)
+	if err != nil || got.ID != job.ID {
+		t.Fatal(got, err)
+	}
+	if err = q.Ack(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func checkRejectedBooks(t *testing.T, err error, want ...string) {
+	t.Helper()
+	var rejection *CancelledBooksError
+	if !errors.As(err, &rejection) || !slices.Equal(rejection.BookIDs, want) {
+		t.Fatalf("atomic rejection did not identify %v: %v", want, err)
+	}
+}
+
 func TestRedisQueueUsesPendingProcessingAndLeaseKeys(t *testing.T) {
 	fake := &fakeRedisQueueDo{}
 	queue := NewRedisQueueWithDo("qiantie:test:novel", fake.Do)
@@ -98,10 +181,11 @@ func TestRedisQueueUsesPendingProcessingAndLeaseKeys(t *testing.T) {
 	if err != nil || claimed.ID != job.ID {
 		t.Fatalf("claimed=%+v err=%v commands=%v", claimed, err, fake.commands)
 	}
+	fake.responses = []any{int64(1)}
 	if err := queue.Ack(context.Background(), claimed); err != nil {
 		t.Fatal(err)
 	}
-	if !fake.hasCommand("BRPOPLPUSH") || !fake.hasCommand("SET") || !fake.hasCommand("LREM") || !fake.hasCommand("DEL") {
+	if !fake.hasCommand("BRPOPLPUSH") || !fake.hasCommand("SET") || !fake.hasCommand("EVAL") || fake.hasCommand("LREM") || fake.hasCommand("DEL") {
 		t.Fatalf("redis queue contract missing command: %v", fake.commands)
 	}
 }
@@ -132,8 +216,9 @@ func TestRedisQueueEnqueueUniqueBooksUsesAtomicPerBookKeys(t *testing.T) {
 	if err != nil || !queued || existingID != job.ID {
 		t.Fatalf("first book enqueue queued=%v existingID=%q err=%v", queued, existingID, err)
 	}
-	if len(fake.commands) != 1 || fake.commands[0][0] != "EVAL" || fake.commands[0][2] != "4" {
-		t.Fatalf("expected one atomic eval for two book locks plus job/list keys: %v", fake.commands)
+	if len(fake.commands) != 1 || fake.commands[0][0] != "EVAL" || fake.commands[0][2] != "6" ||
+		!slices.Equal(fake.commands[0][7:9], []string{queue.cancelKey(job.Owner, "book-a"), queue.cancelKey(job.Owner, "book-b")}) {
+		t.Fatalf("expected one atomic eval with both book locks and cancellation keys: %v", fake.commands)
 	}
 	job.BookIDs = []string{"book-b", "book-c"}
 	queued, existingID, err = queue.EnqueueUniqueBooks(context.Background(), job, time.Hour)
@@ -149,29 +234,32 @@ func TestRedisQueueAckReleasesOnlyBookLocksOwnedByCompletedJob(t *testing.T) {
 	if queued, _, err := queue.EnqueueUniqueBooks(context.Background(), job, time.Hour); err != nil || !queued {
 		t.Fatalf("enqueue books queued=%v err=%v", queued, err)
 	}
+	job.LeaseToken = "token"
 	job.DedupeKey = "books:tester:2"
 	if err := queue.Ack(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
-	if len(fake.commands) != 4 || fake.commands[3][0] != "EVAL" || !strings.Contains(fake.commands[3][1], "== ARGV[1]") {
+	if len(fake.commands) != 2 || fake.commands[1][0] != "EVAL" || !strings.Contains(fake.commands[1][1], "== ARGV[1]") {
 		t.Fatalf("ack did not compare-and-delete the completed job's book locks: %v", fake.commands)
 	}
 }
 
-func TestRedisQueueRecoversStaleJobAndItsOwnedBookLocksAtomically(t *testing.T) {
-	job := ProcessJob{ID: "job-stale", Owner: "tester", BatchID: "batch-stale", PlatformID: "2", BookIDs: []string{"book-a", "book-b"}, DedupeKey: "books:tester:2"}
-	body, err := json.Marshal(job)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fake := &fakeRedisQueueDo{responses: []any{string(body), "1"}}
+func TestRedisQueueRecoversStaleJobWithoutReleasingOwnedBookLocks(t *testing.T) {
+	fake := &fakeRedisQueueDo{responses: []any{"1"}}
 	queue := NewRedisQueueWithDo("qiantie:test:novel", fake.Do)
-	recovered, err := queue.RecoverStaleJob(context.Background(), job.ID)
+	const jobID = "job-stale"
+	recovered, err := queue.RecoverStaleJob(context.Background(), jobID)
 	if err != nil || !recovered {
 		t.Fatalf("recovered=%v err=%v", recovered, err)
 	}
-	if len(fake.commands) != 2 || fake.commands[1][0] != "EVAL" || fake.commands[1][2] != "6" || !strings.Contains(fake.commands[1][1], "LREM") {
-		t.Fatalf("stale job and its book locks were not recovered atomically: %v", fake.commands)
+	if len(fake.commands) != 1 || fake.commands[0][0] != "EVAL" || fake.commands[0][2] != "4" {
+		t.Fatalf("stale job recovery must use one EVAL with job, lease and list keys: %v", fake.commands)
+	}
+	args := fake.commands[0]
+	want := []string{queue.jobKey(jobID), queue.leaseKey(jobID), queue.processingKey(), queue.pendingKey(), jobID}
+	if !slices.Equal(args[3:], want) || strings.Contains(args[1], "'DEL', KEYS[1]") ||
+		!strings.Contains(args[1], "'LPUSH', KEYS[4]") {
+		t.Fatalf("stale job lost its payload or book ownership: %v", args)
 	}
 }
 

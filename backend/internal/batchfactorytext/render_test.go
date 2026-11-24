@@ -36,9 +36,50 @@ func renderCard(t *testing.T, renderer Renderer, in RenderInput) (*image.RGBA, [
 	return out, data
 }
 
+func TestReadingWrapKeepsChinesePunctuationTogether(t *testing.T) {
+	face, err := renderfont.Open("noto-sans-sc", 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer face.Close()
+	cfg, _, err := resolveLayout(LayoutConfig{FontSize: 40})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"甲乙丙丁，戊己庚辛。", "甲乙丙（丁戊）己庚。", "甲乙丙丁？！戊己。", "甲乙（《丙》）丁戊。"} {
+		var recovered strings.Builder
+		width := 164
+		if strings.Contains(text, "（《") {
+			width = 244
+		} // The indivisible nested pair must fit on an empty line.
+		_, err := layoutText(context.Background(), text, cfg, image.Pt(2*cfg.Padding+width, 1200), face, func(line lineGeometry, _, _ int) error {
+			if len(line.glyphs) == 0 {
+				return nil
+			}
+			first, last := line.glyphs[0].r, line.glyphs[len(line.glyphs)-1].r
+			if strings.ContainsRune("，。！？；：、）》】」』”’", first) {
+				t.Errorf("line starts with closing punctuation %q in %s", first, text)
+			}
+			if strings.ContainsRune("（《【「『“‘", last) {
+				t.Errorf("line ends with opening punctuation %q in %s", last, text)
+			}
+			for _, glyph := range line.glyphs {
+				recovered.WriteRune(glyph.r)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if recovered.String() != text {
+			t.Fatalf("content changed: %s", recovered.String())
+		}
+	}
+}
+
 func TestRenderFontsIncludeChineseFallback(t *testing.T) {
 	catalog := renderfont.Catalog()
-	if len(catalog) != 2 || !catalog[1].Available || catalog[1].Coverage == "" || catalog[0].Name != "Noto Sans SC" || catalog[1].Name != "Ma Shan Zheng" {
+	if len(catalog) != 6 || !catalog[1].Available || catalog[1].Coverage == "" || catalog[0].Name != "Noto Sans SC" || catalog[1].Name != "Ma Shan Zheng" {
 		t.Fatal(catalog)
 	}
 	a, err := renderfont.Open("noto-sans-sc", 44)
@@ -120,7 +161,7 @@ func TestRenderCanonicalPixels(t *testing.T) {
 	if n < 100 {
 		t.Fatal("text missing")
 	}
-	if got := fmt.Sprintf("%x", sha256.Sum256(data)); got != "504e9f866a3920baed3ce8743b95927cf46317fbe76f006d712768c2e066d10e" {
+	if got := fmt.Sprintf("%x", sha256.Sum256(data)); got != "52d47df288b85009aff4b40c74f890e56b975b9e9e78e64441a80cfbadc1c89d" {
 		t.Fatalf("Noto card SHA-256 %s", got)
 	}
 }
@@ -176,7 +217,7 @@ func TestRenderAlignmentAndSpacing(t *testing.T) {
 		c.Align = align
 		img, _ := renderCard(t, r, RenderInput{Text: "字", Layout: c})
 		left[i] = img.Rect.Dx()
-		for y := 180; y < 260; y++ {
+		for y := 0; y < img.Rect.Dy(); y++ {
 			for x := 0; x < img.Rect.Dx(); x++ {
 				if img.RGBAAt(x, y) != img.RGBAAt(0, 0) {
 					left[i] = min(left[i], x)
@@ -255,7 +296,7 @@ func TestRenderHighlightRuneGeometry(t *testing.T) {
 		t.Fatal(ranges)
 	}
 	count := 0
-	for y := 180; y < 300; y++ {
+	for y := 0; y < img.Rect.Dy(); y++ {
 		for x := 0; x < 1080; x++ {
 			if img.RGBAAt(x, y) == (color.RGBA{229, 57, 53, 255}) {
 				if x < 180 {

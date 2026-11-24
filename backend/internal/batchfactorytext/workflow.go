@@ -111,6 +111,8 @@ func ValidateWorkflowStyle(s PageStyle) error {
 func geometry(layout LayoutConfig) LayoutConfig {
 	layout.TextColor = ""
 	layout.HighlightColor = ""
+	layout.HighlightRules = ""
+	layout.HighlightLines = ""
 	return layout
 }
 
@@ -328,7 +330,7 @@ func (w Workflow) Ensure(ctx context.Context, req EnsureRequest) (res EnsureResu
 		}
 		manifest = append(manifest, [2]string{p.ID, p.ActiveArtifactID})
 	}
-	fileKey := fingerprint(renderKey, head.ActiveVersionID, head.PaginationVersion, head.CoverArtifactID, manifest)
+	fileKey := fingerprint(renderKey, head.ActiveVersionID, head.PaginationVersion, manifest)
 	err = stage("text_validate", "正在校验", fileKey, true, func() error { return w.Validate(ctx, req, head) })
 	if err != nil {
 		return res, err
@@ -387,7 +389,7 @@ func (w Workflow) matchingCollection(ctx context.Context, s Scope, d Document, m
 		return Collection{}, err
 	}
 	for _, record := range records {
-		if record.VersionID != d.ActiveVersionID || record.PaginationVersion != d.PaginationVersion || record.CoverArtifactID != d.CoverArtifactID || record.Status != "ready" {
+		if record.VersionID != d.ActiveVersionID || record.PaginationVersion != d.PaginationVersion || record.Status != "ready" {
 			continue
 		}
 		full, err := w.Repo.GetCollection(ctx, s, record.ID)

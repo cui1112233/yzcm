@@ -106,21 +106,52 @@ func (a textAPI) renderInput(x textRequest, d txt.Document, p txt.Page, cover bo
 	content := p.Text
 	if cover {
 		prior = txt.PageDraft{Layout: snap.Cover.Layout, Background: snap.Cover.Background}
-		content = snap.Title
+		content = x.book.Title
 		if content == "" {
-			content = x.book.Title
+			content = snap.Title
+		}
+		if content == "" {
+			content = "未命名作品"
+		}
+		content = txt.FormatCoverTitle(content)
+		if prior.Layout == nil {
+			defaults := txt.DefaultCoverLayout(snap.Layout.AspectRatio)
+			prior.Layout = &defaults
 		}
 	}
 	_, style, err := txt.ResolvePageStyle(snap.PageStyle, prior, patch)
 	if err != nil {
 		return txt.RenderInput{}, txt.Renderer{}, err
 	}
-	bg, err := a.bgData(x, style.Background)
-	if err != nil {
-		return txt.RenderInput{}, txt.Renderer{}, err
+	var bg []byte
+	if cover {
+		bg = txt.DefaultCoverImage()
+		style.Background = txt.Background{Kind: "image", ID: txt.DefaultCoverVersion}
+	} else {
+		bg, err = a.bgData(x, style.Background)
+		if err != nil {
+			return txt.RenderInput{}, txt.Renderer{}, err
+		}
 	}
 	in := txt.RenderInput{Owner: x.scope.Owner, BookID: x.scope.BookID, VersionID: d.ActiveVersionID, Text: content, Layout: style.Layout, Background: style.Background, BackgroundImage: bg, HighlightReuseEnabled: style.HighlightReuseEnabled && !cover}
-	renderer := txt.Renderer{Highlights: txt.KeywordHighlightSource(func(context.Context, string, string, string) ([]string, error) { return snap.HighlightWords, nil })}
+	if cover {
+		in.Layout.HighlightRules = "off"
+		in.VerticalCenterRatio = 0.38
+	}
+	if !cover && (txt.HighlightRuleEnabled(style.Layout.HighlightRules, "dialogue") || txt.HighlightRuleEnabled(style.Layout.HighlightRules, "lines")) {
+		version, err := a.repo.GetVersion(x, x.scope, d.ActiveVersionID)
+		if err != nil {
+			return in, txt.Renderer{}, err
+		}
+		in.DialogueRanges, in.DialogueRangesSet = txt.DialoguePageRanges(version.ProductionText, content, p.StartOffset, p.EndOffset)
+	}
+	words := snap.HighlightWords
+	if len(words) == 0 {
+		if raw, err := json.Marshal(x.book.SourceMetadata["illustrationHighlightKeywords"]); err == nil {
+			_ = json.Unmarshal(raw, &words)
+		}
+	}
+	renderer := txt.Renderer{Highlights: txt.KeywordHighlightSource(func(context.Context, string, string, string) ([]string, error) { return words, nil })}
 	return in, renderer, nil
 }
 func (a textAPI) picture(w http.ResponseWriter, r *http.Request, x textRequest) error {
@@ -176,7 +207,14 @@ func (a textAPI) picture(w http.ResponseWriter, r *http.Request, x textRequest) 
 		return err
 	}
 	lowContrast := false
+	previewPages := 1
 	if preview {
+		if !cover {
+			input, previewPages, err = textPreviewInput(x, input, renderer)
+			if err != nil {
+				return textLayoutError(err)
+			}
+		}
 		input.WarnLowContrast = func() { lowContrast = true }
 	}
 	data, mime, err := renderer.Render(x, input)
@@ -184,6 +222,7 @@ func (a textAPI) picture(w http.ResponseWriter, r *http.Request, x textRequest) 
 		return textLayoutError(err)
 	}
 	if preview {
+		w.Header().Set("X-Text-Preview-Pages", strconv.Itoa(previewPages))
 		if lowContrast {
 			w.Header().Set("X-Text-Contrast", "low")
 		}
@@ -198,6 +237,22 @@ func (a textAPI) picture(w http.ResponseWriter, r *http.Request, x textRequest) 
 	}
 	writeJSON(w, 201, view)
 	return nil
+}
+
+func textPreviewInput(ctx context.Context, input txt.RenderInput, renderer txt.Renderer) (txt.RenderInput, int, error) {
+	fits, _, err := renderer.MeasureFunc(ctx)(input.Text, input.Layout)
+	if err != nil || fits {
+		return input, 1, err
+	}
+	pages, err := txt.Paginate(ctx, txt.PaginationInput{Text: input.Text, Layout: input.Layout}, renderer.MeasureFunc(ctx))
+	if err != nil {
+		return input, 0, err
+	}
+	if len(pages) == 0 {
+		return input, 0, txt.ErrInvalid
+	}
+	input.Text = pages[0].Text
+	return input, len(pages), nil
 }
 func (a textAPI) saveImage(x textRequest, pageID string, rev int64, upload bool, backgroundName string, data []byte, mime string) (view textMediaView, err error) {
 	f, err := a.files.SaveImage("text_"+rand.Text(), mime, bytes.NewReader(data))

@@ -74,13 +74,26 @@ func Paginate(ctx context.Context, input PaginationInput, measure MeasureFunc) (
 	if measure == nil || input.Layout.TargetCharacters < 0 || !utf8.ValidString(input.Text) || strings.TrimSpace(input.Text) == "" {
 		return nil, ErrInvalid
 	}
+	if mode := input.Layout.PaginationMode; mode != "" && mode != "auto" && mode != "target" {
+		return nil, ErrInvalid
+	}
 	if input.Layout.TargetCharacters == 0 {
 		input.Layout.TargetCharacters = DefaultTargetCharacters
 	}
 	p := pagePacker{ctx: ctx, runes: []rune(NormalizeLineEndings(input.Text)), layout: input.Layout, measure: measure}
+	reading := map[int]bool{}
+	if resolved, size, err := resolveLayout(input.Layout); err == nil {
+		reading = readingBreaks(string(p.runes), resolved, size.X-2*resolved.Padding)
+	}
 	var quotes straightQuotes
 	for start := 0; start < len(p.runes); {
 		end := paragraphEnd(p.runes, start)
+		for offset := start + 1; offset < end; offset++ {
+			if reading[offset] {
+				end = offset
+				break
+			}
+		}
 		fits, _, err := p.accept(end)
 		if err != nil {
 			return nil, err
@@ -124,7 +137,7 @@ func (p *pagePacker) flush() {
 func (p *pagePacker) accept(end int) (bool, float64, error) {
 	target := p.layout.TargetCharacters
 	before, after := p.end-p.start, end-p.start
-	if before > 0 && after > target && (before >= target || after-target > target-before) {
+	if p.layout.PaginationMode != "auto" && before > 0 && after > target && (before >= target || after-target > target-before) {
 		p.flush()
 	}
 	for {

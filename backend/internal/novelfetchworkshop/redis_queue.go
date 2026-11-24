@@ -2,12 +2,16 @@ package novelfetchworkshop
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
+
+	"qiantie/backend/internal/mergeworker"
 )
 
 type RedisDoFunc func(context.Context, ...string) (any, error)
@@ -19,6 +23,11 @@ type RedisQueue struct {
 
 const enqueueUniqueBooksScript = `
 local count = tonumber(ARGV[4])
+local stopped = {}
+for i = 1, count do
+  if redis.call('EXISTS', KEYS[count + 2 + i]) == 1 then stopped[#stopped + 1] = i end
+end
+if #stopped > 0 then return {-1, stopped} end
 for i = 1, count do
   local existing = redis.call('GET', KEYS[i])
   if existing then return {0, existing} end
@@ -29,21 +38,75 @@ redis.call('RPUSH', KEYS[count + 2], ARGV[1])
 return {1, ARGV[1]}
 `
 
-const releaseUniqueBooksScript = `
-for i = 1, #KEYS do
-  if redis.call('GET', KEYS[i]) == ARGV[1] then redis.call('DEL', KEYS[i]) end
+// The blocking pop and SET NX cannot share a Redis script. If recovery ran
+// between them, confirm both the processing entry and the exact payload
+// before allowing this claimant to work on it.
+const confirmClaimScript = `
+if redis.call('GET', KEYS[2]) ~= ARGV[2] then return false end
+if redis.call('GET', KEYS[1]) == ARGV[3] then
+  for _, id in ipairs(redis.call('LRANGE', KEYS[3], 0, -1)) do
+    if id == ARGV[1] then return 'OK' end
+  end
 end
+redis.call('DEL', KEYS[2])
+return false
+`
+
+const renewLeaseScript = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+return redis.call('EXPIRE', KEYS[1], ARGV[2])
+`
+
+const requireProcessingLeaseScript = `
+if redis.call('GET', KEYS[2]) ~= ARGV[2] then return 0 end
+`
+
+const ackProcessingJobScript = requireProcessingLeaseScript + `
+local release = {}
+for i = 4, #KEYS do
+  if redis.call('GET', KEYS[i]) == ARGV[1] then release[#release + 1] = KEYS[i] end
+end
+if redis.call('LREM', KEYS[3], '0', ARGV[1]) == 0 then return 0 end
+redis.call('DEL', KEYS[1], KEYS[2])
+for _, key in ipairs(release) do redis.call('DEL', key) end
+return 1
+`
+
+// Redis scripts are atomic to other clients but do not roll back runtime errors.
+// Check the two list keys and any values read by the transition before writing.
+const validateQueueListsScript = `
+for i = 3, 4 do
+  local kind = redis.call('TYPE', KEYS[i]).ok
+  if kind ~= 'list' and kind ~= 'none' then
+    return redis.error_reply('WRONGTYPE novel fetch queue index must be a list')
+  end
+end
+`
+
+const retryProcessingJobScript = requireProcessingLeaseScript + `
+local current = redis.call('GET', KEYS[1])
+if not current then return 0 end
+` + validateQueueListsScript + `
+local release = {}
+for i = 5, #KEYS do
+  if redis.call('GET', KEYS[i]) == ARGV[1] then release[#release + 1] = KEYS[i] end
+end
+if redis.call('LREM', KEYS[3], '0', ARGV[1]) == 0 then return 0 end
+redis.call('LREM', KEYS[4], '0', ARGV[1])
+redis.call('SET', KEYS[1], ARGV[3])
+redis.call('LPUSH', KEYS[4], ARGV[1])
+redis.call('DEL', KEYS[2])
+for _, key in ipairs(release) do redis.call('DEL', key) end
 return 1
 `
 
 const recoverStaleJobScript = `
-if not redis.call('GET', KEYS[1]) then return 0 end
-redis.call('LREM', KEYS[3], '0', ARGV[1])
+if redis.call('GET', KEYS[2]) then return 0 end
+local job = redis.call('GET', KEYS[1])
+` + validateQueueListsScript + `
+if redis.call('LREM', KEYS[3], '0', ARGV[1]) == 0 then return 0 end
 redis.call('LREM', KEYS[4], '0', ARGV[1])
-redis.call('DEL', KEYS[1], KEYS[2])
-for i = 5, #KEYS do
-  if redis.call('GET', KEYS[i]) == ARGV[1] then redis.call('DEL', KEYS[i]) end
-end
+if job then redis.call('LPUSH', KEYS[4], ARGV[1]) end
 return 1
 `
 
@@ -161,13 +224,17 @@ func (q *RedisQueue) EnqueueUniqueBooks(ctx context.Context, job ProcessJob, ttl
 	}
 	seen := map[string]bool{}
 	keys := make([]string, 0, len(job.BookIDs)+2)
+	cancelKeys := make([]string, 0, len(job.BookIDs))
+	bookIDs := make([]string, 0, len(job.BookIDs))
 	for _, bookID := range job.BookIDs {
 		bookID = strings.TrimSpace(bookID)
 		if bookID == "" || seen[bookID] {
 			continue
 		}
 		seen[bookID] = true
+		bookIDs = append(bookIDs, bookID)
 		keys = append(keys, q.bookDedupeKey(job.Owner, job.PlatformID, bookID))
+		cancelKeys = append(cancelKeys, q.cancelKey(job.Owner, bookID))
 	}
 	if len(keys) == 0 {
 		return false, "", fmt.Errorf("source book ids are required for unique enqueue")
@@ -180,6 +247,7 @@ func (q *RedisQueue) EnqueueUniqueBooks(ctx context.Context, job ProcessJob, ttl
 	}
 	bookKeyCount := len(keys)
 	keys = append(keys, q.jobKey(job.ID), q.pendingKey())
+	keys = append(keys, cancelKeys...)
 	args := []string{"EVAL", enqueueUniqueBooksScript, strconv.Itoa(len(keys))}
 	args = append(args, keys...)
 	args = append(args, job.ID, strconv.Itoa(seconds), string(body), strconv.Itoa(bookKeyCount))
@@ -191,7 +259,23 @@ func (q *RedisQueue) EnqueueUniqueBooks(ctx context.Context, job ProcessJob, ttl
 	if !ok || len(result) < 2 {
 		return false, "", fmt.Errorf("unexpected redis response for unique novel fetch enqueue: %T", value)
 	}
-	queued := strings.TrimSpace(fmt.Sprint(result[0])) == "1"
+	outcome := strings.TrimSpace(fmt.Sprint(result[0]))
+	if outcome == "-1" {
+		indices, ok := result[1].([]any)
+		if !ok || len(indices) == 0 {
+			return false, "", fmt.Errorf("missing Redis cancellation details")
+		}
+		stopped := make([]string, 0, len(indices))
+		for _, raw := range indices {
+			i, ok := raw.(int64)
+			if !ok || i < 1 || i > int64(len(bookIDs)) {
+				return false, "", fmt.Errorf("invalid Redis cancelled book index %v", raw)
+			}
+			stopped = append(stopped, bookIDs[i-1])
+		}
+		return false, "", &CancelledBooksError{BookIDs: stopped}
+	}
+	queued := outcome == "1"
 	existingID := strings.TrimSpace(fmt.Sprint(result[1]))
 	return queued, existingID, nil
 }
@@ -232,12 +316,22 @@ func (q *RedisQueue) ConflictingBookIDs(ctx context.Context, job ProcessJob) (ma
 	return conflicts, nil
 }
 
-func (q *RedisQueue) Claim(ctx context.Context, lease time.Duration) (ProcessJob, error) {
-	seconds := int(lease.Round(time.Second) / time.Second)
+// The production RESP transport reports Redis nil as a typed error.
+// Queue and lease absence are ordinary return values for these commands.
+func (q *RedisQueue) leaseCommand(ctx context.Context, args ...string) (any, error) {
+	value, err := q.command(ctx, args...)
+	if mergeworker.IsRedisNil(err) {
+		return nil, nil
+	}
+	return value, err
+}
+
+func (q *RedisQueue) Claim(ctx context.Context, wait time.Duration) (ProcessJob, error) {
+	seconds := int(wait.Round(time.Second) / time.Second)
 	if seconds < 1 {
 		seconds = 1
 	}
-	value, err := q.command(ctx, "BRPOPLPUSH", q.pendingKey(), q.processingKey(), strconv.Itoa(seconds))
+	value, err := q.leaseCommand(ctx, "BRPOPLPUSH", q.pendingKey(), q.processingKey(), strconv.Itoa(seconds))
 	if err != nil || value == nil {
 		if err == nil {
 			err = ErrQueueEmpty
@@ -245,16 +339,38 @@ func (q *RedisQueue) Claim(ctx context.Context, lease time.Duration) (ProcessJob
 		return ProcessJob{}, err
 	}
 	id := strings.TrimSpace(fmt.Sprint(value))
-	raw, err := q.command(ctx, "GET", q.jobKey(id))
-	if err != nil || raw == nil {
+	raw, err := q.leaseCommand(ctx, "GET", q.jobKey(id))
+	if err != nil {
 		return ProcessJob{}, fmt.Errorf("read queued novel fetch job: %w", err)
+	}
+	if raw == nil {
+		return ProcessJob{}, ErrProcessLeaseLost
 	}
 	var job ProcessJob
 	if err := json.Unmarshal([]byte(fmt.Sprint(raw)), &job); err != nil {
 		return ProcessJob{}, fmt.Errorf("decode queued novel fetch job: %w", err)
 	}
-	if _, err := q.command(ctx, "SET", q.leaseKey(id), time.Now().UTC().Format(time.RFC3339Nano), "NX", "EX", strconv.Itoa(seconds)); err != nil {
+	if job.ID != id {
+		return ProcessJob{}, fmt.Errorf("queued novel fetch job id mismatch for %q", id)
+	}
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
 		return ProcessJob{}, err
+	}
+	job.LeaseToken = hex.EncodeToString(token[:])
+	value, err = q.leaseCommand(ctx, "SET", q.leaseKey(id), job.LeaseToken, "NX", "EX", strconv.Itoa(int(DefaultProcessLeaseTTL/time.Second)))
+	if err != nil {
+		return ProcessJob{}, err
+	}
+	if value != "OK" {
+		return ProcessJob{}, ErrProcessLeaseLost
+	}
+	value, err = q.leaseCommand(ctx, "EVAL", confirmClaimScript, "3", q.jobKey(id), q.leaseKey(id), q.processingKey(), id, job.LeaseToken, fmt.Sprint(raw))
+	if err != nil {
+		return ProcessJob{}, err
+	}
+	if value != "OK" {
+		return ProcessJob{}, ErrProcessLeaseLost
 	}
 	return processJobWithDedupeScope(job), nil
 }
@@ -264,57 +380,30 @@ func (q *RedisQueue) RecoverStaleJob(ctx context.Context, jobID string) (bool, e
 	if jobID == "" {
 		return false, nil
 	}
-	value, err := q.command(ctx, "GET", q.jobKey(jobID))
-	if err != nil || value == nil {
-		return false, err
-	}
-	var job ProcessJob
-	if err := json.Unmarshal([]byte(fmt.Sprint(value)), &job); err != nil {
-		return false, fmt.Errorf("decode stale novel fetch queue job: %w", err)
-	}
-	if job.ID != jobID {
-		return false, fmt.Errorf("stale novel fetch queue job id mismatch")
-	}
-	keys := []string{q.jobKey(jobID), q.leaseKey(jobID), q.processingKey(), q.pendingKey()}
-	if strings.HasPrefix(job.DedupeKey, "books:") {
-		keys = append(keys, q.jobBookDedupeKeys(job)...)
-	} else if strings.TrimSpace(job.DedupeKey) != "" {
-		keys = append(keys, q.dedupeKey(job.DedupeKey))
-	}
-	args := []string{"EVAL", recoverStaleJobScript, strconv.Itoa(len(keys))}
-	args = append(args, keys...)
-	args = append(args, jobID)
-	recovered, err := q.command(ctx, args...)
+	result, err := q.command(ctx, "EVAL", recoverStaleJobScript, "4",
+		q.jobKey(jobID), q.leaseKey(jobID), q.processingKey(), q.pendingKey(), jobID)
 	if err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(fmt.Sprint(recovered)) == "1", nil
+	switch fmt.Sprint(result) {
+	case "0":
+		return false, nil
+	case "1":
+		return true, nil
+	default:
+		return false, fmt.Errorf("unexpected redis stale recovery response: %v", result)
+	}
 }
 
-// ReapStaleProcessing 回收失去租约的执行中任务。BRPOPLPUSH 会把 job 从
-// pending 移到 processing，但消费者进程退出后不会再有 Ack/Fail，job 就会
-// 永久留在 processing 并继续占用书籍去重锁。租约 key 是消费者仍然存活的
-// 唯一可靠信号：租约过期即视为孤儿，按“未执行”清理，让文档层的恢复逻辑
-// 把这些书重新排入等待重试。
+// ReapStaleProcessing requeues the original payload for jobs with an expired
+// lease. Redis removes only the list references when the payload is missing.
 func (q *RedisQueue) ReapStaleProcessing(ctx context.Context) (int, error) {
 	value, err := q.command(ctx, "LRANGE", q.processingKey(), "0", "-1")
 	if err != nil {
 		return 0, err
 	}
-	ids := redisStringSlice(value)
 	reaped := 0
-	for _, id := range ids {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
-		}
-		exists, existsErr := q.command(ctx, "EXISTS", q.leaseKey(id))
-		if existsErr != nil {
-			return reaped, existsErr
-		}
-		if strings.TrimSpace(fmt.Sprint(exists)) != "0" {
-			continue
-		}
+	for _, id := range redisStringSlice(value) {
 		recovered, recoverErr := q.RecoverStaleJob(ctx, id)
 		if recoverErr != nil {
 			return reaped, recoverErr
@@ -342,13 +431,14 @@ func redisStringSlice(value any) []string {
 }
 
 func (q *RedisQueue) Ack(ctx context.Context, job ProcessJob) error {
-	if _, err := q.command(ctx, "LREM", q.processingKey(), "0", job.ID); err != nil {
-		return err
+	keys := []string{q.jobKey(job.ID), q.leaseKey(job.ID), q.processingKey()}
+	if strings.HasPrefix(job.DedupeKey, "books:") {
+		keys = append(keys, q.jobBookDedupeKeys(job)...)
+	} else if job.DedupeKey != "" {
+		keys = append(keys, q.dedupeKey(job.DedupeKey))
 	}
-	if _, err := q.command(ctx, "DEL", q.jobKey(job.ID), q.leaseKey(job.ID)); err != nil {
-		return err
-	}
-	return q.releaseJobDedupe(ctx, job)
+	args := append([]string{"EVAL", ackProcessingJobScript, strconv.Itoa(len(keys))}, keys...)
+	return q.ownedTransition(ctx, append(args, job.ID, job.LeaseToken)...)
 }
 
 func (q *RedisQueue) jobBookDedupeKeys(job ProcessJob) []string {
@@ -369,47 +459,49 @@ func (q *RedisQueue) jobBookDedupeKeys(job ProcessJob) []string {
 }
 
 func (q *RedisQueue) Fail(ctx context.Context, job ProcessJob, retry bool) error {
-	if _, err := q.command(ctx, "LREM", q.processingKey(), "0", job.ID); err != nil {
+	if !retry {
+		return q.Ack(ctx, job)
+	}
+	if err := validateProcessJob(job); err != nil {
 		return err
 	}
-	if _, err := q.command(ctx, "DEL", q.leaseKey(job.ID)); err != nil {
+	keys := []string{q.jobKey(job.ID), q.leaseKey(job.ID), q.processingKey(), q.pendingKey()}
+	if strings.HasPrefix(job.DedupeKey, "books:") {
+		keys = append(keys, q.jobBookDedupeKeys(processCompletedDedupeBooks(job))...)
+		job.DedupeBookIDs = append([]string{}, job.BookIDs...)
+	}
+	body, err := json.Marshal(job)
+	if err != nil {
 		return err
 	}
-	if retry {
-		if strings.HasPrefix(job.DedupeKey, "books:") {
-			if err := q.releaseJobDedupe(ctx, processCompletedDedupeBooks(job)); err != nil {
-				return err
-			}
-			job.DedupeBookIDs = append([]string{}, job.BookIDs...)
-		}
-		if err := q.Enqueue(ctx, job); err != nil {
-			_, _ = q.command(ctx, "DEL", q.jobKey(job.ID))
-			_ = q.releaseJobDedupe(ctx, job)
-			return err
-		}
-		return nil
-	}
-	if _, err := q.command(ctx, "DEL", q.jobKey(job.ID)); err != nil {
-		return err
-	}
-	return q.releaseJobDedupe(ctx, job)
+	args := []string{"EVAL", retryProcessingJobScript, strconv.Itoa(len(keys))}
+	args = append(args, keys...)
+	return q.ownedTransition(ctx, append(args, job.ID, job.LeaseToken, string(body))...)
 }
 
-func (q *RedisQueue) releaseJobDedupe(ctx context.Context, job ProcessJob) error {
-	if strings.HasPrefix(job.DedupeKey, "books:") {
-		keys := q.jobBookDedupeKeys(job)
-		if len(keys) == 0 {
-			return nil
-		}
-		args := []string{"EVAL", releaseUniqueBooksScript, strconv.Itoa(len(keys))}
-		args = append(args, keys...)
-		args = append(args, job.ID)
-		_, err := q.command(ctx, args...)
+func (q *RedisQueue) ownedTransition(ctx context.Context, args ...string) error {
+	value, err := q.command(ctx, args...)
+	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(job.DedupeKey) == "" {
+	switch fmt.Sprint(value) {
+	case "1":
 		return nil
+	case "0":
+		return ErrProcessLeaseLost
+	default:
+		return fmt.Errorf("unexpected redis lease response: %v", value)
 	}
-	_, err := q.command(ctx, "DEL", q.dedupeKey(job.DedupeKey))
-	return err
+}
+
+func (q *RedisQueue) RenewLease(ctx context.Context, job ProcessJob, ttl time.Duration) error {
+	if ttl < time.Second {
+		return fmt.Errorf("process lease TTL must be at least one second")
+	}
+	return q.ownedTransition(ctx, "EVAL", renewLeaseScript, "1", q.leaseKey(job.ID), job.LeaseToken, strconv.FormatInt(int64(ttl/time.Second), 10))
+}
+
+func (q *RedisQueue) OwnsLease(ctx context.Context, job ProcessJob) (bool, error) {
+	value, err := q.leaseCommand(ctx, "GET", q.leaseKey(job.ID))
+	return err == nil && job.LeaseToken != "" && value == job.LeaseToken, err
 }

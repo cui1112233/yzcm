@@ -658,9 +658,9 @@ func (s *MemoryStore) CreateBatch(_ context.Context, owner string, input CreateB
 		}
 		b.Books = append(b.Books, book)
 	}
-	if len(input.InitialBatchSettings) > 0 {
+	if initial := input.initialSettings(); len(initial) > 0 {
 		b.Revision++
-		s.patches[scopeKey(ScopeRef{Kind: ScopeBatch, BatchID: b.ID})] = cloneSettingsPatch(input.InitialBatchSettings)
+		s.patches[scopeKey(ScopeRef{Kind: ScopeBatch, BatchID: b.ID})] = initial
 	}
 	s.batches[b.ID] = memoryOwned[Batch]{owner, b}
 	return hydrateMemoryBatchSettingsState(b, s.patches, s.hooks, s.directors, s.bookAssets, s.comicSourceSegments), nil
@@ -1042,6 +1042,7 @@ func (s *MemoryStore) ConfigVersions(_ context.Context, owner string) ([]ConfigV
 	return out, nil
 }
 func (s *MemoryStore) CreateConfigVersion(_ context.Context, owner string, version ConfigVersion) (ConfigVersion, error) {
+	version.Config, _ = userConfigJSON(version.Config)
 	if strings.TrimSpace(owner) == "" || strings.TrimSpace(version.Name) == "" || !validConfigVersionJSON(version.Config) {
 		return ConfigVersion{}, ErrInvalid
 	}

@@ -1,6 +1,6 @@
 import { Alert, Button, Divider, Input, InputNumber, Modal, Popconfirm, Popover, Segmented, Select, Space, Switch, Tabs, Typography, message} from 'antd';
 import { useEffect, useMemo, useState } from 'react';
-import { getAvailableModelCatalog, modelSelectOptions, peekAvailableModelCatalog } from '../../../shared/api/modelCatalog';
+import { describeModelCatalogFailure, productionModelKinds, getAvailableModelCatalog, modelSelectOptions, peekAvailableModelCatalog } from '../../../shared/api/modelCatalog';
 import { get121OrganizationOptions, getBatch, listSystemPresetCatalog, saveBookOverride } from '../../../shared/api/batchFactory';
 import { getConfig } from '../../../shared/api/config';
 import { textToSpeech } from '../../../shared/api/tts';
@@ -340,7 +340,7 @@ function ConstraintLayers({ value, records, personalPrompts, loading, saving, ed
   </div>;
 }
 
-function TextBookSettingsModal({batch,book,onClose,onSaved}) {
+function TextBookSettingsModal({batch,book,activeRegion='models',onClose,onSaved}) {
   const [changes,setChanges]=useState({});
   const [saving,setSaving]=useState(false);
   const [error,setError]=useState('');
@@ -361,9 +361,9 @@ function TextBookSettingsModal({batch,book,onClose,onSaved}) {
     }catch(e){setError(Number(e.status)===409?'本书配置已更新，请重新打开后核对。':e.message || '保存失败');}
     finally{setSaving(false);}
   }
-  return <Modal open title={`单书配置 · ${book.title || '文本'}`} width={980} onCancel={onClose} onOk={save} confirmLoading={saving} okText="保存单书配置" cancelText="取消" className="batch-factory-unified-settings-modal">
+  return <Modal open title={`单书配置 · ${book.title || '文本'}`} width={980} onCancel={onClose} onOk={save} confirmLoading={saving} okText="保存当前书配置" cancelText="取消" className="batch-factory-unified-settings-modal">
     {error && <Alert type="error" showIcon message={error}/>}
-    <TextProductionSettingsForm scope="book" value={value} explicitKeys={explicitKeys} onChange={change} onRestore={key=>change({[key]:undefined})}/>
+    <TextProductionSettingsForm batchId={batch?.id} bookId={book?.id} scope="book" activeSection={activeRegion} value={value} explicitKeys={explicitKeys} onChange={change} onRestore={key=>change({[key]:undefined})}/>
   </Modal>;
 }
 
@@ -396,6 +396,7 @@ function MediaBookSettingsModal({ open, batch, book, activeRegion = 'engine', on
   const [accountTts, setAccountTts] = useState(DEFAULT_TTS);
   const [loadError, setLoadError] = useState('');
   const [modelsError, setModelsError] = useState('');
+  const [modelRetry, setModelRetry] = useState(0);
   const [personalPrompts, setPersonalPrompts] = useState({});
   const [savingPersonalCategory, setSavingPersonalCategory] = useState('');
   const [editingPersonalPrompt, setEditingPersonalPrompt] = useState({ category: '', id: '', name: '' });
@@ -409,19 +410,19 @@ function MediaBookSettingsModal({ open, batch, book, activeRegion = 'engine', on
   useEffect(() => {
     if (!open) return undefined;
     let active = true;
-    const cached = peekAvailableModelCatalog();
+    const cached = peekAvailableModelCatalog(productionModelKinds(productionMode));
     if (cached) setModels(cached.models);
     setModelsLoading(!cached);
     setModelsError('');
-    getAvailableModelCatalog().then(result => {
+    getAvailableModelCatalog({ kinds: productionModelKinds(productionMode) }).then(result => {
       if (!active) return;
       setModels(result.models);
-      if (result.failedKinds.length) setModelsError(`部分模型目录暂不可用：${result.failedKinds.join('、')}`);
+      setModelsError(describeModelCatalogFailure(result));
     }).catch(error => {
       if (active) setModelsError(error?.message || '读取个人中心模型失败');
     }).finally(() => { if (active) setModelsLoading(false); });
     return () => { active = false; };
-  }, [open]);
+  }, [open, productionMode, modelRetry]);
   useEffect(() => {
     if (!open) return undefined;
     let active = true;
@@ -789,7 +790,7 @@ function MediaBookSettingsModal({ open, batch, book, activeRegion = 'engine', on
         label: '发布统一',
         children: productionMode === 'comic' ? <div className="batch-factory-engine-drawer batch-factory-book-engine-content">
           <BatchFactoryComicPublishSettingsForm value={form} onChange={patch} singleBook />
-        </div> : <div className="batch-factory-engine-drawer batch-factory-book-engine-content">
+        </div> : <div className="batch-factory-engine-drawer batch-factory-book-engine-content batch-factory-publish-layout">
           <Alert type="info" showIcon message="当前书独立发布配置" description="发布目录仍来自账号和批量作品；这里只保存当前书的差异值。" />
           <ConfigCard title="发布映射" description="网站风格继续读取本书 AI 判断结果。">
             <InheritedField label="网站配置档" value={publish.websiteProfileId} inherited={inheritedPublish.websiteProfileId} options={profiles.map(profile => ({ value: profile.id, label: profile.name || profile.id }))} loading={false} explicit={Object.hasOwn(bookPatch.publishSettings || {}, 'websiteProfileId')} onChange={websiteProfileId => { const profile = profiles.find(item => item.id === websiteProfileId) || {}; patch({ publishSettings: { ...publish, websiteProfileId, versionProfile: profile.name || '' } }); }} />
@@ -848,7 +849,7 @@ function MediaBookSettingsModal({ open, batch, book, activeRegion = 'engine', on
 		{frozenAutomationPreset?.id ? <Alert type="info" showIcon message={`继承统一配置：${frozenAutomationPreset.name || frozenAutomationPreset.id} · v${frozenAutomationPreset.version || 1}`} description="当前书未保存覆盖时，始终使用该批次冻结的统一配置。" /> : null}
     <div className="batch-factory-inherit-hint">整页默认继承批次统一配置；改动哪个字段，哪个字段就变成“自定义”，保存后不会跟随批次。</div>
     {loadError ? <Alert type="warning" showIcon message="配置目录读取失败" description={loadError} /> : null}
-    {modelsError ? <Alert type="warning" showIcon message="模型目录读取失败" description={modelsError} /> : null}
+    {modelsError ? <Alert type="warning" showIcon message="模型目录读取失败" description={modelsError} action={<Button size="small" loading={modelsLoading} onClick={() => setModelRetry(value => value + 1)}>重新读取</Button>} /> : null}
     {region !== 'engine' ? <Divider orientation="left">{REGION_LABELS[region]}</Divider> : null}
     {body}
   </Modal><Modal title={editingPersonalPrompt.id ? '编辑我的提示词' : '保存为我的提示词'} open={personalPromptNameModal.open} onCancel={() => { setPersonalPromptNameModal({ open: false, category: '', name: '' }); setEditingPersonalPrompt({ category: '', id: '', name: '' }); }} onOk={() => savePersonalConstraint(personalPromptNameModal.category, personalPromptNameModal.name.trim())} okText="保存" confirmLoading={savingPersonalCategory === personalPromptNameModal.category}><Input autoFocus value={personalPromptNameModal.name} placeholder="提示词名称" onChange={event => setPersonalPromptNameModal(current => ({ ...current, name: event.target.value }))} /></Modal></>;

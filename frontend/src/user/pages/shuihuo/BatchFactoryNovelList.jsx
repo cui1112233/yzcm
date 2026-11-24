@@ -54,6 +54,7 @@ import {
 } from 'antd';
 import { UploadSentButton, useUploadSentState } from '../../../shared/components/UploadSentButton';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { TEXT_PRODUCTION_BOOK_REGIONS } from './textProductionConfig';
 
 const InputNumber = NativeInputNumber;
 import {
@@ -170,7 +171,6 @@ import { checkWebSubmitEnvironment, getWebSubmitConfig, testWebSubmitVisible } f
 import { YIZHANSHENGMING_EXECUTOR_PROVIDER, localExecutorTaskToast } from './batchFactoryLocalExecutor.js';
 import { batchFactoryPlatformOptions } from './batchFactoryPlatformOptions';
 import { currentMergeJobsByOpening, publishMergeFiles } from './batchFactoryMergeGroups.js';
-import { formatMergeJobSpeed, mergeJobDurationSeconds } from './batchFactoryMergePresentation.js';
 import { BOOK_CONFIG_REGIONS, bookAssetSummary, bookConfigRegionStatus, normalizeSensitiveMode, sensitiveModeLabel } from './batchFactoryBookConfigRegions';
 import { videoProviderForModel } from './videoProviderBinding';
 import { modelOptionsForProvider } from './providerModelBinding';
@@ -188,6 +188,7 @@ import { getTextPublishStatus, publishTextCollection } from '../../../shared/api
 import automationStages from './automationStages.json';
 import { collectionUploadKind, retryTextBooks, textModelPreflightReasons } from './batchFactoryNovelListHelpers.js';
 import TextMediaDialog from './TextMediaDialog.jsx';
+import InlineTextBookPages from './InlineTextBookPages.jsx';
 import { ComicReferenceChips } from './ComicReferenceChips.jsx';
 import { removablePageReferences } from './comicReferenceMaterials.js';
 import {
@@ -1905,7 +1906,7 @@ function InlineMediaLibrary({ book, productionStatus, mergeJob, aspectRatio = '1
   const running = currentProgress?.status === 'running' || currentProgress?.status === 'queued';
   const mergeStatus = String(mergeJob?.status || '').toLowerCase();
   const mergeReady = mergeStatus === 'succeeded' && String(mergeJob?.outputUrl || '').trim();
-  const mergeText = mergeReady ? `最终成片 ${batchFactoryStableMediaLabel('M', mergeJob.id)} · ${formatMergeJobSpeed(mergeJob)}`
+  const mergeText = mergeReady ? `最终成片 ${batchFactoryStableMediaLabel('M', mergeJob.id)} · ${mergeJobSpeed(mergeJob).toFixed(1)}x`
     : mergeStatus === 'running' || mergeStatus === 'queued' ? '最终成片 · 合成中'
     : mergeStatus === 'failed' ? '最终成片 · 合成失败' : '最终成片 · 尚未合成';
   return <div className={`batch-factory-cell-shell batch-factory-inline-media is-${mediaFrameLayout}`}>
@@ -2454,7 +2455,7 @@ function MediaVersionPanel({ book, batchId, productionStatus, mergeJob, mergeJob
       key,
       width,
       height,
-      duration: Number(cached.duration || mergeJobDurationSeconds(job)),
+      duration: Number(cached.duration || job?.durationSeconds || 0),
       ratio,
       orientation: batchFactoryMediaOrientation(ratio),
       ratioText: batchFactoryRatioText(width, height, ratio)
@@ -2698,7 +2699,7 @@ function MediaVersionPanel({ book, batchId, productionStatus, mergeJob, mergeJob
   const uploadOptions = [
     ...completedMerges.map(job => ({
       value: `merged:${job.id}`,
-      label: `成片 ${batchFactoryStableMediaLabel('M', job.id)} · ${formatMergeJobSpeed(job)}`
+      label: `成片 ${batchFactoryStableMediaLabel('M', job.id)} · ${mergeJobSpeed(job).toFixed(1)}x`
     })),
     ...videos.flatMap(video => {
       const state = videoState(video);
@@ -2714,7 +2715,7 @@ function MediaVersionPanel({ book, batchId, productionStatus, mergeJob, mergeJob
       ? `${label(uploadVideo)} · ${batchFactoryStableMediaLabel('V', uploadVersion.id)}`
       : '所选分镜来源暂不可用')
     : mergedReady
-      ? `合成成片 · ${batchFactoryStableMediaLabel('M', selectedMerge?.id)} · ${formatMergeJobSpeed(selectedMerge)}`
+      ? `合成成片 · ${batchFactoryStableMediaLabel('M', selectedMerge?.id)} · ${mergeJobSpeed(selectedMerge).toFixed(1)}x`
       : '尚未选择可上传视频';
 
   function visibleHeightForSheetAnchor(anchor, height) {
@@ -2909,7 +2910,7 @@ function MediaVersionPanel({ book, batchId, productionStatus, mergeJob, mergeJob
         {current.status === 'succeeded' && String(current.outputUrl || '').trim()
           ? renderThumb(current, currentInfo, `合成成片 ${batchFactoryStableMediaLabel('M', current.id)}`)
           : <PassiveMediaPoster className="batch-factory-media-pickstation-thumb is-landscape" label="等待成片" detail={current.status === 'failed' ? '合成失败' : '处理中'} />}
-        <span><b>{current.openingLabel || '原开头'} · {batchFactoryStableMediaLabel('M', current.id)}</b><small>{formatDurationSeconds(currentInfo.duration)} · {formatMergeJobSpeed(current)} · {currentInfo.ratioText}</small><em>{mergeJobsNewest.length > 1 ? '上传组成' : selectedMerge?.id === current.id ? '当前上传来源' : '合成成片'}</em></span>
+        <span><b>{current.openingLabel || '原开头'} · {batchFactoryStableMediaLabel('M', current.id)}</b><small>{formatDurationSeconds(currentInfo.duration)} · {mergeJobSpeed(current).toFixed(1)}x · {currentInfo.ratioText}</small><em>{mergeJobsNewest.length > 1 ? '上传组成' : selectedMerge?.id === current.id ? '当前上传来源' : '合成成片'}</em></span>
       </button> : <div className="batch-factory-media-pickstation-empty">全部分镜选定主版本后，可在底部发起合成。</div>}
       <div className="batch-factory-media-pickstation-versions">
         {mergeJobsNewest.map(job => {
@@ -3000,7 +3001,7 @@ function MediaVersionPanel({ book, batchId, productionStatus, mergeJob, mergeJob
     ? (viewerMerge ? `合成成片 ${batchFactoryStableMediaLabel('M', viewerMerge.id)}` : '合成成片')
     : (viewerVideo ? label(viewerVideo) : '分镜');
   const viewerMeta = viewerKind === 'merge'
-    ? (viewerMerge ? `${formatDurationSeconds(viewerInfo.duration)} · ${formatMergeJobSpeed(viewerMerge)} · ${viewerInfo.ratioText}` : '—')
+    ? (viewerMerge ? `${formatDurationSeconds(viewerInfo.duration)} · ${mergeJobSpeed(viewerMerge).toFixed(1)}x · ${viewerInfo.ratioText}` : '—')
     : (viewerVersion ? `${batchFactoryStableMediaLabel('V', viewerVersion.id)} · ${viewerInfo.ratioText}` : '—');
 
   const primaryVideoDurationRows = videos.map(video => {
@@ -3230,7 +3231,6 @@ function DeferredInlineComicLibrary(props) {
     <div className="batch-factory-cell-empty">滚动到附近后加载漫画页。</div>
   </div>;
 }
-
 
 // 自动生产执行中，流动光带围绕“当前阶段对应的格子”转，而不是整条书行：
 // 资产类阶段围绕“资产设置”，分段/提示词/配音围绕提示词格，
@@ -5866,9 +5866,9 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
   const mediaMode = mediaBook && effectiveBookSettings(batch, mediaBook).productionMode;
   const pageMediaMode = mediaMode === 'text' || mediaMode === 'comic';
   const textBatch = batchProductionMode === 'text';
-  function openTextBook(book, tab = 'pages') {
+  function openTextBook(book, tab = 'pages', pageId = '') {
     setMediaStartTab(tab);
-    setMediaVideoId('');
+    setMediaVideoId(pageId);
     setMediaBook(book);
   }
   const hasComicBooks = batchProductionMode === 'comic' || books.some(book => effectiveBookSettings(batch, book).productionMode === 'comic');
@@ -6030,7 +6030,6 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
                         }
                         aria-label="全选小说"
                       />
-                      <span>序号</span>
                     </>
                   ) : (
                     columnLabel
@@ -6209,7 +6208,7 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
                     {productionMode === "comic"
                       ? `正文总字数 ${batchFactoryCleanSourceText(book.sourceText).length} 字 · 漫画分析 ${comicAnalysisCharactersForBook(book)} 字`
                       : productionMode === "text"
-                        ? `正文总字数 ${batchFactoryCleanSourceText(book.sourceText).length} 字 · 单页约 ${Number(settings.textPageTarget || 150)} 字`
+                        ? `正文总字数 ${batchFactoryCleanSourceText(book.sourceText).length} 字 · ${settings.textPaginationMode==='target' ? `单页约 ${Number(settings.textPageTarget || 150)} 字` : '智能排版'}`
                         : `生产前 ${rangeLines} 行`}
                   </span>
                   <p className={!previewText ? `batch-factory-source-empty is-${sourceStatus.tone}` : ""}>{previewText || sourceStatus.label}</p>
@@ -6271,7 +6270,7 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
                 </div>
                 <div className="shuihuo-workbench-cell batch-factory-book-config-cell">
                   <div className="batch-factory-book-config-regions">
-                    {productionMode === "text" ? <button type="button" className="batch-factory-book-config-region" onClick={() => setConfigTarget({ book, region: "engine" })}><b>单书配置</b><small>排版、模型与发布</small></button> : batchFactoryWorkbenchConfigRegions(book).map((region) => {
+                    {productionMode === "text" ? TEXT_PRODUCTION_BOOK_REGIONS.map(region => <button type="button" key={region.key} className="batch-factory-book-config-region" onClick={() => setConfigTarget({ book, region: region.key })}><b>{region.label}</b><small>{region.detail}</small></button>) : batchFactoryWorkbenchConfigRegions(book).map((region) => {
                       const status =
                         region.combinedStatus ||
                         bookConfigRegionStatus(book, region.key, batch?.settingsState?.patch || {});
@@ -6297,7 +6296,13 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
                     })}
                   </div>
                 </div>
-                {productionMode === "text" ? <div className="shuihuo-workbench-cell"><b>页面内容</b><p>单页约 {settings.textPageTarget || 150} 字</p></div> : <DeferredInlineBookPrompts
+                {productionMode === "text" ? <InlineTextBookPages
+                  batchId={batch?.id}
+                  book={book}
+                  pageTarget={settings.textPageTarget || 150}
+                  automationActive={Boolean(automationRunningStage)}
+                  onOpen={pageId => openTextBook(book, 'pages', pageId)}
+                /> : <DeferredInlineBookPrompts
                   batch={batch}
                   book={book}
                   batchId={batch?.id}
@@ -6318,8 +6323,8 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
                     setPromptBook(book);
                   }}
                 />}
-                <div className={`shuihuo-workbench-cell shuihuo-library-cell batch-factory-book-library-cell${automationActiveCell === 'comic' ? ' is-automation-cell' : ''}`}>
-                  {productionMode === "text" ? <Button aria-label="打开文本媒体库" onClick={() => openTextBook(book)}>文本媒体库</Button> : productionMode === "comic" ? (
+                {productionMode !== "text" ? <div className={`shuihuo-workbench-cell shuihuo-library-cell batch-factory-book-library-cell${automationActiveCell === 'comic' ? ' is-automation-cell' : ''}`}>
+                  {productionMode === "comic" ? (
                     <DeferredInlineComicLibrary
                       batchId={batch?.id}
                       book={book}
@@ -6373,7 +6378,7 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
                       }}
                     />
                   )}
-                </div>
+                </div> : null}
                 <div className={`shuihuo-workbench-cell batch-factory-actions${automationActiveCell === 'actions' ? ' is-automation-cell' : ''}`}>
                   <div className="batch-factory-action-group is-utility">
                     <span>资料与流程</span>

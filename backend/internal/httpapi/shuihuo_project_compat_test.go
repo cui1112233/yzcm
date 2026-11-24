@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -23,10 +25,8 @@ func TestShuihuoProjectsListIncludesOnlyMarkedBatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	shuihuo, err := store.CreateBatch(context.Background(), "alice", batchfactoryv11.CreateBatchInput{
-		Title: "创作漫剧项目",
-		InitialBatchSettings: batchfactoryv11.SettingsPatch{
-			"shuihuoProject": []byte("true"),
-		},
+		Title:          "创作漫剧项目",
+		ShuihuoProject: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -43,6 +43,164 @@ func TestShuihuoProjectsListIncludesOnlyMarkedBatches(t *testing.T) {
 	}
 }
 
+func TestProjectOwnershipSurvivesOnlyThroughServerCreation(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(1700000000, 0)
+	store := batchfactoryv11.NewMemoryStore()
+	presets, err := NewFileAutomationPresetStore(filepath.Join(t.TempDir(), "presets.json"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := NewRouter(RouterOptions{BridgeSecret: "secret", Now: func() time.Time { return now }, Slice: 4, Store: store, AutomationPresetStore: presets})
+	regular := signedJSONRequest(t, api, now, "alice", "POST", "/api/batch-factory/v11/batches", map[string]any{"title": "regular", "ShuihuoProject": true, "projectKind": "shuihuo", "initialBatchSettings": map[string]any{"shuihuoProject": true, "projectKind": "shuihuo", "patch": map[string]any{"patch": map[string]any{"SHUIHUOPROJECT": true, "shuihuoProject": true}}, "aspectRatio": "3:4"}})
+	if regular.Code != 201 {
+		t.Fatal(regular.Body.String())
+	}
+	ordinary := decodeBody[map[string]batchfactoryv11.Batch](t, regular)["batch"]
+	if isShuihuoProjectBatch(ordinary) || ordinary.SettingsState.Patch["projectKind"] != nil || string(ordinary.SettingsState.Patch["aspectRatio"]) != `"3:4"` {
+		t.Fatalf("ordinary initial settings = %s", mustJSON(ordinary.SettingsState.Patch))
+	}
+	created := signedJSONRequest(t, api, now, "alice", "POST", "/api/shuihuo-production/projects", map[string]any{"name": "project"})
+	if created.Code != 201 {
+		t.Fatal(created.Body.String())
+	}
+	projectID := decodeBody[map[string]any](t, created)["id"].(string)
+	preset, err := presets.Create("alice", "preset", map[string]any{"shuihuoProject": true, "projectKind": "shuihuo", "textModelId": "text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preset.Config["shuihuoProject"] != nil || preset.Config["projectKind"] != nil || preset.Config["textModelId"] != "text" {
+		t.Fatalf("stored preset = %v", preset.Config)
+	}
+	version, err := store.CreateConfigVersion(ctx, "alice", batchfactoryv11.ConfigVersion{Name: "regular", Config: mustJSON(map[string]any{"shuihuoProject": true, "patch": map[string]any{"shuihuoProject": false, "aspectRatio": "3:4"}})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var versionConfig map[string]any
+	if err := json.Unmarshal(version.Config, &versionConfig); err != nil {
+		t.Fatal(err)
+	}
+	nested := versionConfig["patch"].(map[string]any)
+	if versionConfig["shuihuoProject"] != nil || nested["shuihuoProject"] != nil || nested["aspectRatio"] != "3:4" {
+		t.Fatalf("saved config version = %s", version.Config)
+	}
+	// A historical preset can still contain ownership in its saved JSON.
+	coordinator := &BatchAutomationCoordinator{store: store}
+	for _, tc := range []struct {
+		id      string
+		project bool
+	}{{ordinary.ID, false}, {projectID, true}} {
+		current, err := store.GetBatch(ctx, "alice", tc.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if isShuihuoProjectBatch(current) != tc.project {
+			t.Fatal("incorrect initial project ownership")
+		}
+		for _, patch := range []map[string]any{{"restoreKeys": []string{"shuihuoProject"}}, {"patch": map[string]any{"shuihuoProject": !tc.project, "projectKind": "shuihuo"}}, {"patch": map[string]any{"patch": map[string]any{"shuihuoProject": !tc.project, "projectKind": "shuihuo"}}}} {
+			patch["expectedRevision"] = current.Revision
+			res := signedJSONRequest(t, api, now, "alice", "PUT", "/api/batch-factory/v11/batches/"+tc.id+"/settings", patch)
+			if res.Code != 200 {
+				t.Fatal(res.Body.String())
+			}
+			current, err = store.GetBatch(ctx, "alice", tc.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if isShuihuoProjectBatch(current) != tc.project || current.SettingsState.Patch["projectKind"] != nil {
+				t.Fatalf("settings changed ownership on %s: %s", tc.id, mustJSON(current.SettingsState.Patch))
+			}
+		}
+		legacy := AutomationPreset{Config: map[string]any{"shuihuoProject": !tc.project, "projectKind": "shuihuo", "textModelId": "text"}}
+		current, err = coordinator.applyPreset(ctx, "alice", current, &legacy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if isShuihuoProjectBatch(current) != tc.project || current.SettingsState.Patch["projectKind"] != nil {
+			t.Fatalf("preset changed ownership on %s: %s", tc.id, mustJSON(current.SettingsState.Patch))
+		}
+	}
+}
+
+func TestShuihuoProjectRoutesRejectOrdinaryBatchAndItsResources(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(1700000000, 0)
+	store := batchfactoryv11.NewMemoryStore()
+	text := &directorHTTPProvider{output: directorHTTPJSON}
+	video := &productionHTTPAdapter{}
+	api := NewRouter(RouterOptions{BridgeSecret: "secret", Now: func() time.Time { return now }, Slice: 4, Store: store, Director: &batchfactoryv11.DirectorService{Store: store, Provider: text}, Production: &batchfactoryv11.ProductionService{Store: store, Compiler: &batchfactoryv11.PromptCompilerService{Store: store}, Adapter: video, Enabled: true}})
+	batch, err := store.CreateBatch(ctx, "alice", batchfactoryv11.CreateBatchInput{Title: "regular", Books: []batchfactoryv11.CreateBookInput{{Title: "book", SourceText: "source", SourceMetadata: map[string]any{"shuihuoSegments": []any{map[string]any{"id": "segment"}}, "shuihuoMedia": []any{map[string]any{"id": "media", "kind": "image"}}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	book := batch.Books[0]
+	asset, err := store.CreateBookAsset(ctx, "alice", batch.ID, book.ID, batchfactoryv11.CreateBookAssetInput{Name: "hero", Kind: "character", Prompt: "image"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := store.CreateBookAssetImage(ctx, "alice", batch.ID, book.ID, asset.ID, batchfactoryv11.CreateBookAssetImageInput{URL: "https://image.invalid/hero.png", Source: "upload"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.CreateProductionJob(ctx, batchfactoryv11.ProductionJob{Owner: "alice", BatchID: batch.ID, BookID: book.ID, RequestID: "queued", Tasks: []batchfactoryv11.ProductionTask{{Status: batchfactoryv11.ProductionQueued}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.GetBatch(ctx, "alice", batch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := string(mustJSON(before))
+	const root = "/api/shuihuo-production"
+	project := "/projects/" + batch.ID
+	for _, r := range []struct {
+		method, path string
+		body         any
+	}{
+		{"GET", project, nil}, {"GET", "/projects?id=" + batch.ID, nil}, {"POST", project + "/tasks", map[string]any{"kind": "audio"}}, {"POST", project + "/tasks", map[string]any{"kind": "image"}}, {"POST", project + "/analysis/assets", map[string]any{}}, {"PUT", project + "/source", map[string]any{"sourceText": "new"}},
+		{"PUT", "/segments/segment/voice-settings", map[string]any{"voice": "new"}}, {"PUT", "/asset-images/" + img.ID + "/primary", nil}, {"PUT", "/media/media/primary", nil}, {"DELETE", "/assets/" + asset.ID, nil}, {"POST", "/tasks/" + job.Tasks[0].ID + "/retry", nil}, {"PUT", "/tasks/" + job.Tasks[0].ID + "/cancel", nil},
+		{"DELETE", "/projects?id=" + batch.ID, nil}, {"DELETE", project, nil},
+	} {
+		t.Run(r.method+" "+r.path, func(t *testing.T) {
+			result := signedJSONRequest(t, api, now, "alice", r.method, root+r.path, r.body)
+			if result.Code != http.StatusNotFound {
+				t.Errorf("status=%d body=%s", result.Code, result.Body.String())
+			}
+		})
+	}
+	after, err := store.GetBatch(ctx, "alice", batch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := store.ListProductionJobs(ctx, "alice", batch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(mustJSON(after)) != snapshot || len(jobs) != 1 || jobs[0].Tasks[0].Status != batchfactoryv11.ProductionQueued || text.calls != 0 || video.calls != 0 {
+		t.Fatalf("ordinary batch or task was changed; text calls=%d video calls=%d", text.calls, video.calls)
+	}
+	// Both legacy query and path forms continue to read and delete a real project.
+	for _, query := range []bool{true, false} {
+		created := signedJSONRequest(t, api, now, "alice", "POST", root+"/projects", map[string]any{"name": "studio"})
+		if created.Code != 201 {
+			t.Fatal(created.Body.String())
+		}
+		id := decodeBody[map[string]any](t, created)["id"].(string)
+		path := root + "/projects/" + id
+		if query {
+			path = root + "/projects?id=" + id
+		}
+		if got := signedJSONRequest(t, api, now, "alice", "GET", path, nil); got.Code != 200 {
+			t.Fatal(got.Body.String())
+		}
+		if got := signedJSONRequest(t, api, now, "alice", "DELETE", path, nil); got.Code != 200 {
+			t.Fatal(got.Body.String())
+		}
+		if _, err = store.GetBatch(ctx, "alice", id); !errors.Is(err, batchfactoryv11.ErrNotFound) {
+			t.Fatalf("marked project delete: %v", err)
+		}
+	}
+}
 func TestShuihuoAssetTypeAndTemplateCanBeUpdated(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	api := NewRouter(RouterOptions{BridgeSecret: "secret", Now: func() time.Time { return now }, Slice: 3, Store: batchfactoryv11.NewMemoryStore()})

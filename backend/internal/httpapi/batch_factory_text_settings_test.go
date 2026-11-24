@@ -21,6 +21,22 @@ type settingLibrary struct {
 	owners map[string]txt.LibraryBackground
 }
 
+func TestBatchFactoryTextHighlightSettingsSnapshot(t *testing.T) {
+	x := textRequest{book: batchfactoryv11.Book{Title: "测试书", SourceMetadata: map[string]any{"illustrationHighlightKeywords": []string{"关键词"}}}, settings: batchfactoryv11.SettingsPatch{"textHighlightRules": json.RawMessage(`"dialogue,lines,keywords"`), "textHighlightLines": json.RawMessage(`"1,3"`)}}
+	got, err := bookTextSnapshot(x)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Layout.HighlightRules != "dialogue,lines,keywords" || got.Layout.HighlightLines != "1,3" || !got.HighlightReuseEnabled || len(got.HighlightWords) != 1 {
+		t.Fatal(got)
+	}
+	x.settings["textHighlightRules"] = json.RawMessage(`"off"`)
+	off, err := bookTextSnapshot(x)
+	if err != nil || off.HighlightReuseEnabled || off.CoverFingerprint != got.CoverFingerprint {
+		t.Fatal("body rules changed cover or failed to turn off", err)
+	}
+}
+
 func (lib settingLibrary) ListBackgrounds(_ context.Context, owner string) ([]txt.LibraryBackground, error) {
 	if bg, ok := lib.owners[owner]; ok {
 		return []txt.LibraryBackground{bg}, nil
@@ -72,11 +88,25 @@ func TestBatchFactoryTextPersonalSettingsLibrary(t *testing.T) {
 	}
 }
 
+func TestBatchFactoryTextPaginationModeSettings(t *testing.T) {
+	for _, mode := range []string{"auto", "target"} {
+		settings := batchfactoryv11.SettingsPatch{"textPaginationMode": json.RawMessage(`"` + mode + `"`), "textPageTarget": json.RawMessage(`150`)}
+		snap, err := bookTextSnapshot(textRequest{settings: settings})
+		if err != nil || snap.Layout.PaginationMode != mode || snap.Layout.TargetCharacters != 150 {
+			t.Fatalf("pagination mode not carried into renderer: %+v %v", snap.Layout, err)
+		}
+	}
+	snap, err := bookTextSnapshot(textRequest{settings: batchfactoryv11.SettingsPatch{}})
+	if err != nil || snap.Layout.PaginationMode != "auto" {
+		t.Fatalf("expected smart default: %+v %v", snap.Layout, err)
+	}
+}
+
 func TestBatchFactoryTextCoverSparseSettings(t *testing.T) {
 	batch := batchfactoryv11.SettingsPatch{"textFontSize": json.RawMessage("56"), "textPadding": json.RawMessage("0"), "textCover": json.RawMessage(`{"layout":{"fontId":"ma-shan-zheng"},"background":{"kind":"color","color":"#123456"}}`)}
 	book := batchfactoryv11.SettingsPatch{"textCover": json.RawMessage(`{"layout":{"align":"right"}}`)}
 	snap, err := bookTextSnapshot(textRequest{settings: effectiveTextSettings(batch, book)})
-	if err != nil || snap.Cover.Layout.FontID != "ma-shan-zheng" || snap.Cover.Layout.FontSize != 56 || snap.Cover.Layout.Align != "right" || snap.Cover.Layout.Padding != 0 || snap.Cover.Background.Color != "#123456" {
+	if err != nil || snap.Cover.Layout.FontID != "ma-shan-zheng" || snap.Cover.Layout.FontSize != 64 || snap.Cover.Layout.Align != "right" || snap.Cover.Layout.Padding != 96 || snap.Cover.Background != nil {
 		t.Fatalf("cover resolved to %+v, error %v", snap, err)
 	}
 }

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -123,7 +124,7 @@ func (c *configuredSubmitConnector) Submit(_ context.Context, _ videomanagementc
 	c.submitCalls++
 	c.lastInput = input
 	if c.submitCalls == 1 {
-		return videomanagementconnector.Submission{}, context.DeadlineExceeded
+		return videomanagementconnector.Submission{ID: "remote-1"}, context.DeadlineExceeded
 	}
 	return videomanagementconnector.Submission{ID: "remote-1", Status: "submitted"}, nil
 }
@@ -614,6 +615,7 @@ func TestWebSubmitExecutingVersionOnlyReadsBack(t *testing.T) {
 	}
 	if err := store.PutDocument(context.Background(), "tester", novelfetchworkshop.Document{BookID: "654321", Gender: "女频", Meta: map[string]any{
 		"style": "现代悬疑", "platformId": "1", "siteSubmitExecutingVersions": []any{"ai1"},
+		"siteSubmitPendingConfirmation": map[string]any{"ai1": "remote-1"},
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -647,7 +649,9 @@ func TestWebSubmitForceResubmitsConfirmedVersion(t *testing.T) {
 	}
 	if err := store.PutDocument(context.Background(), "tester", novelfetchworkshop.Document{BookID: "777777", Gender: "女频", Meta: map[string]any{
 		"style": "现代悬疑", "platformId": "1", "siteSubmitDoneVersions": []any{"ai1"},
-	}}); err != nil {
+	}, Logs: []any{map[string]any{"event": "site_submit", "version": "ai1", "status": "submitted", "remote_receipt": map[string]any{
+		"verified": true, "submission_id": "initial-ai1-receipt",
+	}}}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.PutBody(context.Background(), "tester", novelfetchworkshop.BodyRecord{BookID: "777777", BodyRef: novelfetchworkshop.BodyRef{VersionID: "ai1"}, Content: "满足字数的正文"}); err != nil {
@@ -660,20 +664,182 @@ func TestWebSubmitForceResubmitsConfirmedVersion(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(usersDir, "tester", "upload-target.json"), []byte(`{"cookie":"session=ok"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	connector := &uncertainSubmitConnector{}
+	connector := &cloneSubmissionEvidenceSpy{bookReceiptIDs: []string{"initial-ai1-receipt"}}
 	request := webSubmitRequest{TaskIDs: []string{"777777"}, Versions: []string{"ai1"}, Force: true}
 	result, err := executeWebSubmit(context.Background(), "tester", usersDir, store, request, nil, connector)
-	if err != nil || connector.submitCalls != 1 || result.Success != 1 {
-		t.Fatalf("force must resubmit confirmed version: result=%#v err=%v submits=%d", result, err, connector.submitCalls)
+	if err != nil || connector.submitCalls != 0 || connector.cloneSource != "initial-ai1-receipt" || result.Success != 1 {
+		t.Fatalf("force must resubmit confirmed version: result=%#v err=%v connector=%+v", result, err, connector)
 	}
 	request.Force = false
+	connector.cloneSource = ""
 	result, err = executeWebSubmit(context.Background(), "tester", usersDir, store, request, nil, connector)
-	if err != nil || connector.submitCalls != 1 || result.Success != 0 || len(result.Results) != 1 {
-		t.Fatalf("without force confirmed version must be skipped: result=%#v err=%v submits=%d", result, err, connector.submitCalls)
+	if err != nil || connector.submitCalls != 0 || connector.cloneSource != "" || result.Success != 0 || len(result.Results) != 1 {
+		t.Fatalf("without force confirmed version must be skipped: result=%#v err=%v connector=%+v", result, err, connector)
 	}
 	if row, _ := result.Results[0].(map[string]any); row["status"] != "skipped" {
 		t.Fatalf("result=%#v", result.Results[0])
 	}
+}
+
+func TestWebSubmitForceWithoutNewCloneReceiptStaysPending(t *testing.T) {
+	for _, scenario := range []struct{ name, id string }{{"empty", ""}, {"same", "first-ai1-receipt"}} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, usersDir, doc := newSubmissionEvidenceTask(t)
+			connector := &cloneSubmissionEvidenceSpy{
+				receipt:        &videomanagementconnector.Submission{ID: scenario.id, Status: "submitted"},
+				bookReceiptIDs: []string{"first-ai1-receipt"},
+			}
+			request := webSubmitRequest{TaskIDs: []string{doc.BookID}, Versions: []string{"ai1"}, OperationID: "force-missing-proof", Force: true}
+			result, err := executeWebSubmit(ctx, "tester", usersDir, store, request, nil, connector)
+			if err != nil || len(result.Results) != 1 || result.Success != 0 || result.Failed != 1 || connector.cloneCalls != 1 || connector.submitCalls != 0 {
+				t.Fatalf("invalid clone response was accepted: result=%+v connector=%+v error=%v", result, connector, err)
+			}
+			if row := mapOrEmpty(result.Results[0]); row["status"] != "pending_confirmation" || row["code"] != "WEB_SUBMIT_RESUBMISSION_RECEIPT_UNCONFIRMED" || firstText(row["submissionId"]) != "" {
+				t.Fatalf("invalid clone receipt appeared confirmed: %+v", row)
+			}
+			saved, err := store.GetDocument(ctx, "tester", doc.BookID)
+			if err != nil || saved.Meta["siteSubmitStatus"] != "pending_confirmation" || priorWorkshopSubmitReceipt(saved, "ai1") != "first-ai1-receipt" {
+				t.Fatalf("invalid clone overwrote existing proof: %+v %v", saved, err)
+			}
+			for _, raw := range saved.Logs {
+				log := mapOrEmpty(raw)
+				if log["operation_id"] == request.OperationID && (log["status"] == "submitted" || firstText(log["submissionId"]) != "" || mapOrEmpty(log["remote_receipt"])["verified"] == true) {
+					t.Fatalf("audit claimed a new receipt: %+v", log)
+				}
+			}
+			result, err = executeWebSubmit(ctx, "tester", usersDir, store, request, nil, connector)
+			if err != nil || result.Success != 0 || connector.cloneCalls != 1 || connector.submitCalls != 0 {
+				t.Fatalf("unconfirmed clone was repeated: result=%+v connector=%+v error=%v", result, connector, err)
+			}
+		})
+	}
+}
+
+func TestWebSubmitForceRejectsHistoricalCloneReceiptsAcrossVersions(t *testing.T) {
+	for _, scenario := range []struct{ name, returned string }{
+		{"ai1_history", "first-ai1-receipt"},
+		{"ai2_history", "first-ai2-receipt"},
+		{"imported_history", "imported-receipt"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, usersDir, doc := newSubmissionEvidenceTask(t)
+			doc.Meta["siteSubmitDoneVersions"] = []string{"ai1", "ai2"}
+			doc.Logs = append(doc.Logs,
+				map[string]any{"event": "site_submit", "status": "submitted", "version": "ai1",
+					"remote_receipt": map[string]any{"verified": true, "submission_id": "latest-ai1-receipt"}},
+				map[string]any{"event": "site_submit", "status": "submitted", "version": "ai2",
+					"remote_receipt": map[string]any{"verified": true, "submission_id": "first-ai2-receipt"}},
+			)
+			doc.Meta["websiteSubmitHistory"] = []any{map[string]any{"status": "submitted",
+				"remote_receipt": map[string]any{"verified": true, "submission_id": "imported-receipt"}},
+			}
+			if err := store.PutDocument(ctx, "tester", doc); err != nil {
+				t.Fatal(err)
+			}
+			connector := &cloneSubmissionEvidenceSpy{
+				receipt:        &videomanagementconnector.Submission{ID: scenario.returned, Status: "submitted"},
+				bookReceiptIDs: []string{"latest-ai1-receipt", "first-ai1-receipt", "first-ai2-receipt"},
+			}
+			result, err := executeWebSubmit(ctx, "tester", usersDir, store, webSubmitRequest{
+				TaskIDs: []string{doc.BookID}, Versions: []string{"ai1"}, OperationID: "forced-ai1", Force: true,
+			}, nil, connector)
+			if err != nil || len(result.Results) != 1 || result.Success != 0 || result.Failed != 1 || connector.cloneCalls != 1 || connector.cloneSource != "latest-ai1-receipt" {
+				t.Fatalf("clone returning %s was accepted as a new ai1 receipt: result=%+v connector=%+v error=%v", scenario.returned, result, connector, err)
+			}
+			if row := mapOrEmpty(result.Results[0]); row["status"] != "pending_confirmation" || row["code"] != "WEB_SUBMIT_RESUBMISSION_RECEIPT_UNCONFIRMED" {
+				t.Fatalf("historical clone receipt was not kept pending: %+v", row)
+			}
+			saved, err := store.GetDocument(ctx, "tester", doc.BookID)
+			if err != nil || priorWorkshopSubmitReceipt(saved, "ai1") != "latest-ai1-receipt" || priorWorkshopSubmitReceipt(saved, "ai2") != "first-ai2-receipt" {
+				t.Fatalf("clone changed an existing confirmation: logs=%+v error=%v", saved.Logs, err)
+			}
+		})
+	}
+}
+
+func TestWebSubmitForceChecksRemoteReceiptsBeforeCloning(t *testing.T) {
+	for _, scenario := range []struct {
+		name, returned string
+		success        int
+		unavailable    bool
+	}{
+		{name: "remote_only_old_receipt", returned: "receipt-r1"},
+		{name: "new_receipt", returned: "receipt-r3", success: 1},
+		{name: "history_unavailable", returned: "receipt-r3", unavailable: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, usersDir, doc := newSubmissionEvidenceTask(t)
+			mapOrEmpty(mapOrEmpty(doc.Logs[0])["remote_receipt"])["submission_id"] = "receipt-r2"
+			if err := store.PutDocument(ctx, "tester", doc); err != nil {
+				t.Fatal(err)
+			}
+			connector := &pagedCloneReceiptSpy{
+				cloneSubmissionEvidenceSpy: cloneSubmissionEvidenceSpy{receipt: &videomanagementconnector.Submission{ID: scenario.returned, Status: "submitted"}},
+				pages:                      [][]string{{"receipt-r2"}, {"receipt-r1"}}, unavailable: scenario.unavailable,
+			}
+			request := webSubmitRequest{TaskIDs: []string{doc.BookID}, Versions: []string{"ai1"}, OperationID: "force-with-history", Force: true}
+			result, err := executeWebSubmit(ctx, "tester", usersDir, store, request, nil, connector)
+			if err != nil || result.Success != scenario.success || len(result.Results) != 1 || connector.submitCalls != 0 {
+				t.Fatalf("force did not use remote history: result=%+v connector=%+v error=%v", result, connector, err)
+			}
+			row := mapOrEmpty(result.Results[0])
+			if scenario.unavailable {
+				if connector.cloneCalls != 0 || len(connector.bookPages) != 2 || row["code"] != "WEB_SUBMIT_RESUBMISSION_HISTORY_UNAVAILABLE" {
+					t.Fatalf("incomplete remote history did not block cloning: result=%+v connector=%+v", result, connector)
+				}
+				return
+			}
+			if len(connector.bookPages) != 2 || connector.bookPages[0] != 1 || connector.bookPages[1] != 2 || connector.cloneCalls != 1 || connector.cloneSource != "receipt-r2" {
+				t.Fatalf("remote listing was not frozen before copying: %+v", connector)
+			}
+			if scenario.success == 0 {
+				if row["status"] != "pending_confirmation" {
+					t.Fatalf("remote-only historical receipt was confirmed: %+v", row)
+				}
+				connector.readback = &videomanagementconnector.Submission{ID: "receipt-r1", ReadbackRaw: map[string]any{
+					"bookid": doc.BookID, "version_id": "ai1", "operation_id": request.OperationID,
+				}}
+				result, err = executeWebSubmit(ctx, "tester", usersDir, store, request, nil, connector)
+				if err != nil || result.Success != 0 || connector.cloneCalls != 1 {
+					t.Fatalf("retry accepted a frozen historical receipt or cloned twice: result=%+v connector=%+v error=%v", result, connector, err)
+				}
+			}
+		})
+	}
+}
+
+type pagedCloneReceiptSpy struct {
+	cloneSubmissionEvidenceSpy
+	pages       [][]string
+	bookPages   []int
+	unavailable bool
+	readback    *videomanagementconnector.Submission
+}
+
+func (c *pagedCloneReceiptSpy) GetBook(_ context.Context, _ videomanagementconnector.Session, bookID string, page, _ int) (any, error) {
+	c.bookPages = append(c.bookPages, page)
+	if (c.unavailable && page > 1) || c.cloneCalls > 0 || page > len(c.pages) {
+		return nil, errors.New("remote history unavailable before clone")
+	}
+	total := 0
+	for _, ids := range c.pages {
+		total += len(ids)
+	}
+	rows := []any{}
+	for _, id := range c.pages[page-1] {
+		rows = append(rows, map[string]any{"bookid": bookID, "id": id})
+	}
+	return map[string]any{"success": true, "total": total, "data": rows}, nil
+}
+
+func (c *pagedCloneReceiptSpy) GetSubmission(ctx context.Context, session videomanagementconnector.Session, bookID string) (videomanagementconnector.Submission, error) {
+	if c.readback != nil {
+		return *c.readback, nil
+	}
+	return c.recordingSubmitConnector.GetSubmission(ctx, session, bookID)
 }
 
 func TestWebSubmitUsesSourceBookIDForUpload(t *testing.T) {
@@ -840,3 +1006,46 @@ func TestWebSubmitUploadsBooksConcurrently(t *testing.T) {
 }
 
 func stringsReader(value string) *strings.Reader { return strings.NewReader(value) }
+
+type leaseSwitchSubmitConnector struct {
+	configuredSubmitConnector
+	queue *leaseProbeQueue
+}
+
+func (c *leaseSwitchSubmitConnector) Submit(context.Context, videomanagementconnector.Session, videomanagementconnector.SubmissionInput) (videomanagementconnector.Submission, error) {
+	c.submitCalls++
+	c.queue.owns = false
+	return videomanagementconnector.Submission{}, errors.New("rejected submission")
+}
+
+func TestWebSubmitLeaseSwitchBlocksSecondUploadAttempt(t *testing.T) {
+	ctx := context.Background()
+	store := novelfetchworkshop.NewMemoryStore()
+	dir := t.TempDir()
+	q := &leaseProbeQueue{ProcessQueue: novelfetchworkshop.NewMemoryQueue(), owns: true}
+	connector := &leaseSwitchSubmitConnector{queue: q}
+	doc := readyIndependentUploadDocument("12345678")
+	doc.Meta["platformId"] = "2"
+	doc.Versions["ai1"] = "她走进书店，与多年未见的朋友重逢。"
+	if err := store.PutDocument(ctx, "tester", doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutBody(ctx, "tester", novelfetchworkshop.BodyRecord{BookID: doc.BookID, BodyRef: novelfetchworkshop.BodyRef{VersionID: "ai1", State: "ready"}, Content: doc.Versions["ai1"].(string)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutConfig(ctx, "tester", map[string]any{"appConfig": map[string]any{"web_submit": map[string]any{"enabled": true, "min_file_size": 0, "organization": "org", "retry_times": 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveUploadTargetSession(dir, "tester", map[string]any{"cookie": "fixture", "targetUsername": "fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	worker := workshopProcessWorker{store: store, queue: q, registry: newWorkshopProcessRegistry(), leaseHeartbeat: time.Hour,
+		autoSubmit: func(ctx context.Context, job novelfetchworkshop.ProcessJob) error {
+			_, err := executeWebSubmit(ctx, job.Owner, dir, store, webSubmitRequest{TaskIDs: job.BookIDs, Versions: job.SelectedVersions}, nil, connector)
+			return err
+		}}
+	err := worker.process(ctx, novelfetchworkshop.ProcessJob{ID: "job", Owner: "tester", BatchID: "batch", BookIDs: []string{doc.BookID}, LeaseToken: "old", SelectedVersions: []string{"ai1"}, AutoSubmit: true})
+	if connector.submitCalls != 1 || !errors.Is(err, novelfetchworkshop.ErrProcessLeaseLost) || q.acks != 0 || q.fails != 0 {
+		t.Fatalf("upload attempts=%d err=%v ack=%d fail=%d", connector.submitCalls, err, q.acks, q.fails)
+	}
+}

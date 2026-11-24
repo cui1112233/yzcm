@@ -13,6 +13,7 @@ type Scope struct{ Owner, BatchID, BookID string }
 type LayoutConfig struct {
 	AspectRatio                     string  `json:"aspectRatio"`
 	TargetCharacters                int     `json:"targetCharacters"`
+	PaginationMode                  string  `json:"paginationMode,omitempty"`
 	FontID                          string  `json:"fontId"`
 	FontSize                        float64 `json:"fontSize"`
 	FontWeight                      int     `json:"fontWeight"`
@@ -22,6 +23,8 @@ type LayoutConfig struct {
 	Align                           string  `json:"align"`
 	TextColor                       string  `json:"textColor"`
 	HighlightColor                  string  `json:"highlightColor"`
+	HighlightRules                  string  `json:"highlightRules,omitempty"`
+	HighlightLines                  string  `json:"highlightLines,omitempty"`
 	MaxHeightRatio                  float64 `json:"maxHeightRatio"`
 	paddingSet, paragraphSpacingSet bool
 }

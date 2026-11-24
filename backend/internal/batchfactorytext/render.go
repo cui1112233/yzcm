@@ -13,6 +13,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	xdraw "golang.org/x/image/draw"
@@ -93,6 +94,9 @@ type RenderInput struct {
 	// The caller resolves authenticated storage references into bytes.
 	BackgroundImage       []byte
 	HighlightReuseEnabled bool
+	DialogueRanges        []HighlightRange
+	DialogueRangesSet     bool
+	VerticalCenterRatio   float64
 	// Preview samples the actual cropped background behind the glyphs.
 	WarnLowContrast func()
 }
@@ -103,7 +107,7 @@ type MeasureResult struct {
 }
 
 func DefaultRenderLayout() LayoutConfig {
-	return LayoutConfig{AspectRatio: "3:4", TargetCharacters: DefaultTargetCharacters, FontID: renderfont.Noto, FontSize: 44, FontWeight: 400, LineHeight: 1.65, ParagraphSpacing: 24, Padding: 96, Align: "left", TextColor: "#FFFFFF", HighlightColor: "#E53935", MaxHeightRatio: .75, paddingSet: true, paragraphSpacingSet: true}
+	return LayoutConfig{AspectRatio: "3:4", TargetCharacters: DefaultTargetCharacters, PaginationMode: "auto", FontID: renderfont.Noto, FontSize: 44, FontWeight: 400, LineHeight: 1.65, ParagraphSpacing: 24, Padding: 96, Align: "left", TextColor: "#FFFFFF", HighlightColor: "#E53935", MaxHeightRatio: .75, paddingSet: true, paragraphSpacingSet: true}
 }
 
 var canvasSizes = map[string]image.Point{
@@ -111,7 +115,13 @@ var canvasSizes = map[string]image.Point{
 }
 
 func resolveLayout(c LayoutConfig) (LayoutConfig, image.Point, error) {
+	if err := validateHighlightRules(c); err != nil {
+		return c, image.Point{}, err
+	}
 	defaults := DefaultRenderLayout()
+	if c.PaginationMode != "" && c.PaginationMode != "auto" && c.PaginationMode != "target" {
+		return c, image.Point{}, fmt.Errorf("不支持分页方式 %q", c.PaginationMode)
+	}
 	// Sparse book snapshots inherit missing spacing. The layout editor starts
 	// from DefaultRenderLayout and can set either measurement explicitly to zero.
 	if c.Padding == 0 && !c.paddingSet {
@@ -221,6 +231,14 @@ func layoutText(ctx context.Context, text string, c LayoutConfig, size image.Poi
 	m := MeasureResult{Fits: true, MaxHeight: float64(limit), Width: size.X, Height: size.Y}
 	metrics := face.Metrics()
 	baselineTop := (size.Y - limit) / 2
+	if paint != nil {
+		measured, err := layoutText(ctx, text, c, size, face, nil)
+		if err != nil {
+			return measured, err
+		}
+		baselineTop = (size.Y - int(measured.UsedHeight)) / 2
+	}
+	reading := readingBreaks(text, c, width)
 	spread := boldSpread(c)
 	step := int(math.Ceil(c.FontSize * c.LineHeight))
 	var line lineGeometry
@@ -256,7 +274,14 @@ func layoutText(ctx context.Context, text string, c LayoutConfig, size image.Poi
 		return nil
 	}
 	runeIndex := 0
+	runes := []rune(text)
 	for _, r := range text {
+		if reading[runeIndex] && hasGlyph && r != '\n' {
+			if err := flush(); err != nil {
+				return m, err
+			}
+			top += max(lastHeight, step) + max(int(math.Round(c.ParagraphSpacing)), step/2)
+		}
 		if runeIndex%256 == 0 {
 			if err := ctx.Err(); err != nil {
 				return m, err
@@ -293,7 +318,27 @@ func layoutText(ctx context.Context, text string, c LayoutConfig, size image.Poi
 		}
 		right := max(line.right, x+advance, x+shape.bounds.Max.X+fixed.I(spread))
 		left := min(line.left, x+shape.bounds.Min.X)
-		if hasGlyph && right.Ceil()-left.Floor() > width {
+		// Keep an opening mark with its next character, and reserve space for
+		// closing marks following the current character. Measurement and painting
+		// use the same lookahead; original rune indexes never change.
+		reservedRight, reservedLeft := right, left
+		cursor, previous := x+advance, display
+		for j := runeIndex + 1; j < len(runes); j++ {
+			next := runes[j]
+			if next == '\n' || (!strings.ContainsRune("，。！？；：、）》】」』”’", next) && !strings.ContainsRune("（《【「『“‘", previous)) {
+				break
+			}
+			bounds, ad, ok := face.GlyphBounds(next)
+			if !ok {
+				break
+			}
+			cursor += face.Kern(previous, next)
+			reservedRight = max(reservedRight, cursor+ad, cursor+bounds.Max.X+fixed.I(spread))
+			reservedLeft = min(reservedLeft, cursor+bounds.Min.X)
+			cursor += ad
+			previous = next
+		}
+		if hasGlyph && reservedRight.Ceil()-reservedLeft.Floor() > width {
 			if err := flush(); err != nil {
 				return m, err
 			}
@@ -424,7 +469,7 @@ func (r Renderer) Render(ctx context.Context, in RenderInput) ([]byte, string, e
 		return nil, "", fmt.Errorf("本页排版超出文字区域，请调整字号、边距或重新分页")
 	}
 	var ranges []HighlightRange
-	if in.HighlightReuseEnabled && r.Highlights != nil {
+	if ((c.HighlightRules == "" && in.HighlightReuseEnabled) || HighlightRuleEnabled(c.HighlightRules, "keywords")) && r.Highlights != nil {
 		ranges, err = r.Highlights.Ranges(ctx, in.Owner, in.BookID, in.VersionID, text)
 		if err != nil {
 			return nil, "", err
@@ -437,6 +482,42 @@ func (r Renderer) Render(ctx context.Context, in RenderInput) ([]byte, string, e
 		}
 		ranges = mergeRanges(append([]HighlightRange(nil), ranges...))
 	}
+	dialogue := in.DialogueRanges
+	if !in.DialogueRangesSet {
+		dialogue = DialogueHighlightRanges(text)
+	}
+	if HighlightRuleEnabled(c.HighlightRules, "dialogue") {
+		limit := utf8.RuneCountInString(text)
+		for _, v := range dialogue {
+			v.Start = max(0, v.Start)
+			v.End = min(limit, v.End)
+			if v.Start < v.End {
+				ranges = append(ranges, v)
+			}
+		}
+		ranges = mergeRanges(ranges)
+	}
+	selectedLines := map[int]bool{}
+	if HighlightRuleEnabled(c.HighlightRules, "lines") {
+		selectedLines, _ = parseHighlightLines(c.HighlightLines)
+		visualLine := 0
+		_, err := layoutText(ctx, text, c, size, face, func(line lineGeometry, _, _ int) error {
+			for _, g := range line.glyphs {
+				if !unicode.IsSpace(g.r) {
+					visualLine++
+					if selectedLines[visualLine] {
+						ranges = append(ranges, sentenceHighlightAt(text, g.index, dialogue))
+					}
+					break
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, "", err
+		}
+		ranges = mergeRanges(ranges)
+	}
 	dst := image.NewRGBA(image.Rectangle{Max: size})
 	if err = drawBackground(dst, in.Background, in.BackgroundImage); err != nil {
 		return nil, "", err
@@ -445,6 +526,9 @@ func (r Renderer) Render(ctx context.Context, in RenderInput) ([]byte, string, e
 	rangeIndex := 0
 	spread := boldSpread(c)
 	paint := func(line lineGeometry, x, y int) error {
+		if in.VerticalCenterRatio > 0 {
+			y += int(math.Round(float64(size.Y) * (in.VerticalCenterRatio - 0.5)))
+		}
 		for _, g := range line.glyphs {
 			for rangeIndex < len(ranges) && ranges[rangeIndex].End <= g.index {
 				rangeIndex++

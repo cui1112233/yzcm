@@ -1,7 +1,7 @@
 import { SettingOutlined } from '@ant-design/icons';
 import { Alert, Button, Divider, Input, InputNumber, Modal, Segmented, Select, Space, Switch, Tabs, Tooltip, message } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
-import { getAvailableModelCatalog, modelSelectOptions, peekAvailableModelCatalog } from '../../../shared/api/modelCatalog';
+import { describeModelCatalogFailure, productionModelKinds, getAvailableModelCatalog, modelSelectOptions, peekAvailableModelCatalog } from '../../../shared/api/modelCatalog';
 import { checkWebSubmitEnvironment, getWebSubmitConfig, saveWebSubmitConfig, syncWebSubmitConfigs, syncWebSubmitStyles, testWebSubmitVisible } from '../../../shared/api/novelFetch';
 import { apiErrorMessage } from '../../../shared/apiErrors';
 import { IMAGE_ASPECT_RATIOS } from '../../../shared/imageAspectRatios';
@@ -28,6 +28,8 @@ import { DEFAULT_AUDIO_CATEGORIES, chooseN8Audio, producerAccountOptions, readCo
 import { loadBatchFactoryPresetCatalog } from './batchFactoryPresetCatalog';
 import { reconcileSyncedWebsiteProfiles, websiteProfileOrganization } from './batchFactoryWebsiteProfiles';
 import TextProductionSettingsForm from './TextProductionSettingsForm';
+import { BatchFactoryComicPublishSettingsForm } from './BatchFactoryImagePublishSettingsForm';
+import './publish-settings.css';
 import { applyTextProductionChanges, normalizeTextProductionConfig } from './textProductionConfig';
 
 // Start this tiny directory request as soon as the Batch Factory page chunk is
@@ -97,6 +99,7 @@ export function BatchFactoryEngineSettingsForm({ value, onChange, sections = ['m
   const cachedModels = peekAvailableModelCatalog();
   const [models, setModels] = useState(() => cachedModels?.models || []);
   const [modelsError, setModelsError] = useState('');
+  const [modelRetry, setModelRetry] = useState(0);
   const [modelsLoading, setModelsLoading] = useState(() => !cachedModels);
   const patch = next => onChange({ ...value, ...next });
   const tts = { ...DEFAULT_TTS, ...(value.tts || {}) };
@@ -114,14 +117,14 @@ export function BatchFactoryEngineSettingsForm({ value, onChange, sections = ['m
   useEffect(() => {
     if (!active || !modelSettingsEnabled) return undefined;
     let alive = true;
-    const cached = peekAvailableModelCatalog();
+    const cached = peekAvailableModelCatalog(productionModelKinds(value.productionMode));
     if (cached) setModels(cached.models);
     setModelsLoading(!cached);
     setModelsError('');
-    getAvailableModelCatalog().then(result => {
+    getAvailableModelCatalog({ kinds: productionModelKinds(value.productionMode) }).then(result => {
       if (!alive) return;
       setModels(result.models);
-      if (result.failedKinds.length) setModelsError(`部分模型目录暂不可用：${result.failedKinds.join('、')}`);
+      setModelsError(describeModelCatalogFailure(result));
     }).catch(error => {
       if (!alive) return;
       setModelsError(error?.message || '未能读取个人中心已启用模型');
@@ -129,7 +132,7 @@ export function BatchFactoryEngineSettingsForm({ value, onChange, sections = ['m
       if (alive) setModelsLoading(false);
     });
     return () => { alive = false; };
-  }, [active, modelSettingsEnabled]);
+  }, [active, modelSettingsEnabled, value.productionMode, modelRetry]);
   const publish = value.publishSettings || {};
   return <Space direction="vertical" size={16} style={{ width: '100%' }}>
     <Alert type="info" showIcon message={<span>当前批次统一生产参数 <HelpTip title="当前批次统一生产参数">保存后作为全部小说的默认值；单书已保存的显式覆盖不会被预设载入或本页保存清空。</HelpTip></span>} />
@@ -157,7 +160,7 @@ export function BatchFactoryEngineSettingsForm({ value, onChange, sections = ['m
       <label className="batch-factory-engine-field"><span><b>语速</b></span><InputNumber min={0.5} max={2} step={0.1} value={tts.speed} onChange={speed => patch({ tts: { ...tts, speed: speed ?? DEFAULT_TTS.speed } })} /></label>
       </> : null}
     </div></section>
-    {modelsError ? <Alert type="warning" showIcon message="部分模型目录暂不可用" description={modelsError} /> : null}
+    {modelsError ? <Alert type="warning" showIcon message="部分模型目录暂不可用" description={modelsError} action={<Button size="small" loading={modelsLoading} onClick={() => setModelRetry(value => value + 1)}>重新读取</Button>} /> : null}
     {!modelsLoading && !modelsError && !models.length ? <Alert type="warning" showIcon message="后台没有已启用模型" description="请先在模型配置中新增并启用模型。" /> : null}
     </> : null}
     {sections.includes('sensitive') ? <section className="batch-factory-engine-card"><header><b>敏感词处理</b><HelpTip title="敏感词处理">系统优化在本地执行，不消耗 AI 额度。选“关闭”时跳过敏感词处理。</HelpTip></header><div className="batch-factory-engine-card-body batch-factory-engine-grid">
@@ -353,7 +356,7 @@ export function BatchFactoryPublishSettingsForm({ value, onChange, active }) {
     }
     finally { setSyncing(''); }
   };
-  return <><Space direction="vertical" size={16} style={{ width: '100%' }}>
+  return <><Space className="batch-factory-publish-layout" direction="vertical" size={16} style={{ width: '100%' }}>
     <Alert type="info" showIcon message={<span>批量默认发布规则 <HelpTip title="批量默认发布规则">这里维护视频管理系统连接、网站配置映射和上传素材规则；单书配置可覆盖默认值。</HelpTip></span>} />
     <section className="batch-factory-vms-connection-card"><div className="batch-factory-vms-main"><div className="batch-factory-vms-icon" aria-hidden="true">▣</div><div className="batch-factory-vms-copy"><div className="batch-factory-vms-title-row"><b>视频管理系统</b><span>{credentialLabel(environment?.environment)}</span></div><div className="batch-factory-vms-meta"><span>当前账号</span><strong>{account?.username || '尚未登录'}</strong></div><div className="batch-factory-vms-meta"><span>后台地址</span><a href={TARGET_ADMIN_URL} target="_blank" rel="noreferrer">two.121w.com/tttadmin</a></div><div className="batch-factory-vms-meta"><span>素材相册</span><a href={N8_MATERIAL_ALBUM_URL} target="_blank" rel="noreferrer">打开 N8 素材相册</a></div></div></div><div className="batch-factory-vms-actions"><Button href={TARGET_ADMIN_URL} target="_blank">打开后台</Button><Button onClick={openLoginForm}>{account?.username ? '更换账号' : '登录并验证'}</Button><Button onClick={selfCheck} loading={checking}>{account?.username ? '重新验证' : '环境自检'}</Button></div></section>
     <div className="batch-factory-publish-two-column"><section className="batch-factory-engine-card"><header><b>发布映射</b><HelpTip title="发布映射">同步真实后台配置后，绑定到当前批量作品。</HelpTip></header><div className="batch-factory-engine-card-body"><label className="batch-factory-engine-field"><span><b>网站配置档</b></span><Select allowClear showSearch value={publish.websiteProfileId || undefined} options={(publish.websiteProfiles || []).map(profile => ({ value: profile.id, label: profile.name || profile.id }))} placeholder="同步网站配置档后选择" onChange={websiteProfileId => { const profile = (publish.websiteProfiles || []).find(item => item.id === websiteProfileId) || {}; patch({ publishSettings: { ...publish, websiteProfileId: websiteProfileId || '', versionProfile: profile.name || '', organization: websiteProfileOrganization(profile) } }); }} /></label><div className="batch-factory-publish-sync-row"><Button disabled={!publishSessionReady} onClick={syncProfiles} loading={syncing === 'profiles'}>同步网站配置档</Button><Button disabled={!publishSessionReady} onClick={syncStyles} loading={syncing === 'styles'}>同步风格目录</Button></div><div className="batch-factory-style-catalog">{styleCatalogNames.length ? <button type="button" className="batch-factory-style-catalog-toggle" aria-expanded={styleOpen} onClick={() => setStyleOpen(open => !open)}><span className="batch-factory-style-catalog-label">风格目录</span><span className="batch-factory-style-catalog-count">{styleCatalogNames.length} 条</span><span className={`batch-factory-style-catalog-chevron${styleOpen ? ' is-open' : ''}`} aria-hidden="true" /></button> : <div className="batch-factory-style-catalog-toggle is-empty"><span className="batch-factory-style-catalog-label">风格目录</span><span className="batch-factory-style-catalog-empty">尚未同步风格目录</span></div>}{styleOpen && styleCatalogNames.length ? <div className="batch-factory-style-catalog-list">{styleCatalogNames.map((name, index) => <span className="batch-factory-style-catalog-name" key={`${name}-${index}`}>{name}</span>)}</div> : null}</div><div className="batch-factory-publish-ai-note"><b>组织归属</b><span>{selectedProfileOrganization ? `由网站配置档自动带入：${selectedProfileOrganization}` : publish.websiteProfileId ? '当前网站配置档未提供组织归属，提交时需在确认单选择。' : '尚未选择网站配置档。'}</span></div></div></section>
@@ -364,174 +367,7 @@ export function BatchFactoryPublishSettingsForm({ value, onChange, active }) {
   </>;
 }
 
-export function BatchFactoryComicPublishSettingsForm({ value, onChange, singleBook = false, books = [] }) {
-  const comicPublishSettings = value.comicPublishSettings || {};
-	const cachedDirectory = readComicPublishDirectoryCache();
-	const [producerAccounts, setProducerAccounts] = useState(cachedDirectory?.producerAccounts || []);
-	const [organizations, setOrganizations] = useState(cachedDirectory?.organizations || []);
-	const [audioCategories, setAudioCategories] = useState(cachedDirectory?.audioCategories?.length ? cachedDirectory.audioCategories : DEFAULT_AUDIO_CATEGORIES);
-	const [producerAccountOrganizations, setProducerAccountOrganizations] = useState(cachedDirectory?.producerAccountOrganizations || {});
-	const initialAudios = Array.isArray(comicPublishSettings.audioCandidates) && comicPublishSettings.audioCandidates.length
-		? comicPublishSettings.audioCandidates
-		: (comicPublishSettings.specifiedAudioId ? [{ id: comicPublishSettings.specifiedAudioId, name: comicPublishSettings.specifiedAudioName || `音频 ${comicPublishSettings.specifiedAudioId}`, status: 'ENABLE' }] : []);
-	const [audios, setAudios] = useState(initialAudios);
-	const [audiosError, setAudiosError] = useState('');
-	const [audiosLoading, setAudiosLoading] = useState(false);
-	const [producerAccountsLoading, setProducerAccountsLoading] = useState(!cachedDirectory);
-	const [producerAccountsWarning, setProducerAccountsWarning] = useState('');
-	const [organizationsWarning, setOrganizationsWarning] = useState('');
-	const [audioCategoriesWarning, setAudioCategoriesWarning] = useState('');
-	const [directoryFailureKind, setDirectoryFailureKind] = useState('');
-	const [directoryFailureMessage, setDirectoryFailureMessage] = useState('');
-	const [directoryAvailable, setDirectoryAvailable] = useState(null);
-	const [publishKeyConfigured, setPublishKeyConfigured] = useState(null);
-  const patchComicPublishSettings = next => onChange({
-    ...value,
-    comicPublishSettings: { ...comicPublishSettings, ...next }
-  });
-  useEffect(() => {
-    let active = true;
-    setProducerAccountsLoading(!cachedDirectory);
-    getN8ComicPublishStatus({ silent: true, suppressGlobalError: true }).then(response => {
-      if (!active) return;
-      const nextAccounts = Array.isArray(response?.producerAccounts) ? response.producerAccounts : [];
-      const nextOrganizations = Array.isArray(response?.organizations) ? response.organizations : [];
-      const nextCategories = Array.isArray(response?.audioCategories) && response.audioCategories.length ? response.audioCategories : (cachedDirectory?.audioCategories || DEFAULT_AUDIO_CATEGORIES);
-      const nextAccountOrganizations = response?.producerAccountOrganizations && typeof response.producerAccountOrganizations === 'object' ? response.producerAccountOrganizations : {};
-      setProducerAccounts(nextAccounts);
-      setOrganizations(nextOrganizations);
-      setAudioCategories(nextCategories);
-      setProducerAccountOrganizations(nextAccountOrganizations);
-      setProducerAccountsWarning(String(response?.producerAccountsWarning || ''));
-      setOrganizationsWarning(String(response?.organizationsWarning || ''));
-      setAudioCategoriesWarning(String(response?.audioCategoriesWarning || ''));
-      setDirectoryAvailable(typeof response?.directoryAvailable === 'boolean' ? response.directoryAvailable : null);
-      setPublishKeyConfigured(typeof response?.publishKeyConfigured === 'boolean' ? response.publishKeyConfigured : null);
-      setDirectoryFailureKind('');
-      setDirectoryFailureMessage('');
-      writeComicPublishDirectoryCache({ producerAccounts: nextAccounts, organizations: nextOrganizations, audioCategories: nextCategories, producerAccountOrganizations: nextAccountOrganizations });
-    }).catch(error => {
-      if (!active) return;
-      const failure = describeN8DirectoryFailure(error);
-      setDirectoryFailureKind(failure.kind);
-      setDirectoryFailureMessage(failure.message);
-    }).finally(() => { if (active) setProducerAccountsLoading(false); });
-    return () => { active = false; };
-  }, []);
-  const manualAudioMode = singleBook && comicPublishSettings.audioCategorySelectionMode === 'manual';
-  const manualAudioReady = Boolean(singleBook && manualAudioMode && comicPublishSettings.organizationId && comicPublishSettings.audioCategoryId);
-  const loadComicPublishAudios = async (organizationId, audioCategoryId, selectedCategory = {}) => {
-    if (!organizationId || !audioCategoryId) return;
-    setAudiosLoading(true);
-    setAudiosError('');
-    try {
-      const result = await getN8ComicPublishAudios({ organizationId, audioCategoryId }, { silent: true, suppressGlobalError: true });
-      const candidates = Array.isArray(result?.audios) ? result.audios : [];
-      setAudios(candidates);
-      setAudiosError('');
-      const selected = chooseN8Audio(candidates, comicPublishSettings.specifiedAudioId);
-      patchComicPublishSettings({
-        ...selectedCategory,
-        audioCandidates: candidates,
-        specifiedAudioId: selected?.id || '',
-        specifiedAudioName: selected?.name || ''
-      });
-    } catch (error) {
-      setAudiosError(describeN8DirectoryFailure(error).message);
-    } finally {
-      setAudiosLoading(false);
-    }
-  };
-  // 目录读取成功但上游返回业务错误时，三路 warning 里保存的就是上游 code/message。
-  // 目录失败只作为字段下方的候选区提示，不阻塞字段显示与保存。
-  const accountDirectoryHint = producerAccountsWarning
-    || directoryFailureMessage
-    || (directoryFailureKind === 'auth' ? '登录已失效，请重新登录' : '')
-    || (directoryAvailable === false ? 'N8 目录服务未配置（服务器缺少 N8 后台登录令牌）' : '');
-  return <Space direction="vertical" size={16} style={{ width: '100%' }}>
-    <Alert
-      type="info"
-      showIcon
-      message={singleBook ? '当前书漫画发布配置' : '漫画发布默认设置'}
-      description={singleBook ? '当前书未单独修改的项目继续继承批次默认值；这里只保存本书的差异。图片顺序、宽高、格式、签名和上传重试由系统自动处理。' : '这里只设置一次，当前批次的每本漫画都会自动继承。图片顺序、宽高、格式、签名和上传重试由系统自动处理。'}
-    />
-    {publishKeyConfigured === false
-      ? <Alert type="info" showIcon message="发布密钥未配置：目录可以读取，但发布/上传不可用。请配置服务器环境变量 QIANTIE_N8_COMIC_OPEN_API_KEY 后重启服务。" />
-      : null}
-    <section className="batch-factory-engine-card">
-      <header><b>素材字段映射</b><HelpTip title="素材字段映射">这里和 N8 素材库的字段保持一致；单书配置未覆盖时，自动继承发布统一设置。</HelpTip></header>
-      <div className="batch-factory-engine-card-body batch-factory-engine-grid">
-        <label className="batch-factory-engine-field">
-          <span><b>文案来源</b></span>
-          <Segmented block className="batch-factory-copy-source-segmented" value={comicPublishSettings.copySource || 'original'} options={[{ value: 'original', label: '原创' }, { value: 'bookstore', label: '书城' }, { value: 'third_party', label: '第三方' }]} onChange={copySource => patchComicPublishSettings({ copySource })} />
-        </label>
-        <label className="batch-factory-engine-field">
-          <span><b>素材来源</b></span>
-          <Select value={comicPublishSettings.materialSource || 'ORIGINAL'} options={[{ value: 'ORIGINAL', label: '原创制作' }, { value: 'ORIGINAL_TEXT', label: '原文制作' }, { value: 'DERIVATIZATION', label: '衍生制作' }, { value: 'AI_PRE', label: 'AI前帖' }, { value: 'AUTOMATED_CLIPPING', label: '自动化剪辑' }, { value: 'AUTOMATED_CLIPPING_A', label: '自动化剪辑AI文案' }, { value: 'AUTOMATED_CLIPPING_AI_PRE', label: '自动化剪辑AI前贴' }, { value: 'MANGA_VIDEO_AUTOMATED_CLIPPING', label: '漫剧自动化剪辑' }, { value: 'THIRD_PARTY', label: '第三方' }, { value: 'THIRD_PARTY_REMOVE_WATERMARKS', label: '第三方去水印' }, { value: 'TOOL', label: '素材工具' }, { value: 'GROUP_AI', label: '自动化AI' }, { value: 'AUTOMATED_CLIPPING_BLAZING_FAST', label: '自动化3分钟' }, { value: 'AUTOMATED_CLIPPING_MANGA', label: '自动化漫改' }]} onChange={materialSource => patchComicPublishSettings({ materialSource })} />
-        </label>
-        <div className="batch-factory-engine-field">
-          <span><b>制作者管理员账号（创意者）</b><HelpTip title="制作者管理员账号（创意者）">这就是 N8 素材库里的创意者，不再单独保存第二个账号。</HelpTip></span>
-          <Select showSearch optionFilterProp="label" loading={producerAccountsLoading} placement="bottomLeft" value={comicPublishSettings.producerAdminName || undefined} options={producerAccountOptions(producerAccounts, comicPublishSettings.producerAdminName, comicPublishSettings.organizationId, producerAccountOrganizations, producerAccountsLoading)} placeholder="请选择制作者管理员账号" getPopupContainer={() => document.body} onChange={producerAdminName => patchComicPublishSettings({ producerAdminName, creativeAdminName: producerAdminName })} />
-          {!accountDirectoryHint && producerAccountOptions(producerAccounts, comicPublishSettings.producerAdminName, comicPublishSettings.organizationId, producerAccountOrganizations).length === 0 ? <small>当前组织没有可用的制作者账号，请先选择正确的组织。</small> : null}
-          {accountDirectoryHint ? <small className="batch-factory-engine-note">{accountDirectoryHint}</small> : null}
-        </div>
-        <div className="batch-factory-engine-field">
-          <span><b>组织</b></span>
-          <Select placement="bottomLeft" value={String(comicPublishSettings.organizationId || '') || undefined} options={organizations.map(item => ({ value: String(item.id), label: `${item.name}（组织 ${item.id}）` }))} placeholder="请选择 N8 组织" getPopupContainer={() => document.body} onChange={organizationId => { const selected = organizations.find(item => String(item.id) === String(organizationId)); setAudios([]); patchComicPublishSettings({ organizationId: String(organizationId || ''), organizationName: selected?.name || '', audioCandidates: [], specifiedAudioId: '', specifiedAudioName: '' }); }} />
-          {organizationsWarning ? <small className="batch-factory-engine-note">{organizationsWarning}</small> : null}
-        </div>
-      </div>
-    </section>
-    <section className="batch-factory-engine-card">
-      <header><b>发布账号与作品匹配</b><HelpTip title="漫画发布统一">账号必须与漫画后台中已启用的管理员账号完全一致。找不到同名作品时，发布前会让你选择一次。</HelpTip></header>
-      <div className="batch-factory-engine-card-body batch-factory-engine-grid">
-		<label className="batch-factory-engine-field" style={{ gridColumn: '1 / -1' }}>
-		  <span className="batch-factory-field-title-inline"><b>音频匹配方式</b><HelpTip title="音频匹配方式">发布时按每本书的男女频和风格自动匹配并随机选择音频；重试会继续使用第一次选中的音频。</HelpTip></span>
-		  <Segmented block value={manualAudioMode ? 'manual' : 'auto'} options={audioMatchingModeOptions(singleBook)} onChange={audioCategorySelectionMode => patchComicPublishSettings(audioCategorySelectionMode === 'manual' ? { audioCategorySelectionMode: 'manual' } : { audioCategorySelectionMode: 'auto', audioCategoryId: null, audioCategoryName: '', audioCandidates: [], specifiedAudioId: '', specifiedAudioName: '' })} />
-		</label>
-		{singleBook ? <div className="batch-factory-engine-field">
-          <span><b>启用中的音频分类</b><HelpTip title="启用中的音频分类">请照着漫画后台“音频分类”页面中启用状态的分类名称填写，发布前会同时显示名称和 ID 供你核对。</HelpTip></span>
-          <Select
-            value={comicPublishSettings.audioCategoryName || ''}
-            options={audioCategories.map(item => ({ value: item.name, label: `${item.name}（ID ${item.id}）`, id: item.id }))}
-            placeholder="请选择 N8 启用中的音频分类"
-            showSearch
-            optionFilterProp="label"
-            placement="bottomLeft"
-            getPopupContainer={() => document.body}
-			disabled={!manualAudioMode}
-            onChange={audioCategoryName => {
-              const selected = audioCategories.find(item => item.name === audioCategoryName);
-              const next = { audioCategoryName, audioCategoryId: selected?.id || null, audioCategorySelectionMode: 'manual', audioCandidates: [], specifiedAudioId: '', specifiedAudioName: '' };
-              patchComicPublishSettings(next);
-              if (singleBook) loadComicPublishAudios(String(comicPublishSettings.organizationId || ''), String(selected?.id || ''), next);
-            }}
-          />
-          {audioCategoriesWarning ? <small className="batch-factory-engine-note">{audioCategoriesWarning}</small> : null}
-		</div> : null}
-        {singleBook ? <div className="batch-factory-engine-field"><span><b>指定音频</b></span><Select loading={audiosLoading} disabled={!manualAudioReady} showSearch optionFilterProp="label" value={String(comicPublishSettings.specifiedAudioId || '') || undefined} options={audios.map(item => ({ value: String(item.id), label: `${item.name}（ID ${item.id}）` }))} placeholder={manualAudioMode ? (manualAudioReady ? '选择分类后随机带出，可手动更换' : '请先选择组织和音频分类') : '自动模式将在每本书发布时随机选择'} onChange={specifiedAudioId => { const selected = audios.find(item => String(item.id) === String(specifiedAudioId)); patchComicPublishSettings({ specifiedAudioId: selected?.id || '', specifiedAudioName: selected?.name || '', audioCategorySelectionMode: 'manual' }); }} />
-          {manualAudioMode && comicPublishSettings.organizationId && comicPublishSettings.audioCategoryId ? <Button size="small" loading={audiosLoading} onClick={() => loadComicPublishAudios(String(comicPublishSettings.organizationId), String(comicPublishSettings.audioCategoryId))}>刷新指定音频</Button> : null}
-          {audiosError ? <small className="batch-factory-engine-note">{audiosError}</small> : null}
-          {!audiosError && !audios.length && comicPublishSettings.organizationId && comicPublishSettings.audioCategoryId ? <small>当前分类和组织下没有可用指定音频</small> : null}
-          {manualAudioMode && comicPublishSettings.specifiedAudioId ? <small>已随机选择，可手动更换；保存后重试不会重新随机。</small> : null}</div> : null}
-        <label className="batch-factory-engine-field">
-          <span><b>作品匹配方式</b></span>
-          <Segmented
-            block
-            value={comicPublishSettings.workMatchMode || 'title_auto'}
-            options={[
-              { value: 'title_auto', label: '按书名自动匹配' },
-              { value: 'manual', label: '发布时手动选择' }
-            ]}
-            onChange={workMatchMode => patchComicPublishSettings({ workMatchMode })}
-          />
-        </label>
-      </div>
-    </section>
-    <Alert type="success" showIcon message={singleBook ? '当前书发布时，只需要确认漫画合集和匹配到的作品。' : '以后发布时，你只需要确认漫画合集和匹配到的作品。'} />
-  </Space>;
-}
-
+export { BatchFactoryComicPublishSettingsForm } from './BatchFactoryImagePublishSettingsForm';
 export function BatchFactoryAiReasoningForm({ value, onChange, batchId, productionMode = 'video' }) {
   const [catalog, setCatalog] = useState([]);
   const [catalogFailedModules, setCatalogFailedModules] = useState([]);
@@ -760,6 +596,7 @@ export function BatchFactoryUnifiedSettingsModal({ open, batch, onClose, onSaved
       const confirmed = await new Promise(resolve => {
         Modal.confirm({
           title: `确认把整批切换为${nextLabel}？`,
+          className: 'batch-factory-confirm-modal',
           content: `整批 ${batchBooks.length} 本将切换为${nextLabel}。已生成的内容和资产全部保留，随时可切回。${overrideCount ? `${overrideCount} 本单书的模式覆盖将被清除。` : ''}在途${previousLabel}任务不会迁移。`,
           okText: '确认切换',
           cancelText: '保持当前模式',
@@ -792,7 +629,7 @@ export function BatchFactoryUnifiedSettingsModal({ open, batch, onClose, onSaved
   const activeTab = textMode && selectedTab === 'reasoning' ? 'models' : selectedTab;
   return <Modal title={<div className="batch-factory-unified-settings-title"><BatchFactoryAutomationPresetManager value={draftPatch} productionMode={productionMode} onLoad={setDraftPatch} /><span>统一配置</span><BatchFactoryProductionModeControl value={draftPatch.productionMode} disabled={modeSaving} onChange={changeProductionMode} /></div>} open={open} onCancel={onClose} width={980} destroyOnClose={false} className="batch-factory-unified-settings-modal" footer={<Space><span className="batch-factory-unified-settings-scope">{textMode ? '保存后，使用继承设置的书会跟随此次修改。' : <>保存将覆盖本批次 {(Array.isArray(batch?.books) ? batch.books.length : 0) || 0} 本书的模型等配置（含单书改动）。批次敏感模式仅用于继承的书。</>}</span><Button onClick={onClose}>取消</Button><Button type="primary" loading={saving} onClick={save}>保存统一配置</Button></Space>}>
     {modeNotice ? <Alert type="warning" showIcon closable message={modeNotice} style={{ marginBottom: 12 }} onClose={() => setModeNotice('')} /> : null}
-    {textMode ? <TextProductionSettingsForm open={open} value={normalizeTextProductionConfig(draftPatch)} onChange={changes=>setDraftPatch(current=>applyTextProductionChanges(current,changes))}/> : <Tabs activeKey={activeTab} onChange={setActiveTab} items={[
+    {textMode ? <TextProductionSettingsForm batchId={batch?.id} bookId={batch?.books?.[0]?.id} open={open} value={normalizeTextProductionConfig(draftPatch)} onChange={changes=>setDraftPatch(current=>applyTextProductionChanges(current,changes))}/> : <Tabs activeKey={activeTab} onChange={setActiveTab} items={[
       { key: 'models', label: '模型配置', children: <BatchFactoryEngineSettingsForm value={draftPatch} onChange={setDraftPatch} sections={['models', 'audio', 'sensitive']} active={open && activeTab === 'models'} /> },
       ...(textMode ? [] : [{ key: 'reasoning', label: 'AI 推理', children: <BatchFactoryAiReasoningForm batchId={batch?.id} productionMode={draftPatch.productionMode} value={draftPatch.aiPromptConfig} onChange={aiPromptConfig => setDraftPatch(current => ({ ...current, aiPromptConfig }))} /> }]),
       { key: 'publish', label: '发布统一', children: productionMode === 'comic' ? <BatchFactoryComicPublishSettingsForm value={draftPatch} onChange={setDraftPatch} books={batch?.books || []} /> : <BatchFactoryPublishSettingsForm value={draftPatch} onChange={setDraftPatch} active={batchFactoryShouldLoadPublishEnvironment({ open, activeTab, productionMode })} /> }

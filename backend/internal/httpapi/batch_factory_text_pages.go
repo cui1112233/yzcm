@@ -125,6 +125,8 @@ func registerBatchTextRoutes(m *http.ServeMux, opt RouterOptions, c *BatchAutoma
 		{"POST", "cover/preview", a.picture}, {"POST", "cover/render", a.picture}, {"POST", "cover/upload", a.upload}, {"POST", "cover/restore", a.restore},
 		{"GET", "backgrounds", a.backgrounds}, {"POST", "backgrounds", a.upload}, {"GET", "backgrounds/{backgroundId}/content", a.content},
 		{"GET", "artifacts/{artifactId}/content", a.content}, {"GET", "collections", a.collections}, {"POST", "collections", a.collections}, {"GET", "collections/{collectionId}", a.collections},
+		{"GET", "collections/{collectionId}/download", a.downloadCollection},
+		{"GET", "cover/display", a.displayCover},
 	} {
 		m.HandleFunc(route.method+" "+base+route.path, a.scoped(route.fn))
 	}
@@ -155,7 +157,8 @@ type textSnapshot struct {
 func bookTextSnapshot(x textRequest) (textSnapshot, error) {
 	var s textSnapshot
 	raw := map[string]json.RawMessage{}
-	for k, d := range map[string]string{"textPageTarget": "targetCharacters", "imageAspectRatio": "aspectRatio", "textFontId": "fontId", "textFontSize": "fontSize", "textFontWeight": "fontWeight", "textLineHeight": "lineHeight", "textParagraphSpacing": "paragraphSpacing", "textPadding": "padding", "textAlign": "align", "textColor": "textColor", "textHighlightColor": "highlightColor", "textMaxHeightRatio": "maxHeightRatio"} {
+	raw["paginationMode"] = json.RawMessage(`"auto"`)
+	for k, d := range map[string]string{"textPaginationMode": "paginationMode", "textPageTarget": "targetCharacters", "imageAspectRatio": "aspectRatio", "textFontId": "fontId", "textFontSize": "fontSize", "textFontWeight": "fontWeight", "textLineHeight": "lineHeight", "textParagraphSpacing": "paragraphSpacing", "textPadding": "padding", "textAlign": "align", "textColor": "textColor", "textHighlightColor": "highlightColor", "textHighlightRules": "highlightRules", "textHighlightLines": "highlightLines", "textMaxHeightRatio": "maxHeightRatio"} {
 		if v := x.settings[k]; len(v) > 0 {
 			raw[d] = v
 		}
@@ -180,6 +183,15 @@ func bookTextSnapshot(x textRequest) (textSnapshot, error) {
 			s.Background.Kind = bg.Type
 		}
 	}
+	coverLayout := txt.DefaultCoverLayout(s.Layout.AspectRatio)
+	coverRaw := map[string]json.RawMessage{}
+	coverEncoded, err := json.Marshal(coverLayout)
+	if err != nil {
+		return s, err
+	}
+	if err = json.Unmarshal(coverEncoded, &coverRaw); err != nil {
+		return s, err
+	}
 	if v := x.settings["textCover"]; len(v) > 0 {
 		if err := json.Unmarshal(v, &s.Cover); err != nil {
 			return s, txt.ErrInvalid
@@ -192,9 +204,9 @@ func bookTextSnapshot(x textRequest) (textSnapshot, error) {
 				return s, txt.ErrInvalid
 			}
 			for k, val := range cover.Layout {
-				raw[k] = val
+				coverRaw[k] = val
 			}
-			encoded, err := json.Marshal(raw)
+			encoded, err := json.Marshal(coverRaw)
 			if err != nil {
 				return s, txt.ErrInvalid
 			}
@@ -205,6 +217,12 @@ func bookTextSnapshot(x textRequest) (textSnapshot, error) {
 			s.Cover.Layout = &merged
 		}
 	}
+	if s.Cover.Layout == nil {
+		s.Cover.Layout = &coverLayout
+	}
+	// System covers use the built-in illustration; body backgrounds remain independent.
+	s.Cover.Background = nil
+	s.Cover.ClearBackground = false
 	if v := x.settings["highlightReuseEnabled"]; len(v) > 0 {
 		if err := json.Unmarshal(v, &s.HighlightReuseEnabled); err != nil {
 			return s, txt.ErrInvalid
@@ -215,6 +233,9 @@ func bookTextSnapshot(x textRequest) (textSnapshot, error) {
 		}
 		_ = json.Unmarshal(x.settings["publishSettings"], &legacy)
 		s.HighlightReuseEnabled = legacy.Enabled
+	}
+	if s.Layout.HighlightRules != "" {
+		s.HighlightReuseEnabled = txt.HighlightRuleEnabled(s.Layout.HighlightRules, "keywords")
 	}
 	if s.HighlightReuseEnabled {
 		words, err := json.Marshal(x.book.SourceMetadata["illustrationHighlightKeywords"])
@@ -231,7 +252,9 @@ func bookTextSnapshot(x textRequest) (textSnapshot, error) {
 	if err != nil {
 		return s, err
 	}
-	fingerprint, err := json.Marshal([]any{s.Title, coverStyle.Layout, coverStyle.Background})
+	coverStyle.Layout.HighlightRules = ""
+	coverStyle.Layout.HighlightLines = ""
+	fingerprint, err := json.Marshal([]any{s.Title, coverStyle.Layout, txt.DefaultCoverVersion})
 	if err != nil {
 		return s, txt.ErrInvalid
 	}
@@ -356,6 +379,11 @@ func (a textAPI) listAfterEdit(w http.ResponseWriter, x textRequest, previous []
 		return txt.ErrConflict
 	}
 	result := map[string]any{"document": d, "version": version, "sentenceBreaks": breaks, "pages": ps, "artifacts": views, "fonts": renderfont.Catalog()}
+	if desired, err := bookTextSnapshot(x); err == nil {
+		result["settingsSnapshot"] = desired
+	} else {
+		result["settingsError"] = "当前排版配置无效，请检查字号、边距和字体"
+	}
 	if previous != nil {
 		before := make(map[string]txt.Page, len(previous))
 		for _, p := range previous {

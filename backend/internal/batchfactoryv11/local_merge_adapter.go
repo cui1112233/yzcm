@@ -360,25 +360,6 @@ func (a *LocalMergeAdapter) run(taskID, batchID string, sources []MergeMedia, op
 			// do not expose an unusable bucket URL to the browser.
 			outputURL = "/api/batch-factory/v12/batches/" + batchID + "/merge-media/" + taskID
 		}
-		// TOS remains the durable remote copy, while the authenticated player
-		// needs a seekable local file for reliable Range playback. Keep the same
-		// task ID locally so the merge-media route can serve it immediately and
-		// still fall back to TOS after a host migration.
-		file, openErr := os.Open(outputPath)
-		if openErr != nil {
-			a.fail(taskID, openErr)
-			return
-		}
-		_, saveErr := a.Artifacts.SaveMP4(taskID, file)
-		closeErr := file.Close()
-		if saveErr != nil {
-			a.fail(taskID, saveErr)
-			return
-		}
-		if closeErr != nil {
-			a.fail(taskID, closeErr)
-			return
-		}
 	} else {
 		file, openErr := os.Open(outputPath)
 		if openErr != nil {

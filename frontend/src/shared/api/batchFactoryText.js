@@ -13,10 +13,13 @@ export const splitTextPage = (b,k,i,p) => post(page(b,k,i)+'/split',p);
 export const mergeTextPage = (b,k,i,p) => post(page(b,k,i)+'/merge',p);
 async function preview(path, payload, {withMetadata, ...options} = {}) {
   let warning = '';
+  let pageCount=1;
   const blob = await post(path,payload,{...options,responseType:'blob',suppressGlobalError:true,onResponseHeaders(headers){
     if (headers.get('X-Text-Contrast') === 'low') warning = '文字与背景对比度较低，可调整文字颜色或背景。';
+    const count=Number(headers.get('X-Text-Preview-Pages'));
+    if(Number.isInteger(count) && count>0)pageCount=count;
   }});
-  return withMetadata ? {blob, warning} : blob;
+  return withMetadata ? {blob, warning, pageCount} : blob;
 }
 export const previewTextPage = (b,k,i,p,options) => preview(page(b,k,i)+'/preview',p,options);
 export const renderTextPage = (b,k,i,p) => post(page(b,k,i)+'/render',p);
@@ -34,5 +37,6 @@ export const uploadTextBackground = (b,k,file,name) => upload(base(b,k)+'backgro
 export const createTextCollection = (b,k,p) => post(base(b,k)+'collections',p);
 export const listTextCollections = (b,k,options) => apiRequest(base(b,k)+'collections',options);
 export const getTextCollection = (b,k,i,options) => apiRequest(base(b,k)+'collections/'+id(i),options);
+export const downloadTextCollection = (b,k,i) => apiRequest(base(b,k)+'collections/'+id(i)+'/download',{responseType:'blob'});
 export const getTextArtifactBlob = (b,k,i) => apiRequest(base(b,k)+'artifacts/'+id(i)+'/content',{responseType:'blob'});
 export const getTextBackgroundBlob = (b,k,i) => apiRequest(base(b,k)+'backgrounds/'+id(i)+'/content',{responseType:'blob'});

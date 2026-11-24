@@ -1,4 +1,5 @@
 import React, { useEffect, useImperativeHandle, useRef, useState } from 'react';
+import { ConfigProvider, Select } from 'antd';
 import { createTextCollection, getTextCollection, listTextCollections, listTextPages, prepareTextBook } from '../../../shared/api/batchFactoryText.js';
 import * as api from '../../../shared/api/batchFactoryText.js';
 import { getBatch, saveBookOverride, publishTextCollection, getTextPublishStatus } from '../../../shared/api/batchFactoryV12.js';
@@ -10,6 +11,7 @@ import { textPublishImageProgress, textPublishStatus } from './batchFactoryBookS
 import { textRetryConfirmation, textUploadControl } from './batchFactoryNovelListHelpers.js';
 import { updateTextProductionSettings } from './textProductionConfig.js';
 import './text-media-panel.css';
+import {collectionIsOutdated,textUpdateState} from './textWorkflowStatus.js';
 
 const tabs = [['cover', '封面'], ['pages', '文字页'], ['collections', '文本合集']];
 const empty = { pages: [], artifacts: [], document: null };
@@ -49,10 +51,11 @@ function useTextLibrary(batchId, bookId, refresh) {
   return { snapshot, collections, loading, error };
 }
 
-function CollectionChoices({ collections, current, choose }) {
+function CollectionChoices({ collections, current, choose,document,pages }) {
   return <div className="text-media-collections">{collections.length ? collections.map((item, index) =>
     <button type="button" key={item.id} aria-pressed={item.id === current?.id} onClick={() => choose(item.id)}>
       文本合集 {pageNumber(collections.length - index)}
+      <small>{item.items?.length ? `${item.items.length} 页 · ` : ''}分页版本 {item.paginationVersion || '—'}{collectionIsOutdated(item,document,pages)?' · 历史版本':''}</small>
     </button>) : <p>暂无文本合集</p>}</div>;
 }
 
@@ -135,13 +138,17 @@ function TextBookLibrary({ batchId, book, settings = {}, initialPageId, initialT
     : textUploadControl(collection, onUpload ? {publish:collection} : selectedReceipt?.status);
   async function publish() {
     if (upload.disabled || actionLock.current) return;
+    const historical=collectionIsOutdated(currentCollection,doc,pages) || workflow.settingsChanged;
+    const targets=settings.comicPublishSettings || {};
+    const summary=`上传确认\n作品：${title}\n合集：${collection.id}\n页数：${collectionItems.length || '请核对合集预览'}\n组织：${targets.organizationName || targets.organizationId || '按发布配置'}\n上传人：${targets.producerAdminName || '按发布配置'}${historical?'\n注意：当前合集或排版已变化，本次将上传所选历史合集。':''}`;
+    if(!upload.force && !window.confirm(summary))return;
     let requestKey = upload.requestKey;
     let confirmation;
     if (upload.force) {
       try {
         confirmation = textRetryConfirmation(batchId, book.id, collection.id);
         requestKey = await confirmation.authorize(
-          () => window.confirm('这个文本合集已上传，确认再次上传？'),
+          () => window.confirm(summary+'\n这个文本合集已上传，确认再次上传？'),
           () => window.confirm('上次重传尚未收到回复，要继续同一次上传吗？')
         );
         if (!requestKey) return;
@@ -166,11 +173,12 @@ function TextBookLibrary({ batchId, book, settings = {}, initialPageId, initialT
   const activeId = tab === 'cover' ? doc?.coverArtifactId : state.artifactId;
   const display = candidates.find(a => a.id === selectedCandidate) || candidates.find(a => a.id === activeId);
   const preview = tab === 'collections'
-    ? collectionItems.find(i => i.artifactId === collectionImage)?.contentUrl || currentCollection?.coverContentUrl
+    ? collectionItems.find(i => i.artifactId === collectionImage)?.contentUrl || collectionItems[0]?.contentUrl
     : display?.contentUrl;
   const title = book.title || '未命名作品';
   const selectedIds=pages.slice(start-1,end ?? pages.length).map(p=>p.id);
-  const canCompose = canCreateTextCollection(pages, selectedIds, doc, artifacts);
+  const workflow=textUpdateState(snapshot,currentCollection);
+  const canCompose = !workflow.settingsChanged && canCreateTextCollection(pages, selectedIds, doc, artifacts);
   const background = page?.background || doc?.configSnapshot?.background || settings.textBackground;
   const reload = () => setRefresh(value => value + 1);
   const impact=session?textPageDirtyImpact(session.base,session.draft):'none';
@@ -227,7 +235,6 @@ function TextBookLibrary({ batchId, book, settings = {}, initialPageId, initialT
     const changes=pageChanges(session.base,session.draft,session.rev,session.docRev);
     if(cover) {
       const config={};
-      if(changes.background)config['textCover.background']=changes.background;
       if(changes.layout)for(const key of ['fontId','fontSize','fontWeight','align','textColor']){
         if(changes.layout[key]!==session.base.layout[key])config['textCover.layout.'+key]=changes.layout[key];
       }
@@ -255,6 +262,13 @@ function TextBookLibrary({ batchId, book, settings = {}, initialPageId, initialT
       catch(e){failures.push('第 '+item.ordinal+' 页：'+e.message);}
     }
     if(failures.length)throw Error('排版已保存，以下页面需重新生成：'+failures.join('；'));
+  }
+  async function updateAffected(){
+    if(workflow.stage==='reflow' && workflow.locked)throw Error(`有 ${workflow.locked} 页手动上传图已锁定，请先核对并解除锁定，再重新分页。`);
+    const next=await prepareTextBook(batchId,book.id,doc?{expectedRevision:doc.revision,reflow:workflow.stage==='reflow'}:{});
+    await renderUpdated(next.pages || []);
+    const latest=await listTextPages(batchId,book.id);
+    if(latest.document && !latest.document.coverArtifactId && !latest.document.coverLocked)await api.renderTextCover(batchId,book.id,{expectedRevision:latest.document.revision});
   }
   async function applyBookBackground() {
     const result=await saveBookPatch({textBackground:session.draft.background});
@@ -295,8 +309,15 @@ function TextBookLibrary({ batchId, book, settings = {}, initialPageId, initialT
     });
     chooseCollection(result.id); setCollectionDetail(result); setCollectionImage(''); setTab('collections');
   }
-  return <div className="text-media-panel" aria-label="文本媒体库">
-    <section className="text-media-preview" aria-label="成品预览">{live.url?<img src={live.url} alt="排版预览"/>:preview
+  async function downloadCollection(){
+    const blob=await api.downloadTextCollection(batchId,book.id,collection.id);
+    if(!blob?.size || blob.type!=='application/zip')throw Error('未收到有效的合集压缩包，请重试');
+    const url=URL.createObjectURL(blob),anchor=document.createElement('a');
+    anchor.href=url;anchor.download=(title.replace(/[\\/:*?"<>|\x00-\x1f]/g,'_').trim() || '文本合集')+'.zip';
+    document.body.appendChild(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }
+  return <ConfigProvider theme={{token:{colorBgElevated:'var(--sh-panel)',colorBgContainer:'var(--sh-panel-strong)',colorText:'var(--sh-text)',colorTextPlaceholder:'var(--sh-muted)',colorBorder:'var(--sh-line)',controlItemBgActive:'var(--sh-panel-strong)',controlItemBgHover:'var(--sh-panel-strong)',colorPrimary:'var(--sh-accent)'}}}><div className="text-media-panel" aria-label="文本媒体库">
+    <section className="text-media-preview" aria-label="成品预览">{live.url?<img src={live.url} alt="排版预览"/>:session?<div className="text-media-empty">{live.error?'当前排版无法预览，请调整设置':'正在更新排版预览…'}</div>:preview
       ? <AuthenticatedTextPageImage contentUrl={preview} alt={tab === 'pages' ? `文字页 ${page?.ordinal}` : tab === 'cover' ? '文本封面' : '文本合集预览'} />
       : <div className="text-media-empty">{loading ? '正在读取文本页…' : tab === 'cover' ? '暂无封面图' : tab === 'collections' ? '暂无合集预览' : state.error || state.label}</div>}
       {(live.error||live.warning) && <div className="text-preview-note" role="status">{live.error||live.warning}</div>}</section>
@@ -309,6 +330,7 @@ function TextBookLibrary({ batchId, book, settings = {}, initialPageId, initialT
         <button key={key} type="button" role="tab" aria-label={label} disabled={!!busy} aria-selected={tab === key} onClick={() => {if(!discard())return;setTab(key); selectCandidate('');setActionError('');}}>
           {label}{key === 'pages' ? ' '+pages.length : key === 'collections' ? ' '+collections.length : ''}</button>)}</nav>
       <div className="text-media-scroll" role="tabpanel">
+        <div className={`text-workflow-status is-${workflow.stage}`} role="status"><span>{workflow.label}</span>{!session && ['prepare','reflow','render'].includes(workflow.stage) && <button type="button" disabled={!!busy} onClick={()=>run('update',updateAffected)}>更新受影响内容</button>}</div>
         {(error || actionError) && <div role="alert">{error || actionError} <button type="button" onClick={() => {setActionError('');reload();}}>刷新</button></div>}
         {selectedReceipt?.error && <div role="alert">{selectedReceipt.error} <button type="button" onClick={reload}>刷新上传状态</button></div>}
         {publishRecord && <div role="status">{selectedReceipt.status.published ? '已上传' : ({
@@ -316,31 +338,35 @@ function TextBookLibrary({ batchId, book, settings = {}, initialPageId, initialT
           failed:'上传失败', upload_incomplete:'图片上传未完成'
         })[publishState]} {textPublishImageProgress(publishRecord)} {publishRecord.errorMessage || publishRecord.error}</div>}
         {tab === 'collections' ? <>
-          <CollectionChoices collections={collections} current={collection} choose={id=>{chooseCollection(id);setCollectionImage('');}} />
-          {collection && <section><h4>合集内容</h4><div className="text-media-page-choices"><button type="button" onClick={()=>setCollectionImage('')}>封面</button>
+          <CollectionChoices collections={collections} current={collection} document={doc} pages={pages} choose={id=>{chooseCollection(id);setCollectionImage('');}} />
+          {collection && <section><h4>合集内容</h4><div className="text-media-page-choices">
             {collectionItems.map(i=><button type="button" key={i.artifactId} onClick={()=>setCollectionImage(i.artifactId)}>文字页 {i.ordinal}</button>)}</div></section>}
         </> : <>
           <CandidateList items={candidates} selectedId={display?.id} activeId={activeId} onSelect={id=>{if(!busy && discard())selectCandidate(id);}}/>
           {tab === 'pages' ? <>
-            <section><h4>本页背景</h4>{background?.color ? <span><i className="text-media-swatch" style={{backgroundColor:background.color}}/>{background.color}</span> : background?.id ? '背景图片' : '继承整书背景'}</section>
+            <section className="text-media-background-summary"><h4>本页背景</h4><span>{background?.id ? '图库背景' : background?.color ? <><i className="text-media-swatch" style={{backgroundColor:background.color}}/>{background.color}</> : '继承整书背景'}</span></section>
             <section><h4>页面内容</h4><p className="text-media-copy">{page?.text || '尚未分页'}</p></section>
           </> : <section><h4>封面标题</h4><p>{doc?.configSnapshot?.cover?.title || title}</p>{doc?.coverLocked && <small>上传成品封面</small>}</section>}
-          {doc && (page || cover) && !session && <section className="text-editor-actions">
+          {doc && (page || cover) && !session && <section className="text-media-operation-section"><h4>{cover?'封面操作':'页面操作 · 仅当前页'}</h4><div className="text-media-operation-grid">
             <button type="button" disabled={!!busy || locked} onClick={edit}>{cover?'调整封面':'排版调整'}</button>
             <button type="button" disabled={!!busy || locked} onClick={()=>run('render',async()=>selectCandidate((await renderCurrent()).id))}>{cover?'生成封面':'生成本页'}</button>
             <label className="text-upload-input">{cover?'上传成品封面':'上传成品页'}<input type="file" disabled={!!busy} accept="image/png,image/jpeg,image/webp" aria-label={cover?'上传成品封面':'上传成品页'} onChange={e=>{const file=e.target.files[0];e.target.value='';uploadCurrent(file);}}/></label>
             {locked && <button type="button" disabled={!!busy} onClick={restoreCurrent}>恢复系统生成</button>}
-            {!cover && !locked && <>
-              {breaks.length>0 && <label>句末<select aria-label="拆页句末" value={split || breaks[0].offset} onChange={e=>setSplit(e.target.value)}>{breaks.map(b=><option key={b.offset} value={b.offset}>{b.label}</option>)}</select></label>}
+            </div>
+          </section>}
+          {doc && page && !cover && !locked && !session && <section className="text-media-operation-section"><h4>拆分与合并</h4>
+              {breaks.length>0 && <div className="text-media-split-field"><span>拆分位置</span><Select aria-label="拆页句末" disabled={!!busy} value={Number(split || breaks[0].offset)} onChange={value=>setSplit(String(value))} options={breaks.map(b=>({value:b.offset,label:b.label}))} getPopupContainer={trigger=>trigger.parentElement}/></div>}
+              <div className="text-media-operation-grid is-pair">
               <button type="button" disabled={!!busy || !breaks.length} onClick={()=>changePages(false)}>在完整句子后拆页</button>
               <button type="button" disabled={!!busy || !pages[pageIndex+1] || pages[pageIndex+1].locked} onClick={()=>changePages(true)}>与下一页合并</button>
-            </>}
+              </div>
           </section>}
-          {session && <TextPageEditor key={session.id} session={session} fonts={snapshot.fonts} batchId={batchId} bookId={book.id} busy={!!busy} stale={stale} impact={impact} onUploading={value=>{backgroundUploading.current=value;}}
+          {session && <TextPageEditor key={session.id} session={session} contrastWarning={live.warning} fonts={snapshot.fonts} batchId={batchId} bookId={book.id} busy={!!busy} stale={stale} impact={impact} onUploading={value=>{backgroundUploading.current=value;}}
             onDraft={fn=>setSession(s=>s?.id===session.id?{...s,draft:fn(s.draft)}:s)} onCancel={discard}
             onSave={()=>run('save',saveEdit)} onApplyBackground={()=>run('background',applyBookBackground)}/>}
-          {!loading && !error && !session && <button type="button" disabled={!!busy} onClick={()=>run('prepare',()=>prepareTextBook(batchId,book.id,doc?{expectedRevision:doc.revision}:{}))}>{doc?'更新文字页':'准备文字页'}</button>}
+          {!loading && !error && !session && <section className="text-media-operation-section"><h4>整书操作</h4><div className="text-media-operation-grid is-pair"><button type="button" disabled={!!busy} onClick={()=>run('prepare',()=>prepareTextBook(batchId,book.id,doc?{expectedRevision:doc.revision}:{}))}>{doc?'更新文字页':'准备文字页'}</button>
           {doc && !session && <button type="button" disabled={!!busy} onClick={()=>{if(window.confirm('按当前排版重新分配页数？手动拆页位置可能变化。'))void run('reflow',()=>prepareTextBook(batchId,book.id,{expectedRevision:doc.revision,reflow:true}));}}>重新分页</button>}
+          </div></section>}
         </>}
         {tab==='collections' && pages.length>0 && <section className="text-layout-fields"><label>合集起始页<input type="number" min="1" max={pages.length} value={start} onChange={e=>setStart(Math.max(1,Math.min(pages.length,Number(e.target.value))))}/></label>
           <label>合集结束页<input type="number" min="1" max={pages.length} value={end ?? pages.length} onChange={e=>setEnd(Math.max(1,Math.min(pages.length,Number(e.target.value))))}/></label></section>}
@@ -351,12 +377,13 @@ function TextBookLibrary({ batchId, book, settings = {}, initialPageId, initialT
         <span>{pageNumber(pageIndex+1)} / {pageNumber(pages.length)}</span>
         <button type="button" aria-label="下一页" disabled={!!busy || pageIndex<0 || pageIndex>=pages.length-1} onClick={()=>move(pages[pageIndex+1].id)}>›</button>
       </div>}<div className="text-media-actions">
-        <button type="button" aria-expanded={expanded} onClick={()=>setExpanded(v=>!v)}>{expanded ? '收起' : '展开'}</button>
+        <button type="button" aria-expanded={expanded} onClick={()=>setExpanded(v=>!v)}>{expanded ? '收起目录' : '页目录'}</button>
         <button type="button" disabled={!!busy || !!session || !canCompose} onClick={()=>run('compose',compose)}>{collections.length ? '重新合成' : '合成当前书'}</button>
+        {tab==='collections' && <button type="button" disabled={!!busy || !!session || !collection} onClick={()=>run('download',downloadCollection)}>{busy==='download'?'正在打包…':'下载合集'}</button>}
         <button type="button" disabled={upload.disabled || !!selectedReceipt?.error || !!busy || !!session} onClick={publish}>{upload.label}</button>
       </div></footer>
     </aside>
-  </div>;
+  </div></ConfigProvider>;
 }
 
 export default function TextMediaPanel(props) {

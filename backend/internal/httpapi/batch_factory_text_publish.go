@@ -362,7 +362,7 @@ func (t textCollectionPublisher) publish(ctx context.Context, s txt.Scope, book 
 		if err != nil {
 			return out, err
 		}
-		if c.ID != id || c.Status != "ready" || len(c.Items) == 0 || c.CoverArtifactID == "" {
+		if c.ID != id || c.Status != "ready" || len(c.Items) == 0 {
 			return out, txt.ErrNotReady
 		}
 		if !r.Resuming {
@@ -383,22 +383,8 @@ func (t textCollectionPublisher) publish(ctx context.Context, s txt.Scope, book 
 		if err != nil {
 			return out, err
 		}
-		files, err := t.repo.ListArtifacts(ctx, s)
-		if err != nil {
-			return out, err
-		}
-		index := slices.IndexFunc(files, func(a txt.PageArtifact) bool { return a.ID == c.CoverArtifactID && a.Kind == "cover" })
-		if index < 0 {
-			return out, fmt.Errorf("%w（封面）", txt.ErrNotReady)
-		}
-		cover := files[index]
-		page, err := p.publishPage(ctx, c.ID, 0, cover.StorageRef, cover.MediaType, cover.SHA256)
-		if err != nil {
-			return out, err
-		}
-		out.Pages = append(out.Pages, page)
 		for _, item := range c.Items {
-			page, err = p.publishPage(ctx, c.ID, item.Ordinal, item.StorageRef, item.MediaType, item.SHA256)
+			page, err := p.publishPage(ctx, c.ID, item.Ordinal, item.StorageRef, item.MediaType, item.SHA256)
 			if err != nil {
 				return out, err
 			}
@@ -415,21 +401,10 @@ func (t textCollectionPublisher) resolveMapping(ctx context.Context, r *cp.Publi
 	if err != nil {
 		return fmt.Errorf("%w：请先配置文本上传人和组织", cp.ErrInvalid)
 	}
-	var website map[string]any
-	if raw := settings["publishSettings"]; len(raw) > 0 {
-		if err = json.Unmarshal(raw, &website); err != nil {
-			return cp.ErrInvalid
-		}
-	}
 	r.Producer = strings.TrimSpace(config.ProducerAdminName)
 	r.OrganizationID = strings.TrimSpace(config.OrganizationID)
-	r.CategoryID = strings.TrimSpace(toString(website["bookCategory"]))
-	r.WebsiteProfileID = strings.TrimSpace(toString(website["websiteProfileId"]))
-	if r.Producer == "" || r.OrganizationID == "" || r.CategoryID == "" || r.WebsiteProfileID == "" {
-		return fmt.Errorf("%w：请在文本发布配置中填写上传人、组织、网站配置档和书籍分类", cp.ErrInvalid)
-	}
-	if profile := selectedPublishProfile(website); profile == nil {
-		return fmt.Errorf("%w：所选网站配置档不存在，请重新同步并选择", cp.ErrInvalid)
+	if r.Producer == "" || r.OrganizationID == "" {
+		return fmt.Errorf("%w：请在文本发布配置中填写上传人和组织", cp.ErrInvalid)
 	}
 	p := t.n8
 	names, _, warning, orgs := p.producerDirectorySnapshot(ctx)

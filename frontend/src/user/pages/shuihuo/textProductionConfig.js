@@ -1,21 +1,29 @@
 import { normalizeSensitiveMode, SENSITIVE_MODE_OPTIONS } from './batchFactoryBookConfigRegions.js';
 import { reconcileSyncedWebsiteProfiles, websiteProfileOrganization } from './batchFactoryWebsiteProfiles.js';
 
-const fonts = [{ value: 'noto-sans-sc', label: 'Noto Sans SC · 黑体' }, { value: 'ma-shan-zheng', label: 'Ma Shan Zheng · 手写体' }];
+const fonts = [
+  {value:'noto-sans-sc',label:'思源黑体 · 清晰黑体'},
+  {value:'ma-shan-zheng',label:'马善政 · 毛笔手写'},
+  {value:'lxgw-wenkai',label:'霞鹜文楷 · 楷书 / 钢笔'},
+  {value:'long-cang',label:'龙藏体 · 自然手写'},
+  {value:'zhi-mang-xing',label:'志莽行书 · 连笔手写'},
+  {value:'zcool-kuaile',label:'站酷快乐体 · 圆润活泼'}
+];
 const options = values => values.map(value => ({ value, label: String(value) }));
 const align = [{ value: 'left', label: '左对齐' }, { value: 'center', label: '居中' }, { value: 'right', label: '右对齐' }];
 const field = (key, label, type, initial, extra = {}) => ({key, label, type, initial, ...extra});
 const solid = { kind: 'color', color: '#111318' };
 
 export const TEXT_PRODUCTION_SECTIONS = [
-  { key: 'models', label: '模型配置', fields: [
+  { key: 'models', label: '引擎配置', fields: [
     field('textModelId','文本模型','model',''),
     field('sensitiveMode','敏感内容处理','choice','system',{options:SENSITIVE_MODE_OPTIONS,aiHint:'生产阶段会调用文本模型。AI 优化失败会停止生产并显示失败原因。'}),
     field('sensitiveAIModels','AI 修复模型','models',[]),
     field('sensitiveAIOnFailure','取文阶段未处理命中词','choice','review',{options:[{value:'review',label:'打码并标记待复核'},{value:'fail',label:'停止取文'}]}),
-    field('highlightReuseEnabled','按关键词标红','switch',false)
+    field('highlightReuseEnabled','按关键词标红','switch',false,{hidden:true})
   ]},
   { key:'layout', label:'排版配置', fields:[
+    field('textPaginationMode','分页方式','choice','auto',{options:[{value:'auto',label:'智能排版'},{value:'target',label:'目标字数'}]}),
     field('textPageTarget','单页目标字数','number',150,{min:1,max:100000}),
     field('contentRange','内容截取','choice',4000,{options:options([1000,2000,4000,8000,12000,20000,50000,100000])}),
     field('imageAspectRatio','画幅','choice','3:4',{options:options(['3:4','9:16','1:1','4:3','16:9','21:9','3:2','2:3'])}),
@@ -28,25 +36,39 @@ export const TEXT_PRODUCTION_SECTIONS = [
     field('textAlign','正文对齐','choice','left',{options:align}),
     field('textColor','文字颜色','color','#FFFFFF'),
     field('textHighlightColor','标红颜色','color','#E53935'),
+    field('textHighlightRules','标红规则','highlightRules',''),
+    field('textHighlightLines','标红行号','input','1,3'),
     field('textMaxHeightRatio','文字最大高度占比','percent',0.75,{min:1,max:100}),
     field('textBackground','整书背景','background',solid),
-    field('textCover.background','封面背景','background',null,{from:'textBackground'}),
-    field('textCover.layout.fontId','标题字体','choice',null,{options:fonts,from:'textFontId'}),
-    field('textCover.layout.fontSize','标题字号','number',null,{min:1,max:256,from:'textFontSize'}),
-    field('textCover.layout.fontWeight','标题字重','choice',null,{options:options([100,200,300,400,500,600,700,800,900]),from:'textFontWeight'}),
-    field('textCover.layout.align','标题对齐','choice',null,{options:align,from:'textAlign'}),
-    field('textCover.layout.textColor','标题颜色','color',null,{from:'textColor'})
+    field('textCover.layout.fontId','标题字体','choice','noto-sans-sc',{options:fonts}),
+    field('textCover.layout.fontSize','标题字号','number',64,{min:1,max:256}),
+    field('textCover.layout.fontWeight','标题字重','choice',600,{options:options([100,200,300,400,500,600,700,800,900])}),
+    field('textCover.layout.align','标题对齐','choice','center',{options:align}),
+    field('textCover.layout.textColor','标题颜色','color','#FFFFFF')
   ]},
   {key:'publish',label:'发布配置',fields:[
     field('comicPublishSettings.producerAdminName','上传人','producer',''),
     field('comicPublishSettings.organizationId','组织归属','organization',''),
-    field('publishSettings.websiteProfileId','网站配置档','profile',''),
-    field('publishSettings.bookCategory','书籍分类','input',''),
-    field('textAutoCollection','自动生成合集','switch',true),
-    field('textAutoUpload','自动上传','switch',false),
-    field('textUploadRetryLimit','上传失败重试次数','number',3,{min:0,max:10})
+    ...[
+      ['copySource','original'],['materialSource','ORIGINAL'],['creativeAdminName',''],['organizationName',''],
+      ['audioCategorySelectionMode','auto'],['audioCategoryId',null],['audioCategoryName',''],['audioCandidates',[]],
+      ['specifiedAudioId',''],['specifiedAudioName',''],['workMatchMode','title_auto']
+    ].map(([key,initial])=>field('comicPublishSettings.'+key,key,'publishShared',initial)),
+    field('publishSettings.websiteProfileId','网站配置档','profile','',{hidden:true}),
+    field('publishSettings.bookCategory','书籍分类','input','',{hidden:true}),
+    field('textAutoCollection','自动生成合集','switch',true,{hidden:true}),
+    field('textAutoUpload','自动上传','switch',false,{hidden:true}),
+    field('textUploadRetryLimit','上传失败重试次数','number',3,{min:0,max:10,hidden:true})
   ]}
 ];
+export const TEXT_PRODUCTION_BOOK_REGIONS = Object.freeze([
+  {key:'models',label:'引擎配置',detail:'模型与敏感处理'},
+  {key:'layout',label:'排版配置',detail:'字体、颜色与背景'},
+  {key:'publish',label:'发布配置',detail:'上传人与发布规则'}
+]);
+export function textProductionInitialSection(value) {
+  return TEXT_PRODUCTION_SECTIONS.some(section=>section.key===value) ? value : 'models';
+}
 const fields = TEXT_PRODUCTION_SECTIONS.flatMap(section => section.fields);
 const profileId = 'publishSettings.websiteProfileId';
 const profileCatalog = 'publishSettings.websiteProfiles';
