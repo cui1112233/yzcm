@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 const h=vi.hoisted(()=>({slots:[] as any[],cursor:0,show:undefined as any,load:vi.fn(),navigate:vi.fn()}));
 vi.mock('react',()=>({useState:(initial:any)=>{const i=h.cursor++;if(!(i in h.slots))h.slots[i]=typeof initial==='function'?initial():initial;return [h.slots[i],(next:any)=>{h.slots[i]=typeof next==='function'?next(h.slots[i]):next;}];},useRef:(initial:any)=>{const i=h.cursor++;if(!(i in h.slots))h.slots[i]={current:initial};return h.slots[i];},useEffect:vi.fn()}));
-vi.mock('@tarojs/taro',()=>({default:{navigateTo:h.navigate},useDidShow:(fn:any)=>{h.show=fn;}}));
+vi.mock('@tarojs/taro',()=>({default:{navigateTo:h.navigate},useDidShow:(fn:any)=>{h.show=fn;},useDidHide:vi.fn()}));
 vi.mock('@tarojs/components',()=>({View:'View',Text:'Text',Button:'Button',Image:'Image'}));
 vi.mock('../../services/api',()=>({apiRequest:vi.fn()}));
 vi.mock('../../config/runtime',()=>({isApiOriginConfigured:()=>true,API_ORIGIN_CONFIGURATION_ERROR:''}));
@@ -37,8 +37,9 @@ test('task center renders real counters, approved filters, and one shared list s
  expect(tree.filter(n=>n.props?.className?.includes('task-studio-list'))).toHaveLength(1);
  expect(tree.filter(n=>n.props?.className?.split(' ').includes('task-studio-row'))).toHaveLength(4);
  expect(tree.filter(n=>n.props?.className==='task-studio-row-art').map(n=>n.props.src)).toEqual(['visual-run.webp','visual-review.webp','visual-done.webp','visual-a/b.webp']);
- expect(tree.filter(n=>n.props?.className?.split(' ').includes('task-studio-row')).at(-1)?.props.className).toContain('is-last');
+ expect(tree.filter(n=>n.props?.className?.split(' ').includes('task-studio-row')).slice(-1)[0]?.props.className).toContain('is-last');
 });
+test('large real histories render one mobile-sized page while counters still represent all returned tasks',async()=>{h.load.mockResolvedValue({sources:[{source:'batch',state:'ready'}],entries:Array.from({length:300},(_,i)=>({source:'batch',sourceLabel:'批量工厂',id:`task-${i}`,title:`真实记录${i}`,status:'completed',statusDetail:'已完成'}))});let tree=await ready();expect(tree.filter(n=>n.props?.className?.split(' ').includes('task-studio-row'))).toHaveLength(30);expect(tree.filter(n=>n.props?.className==='task-studio-count-value').map(content)).toEqual(['0','0','300']);const more=tree.find(n=>n.props?.className==='task-studio-next');expect(more).toBeTruthy();more.props.onClick();tree=render();expect(tree.filter(n=>n.props?.className?.split(' ').includes('task-studio-row'))).toHaveLength(30);expect(content(tree.find(n=>n.props?.className==='task-studio-row-title'))).toBe('真实记录30');});
 test('hero and three status counters use four purpose-specific illustrations',async()=>{
  const tree=await ready();
  const hero=tree.find(n=>n.props?.className==='task-studio-hero-art')?.props.src;
@@ -59,10 +60,16 @@ test('hero aggregate progress is rendered as live UI text instead of baked into 
  expect(content(tree.find(n=>n.props?.className==='task-studio-hero-progress-value'))).toBe('40%');
  expect(tree.find(n=>n.props?.className==='task-studio-hero-art')?.props.src).not.toContain('68');
 });
+test('hero never combines unrelated active tasks into one misleading percentage',async()=>{h.load.mockResolvedValue({sources:[{source:'batch',state:'ready'}],entries:[{source:'batch',id:'a',status:'running',progress:{completed:1,total:2}},{source:'aicut',id:'b',status:'running',progress:{completed:90,total:100}}]});const tree=await ready();expect(tree.filter(n=>n.props?.className==='task-studio-hero-progress-value')).toHaveLength(0);});
+test('ready records render during sync with an explicit incomplete-statistics notice',async()=>{
+ let finish!:(value:any)=>void;h.load.mockImplementation((_request:any,options:any)=>{options.onProgress({sources:[{source:'fetch',state:'ready'}],entries:[{id:'fast',source:'fetch',title:'先显示',status:'completed'}]});return new Promise(resolve=>{finish=resolve;});});
+ const tree=await ready();expect(tree.map(content).join('')).toContain('先显示');expect(tree.map(content).join('')).toContain('统计尚未完整');
+ finish({sources:[{source:'fetch',state:'ready'}],entries:[]});for(let i=0;i<12;i++)await Promise.resolve();expect(render().map(content).join('')).not.toContain('统计尚未完整');
+});
 test('flat record opens the existing encoded module destination',async()=>{
  const tree=await ready();expect(tree.filter(n=>n.props?.className?.split(' ').includes('task-studio-row'))).toHaveLength(4);
  tree.find(n=>n.props?.className?.split(' ').includes('task-studio-row')&&content(n).includes('失败项目')).props.onClick();
- expect(h.navigate).toHaveBeenCalledWith({url:'/pages/module-detail/index?key=fetch&taskId=a%2Fb'});
+ expect(h.navigate).toHaveBeenCalledWith({url:'/pages/module-detail/index?key=booktest&taskId=a%2Fb'});
 });
 test('a record without an ID cannot open an empty or unrelated destination',async()=>{
  h.load.mockResolvedValue({sources:[{source:'fetch',state:'ready'}],entries:[{source:'fetch',sourceLabel:'Fetch',title:'Missing ID',status:'unknown'}]});
