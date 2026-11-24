@@ -9,6 +9,15 @@ import (
 )
 
 const DefaultTargetCharacters = 150
+const DefaultMaxPages = 35
+
+type PageLimitError struct{ Pages, Limit int }
+
+func (e *PageLimitError) Unwrap() error { return ErrInvalid }
+
+func (e *PageLimitError) Error() string {
+	return fmt.Sprintf("当前排版需要 %d 页，超过设置的 %d 页上限。正文未截断，请减小字号、行距或段距，或提高最多页数后重新分页", e.Pages, e.Limit)
+}
 
 // SentenceBreaks reports legal manual split points in the same coordinate space as Paginate.
 func SentenceBreaks(text string) []int {
@@ -80,6 +89,13 @@ func Paginate(ctx context.Context, input PaginationInput, measure MeasureFunc) (
 	if input.Layout.TargetCharacters == 0 {
 		input.Layout.TargetCharacters = DefaultTargetCharacters
 	}
+	limit := input.Layout.MaxPages
+	if limit == 0 {
+		limit = DefaultMaxPages
+	}
+	if limit < 1 || limit > 1000 {
+		return nil, ErrInvalid
+	}
 	p := pagePacker{ctx: ctx, runes: []rune(NormalizeLineEndings(input.Text)), layout: input.Layout, measure: measure}
 	reading := map[int]bool{}
 	if resolved, size, err := resolveLayout(input.Layout); err == nil {
@@ -118,10 +134,96 @@ func Paginate(ctx context.Context, input PaginationInput, measure MeasureFunc) (
 		start = end
 	}
 	p.flush()
+	if err := p.balanceTail(); err != nil {
+		return nil, err
+	}
+	if len(p.pages) > limit {
+		return nil, &PageLimitError{Pages: len(p.pages), Limit: limit}
+	}
 	if err := validateDrafts(input.Text, p.pages); err != nil {
 		return nil, err
 	}
 	return p.pages, nil
+}
+
+// Move whole paragraphs from the preceding page instead of leaving a few
+// characters alone on the final page. Both sides use the real font measure.
+func (p *pagePacker) balanceTail() error {
+	if len(p.pages) < 2 {
+		return nil
+	}
+	n := len(p.pages)
+	a, b := p.pages[n-2], p.pages[n-1]
+	count := func(s string) int { return utf8.RuneCountInString(strings.TrimSpace(s)) }
+	if count(b.Text) >= 20 || count(a.Text) < 60 {
+		return nil
+	}
+	runes := p.runes[a.StartOffset:b.EndOffset]
+	original := a.EndOffset - a.StartOffset
+	best, score := original, count(a.Text)-count(b.Text)
+	if score < 0 {
+		score = -score
+	}
+	boundaries := []int{}
+	for start := 0; start < len(runes); {
+		end := paragraphEnd(runes, start)
+		if end < original {
+			boundaries = append(boundaries, end)
+		}
+		start = end
+	}
+	find := func(points []int) error {
+		for _, cut := range points {
+			if err := p.ctx.Err(); err != nil {
+				return err
+			}
+			if cut <= 0 || cut >= original {
+				continue
+			}
+			left, right := string(runes[:cut]), string(runes[cut:])
+			if count(left) < 20 || count(right) < 20 {
+				continue
+			}
+			gap := count(left) - count(right)
+			if gap < 0 {
+				gap = -gap
+			}
+			if gap >= score {
+				continue
+			}
+			fits, _, err := p.measure(left, p.layout)
+			if err != nil {
+				return err
+			}
+			if !fits {
+				continue
+			}
+			fits, _, err = p.measure(right, p.layout)
+			if err != nil {
+				return err
+			}
+			if !fits {
+				continue
+			}
+			best, score = cut, gap
+		}
+		return nil
+	}
+	if err := find(boundaries); err != nil {
+		return err
+	}
+	if best == original {
+		if err := find(SentenceBreaks(string(runes))); err != nil {
+			return err
+		}
+	}
+	if best != original {
+		a.Text, b.Text = string(runes[:best]), string(runes[best:])
+		a.EndOffset = a.StartOffset + best
+		b.StartOffset = a.EndOffset
+		p.pages[n-2], p.pages[n-1] = a, b
+	}
+	return nil
 }
 
 func (p *pagePacker) flush() {
