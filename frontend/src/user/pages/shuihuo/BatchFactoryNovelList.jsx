@@ -2023,13 +2023,14 @@ function ComicMediaPanel(props) {
  const styles=comicBookOutputStyles(props.settings);
  const [chosen,setChosen]=useState(props.initialStyleId || styles[0]?.presetId || '');
  const [videoId,setVideoId]=useState(props.initialVideoId || '');
+ const [activeView,setActiveView]=useState('pages');
  const styleId=comicMediaStyleSelection(styles,chosen);
  return <ComicStyleMediaPanel {...props} key={comicStyleMediaKey(props.batchId,props.book?.id,styleId)} initialVideoId={videoId}
-  styleId={styleId} onVideoSelected={setVideoId}
+  styleId={styleId} onVideoSelected={setVideoId} activeView={activeView} onActiveViewChange={setActiveView}
   styleSelector={<ComicStyleOutputSelector styles={styles} value={styleId} onChange={setChosen}/>}/>;
 }
 
-function ComicStyleMediaPanel({ styleId = '', styleSelector, onVideoSelected, batchId, book, comicPublishSettings = {}, initialVideoId = '', onSaved, onGeneratePage, generatingPage = false, refreshNonce = 0, onClose }) {
+function ComicStyleMediaPanel({ activeView = 'pages', onActiveViewChange, styleId = '', styleSelector, onVideoSelected, batchId, book, comicPublishSettings = {}, initialVideoId = '', onSaved, onGeneratePage, generatingPage = false, refreshNonce = 0, onClose }) {
   const api=useMemo(()=>createComicStyleMediaAPI(apiRequest,batchId,book.id,styleId),[batchId,book.id,styleId]);
   const listComicPages=(_b,_k,o)=>api.listPages(o);
   const listComicCollections=(_b,_k,o)=>api.listCollections(o);
@@ -2047,7 +2048,7 @@ function ComicStyleMediaPanel({ styleId = '', styleSelector, onVideoSelected, ba
   const [pageLoadError, setPageLoadError] = useState('');
   const [segmentation, setSegmentation] = useState(null);
   const [collections, setCollections] = useState([]);
-  const [activeView, setActiveView] = useState('pages');
+  const setActiveView = onActiveViewChange;
 	const [selectedVideoId, setSelectedVideoId] = useState(initialVideoId || videos[0]?.id || '');
 	const [collectionStart, setCollectionStart] = useState(1);
 	const [collectionEnd, setCollectionEnd] = useState(Math.min(videos.length || 1, 35));
