@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -286,6 +287,18 @@ func RegisterScriptEditorRoutes(mux *http.ServeMux, auth BridgeAuth, service *sc
 			return
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"script": script})
+	})
+	handle("GET /api/script-editor/works/{workID}/export", func(w http.ResponseWriter, req *http.Request, owner string) {
+		result, err := service.Export(req.Context(), owner, req.PathValue("workID"), scripteditor.ExportInput{Format: req.URL.Query().Get("format")})
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		disposition := mime.FormatMediaType("attachment", map[string]string{"filename": result.Filename})
+		w.Header().Set("Content-Type", result.ContentType)
+		w.Header().Set("Content-Disposition", disposition)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(result.Content)
 	})
 }
 
