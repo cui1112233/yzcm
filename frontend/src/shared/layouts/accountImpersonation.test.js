@@ -77,19 +77,59 @@ test('the streaming chat write carries the same verified expectation', async () 
   const previousStorage = globalThis.localStorage;
   const previousFetch = globalThis.fetch;
   globalThis.localStorage = { getItem: key => key === 'auth_token' ? 'actor-session' : null };
-  let header;
+  let expectation;
   globalThis.fetch = async (_path, options) => {
-    header = new Headers(options.headers).get('X-Qiantie-Expected-Impersonation');
+    const headers = new Headers(options.headers);
+    expectation = [headers.get('X-Qiantie-Expected-Actor'), headers.get('X-Qiantie-Expected-Impersonation')];
     return new Response('event: ready\ndata: {}\n\n');
   };
   try {
-    setVerifiedImpersonation({ username: 'subject', impersonationId: 'stream-switch' });
+    setVerifiedImpersonation({ actorUsername: 'actor', username: 'subject', impersonationId: 'stream-switch' });
     await streamAgentChatMessage('session', { content: 'a test' });
-    assert.equal(header, 'stream-switch');
+    assert.deepEqual(expectation, ['actor', 'stream-switch']);
   } finally {
     if (previousStorage === undefined) delete globalThis.localStorage;
     else globalThis.localStorage = previousStorage;
     globalThis.fetch = previousFetch;
+  }
+});
+
+test('same-tab login and logout clear the page identity until the server confirms again', async () => {
+  const { login, logout, apiRequest, setVerifiedImpersonation } = await loadLocalModule('../api/auth.js', '../api/client.js');
+  const fields = new Map([['auth_token', 'actor-a-session'], ['auth_username', 'actor-a']]);
+  const requests = [];
+  const originalStorage = globalThis.localStorage;
+  const originalFetch = globalThis.fetch;
+  globalThis.localStorage = { getItem: key => fields.get(key) || null, setItem: (key, value) => fields.set(key, value), removeItem: key => fields.delete(key) };
+  globalThis.fetch = async (path, options) => {
+    const headers = new Headers(options.headers);
+    requests.push([path, headers.get('X-Qiantie-Expected-Actor'), headers.get('X-Qiantie-Expected-Impersonation')]);
+    return new Response(path === '/api/login' ? JSON.stringify({ username: 'actor-b', token: 'actor-b-session' }) : '{}', {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  };
+  try {
+    const write = () => apiRequest('/api/business', { method: 'POST' });
+    setVerifiedImpersonation({ actorUsername: 'actor-a', username: 'actor-a', impersonationId: 'none' });
+    await write();
+    await login('actor-b', 'fixture-password');
+    await assert.rejects(write(), { code: 'IMPERSONATION_UNCONFIRMED' });
+    setVerifiedImpersonation({ actorUsername: 'actor-b', username: 'actor-b', impersonationId: 'none' });
+    await write();
+    await logout();
+    await assert.rejects(write(), { code: 'IMPERSONATION_UNCONFIRMED' });
+    assert.deepEqual(requests, [
+      ['/api/business', 'actor-a', 'none'],
+      ['/api/login', null, null],
+      ['/api/business', 'actor-b', 'none'],
+      ['/api/login/logout', null, null]
+    ]);
+    assert.equal(fields.has('expectedActor'), false);
+    assert.equal(fields.has('expectedImpersonation'), false);
+  } finally {
+    if (originalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalStorage;
+    globalThis.fetch = originalFetch;
   }
 });
 
@@ -124,14 +164,14 @@ test('local drafts use the verified subject while the login session remains with
   globalThis.localStorage = { getItem: key => fields.get(key) || null };
   try {
     assert.equal(getCurrentUsername(), 'actor');
-    setEffectiveImpersonationAccount({username: 'subject', impersonationId: 'switch-1'}, 'actor-session');
+    setEffectiveImpersonationAccount({actorUsername: 'actor', username: 'subject', impersonationId: 'switch-1'}, 'actor-session');
     assert.equal(getCurrentUsername(), 'subject');
     assert.equal(getCurrentActorUsername(), 'actor');
     assert.equal(fields.get('auth_token'), 'actor-session');
     setEffectiveImpersonationAccount(null);
     assert.equal(getCurrentUsername(), 'actor');
     fields.set('auth_token', 'new-session');
-    setEffectiveImpersonationAccount({username: 'subject', impersonationId: 'switch-1'}, 'actor-session');
+    setEffectiveImpersonationAccount({actorUsername: 'actor', username: 'subject', impersonationId: 'switch-1'}, 'actor-session');
     assert.equal(getCurrentUsername(), 'actor');
   } finally {
     if (oldStorage === undefined) delete globalThis.localStorage;
@@ -151,17 +191,18 @@ test('retry confirmations stay separate for the actor and each verified switch s
   try {
     const confirmation = () => textRetryConfirmation('batch', 'book', 'collection');
     const actorKey = await confirmation().authorize(() => true);
-    setEffectiveImpersonationAccount({username: 'member-one', impersonationId: 'switch-1'});
+    setEffectiveImpersonationAccount({actorUsername: 'actor', username: 'member-one', impersonationId: 'switch-1'});
     assert.equal(confirmation().read(), undefined);
     const firstKey = await confirmation().authorize(() => true);
     assert.notEqual(firstKey, actorKey);
-    setEffectiveImpersonationAccount({username: 'member-two', impersonationId: 'switch-2'});
+    setEffectiveImpersonationAccount(null);
+    setEffectiveImpersonationAccount({actorUsername: 'actor', username: 'member-two', impersonationId: 'switch-2'});
     assert.equal(confirmation().read(), undefined);
     const secondKey = await confirmation().authorize(() => true);
     assert.notEqual(secondKey, firstKey);
     setEffectiveImpersonationAccount(null);
     assert.equal(confirmation().read(), actorKey);
-    setEffectiveImpersonationAccount({username: 'member-one', impersonationId: 'switch-3'});
+    setEffectiveImpersonationAccount({actorUsername: 'actor', username: 'member-one', impersonationId: 'switch-3'});
     assert.equal(confirmation().read(), firstKey);
   } finally {
     if (previousStorage === undefined) delete globalThis.localStorage;

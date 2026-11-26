@@ -23,11 +23,11 @@ export function setToken(token) {
 }
 
 export function setVerifiedImpersonation(identity, token = getToken()) {
-  if (token === getToken()) rememberVerifiedImpersonation(identity, token);
+  return token === getToken() && rememberVerifiedImpersonation(identity, token);
 }
 
 export function getVerifiedImpersonation() {
-  return readVerifiedImpersonation(getToken());
+  return readVerifiedImpersonation();
 }
 
 export function isSessionAuthFailure(response) {

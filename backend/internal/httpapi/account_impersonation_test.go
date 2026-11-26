@@ -294,7 +294,10 @@ func TestImpersonationExpectedIDNeverFallsBackToActor(t *testing.T) {
 	request := func(expect string, cookie *http.Cookie) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(http.MethodPost, impersonationBusinessTestPath, nil)
 		r.Header.Set("Authorization", "Bearer founder")
-		r.Header.Set("X-Qiantie-Expected-Impersonation", expect)
+		if expect != "" {
+			r.Header.Set("X-Qiantie-Expected-Actor", "founder")
+			r.Header.Set("X-Qiantie-Expected-Impersonation", expect)
+		}
 		if cookie != nil {
 			r.AddCookie(cookie)
 		}
@@ -315,6 +318,60 @@ func TestImpersonationExpectedIDNeverFallsBackToActor(t *testing.T) {
 	}
 	if w := request("", nil); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"owner":"founder"`) {
 		t.Errorf("regular actor write = %d %s", w.Code, w.Body)
+	}
+}
+
+func TestImpersonationRejectsCrossTabActorAndSwitchChanges(t *testing.T) {
+	router, store, _ := newImpersonationTestRouter(t)
+	status := impersonationRequest(router, http.MethodGet, impersonationCurrentTestPath, "founder", "", nil)
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"actorUsername":"founder"`) {
+		t.Errorf("initial status did not confirm the real actor: %d %s", status.Code, status.Body)
+	}
+	cookie := startImpersonationForTest(t, router, "founder", "member")
+	status = impersonationRequest(router, http.MethodGet, impersonationCurrentTestPath, "founder", "", cookie)
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"actorUsername":"founder"`) || !strings.Contains(status.Body.String(), `"username":"member"`) {
+		t.Errorf("active status did not distinguish actor and effective subject: %d %s", status.Code, status.Body)
+	}
+	otherActorCookie := startImpersonationForTest(t, router, "dev", "member")
+	var otherActorSwitchID string
+	for _, session := range store.sessions {
+		if session.ActorUsername == "dev" {
+			otherActorSwitchID = session.ID
+		}
+	}
+	for _, tc := range []struct {
+		name, token, actor, expectation string
+		cookie                          *http.Cookie
+		want                            int
+	}{
+		{"another tab signed in as a different actor", "dev", "founder", "none", nil, http.StatusConflict},
+		{"a valid switch of another login cannot satisfy actor expectation", "dev", "founder", otherActorSwitchID, otherActorCookie, http.StatusConflict},
+		{"another tab started switching", "founder", "founder", "none", cookie, http.StatusConflict},
+		{"missing either expectation", "founder", "founder", "", nil, http.StatusConflict},
+		{"same actor and no switch", "founder", "founder", "none", nil, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, impersonationBusinessTestPath, nil)
+			r.Header.Set("Authorization", "Bearer "+tc.token)
+			r.Header.Set("X-Qiantie-Expected-Actor", tc.actor)
+			if tc.expectation != "" {
+				r.Header.Set("X-Qiantie-Expected-Impersonation", tc.expectation)
+			}
+			if tc.cookie != nil {
+				r.AddCookie(tc.cookie)
+			}
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, r)
+			if w.Code != tc.want {
+				t.Errorf("write = %d %s, want %d", w.Code, w.Body, tc.want)
+			}
+			if tc.want == http.StatusConflict && strings.Contains(w.Body.String(), `"owner"`) {
+				t.Error("a mismatched write reached the business handler")
+			}
+		})
+	}
+	if len(store.audits) != 2 {
+		t.Errorf("mismatched write reached the switched business audit: %+v", store.audits)
 	}
 }
 

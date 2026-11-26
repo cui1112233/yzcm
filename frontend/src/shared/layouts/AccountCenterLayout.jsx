@@ -38,7 +38,7 @@ export function useAccountImpersonation(enabled) {
     if (!token) return undefined;
     const channel = openSwitchChannel();
     let currentRequest;
-    let currentId;
+    let confirmedSwitch = false;
     let timer;
 
     function reload() {
@@ -46,7 +46,7 @@ export function useAccountImpersonation(enabled) {
     }
 
     function onSessionChange(event) {
-      if (currentId && event.key === 'auth_token' && event.oldValue === token) reload();
+      if (event.key === 'auth_token' && event.oldValue === token) reload();
     }
 
     async function refresh() {
@@ -58,17 +58,20 @@ export function useAccountImpersonation(enabled) {
       try {
         const next = await getAccountImpersonation(request.signal);
         if (request.signal.aborted || getToken() !== token) return;
-        if (typeof next?.active !== 'boolean' || typeof next.canSwitch !== 'boolean' || (next.active && (!next.impersonationId || !next.subject?.username))) {
+        if (!next?.actorUsername || typeof next.active !== 'boolean' || typeof next.canSwitch !== 'boolean' ||
+          (next.active && (!next.impersonationId || !next.subject?.username))) {
           throw new Error('无法确认账号切换状态');
         }
-        const nextId = next.impersonationId || '';
-        if (currentId !== undefined && currentId !== nextId) {
-          // Keep the old write expectation until the old page is unloaded.
+        const accepted = setEffectiveImpersonationAccount({
+          actorUsername: next.actorUsername,
+          username: next.active ? next.subject.username : next.actorUsername,
+          impersonationId: next.active ? next.impersonationId : 'none'
+        }, token);
+        if (!accepted) {
           reload();
           return;
         }
-        setEffectiveImpersonationAccount(next.active ? { username: next.subject.username, impersonationId: nextId } : null, token);
-        currentId = nextId;
+        confirmedSwitch = next.active;
         setSnapshot({ token, status: next, error: '' });
         if (next.active) timer = setTimeout(refresh, Math.min(30, next.expiresInSeconds || 1) * 1000);
       } catch {
@@ -78,7 +81,7 @@ export function useAccountImpersonation(enabled) {
           return;
         }
         setSnapshot(previous => ({ token, status: previous.token === token ? previous.status : null, error: '无法确认账号切换状态' }));
-        if (currentId) timer = setTimeout(refresh, 5000);
+        if (confirmedSwitch) timer = setTimeout(refresh, 5000);
       }
     }
 
@@ -147,12 +150,10 @@ function AccountSwitchEntry({ status }) {
 
   async function submit() {
     if (busy || !target.trim()) return;
-    const token = getToken();
     setBusy(true);
     setError('');
     try {
-      const next = await startAccountImpersonation(target.trim());
-      setEffectiveImpersonationAccount({ username: next.subject?.username, impersonationId: next.impersonationId }, token);
+      await startAccountImpersonation(target.trim());
       reloadForAccountSwitch();
     } catch (failure) {
       setError(failure.message || '账号切换失败');

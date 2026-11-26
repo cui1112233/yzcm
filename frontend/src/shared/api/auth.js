@@ -59,7 +59,7 @@ export async function logout() {
 }
 
 export function getCurrentActorUsername() {
-  return getToken() ? localStorage.getItem('auth_username') || '' : '';
+  return getVerifiedImpersonation()?.actorUsername || (getToken() ? localStorage.getItem('auth_username') || '' : '');
 }
 
 export function getCurrentUsername() {

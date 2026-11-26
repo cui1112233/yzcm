@@ -17,6 +17,8 @@ const (
 	impersonationPath           = "/api/account-impersonation"
 	impersonationCurrent        = impersonationPath + "/current"
 	impersonationLifetime       = 15 * time.Minute
+	noImpersonationExpected     = "none"
+	expectedActorHeader         = "X-Qiantie-Expected-Actor"
 	expectedImpersonationHeader = "X-Qiantie-Expected-Impersonation"
 )
 
@@ -34,6 +36,7 @@ type authenticatedImpersonation struct {
 type impersonationStatus struct {
 	Active          bool                  `json:"active"`
 	CanSwitch       bool                  `json:"canSwitch"`
+	ActorUsername   string                `json:"actorUsername"`
 	ImpersonationID string                `json:"impersonationId,omitempty"`
 	Subject         *impersonationSubject `json:"subject,omitempty"`
 	ExpiresInSecs   int                   `json:"expiresInSeconds,omitempty"`
@@ -207,7 +210,7 @@ func (s accountImpersonation) start(w http.ResponseWriter, r *http.Request) {
 func (s accountImpersonation) activeStatus(active authenticatedImpersonation) impersonationStatus {
 	subject := active.identity.Subject
 	return impersonationStatus{
-		Active: true, ImpersonationID: active.identity.ImpersonationID,
+		Active: true, ActorUsername: active.identity.Actor.Username, ImpersonationID: active.identity.ImpersonationID,
 		Subject:       &impersonationSubject{Username: subject.Username, DisplayName: subject.DisplayName},
 		ExpiresInSecs: max(1, int(active.expiresAt.Sub(s.now()).Seconds())),
 	}
@@ -215,7 +218,7 @@ func (s accountImpersonation) activeStatus(active authenticatedImpersonation) im
 
 func inactiveImpersonationStatus(actor accountcenter.Identity) impersonationStatus {
 	canSwitch := actor.Role == accountcenter.RoleFounder || actor.Role == accountcenter.RoleDeveloper || actor.Role == accountcenter.RoleManager
-	return impersonationStatus{CanSwitch: canSwitch}
+	return impersonationStatus{CanSwitch: canSwitch, ActorUsername: actor.Username}
 }
 
 func (s accountImpersonation) status(w http.ResponseWriter, r *http.Request) {
@@ -280,16 +283,18 @@ func (s accountImpersonation) middleware(root *http.ServeMux, next http.Handler)
 			next.ServeHTTP(w, r)
 			return
 		}
-		expectedID := ""
+		expectedActor, expectedID := "", ""
 		if impersonationWriteMethod(r.Method) && r.URL.Path != "/api/login/logout" {
+			expectedActor = strings.TrimSpace(r.Header.Get(expectedActorHeader))
 			expectedID = strings.TrimSpace(r.Header.Get(expectedImpersonationHeader))
 		}
+		hasExpectation := expectedActor != "" || expectedID != ""
+		if hasExpectation && (expectedActor == "" || expectedID == "" || bearerToken(r) == "") {
+			writeImpersonationConflict(w)
+			return
+		}
 		_, cookieErr := r.Cookie(impersonationCookieName)
-		if s.auth.AccountCenterStore == nil || bearerToken(r) == "" || cookieErr != nil {
-			if expectedID != "" {
-				writeImpersonationConflict(w)
-				return
-			}
+		if !hasExpectation && (s.auth.AccountCenterStore == nil || bearerToken(r) == "" || cookieErr != nil) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -314,6 +319,22 @@ func (s accountImpersonation) middleware(root *http.ServeMux, next http.Handler)
 			writeAuthError(w, http.StatusUnauthorized, "登录已失效，请重新登录")
 			return
 		}
+		if hasExpectation && expectedActor != actor.Username {
+			writeImpersonationConflict(w)
+			return
+		}
+		if cookieErr != nil {
+			if expectedID != noImpersonationExpected {
+				writeImpersonationConflict(w)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+		if s.auth.AccountCenterStore == nil {
+			writeImpersonationUnavailable(w)
+			return
+		}
 		ctx, err := login.accountCenterContext(r.Context(), actor.Username)
 		if err != nil {
 			writeAccountCenterForbidden(w)
@@ -336,7 +357,7 @@ func (s accountImpersonation) middleware(root *http.ServeMux, next http.Handler)
 			}
 			return
 		}
-		if expectedID != "" && expectedID != active.identity.ImpersonationID {
+		if hasExpectation && expectedID != active.identity.ImpersonationID {
 			writeImpersonationConflict(w)
 			return
 		}

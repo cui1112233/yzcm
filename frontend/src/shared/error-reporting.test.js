@@ -6,19 +6,21 @@ test('同一面板的同一错误只上报一次 client-errors', async () => {
   globalThis.window = { location: { pathname: '/novel-fetch' } };
   globalThis.localStorage = { getItem: () => 'token' };
   globalThis.fetch = async (path, options) => {
-    requests.push({ path, body: JSON.parse(options.body), switchId: new Headers(options.headers).get('X-Qiantie-Expected-Impersonation') });
+    const headers = new Headers(options.headers);
+    requests.push({ path, body: JSON.parse(options.body), actor: headers.get('X-Qiantie-Expected-Actor'), switchId: headers.get('X-Qiantie-Expected-Impersonation') });
     return { ok: true };
   };
   const { reportClientError, resetClientErrorDedupe } = await import('./error-reporting.js');
   const { setVerifiedImpersonation } = await import('./api/client.js');
   resetClientErrorDedupe();
-  setVerifiedImpersonation({ username: 'subject', impersonationId: 'diagnostic-switch' });
+  setVerifiedImpersonation({ actorUsername: 'actor', username: 'subject', impersonationId: 'diagnostic-switch' });
 
   const payload = { kind: 'api-error', message: '状态服务暂不可用', source: '/api/batches/x/runtime-summary', method: 'GET', status: 503 };
   reportClientError(payload);
   reportClientError(payload);
   reportClientError(payload);
   assert.equal(requests.length, 1, '重复的 503 不应重复上报');
+  assert.equal(requests[0].actor, 'actor');
   assert.equal(requests[0].switchId, 'diagnostic-switch');
 
   reportClientError({ ...payload, message: '另一种错误' });
