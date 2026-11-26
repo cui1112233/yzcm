@@ -138,12 +138,12 @@ assert.equal(normalizeComicOutputStyles({ style: { presetId: 'old' } })[0].prese
 
 **Interfaces:** Consumes scoped stores and `ResolveComicStyleSettings`; API adapters carry `styleId` through list/generate/upload/primary/reference/collection/download requests. Every handler captures scope before beginning provider work and passes that same scope through completion.
 
-- [ ] Use fake image providers to record final prompts, reference images and request IDs for A/B. Assert shared story text is equal, each receives only its own style description/reference, and returned images persist to the right page. Add rejection cases for another book's style, conflicting query/body IDs and a manual cross-style image selection.
-- [ ] Assert identical neutral prompts under two styles produce different image-cache/request identities. Existing page/image ID-based content and thumbnail routes must check parent ownership/style instead of using the UI's current selection.
-- [ ] Run `go test ./internal/httpapi -run 'Test.*ComicStyleScope|Test.*ComicPage' -count=1` RED, then implement the resolver and scope propagation. Preserve late-result safety and errors; do not recompile a style-specific prompt as another style's source.
-- [ ] Verify both V12 aliases and older paths preserve query parameters; GET with omitted style remains backward compatible, while unscoped collection creation in a multi-style project requires an explicit selection rather than mixing output.
-- [ ] Add frontend API tests checking `encodeURIComponent(styleId)`, `view=lite` coexists with the style query, JSON generation requests include the ID, and download requests retain the same scope. Run `node --test src/shared/api/batchFactoryV12.comicStyles.test.js` green.
-- [ ] Commit `feat: carry comic style scope through generation and media APIs`.
+- [x] Use fake image providers to record final prompts, reference images and request IDs for A/B. Assert shared story text is equal, each receives only its own style description/reference, and returned images persist to the right page. Add rejection cases for another book's style, conflicting query/body IDs and a manual cross-style image selection.
+- [x] Assert identical neutral prompts under two styles produce different image-cache/request identities. Existing page/image ID-based content and thumbnail routes must check parent ownership/style instead of using the UI's current selection.
+- [x] Run `go test ./internal/httpapi -run 'Test.*ComicStyleScope|Test.*ComicPage' -count=1` RED, then implement the resolver and scope propagation. Preserve late-result safety and errors; do not recompile a style-specific prompt as another style's source.
+- [x] Verify both V12 aliases and older paths preserve query parameters; GET with omitted style remains backward compatible, while unscoped collection creation in a multi-style project requires an explicit selection rather than mixing output.
+- [x] Add frontend API tests checking `encodeURIComponent(styleId)`, `view=lite` coexists with the style query, JSON generation requests include the ID, and download requests retain the same scope. Run `node --test src/shared/api/batchFactoryV12.comicStyles.test.js` green.
+- [x] Commit `feat: carry comic style scope through generation and media APIs`.
 
 ### Task 4: 自动生产按画风恢复、合成和发布
 
@@ -157,10 +157,10 @@ assert.equal(normalizeComicOutputStyles({ style: { presetId: 'old' } })[0].prese
 
 - [ ] Fake workflow: three styles × two pages; A succeeds and uploads, B fails on its second image, C succeeds and uploads. Retry must generate exactly B's missing image and submit exactly B's collection. Assert prompt extraction ran once and no successful image/receipt IDs changed.
 - [ ] Fake two workers and restart recovery: completed style runs remain completed, provider-result save retries do not resubmit the model call, and upload retries do not regenerate images. Incomplete result-to-disk recovery retains existing uncertain-call protections.
-- [ ] Run `go test ./internal/httpapi -run 'Test.*ComicStyleAutomation|TestN8ComicPublish' -count=1` RED, then implement style-stage orchestration as a separate helper file. Every provider call still acquires existing global capacity; no per-style bypass or multiplied book concurrency.
-- [ ] Validate each collection contains only its style's page IDs/main images in source-page order; enforce existing per-collection size constraints. AIGC names add a stable style label only where multiple outputs require distinction, and preserve suffixes within the existing64-character limit. Never use display name as deduplication identity.
-- [ ] Aggregate current and total page counts across styles separately. Report 2/3 uploaded as partial, retain per-style errors, and ensure old single-style automation fixtures stay green.
-- [ ] Commit `feat: resume and publish comic styles independently`.
+- [x] Run `go test ./internal/httpapi -run 'Test.*ComicStyleAutomation|TestN8ComicPublish' -count=1` RED, then implement style-stage orchestration as a separate helper file. Every provider call still acquires existing global capacity; no per-style bypass or multiplied book concurrency.
+- [x] Validate each collection contains only its style's page IDs/main images in source-page order; enforce existing per-collection size constraints. AIGC names add a stable style label only where multiple outputs require distinction, and preserve suffixes within the existing64-character limit. Never use display name as deduplication identity.
+- [x] Aggregate current and total page counts across styles separately. Report 2/3 uploaded as partial, retain per-style errors, and ensure old single-style automation fixtures stay green.
+- [x] Commit `feat: resume and publish comic styles independently`.
 
 ### Task 5: 漫画页与合集中的画风切换，以及1～5种选择界面
 
@@ -172,18 +172,18 @@ assert.equal(normalizeComicOutputStyles({ style: { presetId: 'old' } })[0].prese
 
 **Interfaces:** `ComicStyleOutputSelector({styles,value,onChange,disabled})`. State helper exports `comicStyleMediaKey(batchId,bookId,styleId)` and `isCurrentComicStyleResponse(capturedKey,currentKey)`. Generation callbacks receive a captured `styleId`, not a mutable selection reference.
 
-- [ ] Write pure-state and browser tests. In a fake API deferred promise test, select A, switch to B, resolve B then A; B's images/counts and action target must remain B. The selection action itself makes no generate/collection/publish calls.
+- [x] Write pure-state and browser tests. In a fake API deferred promise test, select A, switch to B, resolve B then A; B's images/counts and action target must remain B. The selection action itself makes no generate/collection/publish calls.
 
 ```js
 assert.notEqual(comicStyleMediaKey('b','k','A'), comicStyleMediaKey('b','k','B'));
 assert.equal(isCurrentComicStyleResponse('b/k/A','b/k/B'), false);
 ```
 
-- [ ] Confirm tests RED with `node --test src/user/pages/shuihuo/comicStyleMediaState.test.js src/user/pages/shuihuo/ComicStyleOutputSelector.browser.test.js`.
-- [ ] Add multi-select behavior to the current style picker, show“已选3/5种画风”, keep preset previews and per-style reference associations. Sixth selection is disabled with visible explanation; unselecting or exchanging one remains possible. Saving/canceling cannot silently drop other configured styles.
-- [ ] Put the output selector in the existing comic media toolbar. Comic pages and collections share selection; retain source page position during switching. Empty/unrendered B pages show their actual state rather than A's images. Library page/collection caches, polling and pending writes include style in their key.
-- [ ] Wire generate, retry, reference selection, primary image, download, collection and upload to captured scope. Style-specific busy state must not disable unrelated completed styles. Unified/book/new-batch/preset settings use identical1～5 validation.
-- [ ] Browser verify 1021×901 and a wide viewport; use the existing Antd dark theme and spacing. Check one project card still represents all five styles. Run tests green, frontend build, commit `feat: browse up to five comic styles inside one project`.
+- [x] Confirm tests RED with `node --test src/user/pages/shuihuo/comicStyleMediaState.test.js src/user/pages/shuihuo/ComicStyleOutputSelector.browser.test.js`.
+- [x] Add multi-select behavior to the current style picker, show“已选3/5种画风”, keep preset previews and per-style reference associations. Sixth selection is disabled with visible explanation; unselecting or exchanging one remains possible. Saving/canceling cannot silently drop other configured styles.
+- [x] Put the output selector in the existing comic media toolbar. Comic pages and collections share selection; retain source page position during switching. Empty/unrendered B pages show their actual state rather than A's images. Library page/collection caches, polling and pending writes include style in their key.
+- [x] Wire generate, retry, reference selection, primary image, download, collection and upload to captured scope. Style-specific busy state must not disable unrelated completed styles. Unified/book/new-batch/preset settings use identical1～5 validation.
+- [x] Browser verify 1021×901 and a wide viewport; use the existing Antd dark theme and spacing. Check one project card still represents all five styles. Run tests green, frontend build, commit `feat: browse up to five comic styles inside one project`.
 
 ## 第二段：新建批量创建多种独立模式
 
@@ -199,14 +199,14 @@ assert.equal(isCurrentComicStyleResponse('b/k/A','b/k/B'), false);
 
 Durable schema `8800502` (currently unused; recheck before application): creation group `(owner,request_id)` unique plus input digest, child project `(group,mode)` unique, shared source job `(group,source_key)` unique, and target book mappings with delivery status/revision. MySQL stores state/results; existing Redis task dispatch and short locks coordinate claims. Do not build an independent unbounded polling loop.
 
-- [ ] Tests: same request and digest submitted twice returns the same four batch IDs; same request ID with changed input is409; empty/five/repeated/unknown modes are400; another member cannot read or resume the group.
-- [ ] A source fake counts fetch/classification calls for two input books across four modes. Assert two fetches and two classification operations, four project copies, and no copied jobs/media/receipts. Existing supplied valid metadata skips AI. Duplicate book entries may share source work but keep the user's book rows and order.
-- [ ] Failure/restart tests: fail source delivery after two targets, restart and resume; delivered targets are unchanged and only two remain. Editing gender/type/text in a delivered target must not change another target. A manual change in a still-pending target wins over a late shared result; use expected revision/field provenance rather than overwriting the edit.
-- [ ] Run `go test ./internal/batchfactoryv11 ./internal/httpapi -run 'Test.*MultiMode' -count=1` RED before writing store/handler implementation.
-- [ ] Create group, four independently configured batches and mappings in one database transaction using `createBatchTx`. Validate all selected mode presets before creating any rows; return all children on retry using the unique request identity and digest.
-- [ ] Persist original source once, preserve full `originalRaw`, publish the source result to each target only once. Do not mark a source failed because one child has a mode-specific processing error. Each child applies its own capture, sanitization, segmentation and execution mode only after delivery.
-- [ ] Map `illustrated_text` at creation to existing comic production + `batch-comic-page-illustrated-text` preset and an explicit server-owned output-kind identity. Preset loading, project card labels, refresh recovery and publishing must retain that identity; adding this choice must not produce“生产模式无效”. Other three map to their existing production modes.
-- [ ] Verify MySQL uniqueness, redelivery and independent editing in a real isolated DB, plus memory-store equivalents. Run focused tests green; commit `feat: create independent mode projects from one book intake`.
+- [x] Tests: same request and digest submitted twice returns the same four batch IDs; same request ID with changed input is409; empty/five/repeated/unknown modes are400; another member cannot read or resume the group.
+- [x] A source fake counts fetch/classification calls for two input books across four modes. Assert two fetches and two classification operations, four project copies, and no copied jobs/media/receipts. Existing supplied valid metadata skips AI. Duplicate book entries may share source work but keep the user's book rows and order.
+- [x] Failure/restart tests: fail source delivery after two targets, restart and resume; delivered targets are unchanged and only two remain. Editing gender/type/text in a delivered target must not change another target. A manual change in a still-pending target wins over a late shared result; use expected revision/field provenance rather than overwriting the edit.
+- [x] Run `go test ./internal/batchfactoryv11 ./internal/httpapi -run 'Test.*MultiMode' -count=1` RED before writing store/handler implementation.
+- [x] Create group, four independently configured batches and mappings in one database transaction using `createBatchTx`. Validate all selected mode presets before creating any rows; return all children on retry using the unique request identity and digest.
+- [x] Persist original source once, preserve full `originalRaw`, publish the source result to each target only once. Do not mark a source failed because one child has a mode-specific processing error. Each child applies its own capture, sanitization, segmentation and execution mode only after delivery.
+- [x] Map `illustrated_text` at creation to existing comic production + `batch-comic-page-illustrated-text` preset and an explicit server-owned output-kind identity. Preset loading, project card labels, refresh recovery and publishing must retain that identity; adding this choice must not produce“生产模式无效”. Other three map to their existing production modes.
+- [x] Verify MySQL uniqueness, redelivery and independent editing in a real isolated DB, plus memory-store equivalents. Run focused tests green; commit `feat: create independent mode projects from one book intake`.
 
 ### Task 7: 新建批量的多模式选择与各自预设
 
@@ -218,12 +218,12 @@ Durable schema `8800502` (currently unused; recheck before application): creatio
 
 **Interfaces:** `buildMultiModeCreationRequest({requestId,title,books,modes,settingsByMode})` creates the defined server request. `createMultiModeBatches(payload)` is the frontend API function. Mode-specific drafts and request identity survive retries; ordinary `batchFactoryProductionMode` continues to return the existing execution enum, while output kind is preserved separately.
 
-- [ ] Write a browser test selecting four modes, choosing four distinct presets and three comic styles, switching the editor between modes, then submitting. Assert each mode retains its settings and only one group-create request is made; clicking submit again or retrying a lost response reuses the request ID.
-- [ ] Write tests that a video preset cannot overwrite comic settings, a six-style comic preset cannot partially load, text capture/font/background are retained, and a single selected mode preserves existing creation behavior.
-- [ ] Run `node --test src/user/pages/shuihuo/batchFactoryMultiModeCreation.test.js src/user/pages/shuihuo/BatchFactoryMultiModeCreation.browser.test.js` RED.
-- [ ] Render the four mode choices only in new-batch UI. Each selected mode gets its own preset and unified-settings editor; an inline summary shows mode/preset/execution/style count without inventing generated output counts. Do not add a multi-mode switch to existing projects.
-- [ ] Persist the server response as the project group, refresh the normal project list and show all created projects. Partial source import appears as actual per-project progress, not a second group creation. Render video/comic/文字插画/text labels using shared theme styles.
-- [ ] Test four cards after refresh; editing one child's classification does not change another card/project. Run focused tests and frontend build green; commit `feat: configure four project modes during batch creation`.
+- [x] Write a browser test selecting four modes, choosing four distinct presets and three comic styles, switching the editor between modes, then submitting. Assert each mode retains its settings and only one group-create request is made; clicking submit again or retrying a lost response reuses the request ID.
+- [x] Write tests that a video preset cannot overwrite comic settings, a six-style comic preset cannot partially load, text capture/font/background are retained, and a single selected mode preserves existing creation behavior.
+- [x] Run `node --test src/user/pages/shuihuo/batchFactoryMultiModeCreation.test.js src/user/pages/shuihuo/BatchFactoryMultiModeCreation.browser.test.js` RED.
+- [x] Render the four mode choices only in new-batch UI. Each selected mode gets its own preset and unified-settings editor; an inline summary shows mode/preset/execution/style count without inventing generated output counts. Do not add a multi-mode switch to existing projects.
+- [x] Persist the server response as the project group, refresh the normal project list and show all created projects. Partial source import appears as actual per-project progress, not a second group creation. Render video/comic/文字插画/text labels using shared theme styles.
+- [x] Test four cards after refresh; editing one child's classification does not change another card/project. Run focused tests and frontend build green; commit `feat: configure four project modes during batch creation`.
 
 ## Task 8: 整体本地验收、同一版本证据与交付
 
@@ -254,6 +254,20 @@ Durable schema `8800502` (currently unused; recheck before application): creatio
 
 ## 执行记录
 
-- 任务1完成：Go画风配置/解析/系统目录冻结测试通过；前端画风相关18项测试通过。旧预览测试读取了已退役V11转发文件，已改为检查实际V12接口文件。当前只完成配置基础，尚未开放多画风生产入口。
+### 2026-11-27 本地交付记录
+
+- 本地4001运行代码版本：`00286f89`；`/health` 返回200，`/api/runtime-build-info` 的运行SHA与清单SHA一致，前端入口为 `/assets/user-dpuRv_Tj.js`。独立保存的实际运行程序在本任务归档目录 `runtime-binaries/qiantie-local-00286f89.exe`。本机共享检出目录仍有其他聊天未提交的修改；本任务采用单独暂存，仅提交自己的改动，没有清理或代提交他人文件。
+- 实现提交：`91baba44` 配置、`f5e563f6` 持久化、`64a1c5d0` 画风执行与接口、`37706d7c` 多模式及媒体界面、`0c95c032` 表单对齐、`696c8a0b` 保持合集选项、`00286f89` 服务端预设模式检查。直接维护 `v88`，未建分支或工作树，未推送或上线。
+- 数据库迁移：8800501（画风范围及旧成果绑定）、8800502（多模式创建组、来源任务、独立项目和分发记录）。真实MySQL8.4测试通过，并验证重复迁移、并发创建、恢复后复用、原图片ID和主图保持。切换前已导出并解压校验 `before-multimode-verified.sql.gz`，约120MB原始SQL；未删原始备份。
+- 最新针对性验证：画风/多模式HTTP测试14项、存储对应单元测试11项、相关N8漫画及画风HTTP测试24项、来源分类和文本处理测试47项通过；前端最终接口/配置测试38项、浏览器与延迟响应测试3项通过。React与Go embed构建通过。
+- 扩展Go检查曾得到3398项通过、2项失败。失败为 `TestCustomCopyLegacyTextRequiresAuthoritativeReselection` 和 `TestFailedProcessingRetriesOnlyVerifiedRawAndKeepsCaptureSize`；将本任务修改的CreateBatch函数替换回HEAD基线后仍同样失败，原因是现有手动全文可信判定与旧断言不同。本任务未回退该既有行为，不能将扩展检查报告为全部通过。基线对照日志在归档目录 `baseline-source-tests.jsonl`。
+- 模拟执行：三画风×两页，B的第二页首次失败，A/C继续完成；重试仅补B缺页，每画风只产生一次模拟发布，原成功图片ID不变。另有任务状态序列化再加载的恢复测试。模拟发布不是网络上传。
+- 实际4001接口：同一创建请求重复提交返回同一组四个项目，完整原文已分别保存；视频12行、漫画分析3000字保留到实际读取的子书元数据；人工修改一个子项目男女频，其他项目内容不变。重启后六张手动测试图、三份独立合集仍存在。
+- 已在登录浏览器检查新建四模式行、三画风选择、漫画页及合集切换。合集切换画风后保持当前栏目，1021×901与1440×1000窗口均无表单横向溢出；较短窗口沿用弹窗纵向滚动。表单使用现有主题变量；700px以下配置行改成两列。实际下载ZIP只有所选B画风两张图片，未混入A/C。测试图片明确印有 `LOCAL TEST`，不能作为真实模型出图效果。
+- 运行验收摘要保存在归档目录 `runtime-acceptance.json`。保留名为“本地验收-多模式-1127”和“本地验收-三画风-1127”的独立测试项目，未操作原有书籍。
+- 回退入口：归档目录 `rollback-stable-manifest.json` 指向原稳定 `4a276374` 程序；可用本任务 `switch-local-runtime.py` 切换，脚本先检查活动任务再停止已确认的4001进程。新增表为附加结构，回退程序不需要删除新表。数据库备份只在确实需要恢复数据时使用，不能盲目覆盖日常数据。
+- 发布边界：本轮真实付费模型调用为0，网络上传为0；未更新Mac包。下一步若安排上线，应先授权一份有上限的真实出图/上传验收，逐画风核对网络回执，再从维护分支推送并走 `scripts/deploy-go-embedded.ps1`。未勾选的双工作进程综合模拟及真实供应商上传验收仍明确保留，不以局部测试替代。
+
+- 任务1完成：Go画风配置/解析/系统目录冻结测试通过；前端画风相关18项测试通过。旧预览测试读取了已退役V11转发文件，已改为检查实际V12接口文件。该条记录为任务1当时状态；现已由后续任务开放生产与查看入口。
 
 - 任务2完成：真实MySQL8.4空表结构夹具验证画风页面/资产图/合集隔离、并发写回、重复图片保存与迁移重复启动；原有图片ID及主图保留。迁移8800501。旧画风使用不可变关联映射到原物理范围，避免破坏在途请求。完整batchfactoryv11/storage单元测试已在当前共享源码上通过；临时依赖覆盖仅用于费用模块并发修改期间，最终单元测试不再使用覆盖。
