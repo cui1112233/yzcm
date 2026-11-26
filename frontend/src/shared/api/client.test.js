@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { API_TIMEOUT_CODE, DEFAULT_API_TIMEOUT_MS, isApiTimeoutError, apiRequest, getToken, isSessionAuthFailure, setToken } from './client.js';
+import { API_TIMEOUT_CODE, DEFAULT_API_TIMEOUT_MS, isApiTimeoutError, apiRequest, getToken, isSessionAuthFailure, setToken, setVerifiedImpersonation } from './client.js';
 
 function responseWithHeader(value) {
   return {
@@ -40,6 +40,37 @@ test('reads and clears the Go application session token from local storage', () 
     assert.equal(getToken(), '');
   } finally {
     globalThis.localStorage = previousStorage;
+  }
+});
+
+test('only verified switch state adds an expectation to business mutations for that login', async () => {
+  const storage = new Map([['auth_token', 'actor-session'], ['impersonationId', 'spoofed-local-id']]);
+  const sent = [];
+  const previousStorage = globalThis.localStorage;
+  const previousFetch = globalThis.fetch;
+  globalThis.localStorage = { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) };
+  globalThis.fetch = (path, init) => {
+    sent.push([path, init.headers.get('X-Qiantie-Expected-Impersonation'), init.headers.get('Authorization')]);
+    return Promise.resolve(new Response('{}', { headers: { 'Content-Type': 'application/json' } }));
+  };
+  try {
+    await apiRequest('/api/business', { method: 'POST' });
+    setVerifiedImpersonation({ username: 'subject', impersonationId: 'verified-id' }, 'actor-session');
+    await apiRequest('/api/business', { method: 'POST', headers: { 'X-Qiantie-Expected-Impersonation': 'spoofed-id' } });
+    await apiRequest('/api/business');
+    await apiRequest('/api/account-impersonation/current', { method: 'DELETE' });
+    setToken('replacement-session');
+    await apiRequest('/api/business', { method: 'PATCH' });
+    assert.deepEqual(sent, [
+      ['/api/business', null, 'Bearer actor-session'],
+      ['/api/business', 'verified-id', 'Bearer actor-session'],
+      ['/api/business', null, 'Bearer actor-session'],
+      ['/api/account-impersonation/current', null, 'Bearer actor-session'],
+      ['/api/business', null, 'Bearer replacement-session']
+    ]);
+  } finally {
+    globalThis.localStorage = previousStorage;
+    globalThis.fetch = previousFetch;
   }
 });
 

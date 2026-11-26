@@ -1,6 +1,6 @@
-import { Alert, Avatar, Button, Input, Modal, message } from 'antd';
+import { Alert, Avatar, Button, Input, Modal, Spin, message } from 'antd';
 import { ChartNoAxesCombined, ChevronLeft, Crown, ExternalLink, KeyRound, LogOut, ShieldCheck, UserRound, UsersRound } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { getAccountImpersonation, startAccountImpersonation, stopAccountImpersonation } from '../api/accountImpersonation.js';
 import { setEffectiveImpersonationAccount } from '../api/auth';
 import { getToken } from '../api/client';
@@ -31,13 +31,10 @@ function reloadForAccountSwitch() {
 }
 
 export function useAccountImpersonation(enabled) {
-  const [status, setStatus] = useState(null);
+  const token = enabled ? getToken() : '';
+  const [snapshot, setSnapshot] = useState({ token: '', status: null, error: '' });
+  const refreshRef = useRef(null);
   useEffect(() => {
-    if (!enabled) {
-      setStatus(null);
-      return undefined;
-    }
-    const token = getToken();
     if (!token) return undefined;
     const channel = openSwitchChannel();
     let currentRequest;
@@ -57,38 +54,61 @@ export function useAccountImpersonation(enabled) {
       currentRequest?.abort();
       const request = new AbortController();
       currentRequest = request;
+      setSnapshot(previous => previous.token === token && previous.error ? { ...previous, error: '' } : previous);
       try {
         const next = await getAccountImpersonation(request.signal);
         if (request.signal.aborted || getToken() !== token) return;
+        if (typeof next?.active !== 'boolean' || typeof next.canSwitch !== 'boolean' || (next.active && (!next.impersonationId || !next.subject?.username))) {
+          throw new Error('无法确认账号切换状态');
+        }
         const nextId = next.impersonationId || '';
-        setEffectiveImpersonationAccount(next.active ? next.subject?.username : '', token);
         if (currentId !== undefined && currentId !== nextId) {
+          // Keep the old write expectation until the old page is unloaded.
           reload();
           return;
         }
+        setEffectiveImpersonationAccount(next.active ? { username: next.subject.username, impersonationId: nextId } : null, token);
         currentId = nextId;
-        setStatus(next);
+        setSnapshot({ token, status: next, error: '' });
         if (next.active) timer = setTimeout(refresh, Math.min(30, next.expiresInSeconds || 1) * 1000);
       } catch {
-        if (request.signal.aborted || getToken() !== token) return;
-        setStatus(previous => previous || {});
+        if (request.signal.aborted) return;
+        if (getToken() !== token) {
+          setSnapshot({ token: '', status: null, error: '' });
+          return;
+        }
+        setSnapshot(previous => ({ token, status: previous.token === token ? previous.status : null, error: '无法确认账号切换状态' }));
         if (currentId) timer = setTimeout(refresh, 5000);
       }
     }
 
+    refreshRef.current = refresh;
     channel?.addEventListener('message', reload);
     window.addEventListener('focus', refresh);
     window.addEventListener('storage', onSessionChange);
     void refresh();
     return () => {
+      refreshRef.current = null;
       window.removeEventListener('focus', refresh);
       window.removeEventListener('storage', onSessionChange);
       channel?.close();
       clearTimeout(timer);
       currentRequest?.abort();
     };
-  }, [enabled]);
-  return enabled ? status : null;
+  }, [token]);
+  return {
+    status: snapshot.token === token ? snapshot.status : null,
+    error: snapshot.token === token ? snapshot.error : '',
+    retry: () => refreshRef.current?.()
+  };
+}
+
+export function AccountImpersonationPending({ error, onRetry }) {
+  return <div style={{ padding: 24 }}>
+    {error
+      ? <Alert type="error" showIcon message={error} action={<Button aria-label="重试确认账号切换状态" onClick={onRetry}>重试</Button>} />
+      : <div role="status" aria-live="polite"><Spin size="small" /> 正在确认账号切换状态</div>}
+  </div>;
 }
 
 export function AccountImpersonationBanner({ status }) {
@@ -96,11 +116,10 @@ export function AccountImpersonationBanner({ status }) {
   if (!status?.active || !status.subject?.username) return null;
 
   async function exit() {
-    const token = getToken();
     setBusy(true);
     try {
       await stopAccountImpersonation();
-      setEffectiveImpersonationAccount('', token);
+      // Until reload replaces the old page, its in-flight actions still expect this switch.
       reloadForAccountSwitch();
     } catch (error) {
       message.error(error.message || '退出账号切换失败');
@@ -133,7 +152,7 @@ function AccountSwitchEntry({ status }) {
     setError('');
     try {
       const next = await startAccountImpersonation(target.trim());
-      setEffectiveImpersonationAccount(next.subject?.username, token);
+      setEffectiveImpersonationAccount({ username: next.subject?.username, impersonationId: next.impersonationId }, token);
       reloadForAccountSwitch();
     } catch (failure) {
       setError(failure.message || '账号切换失败');
@@ -150,9 +169,12 @@ function AccountSwitchEntry({ status }) {
   </>;
 }
 
-export function AccountCenterLayout({ account, username, avatar, pathname, onReturn, onLogout, impersonation, children }) {
+export function AccountCenterLayout({ account, username, avatar, pathname, onReturn, onLogout, impersonation, impersonationRequired = Boolean(username), impersonationError, onRetryImpersonation, children }) {
   const canManage = ['dev', 'manager'].includes(account?.role);
   const canAccessAdmin = account?.role === 'dev';
+  const content = impersonationRequired && !impersonation
+    ? <AccountImpersonationPending error={impersonationError} onRetry={onRetryImpersonation} />
+    : children;
 
   // Roll out the new shell only to Profile; other account pages keep their layout.
   if (pathname === '/profile') {
@@ -177,7 +199,7 @@ export function AccountCenterLayout({ account, username, avatar, pathname, onRet
           ? <a key={entry.href} href={entry.href} target="_blank" rel="noreferrer" title="一战晟铭专属 API 控制台">{entry.label}<ExternalLink size={12} aria-hidden="true" /></a>
           : <Link key={entry.href} href={entry.href} reload={entry.reload} aria-current={pathname === entry.href ? 'page' : undefined} className={pathname === entry.href ? 'active' : ''}>{entry.label}{entry.developer ? <small>DEV</small> : null}</Link>)}
       </nav>
-      <main className="account-center-main pg-main">{children}</main>
+      <main className="account-center-main pg-main">{content}</main>
       <footer className="pg-shell-footer"><button type="button" onClick={onReturn} aria-label="返回工作台"><ChevronLeft size={16} />返回工作台</button><button type="button" onClick={onLogout}><LogOut size={16} />退出登录</button></footer>
     </div>;
   }
@@ -204,6 +226,6 @@ export function AccountCenterLayout({ account, username, avatar, pathname, onRet
       </nav>
       <button type="button" className="account-center-sidebar-logout" onClick={onLogout}><LogOut size={17} />退出登录</button>
     </aside>
-    <main className="account-center-main">{children}</main>
+    <main className="account-center-main">{content}</main>
   </div>;
 }

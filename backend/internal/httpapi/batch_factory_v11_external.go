@@ -21,6 +21,9 @@ func registerExternalRoutes(mux *http.ServeMux, service *external.Service) {
 	})
 	mux.HandleFunc("PUT /api/batch-factory/v11/publish/{provider}/credential", func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r); if !ok { writeJSON(w, http.StatusUnauthorized, map[string]string{"error":"unauthorized"}); return }
+		if !allowImpersonationCredentialWrite(w, r) {
+			return
+		}
 		var input externalCredentialInput; if !decodeJSON(w, r, &input) { return }
 		ref, err := service.SaveCredential(r.Context(), owner, r.PathValue("provider"), external.CredentialInput{Name: input.Name, Secret: input.Secret}); if err != nil { writeExternalError(w, err); return }
 		writeJSON(w, http.StatusOK, map[string]any{"credential": ref})

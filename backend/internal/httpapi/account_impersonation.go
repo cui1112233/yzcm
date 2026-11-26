@@ -13,10 +13,11 @@ import (
 )
 
 const (
-	impersonationCookieName = "qiantie_impersonation"
-	impersonationPath       = "/api/account-impersonation"
-	impersonationCurrent    = impersonationPath + "/current"
-	impersonationLifetime   = 15 * time.Minute
+	impersonationCookieName     = "qiantie_impersonation"
+	impersonationPath           = "/api/account-impersonation"
+	impersonationCurrent        = impersonationPath + "/current"
+	impersonationLifetime       = 15 * time.Minute
+	expectedImpersonationHeader = "X-Qiantie-Expected-Impersonation"
 )
 
 type accountImpersonation struct{ auth BridgeAuth }
@@ -129,6 +130,13 @@ func (s accountImpersonation) active(r *http.Request, actor accountcenter.Identi
 		return authenticatedImpersonation{}, err
 	}
 	subject, teamID, err := s.resolveTarget(r.Context(), actor, session.SubjectUsername)
+	if errors.Is(err, accountcenter.ErrNotFound) || errors.Is(err, accountcenter.ErrForbidden) {
+		// A change in the target's account or team cannot make this session usable again.
+		if revokeErr := s.auth.AccountCenterStore.RevokeImpersonation(r.Context(), session.ID, actor.Username, s.now()); revokeErr != nil && !errors.Is(revokeErr, accountcenter.ErrNotFound) {
+			return authenticatedImpersonation{}, revokeErr
+		}
+		return authenticatedImpersonation{}, accountcenter.ErrForbidden
+	}
 	if err != nil {
 		return authenticatedImpersonation{}, err
 	}
@@ -268,12 +276,20 @@ func (s accountImpersonation) audit(ctx context.Context, active authenticatedImp
 
 func (s accountImpersonation) middleware(root *http.ServeMux, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.auth.AccountCenterStore == nil || bearerToken(r) == "" || !strings.HasPrefix(r.URL.Path, "/api/") ||
-			r.URL.Path == impersonationPath || r.URL.Path == impersonationCurrent {
+		if !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == impersonationPath || r.URL.Path == impersonationCurrent {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if _, err := r.Cookie(impersonationCookieName); err != nil {
+		expectedID := ""
+		if impersonationWriteMethod(r.Method) && r.URL.Path != "/api/login/logout" {
+			expectedID = strings.TrimSpace(r.Header.Get(expectedImpersonationHeader))
+		}
+		_, cookieErr := r.Cookie(impersonationCookieName)
+		if s.auth.AccountCenterStore == nil || bearerToken(r) == "" || cookieErr != nil {
+			if expectedID != "" {
+				writeImpersonationConflict(w)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -307,14 +323,21 @@ func (s accountImpersonation) middleware(root *http.ServeMux, next http.Handler)
 		active, err := s.active(r, identity.Actor)
 		if err != nil {
 			if errors.Is(err, accountcenter.ErrNotFound) || errors.Is(err, accountcenter.ErrForbidden) {
+				if errors.Is(err, accountcenter.ErrForbidden) {
+					clearImpersonationCookie(w, r)
+				}
 				if r.Method == http.MethodGet && r.URL.Path == "/api/login/session" {
 					next.ServeHTTP(w, r)
 					return
 				}
-				writeAuthError(w, http.StatusConflict, "账号切换已失效，请刷新后重试")
+				writeImpersonationConflict(w)
 			} else {
 				writeImpersonationUnavailable(w)
 			}
+			return
+		}
+		if expectedID != "" && expectedID != active.identity.ImpersonationID {
+			writeImpersonationConflict(w)
 			return
 		}
 		if impersonationBlocks(r.Method, r.URL.Path) {
@@ -344,6 +367,11 @@ func (s accountImpersonation) middleware(root *http.ServeMux, next http.Handler)
 	})
 }
 
+func writeImpersonationConflict(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusConflict, map[string]string{"code": "IMPERSONATION_CHANGED", "error": "账号切换状态已变化，请刷新后重试"})
+}
+
 func switchedBridgeIdentity(r *http.Request) (BridgeIdentity, bool) {
 	active, ok := r.Context().Value(impersonationContextKey{}).(authenticatedImpersonation)
 	if !ok || active.loginHash != sha256.Sum256([]byte(bearerToken(r))) {
@@ -352,8 +380,20 @@ func switchedBridgeIdentity(r *http.Request) (BridgeIdentity, bool) {
 	return BridgeIdentity{Username: active.identity.Subject.Username}, true
 }
 
+func allowImpersonationCredentialWrite(w http.ResponseWriter, r *http.Request) bool {
+	if _, switched := switchedBridgeIdentity(r); switched {
+		writeAccountCenterForbidden(w)
+		return false
+	}
+	return true
+}
+
+func impersonationWriteMethod(method string) bool {
+	return method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions
+}
+
 func impersonationBlocks(method, path string) bool {
-	if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions {
+	if !impersonationWriteMethod(method) {
 		return false
 	}
 	for _, prefix := range []string{

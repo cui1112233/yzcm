@@ -1,4 +1,5 @@
 import { getBookAssetImageBlob, getBookAssetImageGenerationTask, getBatch, listBookAssetImages, listComicPages, saveBookOverride } from '../../../shared/api/batchFactory';
+import { getCurrentUsername } from '../../../shared/api/auth.js';
 import { getConfig } from '../../../shared/api/config';
 import { textToSpeech } from '../../../shared/api/tts';
 import { audioPlanningRequired, normalizeAudioSourceSettings } from './batchFactoryAudioSource';
@@ -539,7 +540,7 @@ export function textUploadControl(collection, status) {
 const transientTextRetryKeys = Object.create(null);
 export function textRetryConfirmation(batchId, bookId, collectionId) {
   const storage = typeof window === 'undefined' ? transientTextRetryKeys : window.sessionStorage;
-  const owner = typeof window === 'undefined' ? '' : window.localStorage.getItem('auth_username') || '';
+  const owner = typeof window === 'undefined' ? '' : getCurrentUsername();
   const slot = 'text-republish:' + JSON.stringify([owner, batchId, bookId, collectionId]);
   return {
     read:() => storage[slot],

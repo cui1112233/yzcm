@@ -34,6 +34,9 @@ func registerProductionRoutes(mux *http.ServeMux, service *batchfactoryv11.Produ
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
+		if !allowImpersonationCredentialWrite(w, r) {
+			return
+		}
 		if service == nil || service.ProviderRegistry == nil {
 			writeStoreError(w, batchfactoryv11.ErrUnavailable)
 			return

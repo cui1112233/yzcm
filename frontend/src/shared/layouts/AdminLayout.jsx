@@ -4,10 +4,11 @@ import { BrandLogo } from '../components/BrandLogo';
 import { Link } from '../components/Link';
 import { ThemePicker } from '../components/ThemePicker';
 import { getCurrentAccount, logout } from '../api/auth';
+import { getToken } from '../api/client';
 import { updateMemberProfile } from '../api/member';
 import { createAntTheme, resolveSchemeId, resolveThemeId } from '../styles/theme';
 import { loadCachedTheme, persistCachedTheme, selectThemePreference } from '../styles/theme-preference.js';
-import { AccountImpersonationBanner, useAccountImpersonation } from './AccountCenterLayout';
+import { AccountImpersonationBanner, AccountImpersonationPending, useAccountImpersonation } from './AccountCenterLayout';
 
 const navItems = [
   { href: '/admin', icon: '▦', label: '概览' },
@@ -36,13 +37,19 @@ export function AdminLayout({ children }) {
   const [accessState, setAccessState] = useState('checking');
   const [theme, setTheme] = useState(initialTheme);
   const [systemMode, setSystemMode] = useState(initialSystemMode);
-  const impersonation = useAccountImpersonation(Boolean(account));
+  const hasLoginToken = Boolean(getToken());
+  const { status: impersonation, error: impersonationError, retry: retryImpersonation } = useAccountImpersonation(hasLoginToken);
+  const identityReady = !hasLoginToken || impersonation !== null;
+  const isSwitched = impersonation?.active === true;
   const pathname = window.location.pathname;
   const resolvedTheme = resolveThemeId(theme, systemMode);
   const themeScheme = resolveSchemeId(theme);
 
   useEffect(() => {
+    if (!identityReady) return undefined;
+    let alive = true;
     getCurrentAccount().then(nextAccount => {
+      if (!alive) return;
       setAccount(nextAccount);
       const accountTheme = selectThemePreference({ loggedIn: true, accountThemeId: nextAccount.themeId, cachedThemeId: theme });
       setTheme(accountTheme);
@@ -52,12 +59,14 @@ export function AdminLayout({ children }) {
         return;
       }
       setAccessState('denied');
-      window.location.replace('/profile');
+      if (!isSwitched) window.location.replace('/profile');
     }).catch(() => {
+      if (!alive) return;
       setAccessState('denied');
-      window.location.replace('/');
+      if (!isSwitched) window.location.replace('/');
     });
-  }, []);
+    return () => { alive = false; };
+  }, [identityReady, isSwitched]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = resolvedTheme;
@@ -99,12 +108,15 @@ export function AdminLayout({ children }) {
     }
   }
 
-  if (accessState === 'checking') {
-    return <ConfigProvider theme={createAntTheme(theme, systemMode)}><div className="admin-access-screen"><Spin size="large" tip="正在验证开发者权限" /></div></ConfigProvider>;
-  }
-
-  if (accessState !== 'allowed') {
-    return <ConfigProvider theme={createAntTheme(theme, systemMode)}><div className="admin-access-screen"><Result status="403" title="仅 DEV 可访问管理后台" subTitle="账号与组员授权请在个人中心完成。" /></div></ConfigProvider>;
+  if (!identityReady || accessState !== 'allowed') {
+    return <ConfigProvider theme={createAntTheme(theme, systemMode)}>
+      <AccountImpersonationBanner status={impersonation} />
+      <div className="admin-access-screen">
+        {!identityReady ? <AccountImpersonationPending error={impersonationError} onRetry={retryImpersonation} />
+          : accessState === 'checking' ? <div role="status"><Spin size="large" /> 正在验证开发者权限</div>
+          : <Result status="403" title="仅 DEV 可访问管理后台" subTitle="账号与组员授权请在个人中心完成。" />}
+      </div>
+    </ConfigProvider>;
   }
 
   return (

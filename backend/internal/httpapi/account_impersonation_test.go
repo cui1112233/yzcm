@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"qiantie/backend/internal/accountcenter"
+	"qiantie/backend/internal/batchfactoryv11"
+	"qiantie/backend/internal/batchfactoryv11/external"
 	"qiantie/backend/internal/novelfetchworkshop"
 )
 
@@ -21,9 +24,13 @@ type impersonationTestStore struct {
 	audits     []accountcenter.AuditEvent
 	auditErr   error
 	teamEnded  bool
+	targetErr  error
 }
 
 func (s *impersonationTestStore) ResolveIdentity(_ context.Context, username string) (accountcenter.Identity, error) {
+	if username == "member" && s.targetErr != nil {
+		return accountcenter.Identity{}, s.targetErr
+	}
 	if identity, ok := s.identities[strings.ToLower(username)]; ok {
 		return identity, nil
 	}
@@ -68,7 +75,7 @@ func (s *impersonationTestStore) AppendAudit(_ context.Context, event accountcen
 	return nil
 }
 
-func newImpersonationTestRouter(t *testing.T) (http.Handler, *impersonationTestStore, *time.Time) {
+func newImpersonationTestRouter(t *testing.T, configure ...func(*RouterOptions)) (http.Handler, *impersonationTestStore, *time.Time) {
 	t.Helper()
 	t.Setenv("QIANTIE_ENABLE_LEGACY_V11", "1")
 	now := time.Date(2026, 11, 26, 8, 0, 0, 0, time.UTC)
@@ -91,7 +98,7 @@ func newImpersonationTestRouter(t *testing.T) (http.Handler, *impersonationTestS
 			t.Fatal(err)
 		}
 	}
-	router := NewRouter(RouterOptions{
+	options := RouterOptions{
 		BridgeSecret: "test-secret", Now: func() time.Time { return now }, AccountCenterStore: store, NovelFetchStore: novels,
 		SessionResolver: func(_ context.Context, token string) (BridgeIdentity, error) {
 			username, _, _ := strings.Cut(token, ":")
@@ -110,8 +117,11 @@ func newImpersonationTestRouter(t *testing.T) (http.Handler, *impersonationTestS
 				})
 			})
 		},
-	})
-	return router, store, &now
+	}
+	for _, apply := range configure {
+		apply(&options)
+	}
+	return NewRouter(options), store, &now
 }
 
 func impersonationRequest(router http.Handler, method, path, token, body string, cookie *http.Cookie) *httptest.ResponseRecorder {
@@ -242,6 +252,110 @@ func TestImpersonationRechecksMembershipBeforeEveryBusinessRequest(t *testing.T)
 	w := impersonationRequest(router, http.MethodPost, impersonationBusinessTestPath, "manager", "", cookie)
 	if w.Code != http.StatusConflict || len(store.audits) != 1 {
 		t.Fatalf("stale switch mutation = %d %s, audit events = %d", w.Code, w.Body, len(store.audits))
+	}
+	store.teamEnded = false
+	status := impersonationRequest(router, http.MethodGet, impersonationCurrentTestPath, "manager", "", cookie)
+	if len(store.sessions) != 0 || !strings.Contains(status.Body.String(), `"active":false`) || len(w.Result().Cookies()) != 1 || w.Result().Cookies()[0].MaxAge >= 0 {
+		t.Fatalf("restored team revived an invalidated session: %d %s, old session records = %d, clear cookie = %t", status.Code, status.Body, len(store.sessions), len(w.Result().Cookies()) != 0)
+	}
+}
+
+func TestImpersonationStatusRevokesDisallowedTargetButPreservesTemporaryFailure(t *testing.T) {
+	router, store, _ := newImpersonationTestRouter(t)
+	cookie := startImpersonationForTest(t, router, "founder", "member")
+	store.targetErr = context.DeadlineExceeded
+	status := impersonationRequest(router, http.MethodGet, impersonationCurrentTestPath, "founder", "", cookie)
+	if status.Code != http.StatusServiceUnavailable || len(store.sessions) != 1 || len(status.Result().Cookies()) != 0 {
+		t.Fatalf("temporary failure discarded the switch: %d %s", status.Code, status.Body)
+	}
+	store.targetErr = nil
+	member := store.identities["member"]
+	disabled := member
+	disabled.Active = false
+	store.identities["member"] = disabled
+	status = impersonationRequest(router, http.MethodGet, impersonationCurrentTestPath, "founder", "", cookie)
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"active":false`) || len(store.sessions) != 0 || len(status.Result().Cookies()) != 1 || status.Result().Cookies()[0].MaxAge >= 0 {
+		t.Fatalf("disabled account has a live switch: %d %s, sessions = %d", status.Code, status.Body, len(store.sessions))
+	}
+	store.identities["member"] = member
+	status = impersonationRequest(router, http.MethodGet, impersonationCurrentTestPath, "founder", "", cookie)
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"active":false`) {
+		t.Fatalf("reactivation restored the old switch: %d %s", status.Code, status.Body)
+	}
+}
+
+func TestImpersonationExpectedIDNeverFallsBackToActor(t *testing.T) {
+	router, store, now := newImpersonationTestRouter(t)
+	cookie := startImpersonationForTest(t, router, "founder", "member")
+	var id string
+	for _, session := range store.sessions {
+		id = session.ID
+	}
+	request := func(expect string, cookie *http.Cookie) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, impersonationBusinessTestPath, nil)
+		r.Header.Set("Authorization", "Bearer founder")
+		r.Header.Set("X-Qiantie-Expected-Impersonation", expect)
+		if cookie != nil {
+			r.AddCookie(cookie)
+		}
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, r)
+		return w
+	}
+	if w := request(id, cookie); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"owner":"member"`) {
+		t.Fatalf("expected active switch = %d %s", w.Code, w.Body)
+	}
+	if w := request("different-switch-id", cookie); w.Code != http.StatusConflict {
+		t.Errorf("mismatched switch wrote business data: %d %s", w.Code, w.Body)
+	}
+	*now = now.Add(31 * time.Minute)
+	// The expired cookie is absent, as it would be in a real browser.
+	if w := request(id, nil); w.Code != http.StatusConflict {
+		t.Errorf("expired page wrote business data: %d %s", w.Code, w.Body)
+	}
+	if w := request("", nil); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"owner":"founder"`) {
+		t.Errorf("regular actor write = %d %s", w.Code, w.Body)
+	}
+}
+
+func TestImpersonationBlocksV11AndV12CredentialWrites(t *testing.T) {
+	registry := batchfactoryv11.NewMemoryVideoProviderRegistry()
+	credentials := external.NewMemoryStore()
+	publish := &external.Service{Credentials: credentials, Enabled: map[external.Provider]bool{external.Provider121: true}, Key: bytes.Repeat([]byte{4}, 32)}
+	router, _, _ := newImpersonationTestRouter(t, func(options *RouterOptions) {
+		options.Slice = 6
+		options.Production = &batchfactoryv11.ProductionService{ProviderRegistry: registry}
+		options.External = publish
+	})
+	cookie := startImpersonationForTest(t, router, "founder", "manager")
+	for _, version := range []string{"v11", "v12"} {
+		t.Run(version, func(t *testing.T) {
+			ctx := context.Background()
+			prefix := "/api/batch-factory/" + version
+			for _, write := range []struct{ path, original, replacement string }{
+				{prefix + "/video-provider/config", `{"provider":"personal_api","apiKey":"previous-test-key"}`, `{"provider":"personal_api","apiKey":"replacement-test-key"}`},
+				{prefix + "/publish/121/credential", `{"name":"previous","secret":"previous-test-secret"}`, `{"name":"replacement","secret":"replacement-test-secret"}`},
+			} {
+				if w := impersonationRequest(router, http.MethodPut, write.path, "manager", write.original, nil); w.Code != http.StatusOK {
+					t.Fatalf("unswitched credential write at %s = %d %s", write.path, w.Code, w.Body)
+				}
+				if w := impersonationRequest(router, http.MethodPut, write.path, "founder", write.replacement, cookie); w.Code != http.StatusForbidden {
+					t.Errorf("switched credential write at %s = %d %s", write.path, w.Code, w.Body)
+				}
+			}
+			config, err := registry.Resolve(ctx, "manager", batchfactoryv11.VideoProviderPersonalAPI)
+			if err != nil || config.APIKey != "previous-test-key" {
+				t.Error("existing video provider key was not preserved")
+			}
+			stored, err := credentials.GetCredential(ctx, "manager", external.Provider121)
+			if err != nil {
+				t.Fatal(err)
+			}
+			secret, err := external.DecryptCredential(publish.Key, stored.Nonce, stored.Ciphertext)
+			if err != nil || string(secret) != "previous-test-secret" || stored.Name != "previous" {
+				t.Error("existing publish credential was not preserved")
+			}
+		})
 	}
 }
 
