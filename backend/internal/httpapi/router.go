@@ -1016,7 +1016,8 @@ func NewRouter(options RouterOptions) http.Handler {
 	// Compress JSON responses at the outermost layer so every registered route
 	// benefits without touching individual handlers. Non-JSON streams (images,
 	// ServeContent Range/304) are passed through untouched.
-	return withWorkshopSubmitQueue(withJSONCompression(impersonation.middleware(root, withAICutTimelineScope(root, auth))), options.NovelFetchQueue)
+	business := withAccountCenterBusinessAccess(withAICutTimelineScope(root, auth), auth)
+	return withWorkshopSubmitQueue(withJSONCompression(impersonation.middleware(root, business)), options.NovelFetchQueue)
 }
 
 // registerCanonicalNovelFetchWebSubmitAliases keeps the public workshop

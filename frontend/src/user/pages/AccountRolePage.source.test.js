@@ -13,4 +13,7 @@ test('uses the same server-authorized team groups and account actions on both pa
   assert.match(accounts, /value \?\? '暂不可用'/);
   assert.match(teams, /<AccountRolePage[^>]*teamsOnly/);
   assert.doesNotMatch(accounts, /reset_password|listGlobalAccounts|getMemberCenter/);
+  assert.match(accounts, /getAccountAdminAudit\(target\?\.id\)/);
+  assert.match(accounts, /account\.restoreConflict/);
+  assert.match(accounts, /grant_team_create/);
 });

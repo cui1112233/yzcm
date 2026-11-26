@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -124,21 +125,13 @@ func authAccountPayload(account auth.Account, profiles *MemberProfileStore) map[
 func RegisterAuthRoutes(root *http.ServeMux, options AuthOptions) {
 	accountPayload := func(ctx context.Context, account auth.Account) map[string]any {
 		payload := authAccountPayload(account, options.Profiles)
+		setFormalAccountFields(ctx, options.AccountCenterStore, payload, accountcenter.Identity{}, false)
 		if options.AccountCenterStore == nil {
 			return payload
 		}
-		// The legacy field is still consumed by the navigation and older clients.
 		payload["role"] = "member"
 		if identity, err := options.AccountCenterStore.ResolveIdentity(ctx, account.Username); err == nil {
-			switch identity.Role {
-			case accountcenter.RoleFounder, accountcenter.RoleDeveloper:
-				payload["role"] = "dev"
-			case accountcenter.RoleManager:
-				payload["role"] = "manager"
-			}
-			if identity.DisplayName != "" {
-				payload["displayName"] = identity.DisplayName
-			}
+			setFormalAccountFields(ctx, options.AccountCenterStore, payload, identity, false)
 		}
 		return payload
 	}
@@ -303,16 +296,7 @@ func RegisterAuthRoutes(root *http.ServeMux, options AuthOptions) {
 			identity, _ := AccountCenterIdentityFromContext(r.Context())
 			subject := identity.Subject
 			payload := authAccountPayload(auth.Account{Username: subject.Username, Active: true}, options.Profiles)
-			payload["displayName"] = firstText(subject.DisplayName, subject.Username)
-			payload["avatarUrl"] = subject.AvatarURL
-			switch subject.Role {
-			case accountcenter.RoleDeveloper:
-				payload["role"] = "dev"
-			case accountcenter.RoleManager:
-				payload["role"] = "manager"
-			default:
-				payload["role"] = "member"
-			}
+			setFormalAccountFields(r.Context(), options.AccountCenterStore, payload, subject, true)
 			payload["impersonationId"] = identity.ImpersonationID
 			writeJSON(w, http.StatusOK, payload)
 			return
@@ -329,11 +313,7 @@ func RegisterAuthRoutes(root *http.ServeMux, options AuthOptions) {
 			// would recursively validate the same invalid token.
 			if options.SessionResolver != nil && r.Header.Get("X-Qiantie-Auth-Bridge") != "1" {
 				if identity, resolveErr := options.SessionResolver(r.Context(), token); resolveErr == nil {
-					role := "member"
-					if identity.IsOwner {
-						role = "dev"
-					}
-					writeJSON(w, http.StatusOK, map[string]any{"username": identity.Username, "active": true, "isOwner": identity.IsOwner, "role": role, "displayName": identity.Username, "avatarUrl": nil, "effectivePermissions": []string{}})
+					writeJSON(w, http.StatusOK, accountPayload(r.Context(), auth.Account{Username: identity.Username, IsOwner: identity.IsOwner, Active: true}))
 					return
 				}
 			}
@@ -349,6 +329,58 @@ func RegisterAuthRoutes(root *http.ServeMux, options AuthOptions) {
 		}
 		writeJSON(w, http.StatusOK, accountPayload(r.Context(), account))
 	})
+}
+
+func legacyAccountRole(role string) string {
+	switch role {
+	case accountcenter.RoleFounder, accountcenter.RoleDeveloper:
+		return "dev"
+	case accountcenter.RoleManager:
+		return "manager"
+	default:
+		return "member"
+	}
+}
+
+func setFormalAccountFields(ctx context.Context, store accountcenter.Store, payload map[string]any, identity accountcenter.Identity, switched bool) {
+	role := "组员"
+	capabilities := []string{}
+	switch identity.Role {
+	case accountcenter.RoleFounder:
+		role = "开发创始"
+	case accountcenter.RoleDeveloper:
+		role = "开发者"
+	case accountcenter.RoleManager:
+		role = "管理者"
+	}
+	if identity.Username != "" {
+		payload["role"] = legacyAccountRole(identity.Role)
+		payload["displayName"] = firstText(identity.DisplayName, identity.Username)
+		if identity.AvatarURL != "" || switched {
+			payload["avatarUrl"] = identity.AvatarURL
+		}
+	}
+	if identity.Active && identity.ArchivedAt == nil && !switched {
+		switch identity.Role {
+		case accountcenter.RoleFounder:
+			capabilities = append(capabilities, "team_governance", "account_governance", "platform_admin", "create_team")
+		case accountcenter.RoleDeveloper:
+			capabilities = append(capabilities, "team_governance", "account_governance")
+			if reader, ok := store.(accountcenter.PlatformGrantReader); ok {
+				grants, err := reader.PlatformGrants(ctx, identity.Username)
+				if err == nil && slices.Contains(grants, accountcenter.GrantCapabilityPlatformAdmin) {
+					capabilities = append(capabilities, "platform_admin")
+				}
+				if err == nil && slices.Contains(grants, accountcenter.GrantCapabilityTeamCreate) {
+					capabilities = append(capabilities, "create_team")
+				}
+			}
+		case accountcenter.RoleManager:
+			capabilities = append(capabilities, "team_governance")
+		}
+	}
+	payload["canonicalRole"] = role
+	payload["capabilities"] = capabilities
 }
 
 func bearerToken(r *http.Request) string {

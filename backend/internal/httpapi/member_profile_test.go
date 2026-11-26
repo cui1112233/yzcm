@@ -15,7 +15,7 @@ import (
 	"qiantie/backend/internal/auth"
 )
 
-func TestMemberProfileIncludesDetailsAndOwnerTeamShape(t *testing.T) {
+func TestMemberProfileIncludesDetailsAndUsageShape(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "member-profile-details.json"), []byte(`[{"username":"alice","bio":"个人简介","email":"alice@example.com","teamTitle":"负责人"}]`), 0o600); err != nil {
 		t.Fatal(err)
@@ -29,15 +29,11 @@ func TestMemberProfileIncludesDetailsAndOwnerTeamShape(t *testing.T) {
 	if member["apiEnabled"] != false {
 		t.Fatalf("owner apiEnabled should remain account preference: %#v", member["apiEnabled"])
 	}
-	team := goTeam(member)
-	if team["managerUsername"] != "alice" || team["name"] != "alice的团队" {
-		t.Fatalf("team = %#v", team)
-	}
 	usage := emptyMemberUsage()
 	if _, ok := usage["month"].(map[string]any); !ok {
 		t.Fatalf("usage = %#v", usage)
 	}
-	if _, err := json.Marshal(map[string]any{"member": member, "team": team, "usage": usage}); err != nil {
+	if _, err := json.Marshal(map[string]any{"member": member, "usage": usage}); err != nil {
 		t.Fatal(err)
 	}
 }

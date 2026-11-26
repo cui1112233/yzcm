@@ -32,7 +32,7 @@ type AdminTx interface {
 }
 type AdminChange struct {
 	Action, TeamID, TeamName, Actor, Username, DisplayName, Role, PasswordHash, PasswordAlgorithm string
-	InviteDigest                                                                                  string
+	InviteDigest, GrantID                                                                         string
 	StartDisabled                                                                                 bool
 }
 
@@ -111,15 +111,14 @@ func (t adminTx) Directory(ctx context.Context) (d AdminDirectory, err error) {
 	if err = rows.Err(); err != nil {
 		return d, err
 	}
-	// Legacy import ended memberships at the exact moment it archived their team.
-	// Include those relationships for inspection and controlled team restore.
-	rows, err = t.tx.QueryContext(ctx, `SELECT m.team_id,m.username FROM account_center_memberships m JOIN account_center_teams t ON t.id=m.team_id WHERE m.ended_at IS NULL OR m.ended_at=t.archived_at ORDER BY m.username`)
+	// Every interval is visible to its own team's administrators.
+	rows, err = t.tx.QueryContext(ctx, `SELECT id,team_id,username,joined_at,ended_at FROM account_center_memberships ORDER BY username,joined_at,id`)
 	if err != nil {
 		return d, err
 	}
 	for rows.Next() {
 		var m Membership
-		if err = rows.Scan(&m.TeamID, &m.Username); err != nil {
+		if err = rows.Scan(&m.ID, &m.TeamID, &m.Username, &m.JoinedAt, &m.EndedAt); err != nil {
 			rows.Close()
 			return d, err
 		}
@@ -128,13 +127,17 @@ func (t adminTx) Directory(ctx context.Context) (d AdminDirectory, err error) {
 	if err = rows.Err(); err != nil {
 		return d, err
 	}
-	rows, err = t.tx.QueryContext(ctx, `SELECT username, team_id FROM account_center_grants WHERE scope=? AND capability=? AND team_id IS NOT NULL AND revoked_at IS NULL`, GrantScopeTeam, GrantCapabilityTeamManage)
+	rows, err = t.tx.QueryContext(ctx, `SELECT g.username,COALESCE(g.team_id,''),g.capability,g.scope,g.granted_by
+FROM account_center_grants g WHERE g.revoked_at IS NULL AND
+((g.scope=? AND g.capability=? AND g.team_id IS NOT NULL) OR
+ (g.scope=? AND g.team_id IS NULL AND EXISTS (SELECT 1 FROM account_center_profiles founder WHERE founder.username=g.granted_by AND founder.role='founder')))`,
+		GrantScopeTeam, GrantCapabilityTeamManage, GrantScopePlatform)
 	if err != nil {
 		return d, err
 	}
 	for rows.Next() {
 		var g Grant
-		if err = rows.Scan(&g.Username, &g.TeamID); err != nil {
+		if err = rows.Scan(&g.Username, &g.TeamID, &g.Capability, &g.Scope, &g.GrantedBy); err != nil {
 			rows.Close()
 			return d, err
 		}
@@ -204,13 +207,13 @@ func (t adminTx) Change(ctx context.Context, c AdminChange) error {
 		}
 		return insertTeamMembership(ctx, t.tx, c.TeamID, c.Username)
 	case "create_account", "accept_invite":
+		if err := t.createAccount(ctx, c); err != nil {
+			return err
+		}
 		if c.Action == "accept_invite" {
 			if _, err := t.tx.ExecContext(ctx, `INSERT INTO account_center_invite_claims(digest,username) VALUES(?,?)`, c.InviteDigest, c.Username); err != nil {
 				return recordError(err)
 			}
-		}
-		if err := t.createAccount(ctx, c); err != nil {
-			return err
 		}
 		if c.TeamID == "" {
 			return nil
@@ -236,6 +239,13 @@ func (t adminTx) Change(ctx context.Context, c AdminChange) error {
 	switch c.Action {
 	case "set_member", "set_manager", "set_developer":
 		_, err = t.tx.ExecContext(ctx, `UPDATE account_center_profiles SET role=? WHERE username=?`, c.Role, c.Username)
+		if err == nil && c.Role != RoleDeveloper {
+			_, err = t.tx.ExecContext(ctx, `UPDATE account_center_grants SET revoked_at=CURRENT_TIMESTAMP(6) WHERE username=? AND scope=? AND revoked_at IS NULL`, c.Username, GrantScopePlatform)
+		}
+	case "grant_team_create":
+		_, err = t.tx.ExecContext(ctx, insertGrantSQL, c.GrantID, c.Username, GrantCapabilityTeamCreate, GrantScopePlatform, "", c.Actor, nil)
+	case "revoke_team_create":
+		_, err = t.tx.ExecContext(ctx, `UPDATE account_center_grants SET revoked_at=CURRENT_TIMESTAMP(6) WHERE username=? AND scope=? AND capability=? AND team_id IS NULL AND revoked_at IS NULL`, c.Username, GrantScopePlatform, GrantCapabilityTeamCreate)
 	case "enable", "disable":
 		_, err = t.tx.ExecContext(ctx, `UPDATE accounts SET active=? WHERE username=?`, c.Action == "enable", c.Username)
 	case "archive":

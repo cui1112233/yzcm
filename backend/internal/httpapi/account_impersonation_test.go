@@ -37,6 +37,11 @@ func (s *impersonationTestStore) ResolveIdentity(_ context.Context, username str
 	return accountcenter.Identity{}, accountcenter.ErrNotFound
 }
 
+func (s *impersonationTestStore) BusinessAllowed(_ context.Context, username string) (bool, error) {
+	person, ok := s.identities[username]
+	return ok && person.Active && person.ArchivedAt == nil, nil
+}
+
 func (s *impersonationTestStore) ListTeams(_ context.Context, filter accountcenter.TeamFilter) ([]accountcenter.TeamSummary, error) {
 	if !s.teamEnded && filter.ManagerUsername == "manager" && filter.Username == "member" {
 		return []accountcenter.TeamSummary{{Team: accountcenter.Team{ID: "one", ManagerUsername: "manager"}}}, nil
@@ -227,7 +232,7 @@ func TestImpersonationLoginAndNovelRoutesIgnoreActorHeaders(t *testing.T) {
 		}
 	}
 	login := impersonationRequest(router, http.MethodGet, "/api/login/session", "founder", "", cookie)
-	if login.Code != http.StatusOK || !strings.Contains(login.Body.String(), `"username":"manager"`) || !strings.Contains(login.Body.String(), `"isOwner":false`) || !strings.Contains(login.Body.String(), `"impersonationId"`) {
+	if login.Code != http.StatusOK || !containsAll(login.Body.String(), `"username":"manager"`, `"isOwner":false`, `"impersonationId"`, `"canonicalRole":"管理者"`, `"capabilities":[]`) {
 		t.Fatalf("effective session = %d %s", login.Code, login.Body)
 	}
 	for _, path := range []string{"/api/novel-fetch-workshop/config", "/api/batch-rewrite/config"} {
@@ -567,6 +572,7 @@ func TestImpersonationBlocksSensitiveRoutes(t *testing.T) {
 		{"POST", "/api/account-center/admin/accounts/member/disable"}, {"POST", "/api/account-center/admin/accounts/member/archive"},
 		{"POST", "/api/account-center/admin/accounts/member/restore"}, {"POST", "/api/account-center/admin/accounts/member/purge_preflight"},
 		{"POST", "/api/account-center/admin/accounts/member/purge"},
+		{"POST", "/api/account-center/admin/accounts/member/grant_team_create"}, {"POST", "/api/account-center/admin/accounts/member/revoke_team_create"},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			w := impersonationRequest(router, tc.method, tc.path, "founder", `{}`, cookie)

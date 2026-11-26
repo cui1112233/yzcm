@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	ac "qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/auth"
 )
 
@@ -114,6 +115,35 @@ func TestAuthRoutesLoginSessionAndLogout(t *testing.T) {
 	mux.ServeHTTP(logoutResponse, logout)
 	if logoutResponse.Code != http.StatusNoContent || store.session.Token != "" {
 		t.Fatalf("logout response = %d", logoutResponse.Code)
+	}
+}
+
+func TestAccountCenterAuthenticationReturnsCanonicalRoleAndCapabilities(t *testing.T) {
+	hash, algorithm, err := auth.HashPassword("sample-test-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountStore := &authTestStore{account: auth.Account{Username: "person", PasswordHash: hash, PasswordAlgorithm: algorithm, Active: true}}
+	var role string
+	center := accountCenterIdentityStore{resolve: func(context.Context, string) (ac.Identity, error) {
+		return ac.Identity{Username: "person", Role: role, Active: true}, nil
+	}}
+	mux := http.NewServeMux()
+	RegisterAuthRoutes(mux, AuthOptions{Store: accountStore, AccountCenterStore: center})
+	for formal, label := range map[string]string{ac.RoleFounder: "开发创始", ac.RoleDeveloper: "开发者", ac.RoleManager: "管理者", ac.RoleMember: "组员"} {
+		role = formal
+		login := httptest.NewRecorder()
+		mux.ServeHTTP(login, httptest.NewRequest("POST", "/api/login", strings.NewReader(`{"username":"person","password":"sample-test-password"}`)))
+		session := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/api/login/session", nil)
+		req.Header.Set("Authorization", "Bearer "+accountStore.session.Token)
+		mux.ServeHTTP(session, req)
+		for _, result := range []*httptest.ResponseRecorder{login, session} {
+			if result.Code != 200 || !containsAll(result.Body.String(), `"canonicalRole":"`+label+`"`, `"capabilities":[`) ||
+				(formal == ac.RoleFounder) != strings.Contains(result.Body.String(), `"platform_admin"`) {
+				t.Fatalf("role %s: %d %s", formal, result.Code, result.Body)
+			}
+		}
 	}
 }
 

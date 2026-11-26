@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	ac "qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/auth"
 )
 
@@ -60,7 +61,13 @@ func TestAdminGovernanceRoutesListApplicationsAndGrantsWithoutLeakingPassword(t 
 		t.Fatal(err)
 	}
 	accounts := &authTestStore{account: auth.Account{Username: "alice", Active: true, IsOwner: true}}
-	api := NewRouter(RouterOptions{BridgeSecret: "secret", Now: func() time.Time { return now }, AuthStore: accounts, MemberProfileStore: profiles})
+	store := &directoryTestStore{directory: ac.AdminDirectory{People: []ac.Identity{
+		{Username: "alice", Role: ac.RoleFounder, Active: true},
+	}}}
+	store.resolve = func(_ context.Context, username string) (ac.Identity, error) {
+		return (adminSnapshot{AdminDirectory: store.directory}).person(username), nil
+	}
+	api := NewRouter(RouterOptions{BridgeSecret: "secret", Now: func() time.Time { return now }, AuthStore: accounts, MemberProfileStore: profiles, AccountCenterStore: store})
 
 	applications := signedJSONRequest(t, api, now, "alice", "GET", "/api/admin/applications", nil)
 	if applications.Code != 200 || !strings.Contains(applications.Body.String(), "app-1") || strings.Contains(applications.Body.String(), "secret-hash") {
@@ -69,30 +76,5 @@ func TestAdminGovernanceRoutesListApplicationsAndGrantsWithoutLeakingPassword(t 
 	grants := signedJSONRequest(t, api, now, "alice", "GET", "/api/admin/grants", nil)
 	if grants.Code != 200 || !strings.Contains(grants.Body.String(), `"grants":[]`) {
 		t.Fatalf("grants response = %d %s", grants.Code, grants.Body.String())
-	}
-}
-
-func TestAdminAccountOperationsPersistInGoStore(t *testing.T) {
-	profiles := NewMemberProfileStore(t.TempDir())
-	store := &governanceAuthStore{accounts: map[string]auth.Account{
-		"owner": {Username: "owner", Active: true, IsOwner: true},
-	}}
-	ctx := context.Background()
-	created, err := createAdminAccount(ctx, profiles, store, "owner", map[string]any{"username": "member1", "password": "initial-password"})
-	if err != nil || created["username"] != "member1" {
-		t.Fatalf("create account = %#v, %v", created, err)
-	}
-	if _, err := setAdminAccountStatus(ctx, profiles, store, "owner", "member1", false); err != nil {
-		t.Fatalf("disable account: %v", err)
-	}
-	if store.accounts["member1"].Active {
-		t.Fatal("account should be inactive after status update")
-	}
-	oldHash := store.accounts["member1"].PasswordHash
-	if _, err := resetAdminAccountPassword(ctx, profiles, store, "owner", "member1", "replacement-password"); err != nil {
-		t.Fatalf("reset password: %v", err)
-	}
-	if store.accounts["member1"].PasswordHash == oldHash {
-		t.Fatal("password hash did not change")
 	}
 }

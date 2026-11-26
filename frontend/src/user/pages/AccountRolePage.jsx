@@ -19,6 +19,8 @@ const ACTION_LABELS = {
   archive_team: '归档团队',
   restore_team: '恢复团队',
   view_audit: '操作记录',
+  grant_team_create: '授予建团队权限',
+  revoke_team_create: '撤销建团队权限',
   set_member: '设为组员',
   set_manager: '设为管理者',
   set_developer: '设为开发者',
@@ -101,7 +103,8 @@ export default function AccountRolePage({ title = '账号与角色', teamsOnly =
         if (target) await createAdminTeamAccount(target.id, input);
         else await createUngroupedAdminAccount(input);
       } else if (action === 'view_audit') {
-        setAudit((await getAccountAdminAudit()).events);
+        const result = await getAccountAdminAudit(target?.id);
+        setAudit({ events: result.events, team: target?.name });
       } else if (action === 'purge_preflight') {
         setPreflight({ username: target.username, ...await changeAdminAccount(target.username, action) });
       } else if (action === 'switch_account') {
@@ -133,7 +136,16 @@ export default function AccountRolePage({ title = '账号与角色', teamsOnly =
     { title: '登录账号', dataIndex: 'username' },
     { title: '显示名称', dataIndex: 'displayName' },
     { title: '角色', dataIndex: 'role', render: role => <Tag>{ROLE_LABELS[role] || role}</Tag> },
-    { title: '状态', render: (_, account) => account.archivedAt ? '已归档' : account.active ? '启用' : '停用' },
+    { title: '状态', render: (_, account) => <Space direction="vertical" size={0}>
+      {account.archivedAt ? '已归档' : account.active ? '启用' : '停用'}
+      {account.historical && <Tag>历史归属</Tag>}
+      {account.joinedAt && account.historical && <Typography.Text type="secondary">
+        {new Date(account.joinedAt).toLocaleDateString()}{account.endedAt ? ` – ${new Date(account.endedAt).toLocaleDateString()}` : ''}
+      </Typography.Text>}
+      {account.restoreConflict && <Typography.Text type="warning">
+        {account.currentTeamName ? `现属 ${account.currentTeamName}，无法恢复此归属` : '已有其他现行团队，无法恢复此归属'}
+      </Typography.Text>}
+    </Space> },
     { title: '余额', dataIndex: 'balance', render: unavailableValue },
     { title: '本月消费', dataIndex: 'monthConsumption', render: unavailableValue },
     { title: '操作', render: (_, account) => <Space wrap>{account.actions.map(action => actionButton(action, account))}</Space> }
@@ -158,7 +170,7 @@ export default function AccountRolePage({ title = '账号与角色', teamsOnly =
         title={<Space>{team.name}{team.archivedAt && <Tag>已归档</Tag>}</Space>}
         extra={<Space wrap>{team.actions.map(action => actionButton(action, team))}</Space>}>
         <Typography.Paragraph type="secondary">负责人 @{team.managerUsername}</Typography.Paragraph>
-        <Table rowKey="username" columns={columns} dataSource={team.accounts} pagination={false} scroll={{ x: 820 }} />
+        <Table rowKey={account => account.membershipId || account.username} columns={columns} dataSource={team.accounts} pagination={false} scroll={{ x: 820 }} />
       </Card>)}
       {!teamsOnly && directory.ungrouped.length > 0 && <Card title="未分组">
         <Table rowKey="username" columns={columns} dataSource={directory.ungrouped} pagination={false} scroll={{ x: 820 }} />
@@ -182,9 +194,9 @@ export default function AccountRolePage({ title = '账号与角色', teamsOnly =
         <ul>{preflight.checks.map(check => <li key={check.name}>{CHECK_LABELS[check.name] || check.name}　{CHECK_STATUSES[check.status] || check.status}</li>)}</ul>
       </>}
     </Modal>
-    <Modal title="操作记录" width={760} open={Boolean(audit)}
+    <Modal title={audit?.team ? `操作记录 · ${audit.team}` : '操作记录'} width={760} open={Boolean(audit)}
       onCancel={() => setAudit(null)} footer={<Button onClick={() => setAudit(null)}>关闭</Button>}>
-      <Table size="small" rowKey="ID" dataSource={audit || []} columns={[
+      <Table size="small" rowKey="ID" dataSource={audit?.events || []} columns={[
         { title: '操作人', dataIndex: 'ActorUsername' },
         { title: '目标账号', dataIndex: 'SubjectUsername' },
         { title: '操作', dataIndex: 'Action', render: action => ACTION_LABELS[action] || action },

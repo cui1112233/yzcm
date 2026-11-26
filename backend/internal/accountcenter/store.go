@@ -21,8 +21,12 @@ const (
 	RoleManager   = "manager"
 	RoleMember    = "member"
 
-	GrantCapabilityTeamManage = "team:manage"
-	GrantScopeTeam            = "team"
+	GrantCapabilityTeamManage       = "team:manage"
+	GrantScopeTeam                  = "team"
+	GrantScopePlatform              = "platform"
+	GrantCapabilityTeamCreate       = "team:create"
+	GrantCapabilityPlatformBusiness = "business:run"
+	GrantCapabilityPlatformAdmin    = "admin:access"
 )
 
 var (
@@ -65,6 +69,7 @@ type Membership struct {
 	ID               uint64
 	TeamID, Username string
 	JoinedAt         time.Time
+	EndedAt          *time.Time
 }
 
 type Grant struct {

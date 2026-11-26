@@ -5,15 +5,17 @@ import "strings"
 type Action string
 
 const (
-	ActionCreateTeam     Action = "create_team"
-	ActionManageTeam     Action = "manage_team"
-	ActionCreateAccount  Action = "create_account"
-	ActionGrantDeveloper Action = "grant_developer"
-	ActionSetRole        Action = "set_role"
-	ActionManageAccount  Action = "manage_account"
-	ActionResetPassword  Action = "reset_password"
-	ActionImpersonate    Action = "impersonate"
-	ActionPurgeAccount   Action = "purge_account"
+	ActionCreateTeam      Action = "create_team"
+	ActionGrantTeamCreate Action = "grant_team_create"
+	ActionManageTeam      Action = "manage_team"
+	ActionRestoreTeam     Action = "restore_team"
+	ActionCreateAccount   Action = "create_account"
+	ActionGrantDeveloper  Action = "grant_developer"
+	ActionSetRole         Action = "set_role"
+	ActionManageAccount   Action = "manage_account"
+	ActionResetPassword   Action = "reset_password"
+	ActionImpersonate     Action = "impersonate"
+	ActionPurgeAccount    Action = "purge_account"
 )
 
 type PolicyTarget struct {
@@ -22,7 +24,8 @@ type PolicyTarget struct {
 	TeamID   string
 	// InManagedTeam comes from a server-side check of the actor's team scope
 	// and the target's membership for account actions. It is never request input.
-	InManagedTeam bool
+	InManagedTeam       bool
+	TeamCreationGranted bool
 }
 
 type Policy struct{}
@@ -38,9 +41,11 @@ func (Policy) Can(actor Identity, action Action, target PolicyTarget) bool {
 	manager := actor.Role == RoleManager
 	switch action {
 	case ActionCreateTeam:
-		return founder || developer
+		return founder || developer && target.TeamCreationGranted
 	case ActionManageTeam:
 		return target.TeamID != "" && (founder || developer && target.InManagedTeam)
+	case ActionRestoreTeam:
+		return target.TeamID != "" && (founder || (developer || manager) && target.InManagedTeam)
 	case ActionCreateAccount:
 		if target.NewRole == RoleManager {
 			return founder || developer && target.InManagedTeam
@@ -59,6 +64,8 @@ func (Policy) Can(actor Identity, action Action, target PolicyTarget) bool {
 	canManageMember := manager && account.Role == RoleMember && target.InManagedTeam
 	canSupportAccount := founder || developer && teamAccount || canManageMember
 	switch action {
+	case ActionGrantTeamCreate:
+		return founder && account.Role == RoleDeveloper
 	case ActionGrantDeveloper, ActionPurgeAccount:
 		return founder
 	case ActionSetRole:

@@ -1,213 +1,146 @@
 package httpapi
 
 import (
-	"encoding/json"
+	"context"
 	"net/http"
-	"os"
+	"slices"
 	"strconv"
 	"strings"
 
+	ac "qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/auth"
 )
 
-func goTeam(manager map[string]any) map[string]any {
-	username := toString(manager["username"])
-	name := toString(manager["displayName"])
-	if name == "" {
-		name = username
+func RegisterMemberTeamReadCompat(root *http.ServeMux, middleware BridgeAuth, _ auth.Store, profiles *MemberProfileStore) {
+	admin := accountCenterAdmin{auth: middleware}
+	register := func(path string, handler http.HandlerFunc) {
+		root.Handle("GET "+path, middleware.AccountCenterMiddleware(handler))
 	}
-	return map[string]any{"id": "go-team-" + username, "name": name + "的团队", "managerUsername": username, "coManagers": []any{}}
+	register("/api/member/team", func(w http.ResponseWriter, r *http.Request) {
+		admin.withDirectory(w, r, false, func(_ ac.AdminTx, d adminSnapshot) (any, error) {
+			directory := d.directory()
+			id := r.URL.Query().Get("teamId")
+			members := []map[string]any{}
+			var teamView *accountAdminTeam
+			for _, team := range directory.Teams {
+				if id != "" && team.ID != id {
+					continue
+				}
+				if teamView == nil {
+					copy := team
+					teamView = &copy
+				}
+				for _, person := range team.Accounts {
+					members = append(members, legacyDirectoryAccount(person, team.ManagerUsername))
+				}
+			}
+			if id != "" && teamView == nil {
+				return nil, ac.ErrForbidden
+			}
+			return map[string]any{"team": teamView, "teams": directory.Teams, "members": members, "teamGovernance": nil}, nil
+		})
+	})
+	register("/api/member/team/meta", func(w http.ResponseWriter, r *http.Request) {
+		admin.withSubjectDirectory(w, r, false, func(_ ac.AdminTx, d adminSnapshot) (any, error) {
+			team := d.accountTeam(d.actor.Username)
+			teams := []map[string]any{}
+			for _, row := range d.directory().Teams {
+				manager := legacyDirectoryAccount(d.row(d.person(row.ManagerUsername), d.team(row.ID)), "")
+				teams = append(teams, map[string]any{"team": row, "manager": manager})
+			}
+			var teamView, manager any
+			if team.ID != "" {
+				teamView = legacyTeamRow(team)
+				manager = legacyDirectoryAccount(d.row(d.person(team.ManagerUsername), team), "")
+			}
+			return map[string]any{"team": teamView, "manager": manager, "teams": teams}, nil
+		})
+	})
+	register("/api/member/team/members/{username}/usage", func(w http.ResponseWriter, r *http.Request) {
+		admin.withSubjectDirectory(w, r, false, func(_ ac.AdminTx, d adminSnapshot) (any, error) {
+			target := d.person(r.PathValue("username"))
+			team := d.accountTeam(target.Username)
+			readsOtherStaff := !strings.EqualFold(d.actor.Username, target.Username) && d.actor.Role != ac.RoleFounder
+			if target.Username == "" || (readsOtherStaff && !d.manages(team)) {
+				return nil, ac.ErrForbidden
+			}
+			if readsOtherStaff {
+				for _, membership := range d.Memberships {
+					if strings.EqualFold(membership.Username, target.Username) && !d.manages(d.team(membership.TeamID)) {
+						// The per-account ledger includes periods from other teams.
+						return nil, errLegacyGovernanceUnavailable
+					}
+				}
+			}
+			if profiles == nil || profiles.UsageReader == nil {
+				return nil, errLegacyGovernanceUnavailable
+			}
+			usage, err := profiles.usage(r.Context(), target.Username)
+			return map[string]any{"day": usage["day"], "month": usage["month"], "recent": usage["recent"], "quota": nil}, err
+		})
+	})
+	register("/api/member/team/audit", func(w http.ResponseWriter, r *http.Request) {
+		admin.withDirectory(w, r, false, func(tx ac.AdminTx, d adminSnapshot) (any, error) {
+			limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+			if limit <= 0 {
+				limit = 100
+			}
+			limit = min(limit, 500)
+			teamID := r.URL.Query().Get("teamId")
+			switch {
+			case teamID != "" && !d.manages(d.team(teamID)):
+				return nil, ac.ErrForbidden
+			case teamID != "" || d.actor.Role == ac.RoleFounder:
+				events, err := tx.ListAudit(r.Context(), ac.AuditFilter{TeamID: teamID, Limit: limit})
+				return auditEntries(events), err
+			}
+			entries := []ac.AuditEvent{}
+			for _, team := range d.Teams {
+				if !d.manages(team) {
+					continue
+				}
+				events, err := tx.ListAudit(r.Context(), ac.AuditFilter{TeamID: team.ID, Limit: limit})
+				if err != nil {
+					return nil, err
+				}
+				entries = append(entries, events...)
+			}
+			slices.SortFunc(entries, func(a, b ac.AuditEvent) int { return b.CreatedAt.Compare(a.CreatedAt) })
+			return auditEntries(entries[:min(len(entries), limit)]), nil
+		})
+	})
+	register("/api/member/team/governance", admin.retired)
+	register("/api/member/team/invites", admin.retired)
 }
 
-func RegisterMemberTeamReadCompat(root *http.ServeMux, middleware BridgeAuth, accounts auth.Store, profiles *MemberProfileStore) {
-	if root == nil || accounts == nil || profiles == nil {
-		return
+func auditEntries(events []ac.AuditEvent) map[string]any {
+	if events == nil {
+		events = []ac.AuditEvent{}
 	}
-	root.Handle("GET /api/member/team/meta", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		identity, ok := BridgeIdentityFromContext(req.Context())
-		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
-		self := profiles.member(identity.Username, accounts)
-		if self == nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "账号不存在"})
-			return
-		}
-		if toString(self["role"]) == "dev" {
-			owners := []map[string]any{self}
-			if lister, ok := accounts.(accountLister); ok {
-				if rows, err := lister.ListAccounts(req.Context()); err == nil {
-					for _, account := range rows {
-						member := profiles.member(account.Username, accounts)
-						if member != nil && toString(member["role"]) == "manager" {
-							owners = append(owners, member)
-						}
-					}
-				}
-			}
-			teams := make([]map[string]any, 0, len(owners))
-			for _, owner := range owners {
-				teams = append(teams, map[string]any{"team": goTeam(owner), "manager": owner})
-			}
-			writeJSON(w, http.StatusOK, map[string]any{"team": goTeam(self), "teams": teams})
-			return
-		}
-		manager := self
-		if bound := strings.TrimSpace(toString(self["boundTo"])); bound != "" {
-			if found, err := accounts.FindAccount(req.Context(), bound); err == nil {
-				manager = profiles.member(found.Username, accounts)
-			}
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"team": goTeam(manager), "manager": manager})
-	})))
-	root.Handle("GET /api/member/team", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		identity, ok := BridgeIdentityFromContext(req.Context())
-		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
-		self := profiles.member(identity.Username, accounts)
-		if self == nil || (toString(self["role"]) != "dev" && toString(self["role"]) != "manager") {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "当前身份没有团队管理权限"})
-			return
-		}
-		owner := self
-		lister, ok := accounts.(accountLister)
-		if !ok {
-			writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "团队数据尚未接入 Go 存储"})
-			return
-		}
-		rows, err := lister.ListAccounts(req.Context())
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "团队读取失败"})
-			return
-		}
-		members := make([]map[string]any, 0)
-		for _, account := range rows {
-			member := profiles.member(account.Username, accounts)
-			if member == nil {
-				continue
-			}
-			role := toString(member["role"])
-			bound := strings.TrimSpace(toString(member["boundTo"]))
-			if account.Username == toString(owner["username"]) || (role == "member" && bound == toString(owner["username"])) {
-				// Keep the team response compatible with the public/3001 contract.
-				// The old page reads the full quota and usage objects, not only used/limit.
-				member["presence"] = map[string]any{"online": account.Username == toString(identity.Username)}
-				member["archive"] = nil
+	return map[string]any{"entries": events}
+}
 
-				usage, usageErr := profiles.usage(req.Context(), toString(member["username"]))
-				if usageErr != nil {
-					writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "成员用量读取失败"})
-					return
-				}
-				member["usage"] = map[string]any{"day": usage["day"], "month": usage["month"]}
-				member["quota"] = memberQuota(member["monthlyTokenLimit"], usageMonthTokens(usage))
-				member["memberQuota"] = member["quota"]
-				member["teamGovernance"] = memberTeamGovernance(owner)
-				members = append(members, member)
-			}
+func legacyTeamRow(team ac.Team) map[string]any {
+	return map[string]any{"id": team.ID, "name": team.Name, "managerUsername": team.ManagerUsername, "archivedAt": team.ArchivedAt}
+}
+
+func memberCurrentTeam(ctx context.Context, store ac.Store, username string) (manager, team map[string]any, err error) {
+	admin, ok := store.(ac.AdminStore)
+	if !ok {
+		return nil, nil, nil
+	}
+	err = admin.WithAdmin(ctx, false, func(tx ac.AdminTx) error {
+		directory, err := tx.Directory(ctx)
+		if err != nil {
+			return err
 		}
-		response := map[string]any{"team": goTeam(owner), "teamGovernance": memberTeamGovernance(owner), "members": members}
-		if toString(self["role"]) == "dev" {
-			response["teams"] = []any{goTeam(owner)}
+		d := adminSnapshot{AdminDirectory: directory, actor: ac.Identity{Username: username}}
+		current := d.accountTeam(username)
+		if current.ID != "" {
+			team = legacyTeamRow(current)
+			manager = legacyDirectoryAccount(d.row(d.person(current.ManagerUsername), current), "")
 		}
-		writeJSON(w, http.StatusOK, response)
-	})))
-	root.Handle("GET /api/member/team/governance", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		identity, ok := BridgeIdentityFromContext(req.Context())
-		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
-		self := profiles.member(identity.Username, accounts)
-		if self == nil || (toString(self["role"]) != "dev" && toString(self["role"]) != "manager") {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "当前身份没有团队额度管理权限"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"teams": []any{map[string]any{"manager": self, "team": goTeam(self), "monthlyTokenLimit": self["monthlyTokenLimit"], "used": 0}}})
-	})))
-	root.Handle("GET /api/member/team/members/{username}/usage", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		identity, ok := BridgeIdentityFromContext(req.Context())
-		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
-		self := profiles.member(identity.Username, accounts)
-		target := profiles.member(req.PathValue("username"), accounts)
-		if self == nil || target == nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "成员不存在"})
-			return
-		}
-		if toString(self["role"]) != "dev" && toString(target["username"]) != toString(self["username"]) && (toString(self["role"]) != "manager" || toString(target["boundTo"]) != toString(self["username"])) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权查看该成员用量"})
-			return
-		}
-		usage, usageErr := profiles.usage(req.Context(), toString(target["username"]))
-		if usageErr != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "成员用量读取失败"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"day": usage["day"], "month": usage["month"], "quota": memberQuota(target["monthlyTokenLimit"], usageMonthTokens(usage)), "recent": usage["recent"]})
-	})))
-	root.Handle("GET /api/member/team/invites", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		identity, ok := BridgeIdentityFromContext(req.Context())
-		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
-		self := profiles.member(identity.Username, accounts)
-		if self == nil || !teamCanManage(self) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权查看团队邀请"})
-			return
-		}
-		manager := toString(self["username"])
-		if toString(self["role"]) == "dev" && req.URL.Query().Get("manager") != "" {
-			manager = req.URL.Query().Get("manager")
-		}
-		invites := []map[string]any{}
-		if raw, err := os.ReadFile(adminSystemFile(profiles.SystemDir, "team-collaboration.json")); err == nil {
-			var state map[string]any
-			if json.Unmarshal(raw, &state) == nil {
-				if rows, ok := state["invites"].([]any); ok {
-					for _, rawRow := range rows {
-						if row, ok := rawRow.(map[string]any); ok && toString(row["managerUsername"]) == manager {
-							invites = append(invites, row)
-						}
-					}
-				}
-			}
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"invites": invites})
-	})))
-	root.Handle("GET /api/member/team/audit", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		identity, ok := BridgeIdentityFromContext(req.Context())
-		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
-		self := profiles.member(identity.Username, accounts)
-		if self == nil || !teamCanManage(self) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权查看团队操作日志"})
-			return
-		}
-		limit := 100
-		if raw := req.URL.Query().Get("limit"); raw != "" {
-			if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
-				limit = parsed
-			}
-		}
-		if limit > 500 {
-			limit = 500
-		}
-		entries := []map[string]any{}
-		if raw, err := os.ReadFile(adminSystemFile(profiles.SystemDir, "team-audit.json")); err == nil {
-			_ = json.Unmarshal(raw, &entries)
-		}
-		if len(entries) > limit {
-			entries = entries[len(entries)-limit:]
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
-	})))
+		return nil
+	})
+	return manager, team, err
 }

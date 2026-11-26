@@ -649,17 +649,19 @@ func RegisterMemberProfileRoutes(root *http.ServeMux, authMiddleware BridgeAuth,
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "账号不存在"})
 			return
 		}
-		manager := map[string]any(nil)
-		team := map[string]any(nil)
-		if toString(member["role"]) == "dev" || toString(member["role"]) == "manager" {
-			team = goTeam(member)
-		} else if bound := strings.TrimSpace(toString(member["boundTo"])); bound != "" {
-			if found, err := accounts.FindAccount(req.Context(), bound); err == nil {
-				manager = profiles.member(found.Username, accounts)
-				if manager != nil {
-					team = goTeam(manager)
-				}
-			}
+		manager, team, teamErr := memberCurrentTeam(req.Context(), authMiddleware.AccountCenterStore, identity.Username)
+		if teamErr != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "团队信息暂不可用"})
+			return
+		}
+		member["boundTo"] = nil
+		member["monthlyTokenLimit"] = nil
+		member["apiScopes"] = nil
+		if manager != nil {
+			member["boundTo"] = manager["username"]
+		}
+		if requestIdentity, ok := AccountCenterIdentityFromContext(req.Context()); ok {
+			setFormalAccountFields(req.Context(), authMiddleware.AccountCenterStore, member, requestIdentity.Subject, requestIdentity.ImpersonationID != "")
 		}
 		notifications := profiles.listNotifications(identity.Username, 8)
 		unread := 0
@@ -673,15 +675,6 @@ func RegisterMemberProfileRoutes(root *http.ServeMux, authMiddleware BridgeAuth,
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "用量账单读取失败，请稍后重试"})
 			return
 		}
-		governanceManager := member
-		if manager != nil {
-			governanceManager = manager
-		}
-		governance, governanceErr := profiles.usageGovernance(req.Context(), governanceManager)
-		if governanceErr != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "团队用量读取失败"})
-			return
-		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"member":              member,
 			"presence":            map[string]any{"online": true},
@@ -689,7 +682,7 @@ func RegisterMemberProfileRoutes(root *http.ServeMux, authMiddleware BridgeAuth,
 			"team":                team,
 			"notificationSummary": map[string]any{"unread": unread, "recent": notifications},
 			"memberQuota":         memberQuota(member["monthlyTokenLimit"], usageMonthTokens(usage)),
-			"teamGovernance":      governance,
+			"teamGovernance":      nil,
 			"usage":               usage,
 		})
 	})))

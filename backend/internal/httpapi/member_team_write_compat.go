@@ -7,10 +7,6 @@ import (
 	ac "qiantie/backend/internal/accountcenter"
 )
 
-func teamCanManage(actor map[string]any) bool {
-	return actor["role"] == "dev" || actor["role"] == "manager"
-}
-
 func RegisterMemberTeamWriteCompat(root *http.ServeMux, middleware BridgeAuth) {
 	admin := accountCenterAdmin{auth: middleware}
 	register := func(pattern string, handler http.HandlerFunc) {

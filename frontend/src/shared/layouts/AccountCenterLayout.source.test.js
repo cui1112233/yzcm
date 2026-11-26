@@ -17,11 +17,14 @@ test('renders an integrated personal-center shell with a return action', () => {
   assert.doesNotMatch(source, /account-center-popover/);
 });
 
-test('keeps current DEV and manager menu gates', () => {
+test('shows the server role and gates navigation with server capabilities', () => {
   const source = fs.readFileSync(sourcePath, 'utf8');
 
-  assert.match(source, /\['dev', 'manager'\]\.includes\(account\?\.role\)/);
-  assert.match(source, /account\?\.role === 'dev'/);
+  assert.match(source, /account\?\.canonicalRole/);
+  for (const capability of ['team_governance', 'account_governance', 'platform_admin']) {
+    assert.ok(source.includes(`capabilities.includes('${capability}')`));
+  }
+  assert.doesNotMatch(source, /account\?\.role/);
 });
 
 test('keeps profile, member, and security navigation available on every center page', () => {

@@ -164,6 +164,10 @@ func (a BridgeAuth) middleware(next http.Handler, requireAccountCenter bool) htt
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 				return
 			}
+			if a.AccountCenterStore != nil && accountCenterBusinessWrite(req) &&
+				!strings.EqualFold(identity.Username, actorUsername) && !a.allowBusinessSubject(w, req, identity.Username) {
+				return
+			}
 		}
 		ctx := context.WithValue(req.Context(), bridgeIdentityKey{}, identity)
 		if requireAccountCenter || a.AccountCenterStore != nil {

@@ -32,6 +32,12 @@ type accountAdminRow struct {
 	Balance          *int64     `json:"balance"`
 	MonthConsumption *int64     `json:"monthConsumption"`
 	Actions          []string   `json:"actions"`
+	MembershipID     uint64     `json:"membershipId,omitempty"`
+	JoinedAt         *time.Time `json:"joinedAt,omitempty"`
+	EndedAt          *time.Time `json:"endedAt,omitempty"`
+	Historical       bool       `json:"historical"`
+	RestoreConflict  bool       `json:"restoreConflict"`
+	CurrentTeamName  string     `json:"currentTeamName,omitempty"`
 }
 
 type accountAdminTeam struct {
@@ -78,7 +84,7 @@ func registerAccountCenterAdmin(root *http.ServeMux, auth BridgeAuth) {
 	for _, action := range []string{"archive_team", "restore_team"} {
 		register("POST", "/teams/{teamId}/"+action, admin.teamChange(action))
 	}
-	for _, action := range []string{"set_member", "set_manager", "set_developer", "enable", "disable", "archive", "restore", "purge_preflight", "purge"} {
+	for _, action := range []string{"set_member", "set_manager", "set_developer", "enable", "disable", "archive", "restore", "purge_preflight", "purge", "grant_team_create", "revoke_team_create"} {
 		register("POST", "/accounts/{username}/"+action, admin.accountChange(action))
 	}
 }
@@ -89,6 +95,16 @@ func (s accountCenterAdmin) withDirectory(w http.ResponseWriter, r *http.Request
 		writeAccountCenterForbidden(w)
 		return
 	}
+	s.withSubjectDirectory(w, r, write, func(tx ac.AdminTx, d adminSnapshot) (any, error) {
+		if d.actor.Role == ac.RoleMember {
+			return nil, ac.ErrForbidden
+		}
+		return fn(tx, d)
+	})
+}
+
+func (s accountCenterAdmin) withSubjectDirectory(w http.ResponseWriter, r *http.Request, write bool, fn func(ac.AdminTx, adminSnapshot) (any, error)) {
+	identity, _ := AccountCenterIdentityFromContext(r.Context())
 	store, ok := s.auth.AccountCenterStore.(ac.AdminStore)
 	if !ok {
 		writeAccountCenterForbidden(w)
@@ -101,8 +117,8 @@ func (s accountCenterAdmin) withDirectory(w http.ResponseWriter, r *http.Request
 			return err
 		}
 		snapshot := adminSnapshot{AdminDirectory: directory}
-		snapshot.actor = snapshot.person(identity.Actor.Username)
-		if !snapshot.actor.Active || snapshot.actor.ArchivedAt != nil || snapshot.actor.Role == ac.RoleMember {
+		snapshot.actor = snapshot.person(identity.Subject.Username)
+		if !snapshot.actor.Active || snapshot.actor.ArchivedAt != nil {
 			return ac.ErrForbidden
 		}
 		result, err = fn(tx, snapshot)
@@ -169,13 +185,30 @@ func (s adminSnapshot) accountTeam(username string) ac.Team {
 	for _, membership := range s.Memberships {
 		if strings.EqualFold(membership.Username, username) {
 			team := s.team(membership.TeamID)
-			if team.ArchivedAt == nil {
+			if team.ID != "" && team.ArchivedAt == nil && membership.EndedAt == nil {
 				return team
 			}
-			archived = team
+			if team.ArchivedAt != nil && (membership.EndedAt == nil || membership.EndedAt.Equal(*team.ArchivedAt)) {
+				archived = team
+			}
 		}
 	}
 	return archived
+}
+
+func (s adminSnapshot) hasPlatformGrant(username, capability string) bool {
+	for _, grant := range s.Grants {
+		if strings.EqualFold(grant.Username, username) && grant.Scope == ac.GrantScopePlatform &&
+			grant.Capability == capability && grant.TeamID == "" && s.person(grant.GrantedBy).Role == ac.RoleFounder {
+			return true
+		}
+	}
+	return false
+}
+
+func (s adminSnapshot) canCreateTeam() bool {
+	target := ac.PolicyTarget{TeamCreationGranted: s.hasPlatformGrant(s.actor.Username, ac.GrantCapabilityTeamCreate)}
+	return (ac.Policy{}).Can(s.actor, ac.ActionCreateTeam, target)
 }
 
 func (s adminSnapshot) accountActions(person ac.Identity, team ac.Team) []string {
@@ -201,6 +234,13 @@ func (s adminSnapshot) accountActions(person ac.Identity, team ac.Team) []string
 	if person.ArchivedAt != nil {
 		return actions
 	}
+	if policy.Can(s.actor, ac.ActionGrantTeamCreate, target) {
+		if s.hasPlatformGrant(person.Username, ac.GrantCapabilityTeamCreate) {
+			actions = append(actions, "revoke_team_create")
+		} else {
+			actions = append(actions, "grant_team_create")
+		}
+	}
 	// The manager recorded on the team must remain eligible to manage it.
 	for _, role := range []string{ac.RoleMember, ac.RoleManager, ac.RoleDeveloper} {
 		if role == person.Role || (role == ac.RoleMember && strings.EqualFold(team.ManagerUsername, person.Username)) {
@@ -225,13 +265,19 @@ func (s adminSnapshot) teamActions(team ac.Team) []string {
 	actions := []string{}
 	policy := ac.Policy{}
 	target := ac.PolicyTarget{TeamID: team.ID, InManagedTeam: s.manages(team), NewRole: ac.RoleMember}
-	if policy.Can(s.actor, ac.ActionManageTeam, target) {
-		if team.ArchivedAt != nil {
-			return append(actions, "restore_team")
+	if target.InManagedTeam {
+		actions = append(actions, "view_audit")
+	}
+	if team.ArchivedAt != nil {
+		if policy.Can(s.actor, ac.ActionRestoreTeam, target) {
+			actions = append(actions, "restore_team")
 		}
+		return actions
+	}
+	if policy.Can(s.actor, ac.ActionManageTeam, target) {
 		actions = append(actions, "archive_team")
 	}
-	if team.ArchivedAt == nil && policy.Can(s.actor, ac.ActionCreateAccount, target) {
+	if policy.Can(s.actor, ac.ActionCreateAccount, target) {
 		actions = append(actions, "create_member")
 		target.NewRole = ac.RoleManager
 		if policy.Can(s.actor, ac.ActionCreateAccount, target) {
@@ -250,7 +296,7 @@ func (s adminSnapshot) row(person ac.Identity, team ac.Team) accountAdminRow {
 
 func (s adminSnapshot) directory() accountAdminDirectory {
 	result := accountAdminDirectory{Actions: []string{}, Teams: []accountAdminTeam{}, Ungrouped: []accountAdminRow{}}
-	if (ac.Policy{}).Can(s.actor, ac.ActionCreateTeam, ac.PolicyTarget{}) {
+	if s.canCreateTeam() {
 		result.Actions = append(result.Actions, "create_team")
 	}
 	if s.actor.Role == ac.RoleFounder {
@@ -266,12 +312,38 @@ func (s adminSnapshot) directory() accountAdminDirectory {
 			})
 		}
 	}
-	for _, person := range s.People {
-		team := s.accountTeam(person.Username)
-		if index, visible := groups[team.ID]; visible {
-			result.Teams[index].Accounts = append(result.Teams[index].Accounts, s.row(person, team))
-		} else if team.ID == "" && s.actor.Role == ac.RoleFounder {
-			result.Ungrouped = append(result.Ungrouped, s.row(person, team))
+	for _, membership := range s.Memberships {
+		index, visible := groups[membership.TeamID]
+		if !visible {
+			continue
+		}
+		person := s.person(membership.Username)
+		if person.Username == "" {
+			continue
+		}
+		team := s.team(membership.TeamID)
+		row := s.row(person, team)
+		row.MembershipID, row.EndedAt = membership.ID, membership.EndedAt
+		if !membership.JoinedAt.IsZero() {
+			row.JoinedAt = &membership.JoinedAt
+		}
+		row.Historical = membership.EndedAt != nil || team.ArchivedAt != nil
+		if row.Historical {
+			row.Actions = []string{}
+			current := s.accountTeam(person.Username)
+			canRestore := team.ArchivedAt != nil && (membership.EndedAt == nil || membership.EndedAt.Equal(*team.ArchivedAt))
+			row.RestoreConflict = canRestore && current.ID != "" && current.ID != team.ID && current.ArchivedAt == nil
+			if row.RestoreConflict && s.manages(current) {
+				row.CurrentTeamName = current.Name
+			}
+		}
+		result.Teams[index].Accounts = append(result.Teams[index].Accounts, row)
+	}
+	if s.actor.Role == ac.RoleFounder {
+		for _, person := range s.People {
+			if s.accountTeam(person.Username).ID == "" {
+				result.Ungrouped = append(result.Ungrouped, s.row(person, ac.Team{}))
+			}
 		}
 	}
 	return result
@@ -361,7 +433,7 @@ func newAccountAdminChange(input accountAdminInput) (ac.AdminChange, error) {
 
 func (s accountCenterAdmin) createTeam(w http.ResponseWriter, r *http.Request) {
 	s.withDirectory(w, r, true, func(tx ac.AdminTx, d adminSnapshot) (any, error) {
-		if !(ac.Policy{}).Can(d.actor, ac.ActionCreateTeam, ac.PolicyTarget{}) {
+		if !d.canCreateTeam() {
 			return nil, ac.ErrForbidden
 		}
 		input, err := decodeAccountAdminInput(w, r)
@@ -449,7 +521,15 @@ func (s accountCenterAdmin) accountChange(action string) http.HandlerFunc {
 			if !slices.Contains(d.accountActions(person, team), action) {
 				return nil, ac.ErrForbidden
 			}
-			return s.apply(r, tx, d, ac.AdminChange{Action: action, Username: person.Username, TeamID: team.ID, Role: strings.TrimPrefix(action, "set_")})
+			change := ac.AdminChange{Action: action, Username: person.Username, TeamID: team.ID, Role: strings.TrimPrefix(action, "set_")}
+			if action == "grant_team_create" {
+				id, err := newSessionToken()
+				if err != nil {
+					return nil, err
+				}
+				change.GrantID = id
+			}
+			return s.apply(r, tx, d, change)
 		})
 	}
 }

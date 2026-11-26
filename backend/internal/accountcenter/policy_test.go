@@ -13,7 +13,8 @@ func TestPolicyMatrix(t *testing.T) {
 		target  PolicyTarget
 		allowed [4]bool // founder, developer, manager, member
 	}{
-		{"create team", ActionCreateTeam, PolicyTarget{}, [4]bool{true, true, false, false}},
+		{"create team without separate grant", ActionCreateTeam, PolicyTarget{}, [4]bool{true, false, false, false}},
+		{"create team with separate grant", ActionCreateTeam, PolicyTarget{TeamCreationGranted: true}, [4]bool{true, true, false, false}},
 		{"manage assigned team", ActionManageTeam, PolicyTarget{TeamID: "team", InManagedTeam: true}, [4]bool{true, true, false, false}},
 		{"manage other team", ActionManageTeam, PolicyTarget{TeamID: "team"}, [4]bool{true, false, false, false}},
 		{"create founder", ActionCreateAccount, PolicyTarget{NewRole: RoleFounder}, [4]bool{}},

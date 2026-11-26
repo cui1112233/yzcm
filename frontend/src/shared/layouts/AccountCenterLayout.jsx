@@ -8,12 +8,6 @@ import { getToken } from '../api/client';
 import { Link } from '../components/Link';
 import '../styles/profile-grey-glass.css';
 
-function roleLabel(role) {
-  if (role === 'dev') return 'DEV';
-  if (role === 'manager') return 'MANAGER';
-  return 'MEMBER';
-}
-
 const switchChannel = 'qiantie:account-impersonation';
 
 function openSwitchChannel() {
@@ -172,8 +166,10 @@ function AccountSwitchEntry({ status }) {
 }
 
 export function AccountCenterLayout({ account, username, avatar, pathname, onReturn, onLogout, impersonation, impersonationRequired = Boolean(username), impersonationError, onRetryImpersonation, children }) {
-  const canManage = ['dev', 'manager'].includes(account?.role);
-  const canAccessAdmin = account?.role === 'dev';
+  const capabilities = account?.capabilities || [];
+  const canManage = capabilities.includes('team_governance');
+  const canGovernAccounts = capabilities.includes('account_governance');
+  const canAccessAdmin = capabilities.includes('platform_admin');
   const content = impersonationRequired && !impersonation
     ? <AccountImpersonationPending error={impersonationError} onRetry={onRetryImpersonation} />
     : children;
@@ -188,12 +184,13 @@ export function AccountCenterLayout({ account, username, avatar, pathname, onRet
       { href: 'http://newapi.yzcm.site/', label: 'YZCM API', external: true },
       { href: '/usage', label: '用量与制作' },
       ...(canManage ? [{ href: '/team', label: '组员管理' }] : []),
-      ...(canAccessAdmin ? [{ href: '/accounts', label: '账号与角色', developer: true }, { href: '/admin/presets', label: '管理后台', reload: true, developer: true }] : [])
+      ...(canGovernAccounts ? [{ href: '/accounts', label: '账号与角色', developer: true }] : []),
+      ...(canAccessAdmin ? [{ href: '/admin/presets', label: '管理后台', reload: true, developer: true }] : [])
     ];
     return <div className="account-center-workspace profile-glass-workspace">
       <header className="pg-shell-header">
         <button type="button" className="pg-brand" onClick={onReturn} aria-label="一战晟铭，返回工作台"><b aria-hidden="true">Y</b><span>一战晟铭</span></button>
-        <div className="pg-shell-account"><Avatar size={32} src={account?.avatarUrl} style={{ backgroundColor: avatar?.background }}>{avatar?.emoji}</Avatar><span>{account?.displayName || username}</span><em>{roleLabel(account?.role)}</em><AccountSwitchEntry status={impersonation} /></div>
+        <div className="pg-shell-account"><Avatar size={32} src={account?.avatarUrl} style={{ backgroundColor: avatar?.background }}>{avatar?.emoji}</Avatar><span>{account?.displayName || username}</span><em>{account?.canonicalRole}</em><AccountSwitchEntry status={impersonation} /></div>
       </header>
       <AccountImpersonationBanner status={impersonation} />
       <nav className="pg-navigation" aria-label="个人中心导航">
@@ -216,7 +213,7 @@ export function AccountCenterLayout({ account, username, avatar, pathname, onRet
       </div>
       <div className="account-center-sidebar-profile">
         <Avatar size={54} src={account?.avatarUrl} style={{ backgroundColor: avatar?.background }}>{avatar?.emoji}</Avatar>
-        <div><strong>{account?.displayName || username}</strong><small>@{username}</small><em>{roleLabel(account?.role)}</em></div>
+        <div><strong>{account?.displayName || username}</strong><small>@{username}</small><em>{account?.canonicalRole}</em></div>
       </div>
       <nav className="account-center-sidebar-nav">
         <div className="account-center-sidebar-group">
@@ -224,7 +221,11 @@ export function AccountCenterLayout({ account, username, avatar, pathname, onRet
           <div className="account-center-sidebar-submenu"><Link href="/member" className={pathname === '/member' ? 'active' : ''} aria-current={pathname === '/member' ? 'page' : undefined}><Crown size={17} />会员中心</Link><Link href="/security" className={pathname === '/security' ? 'active' : ''} aria-current={pathname === '/security' ? 'page' : undefined}><ShieldCheck size={17} />账号安全</Link>{canManage ? <Link href="/advanced-team-admin" className={pathname === '/advanced-team-admin' ? 'active' : ''} aria-current={pathname === '/advanced-team-admin' ? 'page' : undefined}><UsersRound size={17} />联合治理</Link> : null}</div>
         </div>
         <div className="account-center-sidebar-group">{canManage ? <Link href="/api-config" className={pathname === '/api-config' ? 'active' : ''} aria-current={pathname === '/api-config' ? 'page' : undefined}><KeyRound size={17} />API 配置</Link> : null}<a href="http://newapi.yzcm.site/" target="_blank" rel="noreferrer" title="一战晟铭专属 API 控制台"><ExternalLink size={17} />YZCM API</a><Link href="/usage" className={pathname === '/usage' ? 'active' : ''} aria-current={pathname === '/usage' ? 'page' : undefined}><ChartNoAxesCombined size={17} />用量与制作</Link>{canManage ? <Link href="/team" className={pathname === '/team' ? 'active' : ''} aria-current={pathname === '/team' ? 'page' : undefined}><UsersRound size={17} />组员管理</Link> : null}</div>
-        {canAccessAdmin ? <div className="account-center-sidebar-group account-center-sidebar-developer"><span>开发者工具</span><Link href="/accounts" className={pathname === '/accounts' ? 'active' : ''} aria-current={pathname === '/accounts' ? 'page' : undefined}><UsersRound size={17} />账号与角色</Link><Link href="/admin/presets" reload><ShieldCheck size={17} />管理后台</Link></div> : null}
+        {canGovernAccounts || canAccessAdmin ? <div className="account-center-sidebar-group account-center-sidebar-developer">
+          <span>开发者工具</span>
+          {canGovernAccounts && <Link href="/accounts" className={pathname === '/accounts' ? 'active' : ''} aria-current={pathname === '/accounts' ? 'page' : undefined}><UsersRound size={17} />账号与角色</Link>}
+          {canAccessAdmin && <Link href="/admin/presets" reload><ShieldCheck size={17} />管理后台</Link>}
+        </div> : null}
       </nav>
       <button type="button" className="account-center-sidebar-logout" onClick={onLogout}><LogOut size={17} />退出登录</button>
     </aside>
