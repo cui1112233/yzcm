@@ -163,3 +163,19 @@ func TestAuthoringReadToolShotIDsUseAuthenticatedScope(t *testing.T) {
 		t.Fatal("read persisted conversation")
 	}
 }
+
+func TestAuthoringReadToolRejectsCaseAndDuplicateSelectorKeys(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	s := screenplay.NewMemoryStore()
+	_, _ = s.CreateProject(ctx, screenplay.Project{ID: "p", OwnerUsername: "alice"})
+	_, _ = s.SaveStoryboard(ctx, screenplay.Storyboard{ProjectID: "p", OwnerUsername: "alice", EpisodeNo: 1, Engine: screenplay.EngineXiaoluoV7, Shots: []screenplay.StoryboardShot{{ID: "one", Seq: 1, VideoDesc: "不得返回"}}})
+	mux := http.NewServeMux()
+	RegisterScreenplayAuthoringRoutes(mux, BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}, s, screenplay.NewMemoryAuthoringRepository(), nil)
+	for _, raw := range []string{`{"SHOT_IDS":["one"]}`, `{"shot_ids":["one"],"SHOT_NUMBERS":[1]}`, `{"shot_ids":["one"],"SHOT_ID":"one"}`, `{"shot_numbers":[1],"shot_numbers":[]}`, `{"shot_ids":["one"],"\u0073hot_ids":[]}`} {
+		res := signedJSONRequest(t, mux, now, "alice", "POST", "/api/comic-screenplays/projects/p/assistant/read-tool", map[string]any{"tool": "read_shot_video_prompts", "tool_args": json.RawMessage(raw)})
+		if res.Code != http.StatusBadRequest || strings.Contains(res.Body.String(), "不得返回") {
+			t.Fatal(raw, res.Code, res.Body.String())
+		}
+	}
+}

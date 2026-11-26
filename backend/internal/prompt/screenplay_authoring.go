@@ -15,7 +15,7 @@ const ScreenplayAuthoringReadTools = `
 - read_assets：可给asset_type（all/character/scene/prop）、name筛选名称。
 - get_shot_numbers、read_shot_video_prompts、read_shot_image_prompts、get_all_shots_voicetext：可给episode_no、engine、shot_numbers（正整数数组，最多200）或shot_ids（1至200个真实镜头ID的字符串数组，每项1至256字节，无首尾空白）；shot_ids不能与shot_numbers或单个shot_id混用，不能给其他读取工具。每个ID都必须属于当前作品及所选episode_no和engine，不存在或跨范围会整次拒绝；视频提示词可用include_prompt=false只读绑定。
 - get_shot_detail：必须给实际shot_id，可给episode_no和engine；只能使用真实读取到的镜头ID。
-存在多个剧集或引擎必须明确筛选；不能猜第一个。参数不含owner、project_id、文件路径、URL或任何写入字段。工具失败必须说明真实原因；truncated=true说明结果仅为部分。读取不等于修改成功。`
+存在多个剧集或引擎必须明确筛选；不能猜第一个。所有参数字段必须严格使用上文小写名称，不接受大小写别名或重复同名字段。参数不含owner、project_id、文件路径、URL或任何写入字段。工具失败必须说明真实原因；truncated=true说明结果仅为部分。读取不等于修改成功。`
 
 const ScreenplayAuthoringAssetEditTools = `
 【待确认的资产修改】只在用户明确要求新增、修改或删除资产时使用modify_character、modify_scene、modify_prop，不直接执行写入。

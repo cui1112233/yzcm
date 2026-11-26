@@ -175,3 +175,26 @@ func TestAssistantReadShotIDsAcceptsBoundaryWithoutExpanding(t *testing.T) {
 		t.Fatal(data, e)
 	}
 }
+
+func TestAssistantReadToolsRejectCaseAliasesAndDuplicateKeys(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+	_, _ = s.CreateProject(ctx, Project{ID: "p", OwnerUsername: "alice"})
+	_, _ = s.SaveStoryboard(ctx, Storyboard{ProjectID: "p", OwnerUsername: "alice", EpisodeNo: 1, Engine: EngineXiaoluoV7, Shots: []StoryboardShot{{ID: "one", Seq: 1}, {ID: "two", Seq: 2}}})
+	for _, raw := range []string{
+		`{"SHOT_IDS":["one"]}`, `{"Shot_Ids":["one"]}`, `{"shot_ids":["one"],"SHOT_NUMBERS":[1]}`, `{"shot_ids":["one"],"SHOT_ID":"one"}`,
+		`{"shot_ids":["one"],"shot_ids":["two"]}`, `{"shot_numbers":[1],"shot_numbers":[]}`, `{"shot_id":"one","shot_id":""}`, `{"episode_no":2,"episode_no":1}`, `{"engine":"other","engine":""}`,
+		`{"shot_ids":["one"],"\u0073hot_ids":["two"]}`, `{"EPISODE_NO":1}`, `{"include_Prompt":false}`, `[]`,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			if _, data, e := ReadAssistantTool(ctx, s, "alice", "p", "get_shot_numbers", json.RawMessage(raw)); e == nil {
+				t.Fatalf("non-exact or duplicate key expanded/changed selection: %s %#v", raw, data)
+			}
+		})
+	}
+	for _, tool := range []string{"read_assets", "get_current_screenplay", "analyze_screenplay", "get_editor_status", "get_shot_detail"} {
+		if _, _, e := ReadAssistantTool(ctx, s, "alice", "p", tool, json.RawMessage(`{"shot_id":"one","SHOT_IDS":["one"]}`)); e == nil {
+			t.Fatal("case alias ignored", tool)
+		}
+	}
+}

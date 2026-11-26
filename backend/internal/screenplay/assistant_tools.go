@@ -50,16 +50,46 @@ func ReadAssistantTool(ctx context.Context, store Store, owner, project, name st
 	}
 	var args assistantReadArgs
 	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if dec.Decode(&args) != nil {
+	opening, err := dec.Token()
+	if err != nil || opening != json.Delim('{') {
+		return invalid("工具参数必须是一个对象")
+	}
+	// Struct decoding alone accepts case aliases and duplicate keys. Validate
+	// decoded key names first so neither can bypass selector presence checks.
+	fields := map[string]json.RawMessage{}
+	for dec.More() {
+		token, e := dec.Token()
+		if e != nil {
+			return invalid("工具参数无效")
+		}
+		key, ok := token.(string)
+		if !ok {
+			return invalid("工具参数无效")
+		}
+		switch key {
+		case "episode_no", "engine", "shot_id", "shot_ids", "shot_numbers", "asset_type", "name", "include_prompt", "focus":
+		default:
+			return invalid("工具参数字段必须使用规定的小写名称")
+		}
+		if _, duplicate := fields[key]; duplicate {
+			return invalid("工具参数不能重复同名字段")
+		}
+		var value json.RawMessage
+		if dec.Decode(&value) != nil {
+			return invalid("工具参数无效")
+		}
+		fields[key] = value
+	}
+	if closing, e := dec.Token(); e != nil || closing != json.Delim('}') {
 		return invalid("工具参数无效")
 	}
 	var tail any
 	if dec.Decode(&tail) != io.EOF {
 		return invalid("工具参数必须是一个对象")
 	}
-	var fields map[string]json.RawMessage
-	_ = json.Unmarshal(raw, &fields)
+	if json.Unmarshal(raw, &args) != nil {
+		return invalid("工具参数无效")
+	}
 	wantedIDs := map[string]bool{}
 	if _, hasIDs := fields["shot_ids"]; hasIDs {
 		switch name {
