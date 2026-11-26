@@ -78,6 +78,8 @@ func TestAppMigrationsIncludesV11AndV12Migrations(t *testing.T) {
 	want = append(want, NovelCreationMigrations()...)
 	want = append(want, ProjectRetentionMigrations()...)
 	want = append(want, ImageCapacityMigrations()...)
+	want = append(want, YZCMUsageMigrations()...)
+	want = append(want, AccountCenterMigrations()...)
 	if len(migrations) != len(want) {
 		t.Fatalf("AppMigrations length=%d, want %d", len(migrations), len(want))
 	}
