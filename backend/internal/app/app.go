@@ -233,6 +233,9 @@ func prepareAccountCenter(ctx context.Context, db *sql.DB, authStore *auth.MySQL
 	if err := store.ImportLegacy(ctx, cfg.MemberSystemDir); err != nil {
 		return nil, fmt.Errorf("import legacy account center: %w", err)
 	}
+	if err := store.ReserveLegacyNames(ctx, cfg.MemberSystemDir); err != nil {
+		return nil, fmt.Errorf("reserve historical account names: %w", err)
+	}
 	return store, nil
 }
 

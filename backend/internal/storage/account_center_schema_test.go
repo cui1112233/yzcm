@@ -7,7 +7,7 @@ import (
 
 func TestAccountCenterMigrationsContainAuthorizationBoundaries(t *testing.T) {
 	migrations := AccountCenterMigrations()
-	if len(migrations) != 2 || migrations[0].Version != 8800403 || migrations[1].Version != 8800404 {
+	if len(migrations) != 3 || migrations[0].Version != 8800403 || migrations[1].Version != 8800404 || migrations[2].Version != 8800405 {
 		t.Fatalf("unexpected account center migrations: %+v", migrations)
 	}
 	joined := strings.ToLower(strings.Join(migrations[0].SQL, "\n"))
@@ -24,6 +24,12 @@ func TestAccountCenterMigrationsContainAuthorizationBoundaries(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(migrations[1].SQL, "\n"), "account_center_imports") {
 		t.Fatal("missing legacy import marker table")
+	}
+	adminSQL := strings.Join(migrations[2].SQL, "\n")
+	for _, table := range []string{"account_center_archive_states", "account_center_reserved_names", "account_center_invite_claims"} {
+		if !strings.Contains(adminSQL, table) {
+			t.Fatalf("missing governance table %s", table)
+		}
 	}
 	app := AppMigrations()
 	for _, want := range migrations {

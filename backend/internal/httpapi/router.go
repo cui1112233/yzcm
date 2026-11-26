@@ -543,7 +543,7 @@ func NewRouter(options RouterOptions) http.Handler {
 		rateLimitNow = time.Now
 	}
 	authLimiter := newAuthRateLimiter(options.AuthRateLimits, rateLimitNow)
-	RegisterAuthRoutes(root, AuthOptions{Store: options.AuthStore, Profiles: options.MemberProfileStore, Now: options.Now, SessionResolver: options.SessionResolver, MFAFile: mfaFile, PasskeyFile: passkeyFile, RateLimiter: authLimiter})
+	RegisterAuthRoutes(root, AuthOptions{Store: options.AuthStore, AccountCenterStore: options.AccountCenterStore, Profiles: options.MemberProfileStore, Now: options.Now, SessionResolver: options.SessionResolver, MFAFile: mfaFile, PasskeyFile: passkeyFile, RateLimiter: authLimiter})
 	if options.PresetCatalog != nil {
 		registerPresetRoutes(root, auth, options.PresetCatalog, options.LocalArtifacts)
 	}
@@ -553,13 +553,14 @@ func NewRouter(options RouterOptions) http.Handler {
 	RegisterScriptHistoryRoutes(root, auth, options.ScriptHistoryStore)
 	RegisterMemberProfileRoutes(root, auth, options.MemberProfileStore, options.AuthStore, options.MemberAvatarDir)
 	RegisterMFARoutes(root, auth, options.MemberProfileStore, options.AuthStore)
-	RegisterAccountAdminReadCompat(root, auth, options.AuthStore, options.MemberProfileStore)
-	RegisterAccountTransferCompat(root, auth, options.AuthStore, options.MemberProfileStore)
+	registerAccountCenterAdmin(root, auth)
+	RegisterAccountAdminReadCompat(root, auth)
+	RegisterAccountTransferCompat(root, auth)
 	RegisterMemberTeamReadCompat(root, auth, options.AuthStore, options.MemberProfileStore)
-	RegisterMemberTeamWriteCompat(root, auth, options.AuthStore, options.MemberProfileStore)
-	RegisterTeamAdminCompat(root, auth, options.AuthStore, options.MemberProfileStore)
+	RegisterMemberTeamWriteCompat(root, auth)
+	RegisterTeamAdminCompat(root, auth)
 	if options.MemberProfileStore != nil {
-		RegisterPublicTeamInviteCompat(root, options.MemberProfileStore.SystemDir, options.AuthStore, options.MemberProfileStore)
+		RegisterPublicTeamInviteCompat(root, options.MemberProfileStore.SystemDir, options.AccountCenterStore)
 	}
 	prompt.SetLuoshuiOverrideCatalog(options.PresetCatalog)
 	RegisterAdminReadCompat(root, auth, options.AuthStore, options.MemberProfileStore, options.PresetCatalog, options.LocalArtifacts)
@@ -569,7 +570,7 @@ func NewRouter(options RouterOptions) http.Handler {
 	if options.MemberProfileStore != nil {
 		RegisterAccountRecoveryStatusCompat(root, auth, options.MemberProfileStore.SystemDir, authLimiter)
 		RegisterAccountPasskeyCompat(root, auth, options.MemberProfileStore, options.AuthStore)
-		RegisterAccountPurgeCompat(root, auth, options.AuthStore, options.MemberProfileStore, options.MemberAvatarDir)
+		RegisterAccountPurgeCompat(root, auth)
 	}
 	RegisterReferenceAssetRoutes(root, auth, options.UserDataDir)
 	registerReferenceAssetImageGenerateRoute(root, auth, options.UserConfigStore, runtimeCatalogStore, options.LocalExecutors)

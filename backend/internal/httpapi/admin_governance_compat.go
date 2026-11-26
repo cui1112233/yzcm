@@ -5,12 +5,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	ac "qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/auth"
 )
 
@@ -21,8 +23,8 @@ var adminGrantCapabilities = map[string]bool{
 }
 
 var adminGrantScopes = map[string]bool{
-	"*":           true,
-	"script":      true,
+	"*":      true,
+	"script": true,
 }
 
 // RegisterAdminGovernanceCompat keeps the account-application and backend-grant
@@ -38,73 +40,113 @@ func RegisterAdminGovernanceCompat(root *http.ServeMux, middleware BridgeAuth, a
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"applications": readAdminGovernanceArray(profiles, "applications.json")})
 	})))
-	root.Handle("POST /api/admin/accounts", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		identity, ok := requireAdminGovernance(w, req, accounts, profiles, true)
-		if !ok {
-			return
-		}
-		input, ok := decodeAdminJSON(w, req, 32<<10)
-		if !ok {
-			return
-		}
-		account, err := createAdminAccount(req.Context(), profiles, accounts, identity.Username, input)
-		if err != nil {
-			writeAdminGovernanceError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusCreated, map[string]any{"account": account})
-	})))
-	root.Handle("POST /api/admin/accounts/{username}/status", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		identity, ok := requireAdminGovernance(w, req, accounts, profiles, false)
-		if !ok {
-			return
-		}
-		input, ok := decodeAdminJSON(w, req, 8<<10)
-		if !ok {
-			return
-		}
-		active, exists := input["active"].(bool)
-		if !exists {
-			writeAdminGovernanceError(w, auth.ErrInvalid)
-			return
-		}
-		account, err := setAdminAccountStatus(req.Context(), profiles, accounts, identity.Username, req.PathValue("username"), active)
-		if err != nil {
-			writeAdminGovernanceError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"account": account})
-	})))
-	root.Handle("POST /api/admin/accounts/{username}/reset-password", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		identity, ok := requireAdminGovernance(w, req, accounts, profiles, false)
-		if !ok {
-			return
-		}
-		input, ok := decodeAdminJSON(w, req, 8<<10)
-		if !ok {
-			return
-		}
-		password := strings.TrimSpace(toString(input["password"]))
-		if len(password) < 8 {
-			writeAdminGovernanceError(w, auth.ErrInvalid)
-			return
-		}
-		account, err := resetAdminAccountPassword(req.Context(), profiles, accounts, identity.Username, req.PathValue("username"), password)
-		if err != nil {
-			writeAdminGovernanceError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"account": account})
-	})))
-	for _, action := range []string{"approve", "reject"} {
-		action := action
-		root.Handle("POST /api/admin/applications/{id}/"+action, middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+	if middleware.AccountCenterStore != nil {
+		admin := accountCenterAdmin{auth: middleware}
+		root.Handle("POST /api/admin/accounts", middleware.AccountCenterMiddleware(http.HandlerFunc(admin.createUngroupedAccount)))
+		root.Handle("POST /api/admin/accounts/{username}/status", middleware.AccountCenterMiddleware(http.HandlerFunc(admin.compatibilityStatus)))
+		root.Handle("POST /api/admin/accounts/{username}/reset-password", middleware.AccountCenterMiddleware(http.HandlerFunc(admin.retired)))
+	} else {
+		root.Handle("POST /api/admin/accounts", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			identity, ok := requireAdminGovernance(w, req, accounts, profiles, true)
+			if !ok {
+				return
+			}
+			input, ok := decodeAdminJSON(w, req, 32<<10)
+			if !ok {
+				return
+			}
+			account, err := createAdminAccount(req.Context(), profiles, accounts, identity.Username, input)
+			if err != nil {
+				writeAdminGovernanceError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusCreated, map[string]any{"account": account})
+		})))
+		root.Handle("POST /api/admin/accounts/{username}/status", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			identity, ok := requireAdminGovernance(w, req, accounts, profiles, false)
 			if !ok {
 				return
 			}
-			application, err := reviewAdminApplication(req.Context(), profiles, accounts, identity.Username, req.PathValue("id"), action == "approve")
+			input, ok := decodeAdminJSON(w, req, 8<<10)
+			if !ok {
+				return
+			}
+			active, exists := input["active"].(bool)
+			if !exists {
+				writeAdminGovernanceError(w, auth.ErrInvalid)
+				return
+			}
+			account, err := setAdminAccountStatus(req.Context(), profiles, accounts, identity.Username, req.PathValue("username"), active)
 			if err != nil {
+				writeAdminGovernanceError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"account": account})
+		})))
+		root.Handle("POST /api/admin/accounts/{username}/reset-password", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			identity, ok := requireAdminGovernance(w, req, accounts, profiles, false)
+			if !ok {
+				return
+			}
+			input, ok := decodeAdminJSON(w, req, 8<<10)
+			if !ok {
+				return
+			}
+			password := strings.TrimSpace(toString(input["password"]))
+			if len(password) < 8 {
+				writeAdminGovernanceError(w, auth.ErrInvalid)
+				return
+			}
+			account, err := resetAdminAccountPassword(req.Context(), profiles, accounts, identity.Username, req.PathValue("username"), password)
+			if err != nil {
+				writeAdminGovernanceError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"account": account})
+		})))
+	}
+	for _, action := range []string{"approve", "reject"} {
+		action := action
+		root.Handle("POST /api/admin/applications/{id}/"+action, middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			createAccount := accounts.CreateAccount
+			if action == "approve" && middleware.AccountCenterStore != nil {
+				identity, ok := AccountCenterIdentityFromContext(req.Context())
+				store, available := middleware.AccountCenterStore.(ac.AdminStore)
+				if !ok || !available || identity.Actor.Role != ac.RoleFounder {
+					writeAccountCenterForbidden(w)
+					return
+				}
+				createAccount = func(ctx context.Context, account auth.Account) error {
+					return store.WithAdmin(ctx, true, func(tx ac.AdminTx) error {
+						directory, err := tx.Directory(ctx)
+						if err != nil {
+							return err
+						}
+						actor := (adminSnapshot{AdminDirectory: directory}).person(identity.Actor.Username)
+						target := ac.PolicyTarget{NewRole: ac.RoleMember}
+						if actor.Role != ac.RoleFounder || !(ac.Policy{}).Can(actor, ac.ActionCreateAccount, target) {
+							return ac.ErrForbidden
+						}
+						if err := tx.Change(ctx, ac.AdminChange{
+							Action: "create_account", Actor: actor.Username, Username: account.Username, DisplayName: account.Username,
+							Role: ac.RoleMember, PasswordHash: account.PasswordHash, PasswordAlgorithm: account.PasswordAlgorithm,
+						}); err != nil {
+							return err
+						}
+						return tx.AppendAudit(ctx, ac.AuditEvent{ActorUsername: actor.Username, SubjectUsername: account.Username, Action: "approve_application"})
+					})
+				}
+			}
+			identity, ok := requireAdminGovernance(w, req, accounts, profiles, false)
+			if !ok {
+				return
+			}
+			application, err := reviewAdminApplication(req.Context(), profiles, accounts, createAccount, identity.Username, req.PathValue("id"), action == "approve")
+			if err != nil {
+				if errors.Is(err, ac.ErrForbidden) {
+					writeAccountCenterForbidden(w)
+					return
+				}
 				writeAdminGovernanceError(w, err)
 				return
 			}
@@ -212,7 +254,7 @@ func writeAdminGovernanceArray(profiles *MemberProfileStore, name string, rows [
 	return os.Rename(tmp, path)
 }
 
-func reviewAdminApplication(ctx context.Context, profiles *MemberProfileStore, accounts auth.Store, actor, id string, approve bool) (map[string]any, error) {
+func reviewAdminApplication(ctx context.Context, profiles *MemberProfileStore, accounts auth.Store, createAccount func(context.Context, auth.Account) error, actor, id string, approve bool) (map[string]any, error) {
 	profiles.mu.Lock()
 	defer profiles.mu.Unlock()
 	path := adminSystemFile(profiles.SystemDir, "applications.json")
@@ -249,7 +291,7 @@ func reviewAdminApplication(ctx context.Context, profiles *MemberProfileStore, a
 			algorithm = "scrypt"
 		}
 		created := time.Now().UTC()
-		if err := accounts.CreateAccount(ctx, auth.Account{Username: username, PasswordHash: passwordHash, PasswordAlgorithm: algorithm, Active: true, CreatedAt: created, UpdatedAt: created}); err != nil {
+		if err := createAccount(ctx, auth.Account{Username: username, PasswordHash: passwordHash, PasswordAlgorithm: algorithm, Active: true, CreatedAt: created, UpdatedAt: created}); err != nil {
 			return nil, err
 		}
 	}

@@ -1,131 +1,195 @@
-import { Alert, Button, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Typography, message } from 'antd';
-import { useEffect, useState } from 'react';
-import { createAccount, listGlobalAccounts, updateAccount } from '../../shared/api/accountAdmin';
-import { getMemberCenter } from '../../shared/api/member';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Alert, Button, Card, Empty, Form, Input, Modal, Space, Table, Tag, Typography } from 'antd';
+import { changeAdminAccount, createUngroupedAdminAccount, getAccountAdminAudit, getAccountAdminDirectory } from '../../shared/api/accountAdmin.js';
+import { changeAdminTeam, createAdminTeam, createAdminTeamAccount } from '../../shared/api/teamAdmin.js';
+import { startAccountImpersonation } from '../../shared/api/accountImpersonation.js';
+import { reloadForAccountSwitch } from '../../shared/layouts/AccountCenterLayout.jsx';
 
-const ROLE_OPTIONS = [
-  { value: 'member', label: 'MEMBER（普通成员）' },
-  { value: 'manager', label: 'MANAGER（管理者）' }
+const ROLE_LABELS = {
+  founder: '开发创始',
+  developer: '开发者',
+  manager: '管理者',
+  member: '组员'
+};
+
+const ACTION_LABELS = {
+  create_team: '新建团队',
+  create_manager: '添加管理者',
+  create_member: '添加组员',
+  archive_team: '归档团队',
+  restore_team: '恢复团队',
+  view_audit: '操作记录',
+  set_member: '设为组员',
+  set_manager: '设为管理者',
+  set_developer: '设为开发者',
+  enable: '启用账号',
+  disable: '停用账号',
+  archive: '归档账号',
+  restore: '恢复归档账号',
+  purge_preflight: '检查永久删除条件',
+  switch_account: '切换账号'
+};
+
+const CHECK_LABELS = {
+  archive: '归档状态',
+  balance: '余额',
+  in_flight_jobs: '在途任务',
+  pending_reconciliation: '待核账记录',
+  retention: '留存要求'
+};
+
+const CHECK_STATUSES = { clear: '通过', blocked: '未通过', unavailable: '暂不可用' };
+const USERNAME_RULES = [
+  { required: true },
+  { pattern: /^[A-Za-z0-9][A-Za-z0-9._-]{1,31}$/, message: '账号须为 2–32 位字母、数字、点、下划线或短横线，并以字母或数字开头' }
 ];
 
-function requestError(error, fallback) {
-  try { return JSON.parse(error?.message || '').error || fallback; } catch (_) { return error?.message || fallback; }
+function AccountFields({ manager = false }) {
+  return <>
+    <Form.Item name={manager ? 'managerUsername' : 'username'} label={manager ? '管理者账号' : '登录账号'} rules={USERNAME_RULES}>
+      <Input autoComplete="off" />
+    </Form.Item>
+    <Form.Item name="displayName" label="显示名称" rules={[{ max: 191 }]}><Input /></Form.Item>
+    <Form.Item name="password" label="初始密码" rules={[{ required: true, min: 8, max: 128 }]}>
+      <Input.Password autoComplete="new-password" />
+    </Form.Item>
+  </>;
 }
 
-function roleTag(role) {
-  const color = role === 'dev' ? 'purple' : role === 'manager' ? 'blue' : 'default';
-  return <Tag color={color}>{String(role || 'member').toUpperCase()}</Tag>;
-}
-
-export default function AccountRolePage() {
-  const [accounts, setAccounts] = useState([]);
+export default function AccountRolePage({ title = '账号与角色', teamsOnly = false }) {
+  const [directory, setDirectory] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [forbidden, setForbidden] = useState(false);
   const [error, setError] = useState('');
-  const [createOpen, setCreateOpen] = useState(false);
-  const [editing, setEditing] = useState(null);
+  const [pending, setPending] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [createForm] = Form.useForm();
-  const [editForm] = Form.useForm();
+  const [dialogError, setDialogError] = useState('');
+  const [preflight, setPreflight] = useState(null);
+  const [audit, setAudit] = useState(null);
+  const [form] = Form.useForm();
 
-  async function load() {
+  const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const center = await getMemberCenter();
-      if (center.member?.role !== 'dev') {
-        setForbidden(true);
-        setAccounts([]);
-        return;
-      }
-      const result = await listGlobalAccounts();
-      setForbidden(false);
-      setAccounts(result.accounts || []);
-    } catch (request) {
-      if (request?.status === 403) setForbidden(true);
-      else setError(requestError(request, '账号目录加载失败'));
+      setDirectory(await getAccountAdminDirectory());
+    } catch (failure) {
+      setDirectory(null);
+      setError(failure.message || '账号与团队读取失败');
     } finally {
       setLoading(false);
     }
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+
+  function openAction(action, target) {
+    if (!ACTION_LABELS[action]) return;
+    form.resetFields();
+    setDialogError('');
+    setPending({ action, target });
   }
 
-  useEffect(() => { load(); }, []);
-
-  async function submitCreate(values) {
+  async function submitAction(values) {
+    if (!pending || saving) return;
+    const { action, target } = pending;
     setSaving(true);
+    setDialogError('');
     try {
-      await createAccount({ ...values, monthlyTokenLimit: null });
-      message.success('账号已创建，角色已立即生效。');
-      createForm.resetFields();
-      setCreateOpen(false);
-      await load();
-    } catch (request) {
-      message.error(requestError(request, '账号创建失败'));
+      if (action === 'create_team') {
+        await createAdminTeam(values);
+      } else if (action === 'create_manager' || action === 'create_member') {
+        const input = { ...values, role: action === 'create_manager' ? 'manager' : 'member' };
+        if (target) await createAdminTeamAccount(target.id, input);
+        else await createUngroupedAdminAccount(input);
+      } else if (action === 'view_audit') {
+        setAudit((await getAccountAdminAudit()).events);
+      } else if (action === 'purge_preflight') {
+        setPreflight({ username: target.username, ...await changeAdminAccount(target.username, action) });
+      } else if (action === 'switch_account') {
+        await startAccountImpersonation(target.username);
+        reloadForAccountSwitch();
+        return;
+      } else if (target.username) {
+        await changeAdminAccount(target.username, action);
+      } else {
+        await changeAdminTeam(target.id, action);
+      }
+      setPending(null);
+      if (action !== 'view_audit' && action !== 'purge_preflight') await load();
+    } catch (failure) {
+      setDialogError(failure.message || '操作失败');
     } finally {
       setSaving(false);
     }
   }
 
-  function openEdit(account) {
-    setEditing(account);
-    editForm.setFieldsValue({ displayName: account.displayName, role: account.role, active: account.active });
+  function actionButton(action, target) {
+    return ACTION_LABELS[action] ? <Button key={action} size="small" disabled={loading || saving} onClick={() => openAction(action, target)}>
+      {ACTION_LABELS[action]}
+    </Button> : null;
   }
 
-  async function submitEdit(values) {
-    if (!editing) return;
-    setSaving(true);
-    try {
-      await updateAccount(editing.username, values);
-      message.success('账号与角色已更新。');
-      setEditing(null);
-      await load();
-    } catch (request) {
-      message.error(requestError(request, '账号更新失败'));
-    } finally {
-      setSaving(false);
-    }
-  }
-
+  const unavailableValue = value => value ?? '暂不可用';
   const columns = [
-    { title: '账号', dataIndex: 'username', render: (username, account) => <div><strong>{account.displayName || username}</strong><br /><small>@{username}</small></div> },
-    { title: '角色', dataIndex: 'role', render: roleTag },
-    { title: '状态', dataIndex: 'active', render: active => <Tag color={active ? 'green' : 'default'}>{active ? '正常' : '已停用'}</Tag> },
-    { title: '所属团队', render: (_, account) => account.teamOwner?.team?.name || (account.role === 'manager' ? '独立管理者' : '未归属') },
-    { title: '操作', width: 116, render: (_, account) => account.role === 'dev' ? '当前开发者' : <Button size="small" onClick={() => openEdit(account)}>编辑角色</Button> }
+    { title: '登录账号', dataIndex: 'username' },
+    { title: '显示名称', dataIndex: 'displayName' },
+    { title: '角色', dataIndex: 'role', render: role => <Tag>{ROLE_LABELS[role] || role}</Tag> },
+    { title: '状态', render: (_, account) => account.archivedAt ? '已归档' : account.active ? '启用' : '停用' },
+    { title: '余额', dataIndex: 'balance', render: unavailableValue },
+    { title: '本月消费', dataIndex: 'monthConsumption', render: unavailableValue },
+    { title: '操作', render: (_, account) => <Space wrap>{account.actions.map(action => actionButton(action, account))}</Space> }
   ];
 
-  if (forbidden) return <section className="account-center-page"><Alert type="warning" showIcon message="当前账号没有“账号与角色”管理权限" description="只有 DEV 可以创建账号和调整全局角色。" /></section>;
+  const createTeam = pending?.action === 'create_team';
+  const createAccount = pending?.action === 'create_member' || pending?.action === 'create_manager';
+  const hasForm = createTeam || createAccount;
 
-  return <section className="account-center-page">
+  return <section className="admin-page account-role-page">
     <div className="admin-page-heading">
-      <div>
-        <Typography.Title level={2}>账号与角色</Typography.Title>
-        <Typography.Paragraph>在这里直接新建账号并选择角色。新账号不需要先加入组员或团队；需要团队归属时，再到组员管理处理。</Typography.Paragraph>
-      </div>
-      <Space>
+      <Typography.Title level={2}>{title}</Typography.Title>
+      <Space wrap>
         <Button onClick={load} loading={loading}>刷新</Button>
-        <Button type="primary" onClick={() => setCreateOpen(true)}>添加账号</Button>
+        {directory?.actions.filter(action => !teamsOnly || !['create_manager', 'create_member'].includes(action))
+          .map(action => actionButton(action))}
       </Space>
     </div>
-    {error ? <Alert type="error" showIcon message="无法读取账号目录" description={error} style={{ marginBottom: 16 }} /> : null}
-    <Table rowKey="username" loading={loading} columns={columns} dataSource={accounts} scroll={{ x: 720 }} />
-
-    <Modal title="添加账号并直接授权" open={createOpen} onCancel={() => setCreateOpen(false)} onOk={() => createForm.submit()} confirmLoading={saving} okText="创建并授权" destroyOnClose>
-      <Form form={createForm} layout="vertical" onFinish={submitCreate} initialValues={{ role: 'member' }}>
-        <Form.Item name="username" label="登录账号" rules={[{ required: true, message: '请输入登录账号' }, { pattern: /^[A-Za-z0-9][A-Za-z0-9._-]{1,31}$/, message: '账号为 2-32 位字母、数字、点、下划线或短横线' }]}><Input autoComplete="off" /></Form.Item>
-        <Form.Item name="displayName" label="显示名称" rules={[{ required: true, message: '请输入显示名称' }]}><Input /></Form.Item>
-        <Form.Item name="password" label="初始密码" rules={[{ required: true, min: 8, message: '密码至少 8 位' }]}><Input.Password autoComplete="new-password" /></Form.Item>
-        <Form.Item name="role" label="直接授权为" rules={[{ required: true }]}><Select options={ROLE_OPTIONS} /></Form.Item>
-        <Alert type="info" showIcon message="选择 MANAGER 后，账号创建完成即为管理者；无需先添加为组员。初始密码只用于本次创建，不会被回显。" />
-      </Form>
+    {error && <Alert type="error" showIcon message={error} />}
+    {directory && <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+      {directory.teams.map(team => <Card key={team.id}
+        title={<Space>{team.name}{team.archivedAt && <Tag>已归档</Tag>}</Space>}
+        extra={<Space wrap>{team.actions.map(action => actionButton(action, team))}</Space>}>
+        <Typography.Paragraph type="secondary">负责人 @{team.managerUsername}</Typography.Paragraph>
+        <Table rowKey="username" columns={columns} dataSource={team.accounts} pagination={false} scroll={{ x: 820 }} />
+      </Card>)}
+      {!teamsOnly && directory.ungrouped.length > 0 && <Card title="未分组">
+        <Table rowKey="username" columns={columns} dataSource={directory.ungrouped} pagination={false} scroll={{ x: 820 }} />
+      </Card>}
+      {directory.teams.length === 0 && (teamsOnly || directory.ungrouped.length === 0) && <Empty description="暂无可管理的团队" />}
+    </Space>}
+    <Modal title={ACTION_LABELS[pending?.action]} open={Boolean(pending)}
+      onCancel={() => { if (!saving) setPending(null); }}
+      onOk={() => hasForm ? form.submit() : submitAction()}
+      okText="确认" cancelText="取消" confirmLoading={saving} destroyOnClose>
+      {hasForm ? <Form form={form} layout="vertical" onFinish={submitAction} preserve={false}>
+        {createTeam && <Form.Item name="name" label="团队名称" rules={[{ required: true, max: 60 }]}><Input /></Form.Item>}
+        <AccountFields manager={createTeam} />
+      </Form> : pending?.target && <p>{pending.target.username ? `@${pending.target.username}` : pending.target.name}</p>}
+      {dialogError && <Alert type="error" showIcon message={dialogError} />}
     </Modal>
-
-    <Modal title={editing ? `编辑 @${editing.username}` : '编辑角色'} open={Boolean(editing)} onCancel={() => setEditing(null)} onOk={() => editForm.submit()} confirmLoading={saving} okText="保存" destroyOnClose>
-      <Form form={editForm} layout="vertical" onFinish={submitEdit}>
-        <Form.Item name="displayName" label="显示名称" rules={[{ required: true, message: '请输入显示名称' }]}><Input /></Form.Item>
-        <Form.Item name="role" label="角色" rules={[{ required: true }]}><Select options={ROLE_OPTIONS} /></Form.Item>
-        <Form.Item name="active" label="账号状态" rules={[{ required: true }]}><Select options={[{ value: true, label: '正常' }, { value: false, label: '停用' }]} /></Form.Item>
-      </Form>
+    <Modal title={preflight ? `永久删除条件 · @${preflight.username}` : '永久删除条件'}
+      open={Boolean(preflight)} onCancel={() => setPreflight(null)} footer={<Button onClick={() => setPreflight(null)}>关闭</Button>}>
+      {preflight && <>
+        <Alert type={preflight.allowed ? 'success' : 'warning'} showIcon message={preflight.allowed ? '删除条件已通过' : '当前无法永久删除'} />
+        <ul>{preflight.checks.map(check => <li key={check.name}>{CHECK_LABELS[check.name] || check.name}　{CHECK_STATUSES[check.status] || check.status}</li>)}</ul>
+      </>}
+    </Modal>
+    <Modal title="操作记录" width={760} open={Boolean(audit)}
+      onCancel={() => setAudit(null)} footer={<Button onClick={() => setAudit(null)}>关闭</Button>}>
+      <Table size="small" rowKey="ID" dataSource={audit || []} columns={[
+        { title: '操作人', dataIndex: 'ActorUsername' },
+        { title: '目标账号', dataIndex: 'SubjectUsername' },
+        { title: '操作', dataIndex: 'Action', render: action => ACTION_LABELS[action] || action },
+        { title: '时间', dataIndex: 'CreatedAt', render: value => new Date(value).toLocaleString() }
+      ]} />
     </Modal>
   </section>;
 }

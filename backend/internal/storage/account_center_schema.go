@@ -9,6 +9,20 @@ func AccountCenterMigrations() []Migration {
   completed_at DATETIME(6) NULL
 ) ENGINE=InnoDB`,
 		}},
+		{Version: 8800405, CallbackChecksum: "account-center-admin-v1", SQL: []string{
+			`CREATE TABLE IF NOT EXISTS account_center_archive_states (
+  username VARCHAR(32) NOT NULL PRIMARY KEY,
+  active_before_archive BOOLEAN NOT NULL
+) ENGINE=InnoDB`,
+			`CREATE TABLE IF NOT EXISTS account_center_reserved_names (
+  username VARCHAR(32) NOT NULL PRIMARY KEY
+) ENGINE=InnoDB`,
+			`CREATE TABLE IF NOT EXISTS account_center_invite_claims (
+  digest CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY,
+  username VARCHAR(32) NOT NULL,
+  used_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+) ENGINE=InnoDB`,
+		}},
 	}
 }
 

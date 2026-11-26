@@ -469,7 +469,7 @@ func impersonationBlocks(method, path string) bool {
 		return false
 	}
 	for _, prefix := range []string{
-		"/api/member/security", "/api/account-recovery", "/api/login/passkey",
+		"/api/member/security", "/api/account-recovery", "/api/login/passkey", "/api/login/invite",
 		"/api/account-center", "/api/account-admin", "/api/admin/accounts", "/api/admin/grants", "/api/admin/applications",
 		"/api/member/team", "/api/team-admin", "/api/settings/api-integrations", "/api/config",
 		"/api/shuihuo-production/config", "/api/shuihuo-production/account-ai-config",

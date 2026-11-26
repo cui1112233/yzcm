@@ -66,13 +66,14 @@ func writeAccountCenterForbidden(w http.ResponseWriter) {
 }
 
 type AuthOptions struct {
-	Store           auth.Store
-	Profiles        *MemberProfileStore
-	Now             func() time.Time
-	SessionResolver func(context.Context, string) (BridgeIdentity, error)
-	MFAFile         string
-	PasskeyFile     string
-	RateLimiter     *authRateLimiter
+	Store              auth.Store
+	AccountCenterStore accountcenter.Store
+	Profiles           *MemberProfileStore
+	Now                func() time.Time
+	SessionResolver    func(context.Context, string) (BridgeIdentity, error)
+	MFAFile            string
+	PasskeyFile        string
+	RateLimiter        *authRateLimiter
 }
 
 func authAccountPayload(account auth.Account, profiles *MemberProfileStore) map[string]any {
@@ -121,6 +122,26 @@ func authAccountPayload(account auth.Account, profiles *MemberProfileStore) map[
 }
 
 func RegisterAuthRoutes(root *http.ServeMux, options AuthOptions) {
+	accountPayload := func(ctx context.Context, account auth.Account) map[string]any {
+		payload := authAccountPayload(account, options.Profiles)
+		if options.AccountCenterStore == nil {
+			return payload
+		}
+		// The legacy field is still consumed by the navigation and older clients.
+		payload["role"] = "member"
+		if identity, err := options.AccountCenterStore.ResolveIdentity(ctx, account.Username); err == nil {
+			switch identity.Role {
+			case accountcenter.RoleFounder, accountcenter.RoleDeveloper:
+				payload["role"] = "dev"
+			case accountcenter.RoleManager:
+				payload["role"] = "manager"
+			}
+			if identity.DisplayName != "" {
+				payload["displayName"] = identity.DisplayName
+			}
+		}
+		return payload
+	}
 	now := options.Now
 	if now == nil {
 		now = time.Now
@@ -203,7 +224,7 @@ func RegisterAuthRoutes(root *http.ServeMux, options AuthOptions) {
 		}
 		limiter.reset(authRateScopeLogin, ipKey)
 		limiter.reset(authRateScopeLogin, userKey)
-		payload := authAccountPayload(account, options.Profiles)
+		payload := accountPayload(r.Context(), account)
 		payload["token"] = token
 		writeJSON(w, http.StatusOK, payload)
 	})
@@ -272,7 +293,7 @@ func RegisterAuthRoutes(root *http.ServeMux, options AuthOptions) {
 			writeAuthError(w, http.StatusUnauthorized, "Passkey 登录失败")
 			return
 		}
-		payload := authAccountPayload(account, options.Profiles)
+		payload := accountPayload(r.Context(), account)
 		payload["token"] = token
 		writeJSON(w, http.StatusOK, payload)
 	})
@@ -326,7 +347,7 @@ func RegisterAuthRoutes(root *http.ServeMux, options AuthOptions) {
 			writeAuthError(w, http.StatusUnauthorized, "登录已失效，请重新登录")
 			return
 		}
-		writeJSON(w, http.StatusOK, authAccountPayload(account, options.Profiles))
+		writeJSON(w, http.StatusOK, accountPayload(r.Context(), account))
 	})
 }
 

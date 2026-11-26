@@ -20,7 +20,7 @@ func TestPolicyMatrix(t *testing.T) {
 		{"create developer", ActionCreateAccount, PolicyTarget{NewRole: RoleDeveloper}, [4]bool{}},
 		{"create manager", ActionCreateAccount, PolicyTarget{NewRole: RoleManager, InManagedTeam: true}, [4]bool{true, true, false, false}},
 		{"create own member", ActionCreateAccount, PolicyTarget{NewRole: RoleMember, InManagedTeam: true}, [4]bool{true, true, true, false}},
-		{"create other member", ActionCreateAccount, PolicyTarget{NewRole: RoleMember}, [4]bool{true, true, false, false}},
+		{"create other member", ActionCreateAccount, PolicyTarget{NewRole: RoleMember}, [4]bool{true, false, false, false}},
 		{"grant developer to member", ActionGrantDeveloper, policyTestTarget(RoleMember, true), [4]bool{true, false, false, false}},
 		{"grant developer to manager", ActionGrantDeveloper, policyTestTarget(RoleManager, true), [4]bool{true, false, false, false}},
 		{"change developer grant", ActionGrantDeveloper, policyTestTarget(RoleDeveloper, true), [4]bool{true, false, false, false}},

@@ -559,6 +559,14 @@ func TestImpersonationBlocksSensitiveRoutes(t *testing.T) {
 		{"POST", "/api/settings/api-integrations/reveal"}, {"POST", "/api/settings/api-integrations"},
 		{"POST", "/api/config"}, {"POST", "/api/member/te%61m/members/member/api"},
 		{"PUT", "/api/novel-fetch-workshop/config"}, {"POST", "/api/batch-rewrite/config"},
+		{"POST", "/api/account-center/admin/accounts"}, {"POST", "/api/account-center/admin/teams"},
+		{"POST", "/api/account-center/admin/teams/one/accounts"}, {"POST", "/api/account-center/admin/teams/one/archive_team"},
+		{"POST", "/api/account-center/admin/teams/one/restore_team"}, {"POST", "/api/login/invite/synthetic-token"},
+		{"POST", "/api/account-center/admin/accounts/member/set_member"}, {"POST", "/api/account-center/admin/accounts/member/set_manager"},
+		{"POST", "/api/account-center/admin/accounts/member/set_developer"}, {"POST", "/api/account-center/admin/accounts/member/enable"},
+		{"POST", "/api/account-center/admin/accounts/member/disable"}, {"POST", "/api/account-center/admin/accounts/member/archive"},
+		{"POST", "/api/account-center/admin/accounts/member/restore"}, {"POST", "/api/account-center/admin/accounts/member/purge_preflight"},
+		{"POST", "/api/account-center/admin/accounts/member/purge"},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			w := impersonationRequest(router, tc.method, tc.path, "founder", `{}`, cookie)

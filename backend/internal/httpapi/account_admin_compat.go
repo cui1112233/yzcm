@@ -2,12 +2,12 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"regexp"
 	"strings"
 	"time"
 
+	ac "qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/auth"
 )
 
@@ -75,154 +75,47 @@ func managedAccountRow(account auth.Account, profile map[string]any) map[string]
 	return map[string]any{"username": account.Username, "displayName": displayName, "role": role, "active": account.Active, "isOwner": account.IsOwner, "updatedAt": account.UpdatedAt, "boundTo": boundTo, "teamOwner": nil, "apiScopes": []any{}, "monthlyTokenLimit": monthly, "presence": map[string]any{"online": false}, "usage": map[string]any{"month": map[string]any{}}}
 }
 
-// RegisterAccountAdminReadCompat keeps the account directory contract on Go.
-// Mutating account operations remain on the old service until their complete
-// audit/session/team behavior is ported.
-func RegisterAccountAdminReadCompat(root *http.ServeMux, middleware BridgeAuth, accounts auth.Store, profiles *MemberProfileStore) {
-	if root == nil || accounts == nil || profiles == nil {
-		return
-	}
-	root.Handle("GET /api/account-admin/accounts", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		identity, ok := BridgeIdentityFromContext(req.Context())
-		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
-		self := profiles.member(identity.Username, accounts)
-		if self == nil || self["role"] != "dev" {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "仅 DEV 可以管理全局账号"})
-			return
-		}
-		lister, ok := accounts.(accountLister)
-		if !ok {
-			writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "账号目录尚未接入 Go 存储"})
-			return
-		}
-		rows, err := lister.ListAccounts(req.Context())
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "账号目录读取失败"})
-			return
-		}
-		role := strings.ToLower(strings.TrimSpace(req.URL.Query().Get("role")))
-		query := strings.ToLower(strings.TrimSpace(req.URL.Query().Get("query")))
-		result := make([]map[string]any, 0, len(rows))
-		for _, account := range rows {
-			row := managedAccountRow(account, managedProfile(profiles, account.Username))
-			memberRole := strings.ToLower(strings.TrimSpace(toString(row["role"])))
-			if role != "" && memberRole != role {
-				continue
+// RegisterAccountAdminReadCompat projects the canonical directory to old readers.
+func RegisterAccountAdminReadCompat(root *http.ServeMux, middleware BridgeAuth) {
+	admin := accountCenterAdmin{auth: middleware}
+	root.Handle("GET /api/account-admin/accounts", middleware.AccountCenterMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		admin.withDirectory(w, r, false, func(_ ac.AdminTx, d adminSnapshot) (any, error) {
+			if d.actor.Role == ac.RoleManager {
+				return nil, ac.ErrForbidden
 			}
-			displayName := toString(row["displayName"])
-			if query != "" && !strings.Contains(strings.ToLower(account.Username+" "+displayName), query) {
-				continue
+			result := []map[string]any{}
+			role := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("role")))
+			query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("query")))
+			directory := d.directory()
+			appendRow := func(person accountAdminRow, manager string) {
+				oldRole := person.Role
+				if oldRole == ac.RoleFounder || oldRole == ac.RoleDeveloper {
+					oldRole = "dev"
+				}
+				if role != "" && role != oldRole || query != "" && !strings.Contains(strings.ToLower(person.Username+" "+person.DisplayName), query) {
+					return
+				}
+				if r.URL.Query().Get("active") == "true" && (!person.Active || person.ArchivedAt != nil) {
+					return
+				}
+				result = append(result, map[string]any{
+					"username": person.Username, "displayName": person.DisplayName, "role": oldRole,
+					"active": person.Active && person.ArchivedAt == nil, "boundTo": manager,
+					"isOwner": person.Role == ac.RoleFounder, "archivedAt": person.ArchivedAt,
+					"balance": person.Balance, "monthConsumption": person.MonthConsumption,
+				})
 			}
-			row["role"] = memberRole
-			result = append(result, row)
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"accounts": result})
-	})))
-	root.Handle("POST /api/account-admin/accounts", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		identity, ok := BridgeIdentityFromContext(req.Context())
-		if !ok {
-			managedAccountError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		self := profiles.member(identity.Username, accounts)
-		if self == nil || self["role"] != "dev" {
-			managedAccountError(w, http.StatusForbidden, "仅 DEV 可以管理全局账号")
-			return
-		}
-		var input struct {
-			Username    string `json:"username"`
-			DisplayName string `json:"displayName"`
-			Password    string `json:"password"`
-			Role        string `json:"role"`
-			Monthly     any    `json:"monthlyTokenLimit"`
-		}
-		if json.NewDecoder(http.MaxBytesReader(w, req.Body, 32<<10)).Decode(&input) != nil {
-			managedAccountError(w, http.StatusBadRequest, "请求内容无效")
-			return
-		}
-		input.Username, input.DisplayName, input.Role = strings.TrimSpace(input.Username), strings.TrimSpace(input.DisplayName), strings.ToLower(strings.TrimSpace(input.Role))
-		if !managedUsernamePattern.MatchString(input.Username) || input.DisplayName == "" || len(input.Password) < 8 || (input.Role != "member" && input.Role != "manager") {
-			managedAccountError(w, http.StatusBadRequest, "账号、显示名称、角色或密码格式不正确")
-			return
-		}
-		if _, err := accounts.FindAccount(req.Context(), input.Username); err == nil {
-			managedAccountError(w, http.StatusConflict, "账号已存在")
-			return
-		} else if err != auth.ErrNotFound {
-			managedAccountError(w, http.StatusInternalServerError, "账号检查失败")
-			return
-		}
-		hash, algorithm, err := auth.HashPassword(input.Password)
-		if err != nil {
-			managedAccountError(w, http.StatusInternalServerError, "密码处理失败")
-			return
-		}
-		now := time.Now().UTC()
-		if err := accounts.CreateAccount(req.Context(), auth.Account{Username: input.Username, PasswordHash: hash, PasswordAlgorithm: algorithm, Active: true, CreatedAt: now, UpdatedAt: now}); err != nil {
-			managedAccountError(w, http.StatusConflict, "账号创建失败")
-			return
-		}
-		if err := saveManagedProfile(profiles, input.Username, input.DisplayName, input.Role, input.Monthly); err != nil {
-			managedAccountError(w, http.StatusInternalServerError, "账号资料保存失败")
-			return
-		}
-		account, _ := accounts.FindAccount(req.Context(), input.Username)
-		writeJSON(w, http.StatusCreated, map[string]any{"member": managedAccountRow(account, managedProfile(profiles, input.Username))})
-	})))
-	root.Handle("PATCH /api/account-admin/accounts/{username}", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		identity, ok := BridgeIdentityFromContext(req.Context())
-		if !ok {
-			managedAccountError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		self := profiles.member(identity.Username, accounts)
-		if self == nil || self["role"] != "dev" {
-			managedAccountError(w, http.StatusForbidden, "仅 DEV 可以管理全局账号")
-			return
-		}
-		username := req.PathValue("username")
-		account, err := accounts.FindAccount(req.Context(), username)
-		if err != nil {
-			managedAccountError(w, http.StatusNotFound, "目标账号不存在")
-			return
-		}
-		if account.IsOwner {
-			managedAccountError(w, http.StatusBadRequest, "当前开发者账号不可编辑")
-			return
-		}
-		var input struct {
-			DisplayName string `json:"displayName"`
-			Role        string `json:"role"`
-			Active      *bool  `json:"active"`
-		}
-		if json.NewDecoder(http.MaxBytesReader(w, req.Body, 16<<10)).Decode(&input) != nil {
-			managedAccountError(w, http.StatusBadRequest, "请求内容无效")
-			return
-		}
-		input.DisplayName, input.Role = strings.TrimSpace(input.DisplayName), strings.ToLower(strings.TrimSpace(input.Role))
-		if input.DisplayName == "" || (input.Role != "member" && input.Role != "manager") {
-			managedAccountError(w, http.StatusBadRequest, "显示名称或角色格式不正确")
-			return
-		}
-		old := managedProfile(profiles, username)
-		var monthly any
-		if old != nil {
-			monthly = old["monthlyTokenLimit"]
-		}
-		if err := saveManagedProfile(profiles, username, input.DisplayName, input.Role, monthly); err != nil {
-			managedAccountError(w, http.StatusInternalServerError, "账号资料保存失败")
-			return
-		}
-		if input.Active != nil {
-			if err := accounts.SetActive(req.Context(), username, *input.Active); err != nil {
-				managedAccountError(w, http.StatusInternalServerError, "账号状态保存失败")
-				return
+			for _, team := range directory.Teams {
+				for _, person := range team.Accounts {
+					appendRow(person, team.ManagerUsername)
+				}
 			}
-		}
-		account, _ = accounts.FindAccount(req.Context(), username)
-		writeJSON(w, http.StatusOK, map[string]any{"member": managedAccountRow(account, managedProfile(profiles, username))})
+			for _, person := range directory.Ungrouped {
+				appendRow(person, "")
+			}
+			return map[string]any{"accounts": result}, nil
+		})
 	})))
+	root.Handle("POST /api/account-admin/accounts", middleware.AccountCenterMiddleware(http.HandlerFunc(admin.createUngroupedAccount)))
+	root.Handle("PATCH /api/account-admin/accounts/{username}", middleware.AccountCenterMiddleware(http.HandlerFunc(admin.retired)))
 }

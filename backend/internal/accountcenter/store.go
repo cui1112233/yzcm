@@ -339,11 +339,17 @@ const insertAuditSQL = `INSERT INTO account_center_audit_events (actor_username,
 VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, COALESCE(?, CURRENT_TIMESTAMP(6)))`
 
 func (s *MySQLStore) ListAudit(ctx context.Context, filter AuditFilter) ([]AuditEvent, error) {
+	return listAudit(ctx, s.db, filter)
+}
+
+func listAudit(ctx context.Context, db interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, filter AuditFilter) ([]AuditEvent, error) {
 	limit := filter.Limit
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, actor_username, subject_username, COALESCE(team_id, ''), COALESCE(impersonation_id, ''), action, created_at
+	rows, err := db.QueryContext(ctx, `SELECT id, actor_username, subject_username, COALESCE(team_id, ''), COALESCE(impersonation_id, ''), action, created_at
 FROM account_center_audit_events WHERE (? = '' OR team_id = ?) AND (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
 ORDER BY created_at DESC, id DESC LIMIT ?`, filter.TeamID, filter.TeamID, optionalTime(filter.From), optionalTime(filter.From), optionalTime(filter.Before), optionalTime(filter.Before), limit)
 	if err != nil {

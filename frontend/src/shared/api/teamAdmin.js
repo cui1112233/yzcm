@@ -1,44 +1,22 @@
-import { apiRequest } from './client';
+import { apiRequest } from './client.js';
 
-export function getManageableTeams() {
-  return apiRequest('/api/team-admin/teams');
+const adminTeamsPath = '/api/account-center/admin/teams';
+
+export function createAdminTeam(input, request = apiRequest) {
+  return request(adminTeamsPath, { method: 'POST', body: JSON.stringify(input), suppressGlobalError: true });
 }
 
-export function setTeamCoManagers(teamId, usernames) {
-  return apiRequest(`/api/team-admin/teams/${encodeURIComponent(teamId)}/co-managers`, {
-    method: 'PUT',
-    body: JSON.stringify({ usernames })
-  });
-}
-
-export function getDelegatedTeamMembers(teamId) {
-  return apiRequest(`/api/team-admin/teams/${encodeURIComponent(teamId)}/members`);
-}
-
-export function updateDelegatedTeamGovernance(teamId, monthlyTokenLimit) {
-  return apiRequest(`/api/team-admin/teams/${encodeURIComponent(teamId)}/governance`, {
-    method: 'PATCH',
-    body: JSON.stringify({ monthlyTokenLimit })
-  });
-}
-
-export function setDelegatedMemberScopes(teamId, username, scopes) {
-  return apiRequest(`/api/team-admin/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(username)}/api-scopes`, {
-    method: 'PUT',
-    body: JSON.stringify({ scopes })
-  });
-}
-
-export function setDelegatedMemberStatus(teamId, username, active) {
-  return apiRequest(`/api/team-admin/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(username)}/status`, {
+export function createAdminTeamAccount(teamId, input, request = apiRequest) {
+  return request(`${adminTeamsPath}/${encodeURIComponent(teamId)}/accounts`, {
     method: 'POST',
-    body: JSON.stringify({ active })
+    body: JSON.stringify(input),
+    suppressGlobalError: true
   });
 }
 
-export function resetDelegatedMemberPassword(teamId, username, password) {
-  return apiRequest(`/api/team-admin/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(username)}/reset-password`, {
+export function changeAdminTeam(teamId, action, request = apiRequest) {
+  return request(`${adminTeamsPath}/${encodeURIComponent(teamId)}/${encodeURIComponent(action)}`, {
     method: 'POST',
-    body: JSON.stringify({ password })
+    suppressGlobalError: true
   });
 }

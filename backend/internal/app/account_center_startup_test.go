@@ -32,6 +32,10 @@ func TestAccountCenterImportRunsAfterLegacyAccountCommit(t *testing.T) {
 	mock.ExpectExec(`INSERT INTO account_center_imports`).WithArgs("member-center-legacy-v1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`SELECT completed_at IS NOT NULL FROM account_center_imports`).WithArgs("member-center-legacy-v1").WillReturnRows(sqlmock.NewRows([]string{"completed"}).AddRow(true))
 	mock.ExpectRollback()
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO account_center_imports`).WithArgs("account-center-reserve-legacy-names-v1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT completed_at IS NOT NULL FROM account_center_imports`).WithArgs("account-center-reserve-legacy-names-v1").WillReturnRows(sqlmock.NewRows([]string{"completed"}).AddRow(true))
+	mock.ExpectRollback()
 
 	ctx := context.Background()
 	store, err := prepareAccountCenter(ctx, db, auth.NewMySQLStore(db), config.Config{LegacyAccountsPath: accountFile, MemberSystemDir: source})

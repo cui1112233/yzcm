@@ -43,9 +43,9 @@ func (Policy) Can(actor Identity, action Action, target PolicyTarget) bool {
 		return target.TeamID != "" && (founder || developer && target.InManagedTeam)
 	case ActionCreateAccount:
 		if target.NewRole == RoleManager {
-			return founder || developer
+			return founder || developer && target.InManagedTeam
 		}
-		return target.NewRole == RoleMember && (founder || developer || manager && target.InManagedTeam)
+		return target.NewRole == RoleMember && (founder || (developer || manager) && target.InManagedTeam)
 	}
 
 	account := target.Identity

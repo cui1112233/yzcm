@@ -24,7 +24,7 @@ function openSwitchChannel() {
   }
 }
 
-function reloadForAccountSwitch() {
+export function reloadForAccountSwitch() {
   const channel = openSwitchChannel();
   channel?.postMessage('changed');
   channel?.close();
