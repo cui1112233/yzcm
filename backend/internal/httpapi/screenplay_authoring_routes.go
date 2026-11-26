@@ -14,8 +14,6 @@ import (
 	"strings"
 )
 
-const assistantToolPrompt = "\n\n【只读工具】上下文中没有的实时状态可以申请一次：storyboard_failures（最近一次分镜生成失败集与失败场次）。需要时只返回 {\"tool\":\"storyboard_failures\",\"reply\":\"正在核对\"}；工具结果会在下一轮提供，不会修改作品或启动生产。"
-
 type assistantWire struct {
 	Reply       string                       `json:"reply"`
 	Summary     string                       `json:"summary"`
@@ -23,9 +21,10 @@ type assistantWire struct {
 	Question    string                       `json:"question"`
 	Suggestions []assistantSuggestion        `json:"suggestions"`
 	Tool        string                       `json:"tool"`
+	ToolArgs    json.RawMessage              `json:"tool_args"`
 }
 
-// assistantReadStoryboardFailures 是助手唯一的原生只读工具：读取最近一次
+// assistantReadStoryboardFailures 读取最近一次
 // 分镜生成尝试的失败场次，不触发新请求、不计费、不改作品。
 func assistantReadStoryboardFailures(ctx context.Context, store screenplay.Store, owner, projectID string) (screenplay.AssistantToolRun, map[string]any) {
 	run := screenplay.AssistantToolRun{Name: "storyboard_failures", OK: true}
@@ -427,7 +426,7 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 					}
 					contextData["capabilities"] = caps
 					contextData["coverage"] = cov
-					system += "\n\n" + screenplay.FormatCapabilitiesForPrompt(caps, cov) + assistantToolPrompt
+					system += "\n\n" + screenplay.FormatCapabilitiesForPrompt(caps, cov) + prompt.ScreenplayAuthoringReadTools
 				}
 				switch path {
 				case "chapters/plan":
@@ -495,10 +494,23 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 					}
 					toolRuns := []screenplay.AssistantToolRun{}
 					if strings.TrimSpace(parsed.Tool) != "" {
-						if parsed.Tool != "storyboard_failures" {
-							return fmt.Errorf("%w: 不支持的只读工具 %s", screenplay.ErrInvalidArgument, parsed.Tool)
+						var run screenplay.AssistantToolRun
+						var detail map[string]any
+						if len(parsed.Actions) > 0 {
+							return screenplay.ErrInvalidArgument
 						}
-						run, detail := assistantReadStoryboardFailures(r.Context(), store, o, st.ProjectID)
+						if parsed.Tool == "storyboard_failures" {
+							if len(parsed.ToolArgs) > 0 && strings.TrimSpace(string(parsed.ToolArgs)) != "{}" {
+								return screenplay.ErrInvalidArgument
+							}
+							run, detail = assistantReadStoryboardFailures(r.Context(), store, o, st.ProjectID)
+						} else {
+							var toolErr error
+							run, detail, toolErr = screenplay.ReadAssistantTool(r.Context(), store, o, st.ProjectID, parsed.Tool, parsed.ToolArgs)
+							if toolErr != nil {
+								return toolErr
+							}
+						}
 						toolRuns = append(toolRuns, run)
 						contextData["tool_result"] = detail
 						payload, _ := json.Marshal(contextData)
@@ -512,6 +524,9 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 						parsed = assistantWire{}
 						if json.Unmarshal([]byte(raw), &parsed) != nil || strings.TrimSpace(parsed.Reply) == "" {
 							return screenplay.ErrAIInvalidJSON
+						}
+						if strings.TrimSpace(parsed.Tool) != "" {
+							return fmt.Errorf("%w: 本轮工具读取后必须直接回答", screenplay.ErrInvalidArgument)
 						}
 					}
 					if len(parsed.Actions) > 0 {
