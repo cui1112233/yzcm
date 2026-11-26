@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -15,6 +16,13 @@ type HandoffInput struct {
 	RequestKey string `json:"requestKey"`
 	Episodes   []int  `json:"episodes"`
 	Title      string `json:"title"`
+}
+
+var leadingEpisodeHeading = regexp.MustCompile(`(?i)^\s*(?:#{1,6}\s*)?(?:第\s*[0-9〇零一二三四五六七八九十百千万两]+\s*集|Episode\s+[0-9]+)(?:[ \t：:·—-][^\r\n]*)?(?:\r?\n|$)`)
+
+func handoffEpisodeBody(content string) string {
+	content = strings.TrimSpace(content)
+	return strings.TrimSpace(leadingEpisodeHeading.ReplaceAllString(content, ""))
 }
 
 func (s *Service) CreateComicHandoff(ctx context.Context, owner, workID string, input HandoffInput) (Handoff, error) {
@@ -55,7 +63,7 @@ func (s *Service) CreateComicHandoff(ctx context.Context, owner, workID string, 
 	sort.Ints(episodes)
 	parts := make([]string, 0, len(episodes))
 	for _, episode := range episodes {
-		parts = append(parts, fmt.Sprintf("# 第%d集\n\n%s", episode, strings.TrimSpace(preferred[episode].Content)))
+		parts = append(parts, fmt.Sprintf("# 第%d集\n\n%s", episode, handoffEpisodeBody(preferred[episode].Content)))
 	}
 	sourceParts := make([]string, 0, len(work.Chapters))
 	for _, chapter := range work.Chapters {
@@ -71,7 +79,7 @@ func (s *Service) CreateComicHandoff(ctx context.Context, owner, workID string, 
 	documentID := randomID("doc")
 	shots := make([]screenplay.Shot, 0, len(episodes))
 	for index, episode := range episodes {
-		shots = append(shots, screenplay.Shot{ID: randomID("shot"), DocumentID: documentID, ProjectID: project.ID, OwnerUsername: owner, EpisodeNo: episode, SortOrder: index + 1, Heading: fmt.Sprintf("第%d集", episode), ScriptText: preferred[episode].Content})
+		shots = append(shots, screenplay.Shot{ID: randomID("shot"), DocumentID: documentID, ProjectID: project.ID, OwnerUsername: owner, EpisodeNo: episode, SortOrder: index + 1, Heading: fmt.Sprintf("第%d集", episode), ScriptText: handoffEpisodeBody(preferred[episode].Content)})
 	}
 	for index := range parsed.Characters {
 		parsed.Characters[index].ID = randomID("character")
@@ -102,7 +110,7 @@ func (s *Service) CreateComicHandoff(ctx context.Context, owner, workID string, 
 		if len(sources) == 0 && index == 0 {
 			sources = append(sources, sourceParts...)
 		}
-		authoringChapters = append(authoringChapters, screenplay.Chapter{ID: randomID("chapter"), Title: script.Title, SourceText: strings.Join(sources, "\n\n"), ScriptText: script.Content})
+		authoringChapters = append(authoringChapters, screenplay.Chapter{ID: randomID("chapter"), Title: script.Title, SourceText: strings.Join(sources, "\n\n"), ScriptText: handoffEpisodeBody(script.Content)})
 	}
 	if _, err = s.ComicAuthoring.Save(ctx, screenplay.AuthoringState{ProjectID: project.ID, Owner: owner, Chapters: authoringChapters, Display: map[string]any{"editor_version": "studio", "active_tab": "script", "font_size": 14}}, 0); err != nil {
 		_ = s.ComicStore.DeleteProject(ctx, owner, project.ID)

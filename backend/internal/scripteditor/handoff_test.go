@@ -11,7 +11,7 @@ func TestComicHandoffIsIdempotentAndPreservesEpisodes(t *testing.T) {
 	ctx := context.Background()
 	store := newDeterministicMemoryStore()
 	work, _ := store.CreateWork(ctx, "alice", CreateWorkInput{Title: "测试作品", Type: WorkNovel})
-	one, _ := store.CreateScript(ctx, "alice", work.ID, CreateScriptInput{Episode: 1, Content: "第一集正文"})
+	one, _ := store.CreateScript(ctx, "alice", work.ID, CreateScriptInput{Episode: 1, Content: "第1集\n\n第一集正文"})
 	two, _ := store.CreateScript(ctx, "alice", work.ID, CreateScriptInput{Episode: 2, Content: "第二集正文"})
 	one, _ = store.PreferScript(ctx, "alice", work.ID, one.ID, one.Revision)
 	two, _ = store.PreferScript(ctx, "alice", work.ID, two.ID, two.Revision)
