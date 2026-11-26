@@ -34,6 +34,7 @@ import (
 	"qiantie/backend/internal/releasenotes"
 	"qiantie/backend/internal/runtimeaudit"
 	"qiantie/backend/internal/screenplay"
+	"qiantie/backend/internal/scripteditor"
 	"qiantie/backend/internal/upscale"
 	"qiantie/backend/internal/videomanagementconnector"
 )
@@ -114,6 +115,7 @@ type RouterOptions struct {
 	AICutTimelines            *aicut.TimelineCollectionStore
 	AICutPersonalTemplates    *aicut.PersonalTemplateStore
 	Screenplay                screenplay.Store
+	ScriptEditor              *scripteditor.Service
 	NovelCreation             *novelcreation.Service
 	ProjectRetention          *projectretention.Service
 	NovelCreationRunStarter   NovelCreationRunStarter
@@ -699,6 +701,7 @@ func NewRouter(options RouterOptions) http.Handler {
 	}
 	RegisterAICutPersonalTemplateRoutes(root, auth, personalTemplates)
 	registerScreenplayWorkflow(root, auth, options, runtimeTextProviderResolver, runtimeCatalogStore)
+	registerScriptEditor(root, auth, options)
 	RegisterNovelCreationRoutes(root, auth, options.NovelCreation, options.NovelCreationRunStarter)
 	RegisterProjectRetentionRoutes(root, auth, options.ProjectRetention)
 	RegisterAICutAssetRoutes(root, auth, options.AICut, options.AgentAssetObjects, options.Now)
