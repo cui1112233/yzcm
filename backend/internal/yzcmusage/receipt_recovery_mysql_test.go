@@ -18,14 +18,14 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
-func TestReceiptMySQLFallbackWhenRecoveryDirectoryIsUnavailable(t *testing.T) {
+func TestReceiptMySQLExplicitDBOnlyFallback(t *testing.T) {
 	db, dsn := receiptRecoveryMySQL(t)
 	blocked := filepath.Join(t.TempDir(), "file-in-place-of-directory")
 	if err := os.WriteFile(blocked, []byte("keep"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(blocked, "receipts")
-	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: dir}
+	tracker := &Tracker{Store: Store{DB: db}, DBOnly: true}
 	calls := 0
 	base := transportFunc(func(*http.Request) (*http.Response, error) {
 		calls++
@@ -78,7 +78,7 @@ func TestReceiptMySQLFallbackWhenRecoveryDirectoryIsUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer vanishingDB.Close()
-	tracker.Store.DB = vanishingDB
+	tracker = &Tracker{Store: Store{DB: vanishingDB}, DBOnly: true}
 	var logs bytes.Buffer
 	oldLog := log.Writer()
 	log.SetOutput(&logs)
@@ -104,43 +104,196 @@ func TestReceiptMySQLFallbackWhenRecoveryDirectoryIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestReceiptMySQLHiddenFirstClaimBlocksNewPaidCalls(t *testing.T) {
+	db, _ := receiptRecoveryMySQL(t)
+	parent := t.TempDir()
+	dir, hidden := filepath.Join(parent, "recovery"), filepath.Join(parent, "hidden")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	first := &Tracker{ReceiptDir: dir}
+	second := &Tracker{Store: Store{DB: db}, ReceiptDir: dir}
+	t.Cleanup(second.closeReceiptScan)
+	ctx := context.Background()
+	ownerA := Request{Owner: "member", TeamID: "team-a", ActorUsername: "founder"}
+	ownerB := Request{Owner: "other", TeamID: "team-b", ActorUsername: "manager"}
+	const firstID = "first-claim-hidden"
+	saveFirst := func(id string) {
+		t.Helper()
+		response, err := first.Wrap(transportFunc(func(*http.Request) (*http.Response, error) {
+			return fakeBilledResponse(id), nil
+		})).RoundTrip(billingTestRequest(t, ownerA))
+		if err != nil || response == nil {
+			t.Fatalf("provider fixture failed: %v", err)
+		}
+		response.Body.Close()
+		got, err := readReceipt(filepath.Join(dir, receiptName(id)))
+		if err != nil || got.Request.Owner != ownerA.Owner {
+			t.Fatalf("first local claim was not durable: %+v %v", got, err)
+		}
+	}
+	move := func(src, dst string) {
+		t.Helper()
+		if err := os.Rename(src, dst); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checkCount := func(id string, want int) {
+		t.Helper()
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM yzcm_usage_requests WHERE request_id=?`, id).Scan(&n); err != nil || n != want {
+			t.Fatalf("request %s count=%d want %d error=%v", id, n, want, err)
+		}
+	}
+	checkFirst := func(id string) {
+		t.Helper()
+		var owner, team, actor string
+		if err := db.QueryRow(`SELECT owner,team_id,actor_username FROM yzcm_usage_requests WHERE request_id=?`, id).Scan(&owner, &team, &actor); err != nil || owner != ownerA.Owner || team != ownerA.TeamID || actor != ownerA.ActorUsername {
+			t.Fatalf("request %s attribution=%q/%q/%q error=%v", id, owner, team, actor, err)
+		}
+	}
+	saveFirst(firstID)
+	move(dir, hidden)
+	calls := 0
+	base := transportFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return fakeBilledResponse(firstID), nil
+	})
+	checkBlocked := func() {
+		t.Helper()
+		unknown := &Tracker{Store: Store{DB: db}, ReceiptDir: dir}
+		if resp, err := unknown.Wrap(base).RoundTrip(billingTestRequest(t, ownerB)); resp != nil || !errors.Is(err, ErrReceiptPersistenceUnavailable) || calls != 0 {
+			t.Fatalf("hidden claim must block paid call: calls=%d error=%v", calls, err)
+		}
+		checkCount(firstID, 0)
+	}
+	checkBlocked()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("missing configured directory was recreated: %v", err)
+	}
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	checkBlocked()
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	move(hidden, dir)
+	second.flushReceipts(ctx)
+	checkFirst(firstID)
+
+	const lateID = "first-claim-hidden-after-paid-call"
+	saveFirst(lateID)
+	var logs bytes.Buffer
+	oldLog := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(oldLog)
+	response, err := second.Wrap(transportFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		move(dir, hidden)
+		return fakeBilledResponse(lateID), nil
+	})).RoundTrip(billingTestRequest(t, ownerB))
+	if err != nil || response == nil || response.StatusCode != 200 || calls != 1 {
+		t.Fatalf("late outage changed provider result: calls=%d error=%v", calls, err)
+	}
+	response.Body.Close()
+	checkCount(lateID, 0)
+	if !strings.Contains(logs.String(), "receipt_not_durable") {
+		t.Fatalf("missing late-outage alert: %s", logs.String())
+	}
+	backup := filepath.Join(parent, ".recovery-receipt-id.unverified")
+	if files := receiptFiles(t, backup); len(files) != 1 {
+		t.Fatalf("backup evidence missing: %v", files)
+	}
+	move(hidden, dir)
+	second.flushReceipts(ctx)
+	checkFirst(lateID)
+}
+
+func TestReceiptMySQLReadOnlyPreflightRejectsPaidCall(t *testing.T) {
+	db, _ := receiptRecoveryMySQL(t)
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`SET SESSION TRANSACTION READ ONLY`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Ping(); err != nil {
+		t.Fatalf("read-only host should still answer Ping: %v", err)
+	}
+	tracker := &Tracker{Store: Store{DB: db}, DBOnly: true}
+	calls := 0
+	base := transportFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return fakeBilledResponse("unexpected-charge"), nil
+	})
+	for i := 0; i < 2; i++ {
+		resp, err := tracker.Wrap(base).RoundTrip(billingTestRequest(t, Request{Owner: "member"}))
+		var sqlErr *mysql.MySQLError
+		if resp != nil || calls != 0 || !errors.Is(err, ErrReceiptPersistenceUnavailable) || !errors.As(err, &sqlErr) || sqlErr.Number != 1792 {
+			t.Fatalf("read-only preflight allowed payment: calls=%d response=%v error=%v", calls, resp, err)
+		}
+	}
+	if _, err := db.Exec(`SET SESSION TRANSACTION READ WRITE`); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Store{DB: db}).probeReceiptWrite(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM yzcm_usage_requests`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("write probe left usage rows: count=%d error=%v", count, err)
+	}
+}
+
 func TestReceiptMySQLQuarantinePreservesConflictsAndMakesRecoveryFair(t *testing.T) {
 	db, _ := receiptRecoveryMySQL(t)
 	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: t.TempDir()}
+	t.Cleanup(tracker.closeReceiptScan)
 	ctx := context.Background()
 	const conflictCount = 111
-	normalID := "normal-0"
-	for i := 1; !strings.HasPrefix(Fingerprint(normalID), "ff"); i++ {
-		normalID = fmt.Sprintf("normal-%d", i)
-	}
 	hash := Fingerprint("fixture-key")
 	at := time.Now().UTC()
+	want := make(map[string]receipt, conflictCount+1)
+	for i := 0; i <= conflictCount; i++ {
+		id := fmt.Sprintf("pending-%d", i)
+		r := receipt{Request: Request{ID: id, Owner: "member", TeamID: "team-a", ActorUsername: "founder", Feature: "script"}, CredentialHash: hash, Status: 200, At: at}
+		if err := tracker.saveReceipt(r); err != nil {
+			t.Fatal(err)
+		}
+		want[receiptName(id)] = r
+	}
+	// Choose the tail of the actual native listing, regardless of filesystem order.
+	stream, err := os.Open(tracker.ReceiptDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := stream.ReadDir(-1)
+	stream.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var normalName string
+	for _, entry := range entries {
+		if _, fixture := want[entry.Name()]; fixture {
+			normalName = entry.Name()
+		}
+	}
+	normalID := want[normalName].Request.ID
+	if normalID == "" {
+		t.Fatal("no fixture in directory listing")
+	}
+	delete(want, normalName)
 	seeds, err := db.Begin()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer seeds.Rollback()
-	want := make(map[string]receipt, conflictCount)
-	for i := 0; len(want) < conflictCount; i++ {
-		id := fmt.Sprintf("conflict-%d", i)
-		name := receiptName(id)
-		if name >= receiptName(normalID) {
-			continue
-		}
+	for _, r := range want {
 		if _, err := seeds.Exec(`INSERT INTO yzcm_usage_requests (request_id,owner,team_id,actor_username,feature,credential_hash,created_at,http_status)
-VALUES (?,'first-owner','first-team','first-actor','script',?,?,200)`, id, hash, at); err != nil {
+VALUES (?,'first-owner','first-team','first-actor','script',?,?,200)`, r.Request.ID, hash, at); err != nil {
 			t.Fatal(err)
 		}
-		r := receipt{Request: Request{ID: id, Owner: "member", TeamID: "team-a", ActorUsername: "founder", Feature: "script"}, CredentialHash: hash, Status: 200, At: at}
-		if err := tracker.saveReceipt(r); err != nil {
-			t.Fatal(err)
-		}
-		want[name] = r
 	}
 	if err := seeds.Commit(); err != nil {
-		t.Fatal(err)
-	}
-	if err := tracker.saveReceipt(receipt{Request: Request{ID: normalID, Owner: "member", Feature: "script"}, CredentialHash: hash, Status: 200, At: at}); err != nil {
 		t.Fatal(err)
 	}
 	blocked := filepath.Join(tracker.ReceiptDir, ".review")

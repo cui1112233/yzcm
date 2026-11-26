@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -47,7 +48,9 @@ func Fingerprint(key string) string {
 }
 
 type Tracker struct {
-	ReceiptDir        string
+	ReceiptDir string
+	// DBOnly is explicit and exclusive to installations without local receipt claims.
+	DBOnly            bool
 	Store             Store
 	Client            Client
 	ResolveCredential func(context.Context, string, string) (string, error)
@@ -55,8 +58,16 @@ type Tracker struct {
 	once              sync.Once
 	credentialMu      sync.Mutex
 	credentials       map[string]cachedCredential
+	receiptBindingMu  sync.Mutex
+	receiptBound      *receiptBinding
 	receiptScanMu     sync.Mutex
-	receiptCursor     string
+	receiptScan       *os.File
+	receiptScanInfo   os.FileInfo
+	receiptScanNext   os.DirEntry
+	receiptProbeMu    sync.Mutex
+	receiptProbe      *receiptProbe
+	receiptProbeErr   error
+	receiptProbeRetry time.Time
 }
 
 type cachedCredential struct {
@@ -100,6 +111,7 @@ func (t *Tracker) Run(ctx context.Context) {
 	t.once.Do(func() {
 		t.wake = make(chan struct{}, 1)
 		go func() {
+			defer t.closeReceiptScan()
 			t.flushReceipts(ctx)
 			timer := time.NewTicker(20 * time.Second)
 			defer timer.Stop()
@@ -205,7 +217,8 @@ func (t *trackedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if key == "" {
 		return t.base.RoundTrip(r)
 	}
-	if err := t.t.preflightReceipt(r.Context()); err != nil {
+	binding, err := t.t.preflightReceipt(r.Context())
+	if err != nil {
 		return nil, err
 	}
 	at := time.Now().UTC()
@@ -228,7 +241,8 @@ func (t *trackedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		feature = "audio"
 	}
 	t.t.remember(key)
-	if err := t.t.recordReceipt(context.Background(), Request{ID: id, Owner: i.Owner, TeamID: i.TeamID, ActorUsername: i.ActorUsername, Feature: feature}, Fingerprint(key), response.StatusCode, at); err != nil {
+	captured := receipt{Request: Request{ID: id, Owner: i.Owner, TeamID: i.TeamID, ActorUsername: i.ActorUsername, Feature: feature}, CredentialHash: Fingerprint(key), Status: response.StatusCode, At: at}
+	if err := t.t.recordBoundReceipt(context.Background(), binding, captured); err != nil {
 		logReceiptError(id, err)
 	}
 	// A bounded worker, rather than a goroutine per response, performs lookups.

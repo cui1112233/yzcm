@@ -28,13 +28,29 @@ func receiptFiles(t *testing.T, dir string) []string {
 	return files
 }
 
+func (t *Tracker) saveReceipt(r receipt) error {
+	b, err := t.bindReceiptDirectory()
+	if err != nil {
+		return err
+	}
+	return saveReceiptAt(b.dir, r)
+}
+
+func (t *Tracker) recordReceipt(ctx context.Context, r Request, hash string, status int, at time.Time) error {
+	b, err := t.bindReceiptDirectory()
+	if err != nil {
+		return err
+	}
+	return t.recordBoundReceipt(ctx, &b, receipt{Request: r, CredentialHash: hash, Status: status, At: at})
+}
+
 func TestFailedReceiptSurvivesRestartWithoutKeyOrContent(t *testing.T) {
 	db, m, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	dir := filepath.Join(t.TempDir(), "receipts")
+	dir := t.TempDir()
 	at := time.Date(2026, 11, 24, 2, 0, 0, 0, time.UTC)
 	r := Request{ID: "request1", Owner: "alice", Feature: "image", TeamID: "team-a", ActorUsername: "founder"}
 	hash := Fingerprint("secret-key")
@@ -66,7 +82,7 @@ func TestFailedReceiptSurvivesRestartWithoutKeyOrContent(t *testing.T) {
 func TestReceiptDuplicateCannotMoveOwnerAndFailedFlushRetainsFile(t *testing.T) {
 	db, m, _ := sqlmock.New()
 	defer db.Close()
-	dir := filepath.Join(t.TempDir(), "receipts")
+	dir := t.TempDir()
 	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: dir}
 	at := time.Now().UTC()
 	hash := Fingerprint("secret")
@@ -387,7 +403,7 @@ func TestReceiptRejectsUntrustedNamesAndDirectories(t *testing.T) {
 func TestTrackerDatabaseFailureKeepsGenerationResponse(t *testing.T) {
 	db, m, _ := sqlmock.New()
 	defer db.Close()
-	dir := filepath.Join(t.TempDir(), "r")
+	dir := t.TempDir()
 	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: dir}
 	m.ExpectExec("INSERT INTO yzcm_usage_requests").WillReturnError(errors.New("db down"))
 	transport := tracker.Wrap(transportFunc(func(*http.Request) (*http.Response, error) {
@@ -418,7 +434,7 @@ func TestTrackerDatabaseFailureKeepsGenerationResponse(t *testing.T) {
 func TestTrackerStartupFlushesOldReceipt(t *testing.T) {
 	db, m, _ := sqlmock.New()
 	defer db.Close()
-	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: filepath.Join(t.TempDir(), "r")}
+	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: t.TempDir()}
 	at := time.Now().UTC()
 	hash := Fingerprint("key")
 	if err := tracker.saveReceipt(receipt{Request: Request{ID: "old", Owner: "alice", Feature: "image"}, CredentialHash: hash, Status: 200, At: at}); err != nil {
@@ -441,5 +457,113 @@ func TestTrackerStartupFlushesOldReceipt(t *testing.T) {
 	}
 	if err := m.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReceiptScanBoundsDirectoryWorkAndCancellation(t *testing.T) {
+	var smallScan, smallCanceled float64
+	for _, entries := range []int{100, 3000, 6000} {
+		t.Run(fmt.Sprint(entries), func(t *testing.T) {
+			tracker := &Tracker{ReceiptDir: t.TempDir()}
+			t.Cleanup(tracker.closeReceiptScan)
+			for i := range entries {
+				if err := os.WriteFile(filepath.Join(tracker.ReceiptDir, fmt.Sprintf("fixture-%06d", i)), nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := tracker.bindReceiptDirectory(); err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			canceled, stop := context.WithCancel(ctx)
+			stop()
+			canceledAllocs := testing.AllocsPerRun(5, func() { tracker.flushReceipts(canceled) })
+			if canceledAllocs > 2 || tracker.receiptScan != nil {
+				t.Fatalf("canceled scan opened or allocated for directory: %f", canceledAllocs)
+			}
+			scanAllocs := testing.AllocsPerRun(3, func() {
+				tracker.closeReceiptScan()
+				tracker.flushReceipts(ctx)
+			})
+			if entries == 100 {
+				smallScan, smallCanceled = scanAllocs, canceledAllocs
+			} else if scanAllocs > smallScan+64 || canceledAllocs > smallCanceled+2 {
+				t.Fatalf("scan allocs scaled with directory size: active=%f/%f canceled=%f/%f", scanAllocs, smallScan, canceledAllocs, smallCanceled)
+			}
+			if tracker.receiptScan == nil {
+				t.Fatal("directory stream was not retained at the 100-item bound")
+			}
+			remaining := 0
+			for {
+				batch, err := tracker.receiptScan.ReadDir(100)
+				remaining += len(batch)
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The binding marker lives beside the fixtures and counts as one entry.
+			if want := entries + 1 - 100; remaining != want {
+				t.Fatalf("one pass consumed %d entries, want 100", entries+1-remaining)
+			}
+			t.Logf("entries=%d per-pass allocs=%.0f canceled allocs=%.0f", entries, scanAllocs, canceledAllocs)
+		})
+	}
+}
+
+func TestReceiptWriterProbeCoalescesConcurrentFallbackChecks(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tracker := &Tracker{DBOnly: true, Store: Store{DB: db}}
+	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO yzcm_usage_requests").WillDelayFor(150 * time.Millisecond).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectRollback()
+	const callers = 10
+	start := make(chan struct{})
+	results := make(chan error, callers)
+	for range callers {
+		go func() {
+			<-start
+			results <- tracker.checkReceiptWriter(context.Background())
+		}()
+	}
+	close(start)
+	for range callers {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestKnownReceiptBindingRejectsReplacementOfEntireParent(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "parent")
+	dir := filepath.Join(parent, "recovery")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	tracker := &Tracker{ReceiptDir: dir}
+	if _, err := tracker.preflightReceipt(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(parent, filepath.Join(root, "hidden")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tracker.preflightReceipt(context.Background()); !errors.Is(err, ErrReceiptPersistenceUnavailable) {
+		t.Fatalf("live tracker adopted a replacement parent: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, receiptDirectoryIDFile)); !os.IsNotExist(err) {
+		t.Fatalf("replacement was stamped: %v", err)
 	}
 }

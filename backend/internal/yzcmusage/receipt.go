@@ -11,7 +11,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -79,64 +78,51 @@ func readReceipt(path string) (receipt, error) {
 	return r, nil
 }
 
-func (t *Tracker) receiptDirectory(create bool) (string, error) {
-	if strings.TrimSpace(t.ReceiptDir) == "" {
-		return "", errors.New("usage receipt directory is not configured")
+// A nil binding is reserved for the explicitly configured DB-only mode.
+func (t *Tracker) preflightReceipt(ctx context.Context) (*receiptBinding, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	dir, err := filepath.Abs(t.ReceiptDir)
-	if err != nil {
-		return "", err
-	}
-	if create {
-		if err = os.MkdirAll(dir, 0700); err != nil {
-			return "", err
+	if t.DBOnly && strings.TrimSpace(t.ReceiptDir) == "" {
+		if err := t.checkReceiptWriter(ctx); err != nil {
+			return nil, errors.Join(ErrReceiptPersistenceUnavailable, err)
 		}
+		return nil, nil
 	}
-	info, err := os.Lstat(dir)
+	b, err := t.bindReceiptDirectory()
 	if err != nil {
-		return "", err
+		return nil, errors.Join(ErrReceiptPersistenceUnavailable, err)
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return "", errors.New("invalid usage receipt directory")
-	}
-	return dir, nil
-}
-
-// Only probe MySQL when the local recovery directory fails a write probe.
-func (t *Tracker) preflightReceipt(ctx context.Context) error {
-	dir, claimErr := t.receiptDirectory(true)
+	probe, claimErr := os.CreateTemp(b.dir, ".receipt-probe-*.tmp")
 	if claimErr == nil {
-		probe, err := os.CreateTemp(dir, ".receipt-probe-*.tmp")
-		if err == nil {
-			claimErr = probe.Close()
-			_ = os.Remove(probe.Name())
-		} else {
-			claimErr = err
-		}
+		claimErr = probe.Close()
+		_ = os.Remove(probe.Name())
 	}
 	if claimErr == nil {
-		return nil
+		if err := b.verifyVisible(); err != nil {
+			return nil, errors.Join(ErrReceiptPersistenceUnavailable, err)
+		}
+		return &b, nil
 	}
-	dbErr := errReceiptDatabaseUnavailable
-	if t.Store.DB != nil {
-		probeCtx, cancel := context.WithTimeout(ctx, time.Second)
-		defer cancel()
-		dbErr = t.Store.DB.PingContext(probeCtx)
+	// A readable directory can be protected against a concurrent publisher
+	// while the ledger takes over. A hidden directory cannot be bypassed.
+	lockCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	lock, err := b.openPublicationLock(lockCtx)
+	if err != nil {
+		return nil, errors.Join(ErrReceiptPersistenceUnavailable, claimErr, err)
 	}
-	if dbErr == nil {
-		return nil
+	_ = lock.Close()
+	if err := t.checkReceiptWriter(ctx); err != nil {
+		return nil, errors.Join(ErrReceiptPersistenceUnavailable, claimErr, err)
 	}
-	return errors.Join(ErrReceiptPersistenceUnavailable, claimErr, dbErr)
+	if err := b.verifyVisible(); err != nil {
+		return nil, errors.Join(ErrReceiptPersistenceUnavailable, err)
+	}
+	return &b, nil
 }
 
-func (t *Tracker) saveReceipt(r receipt) error {
-	if !r.valid() {
-		return errors.New("invalid usage receipt")
-	}
-	dir, err := t.receiptDirectory(true)
-	if err != nil {
-		return err
-	}
+func saveReceiptAt(dir string, r receipt) error {
 	name := receiptName(r.Request.ID)
 	if receiptInReview(dir, name) {
 		return ErrReceiptAttributionConflict
@@ -151,57 +137,52 @@ func (t *Tracker) saveReceipt(r receipt) error {
 	if err != nil {
 		return err
 	}
-	file, err := os.CreateTemp(dir, ".receipt-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmp := file.Name()
-	defer os.Remove(tmp)
-	if err = file.Chmod(0600); err != nil {
-		file.Close()
-		return err
-	}
-	if _, err = file.Write(raw); err == nil {
-		err = file.Sync()
-	}
-	closeErr := file.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	// Hard-link publication is atomic and never replaces an existing receipt.
-	// The first attribution therefore survives duplicate deliveries and restarts.
-	if err = os.Link(tmp, dest); os.IsExist(err) {
-		return syncReceiptDirectory(dir)
-	} else if err != nil {
-		return err
-	}
-	return syncReceiptDirectory(dir)
+	return publishReceiptFile(dest, ".receipt-*.tmp", raw)
 }
-func (t *Tracker) recordReceipt(ctx context.Context, r Request, hash string, status int, at time.Time) error {
-	snapshot := receipt{Request: r, CredentialHash: hash, Status: status, At: at}
-	if !snapshot.valid() {
+
+func (t *Tracker) recordBoundReceipt(ctx context.Context, b *receiptBinding, r receipt) error {
+	if !r.valid() {
 		return errors.New("invalid usage receipt")
 	}
-	claimErr := t.saveReceipt(snapshot)
+	if b == nil {
+		if !t.DBOnly || strings.TrimSpace(t.ReceiptDir) != "" {
+			return ErrReceiptPersistenceUnavailable
+		}
+		return t.writeReceiptFallback(ctx, r)
+	}
+	if err := b.verifyVisible(); err != nil {
+		return unverifiedReceipt(*b, r, err)
+	}
+	lockCtx, cancelLock := context.WithTimeout(ctx, receiptWriteTimeout)
+	lock, err := b.openPublicationLock(lockCtx)
+	cancelLock()
+	if err != nil {
+		return t.recoverKnownClaim(ctx, *b, r, err)
+	}
+	if err := b.verifyVisible(); err != nil {
+		_ = lock.Close()
+		return unverifiedReceipt(*b, r, err)
+	}
+	claimErr := saveReceiptAt(b.dir, r)
 	if errors.Is(claimErr, ErrReceiptAttributionConflict) {
+		_ = lock.Close()
 		return claimErr
 	}
-	if claimErr == nil {
-		dir, err := t.receiptDirectory(false)
-		if err == nil {
-			applyCtx, cancel := context.WithTimeout(ctx, receiptWriteTimeout)
-			err = t.applyReceipt(applyCtx, dir, receiptName(r.ID))
-			cancel()
-			if !errors.Is(err, errReceiptDiskUnavailable) {
-				return err
-			}
-		}
-		claimErr = err
+	if claimErr != nil {
+		defer lock.Close()
+		return t.writeAfterClaimFailure(ctx, *b, r, claimErr)
 	}
-	return t.recordReceiptWithoutClaim(ctx, snapshot, claimErr)
+	_ = lock.Close()
+	applyCtx, cancel := context.WithTimeout(ctx, receiptWriteTimeout)
+	defer cancel()
+	err = t.applyReceipt(applyCtx, *b, receiptName(r.Request.ID))
+	if errors.Is(err, errReceiptDirectoryChanged) {
+		return unverifiedReceipt(*b, r, err)
+	}
+	if errors.Is(err, errReceiptDiskUnavailable) {
+		return t.recoverKnownClaim(ctx, *b, r, err)
+	}
+	return err
 }
 
 func (t *Tracker) writeReceipt(ctx context.Context, r receipt) error {
@@ -211,33 +192,103 @@ func (t *Tracker) writeReceipt(ctx context.Context, r receipt) error {
 	return t.Store.recordAt(ctx, r.Request, r.CredentialHash, r.Status, r.At)
 }
 
-func (t *Tracker) recordReceiptWithoutClaim(ctx context.Context, r receipt, claimErr error) error {
-	readableClaim := false
-	if dir, err := t.receiptDirectory(false); err == nil {
-		name := receiptName(r.Request.ID)
-		if receiptInReview(dir, name) {
-			return ErrReceiptAttributionConflict
-		}
-		if saved, err := readReceipt(filepath.Join(dir, name)); err == nil {
-			r, readableClaim = saved, true
-		}
-	}
-	// A readable first claim still wins if only the lock or sync failed.
-	// Otherwise the MySQL unique key decides the first stored attribution.
+func (t *Tracker) writeReceiptFallback(ctx context.Context, r receipt) error {
 	dbCtx, cancel := context.WithTimeout(ctx, receiptWriteTimeout)
 	defer cancel()
-	err := t.writeReceipt(dbCtx, r)
-	if err == nil || readableClaim || errors.Is(err, ErrReceiptAttributionConflict) {
+	if err := t.writeReceipt(dbCtx, r); err != nil && !errors.Is(err, ErrReceiptAttributionConflict) {
+		return errors.Join(ErrReceiptPersistenceUnavailable, err)
+	} else {
 		return err
 	}
-	return errors.Join(ErrReceiptPersistenceUnavailable, claimErr, err)
 }
 
-func (t *Tracker) applyReceipt(ctx context.Context, dir, name string) error {
+func readBoundClaim(b receiptBinding, name string) (receipt, error) {
+	if err := b.verify(); err != nil {
+		return receipt{}, err
+	}
+	review, err := os.Lstat(receiptReviewDirectory(b.dir))
+	if err == nil && (!review.IsDir() || review.Mode()&os.ModeSymlink != 0) || err != nil && !os.IsNotExist(err) {
+		return receipt{}, errReceiptDirectoryChanged
+	}
+	_, err = readReceipt(filepath.Join(receiptReviewDirectory(b.dir), name))
+	if err == nil {
+		return receipt{}, ErrReceiptAttributionConflict
+	}
+	if !os.IsNotExist(err) {
+		return receipt{}, errReceiptDirectoryChanged
+	}
+	r, err := readReceipt(filepath.Join(b.dir, name))
+	if checkErr := b.verify(); checkErr != nil {
+		return receipt{}, checkErr
+	}
+	return r, err
+}
+
+// This path runs while holding the publication lock. A proved absence may use
+// the ledger directly. Any ambiguity is retained for review, never auto-posted.
+func (t *Tracker) writeAfterClaimFailure(ctx context.Context, b receiptBinding, r receipt, claimErr error) error {
+	saved, err := readBoundClaim(b, receiptName(r.Request.ID))
+	switch {
+	case err == nil:
+		return t.writeKnownReceipt(ctx, saved)
+	case errors.Is(err, ErrReceiptAttributionConflict):
+		return err
+	case !os.IsNotExist(err) || errors.Is(err, errReceiptDirectoryChanged):
+		return unverifiedReceipt(b, r, errors.Join(claimErr, err))
+	}
+	info, err := visibleReceiptDirectory(b.dir)
+	if err != nil || !os.SameFile(info, b.info) {
+		return unverifiedReceipt(b, r, errors.Join(claimErr, errReceiptDirectoryChanged, err))
+	}
+	if err := t.writeReceiptFallback(ctx, r); errors.Is(err, ErrReceiptPersistenceUnavailable) {
+		return unverifiedReceipt(b, r, errors.Join(claimErr, err))
+	} else {
+		return err
+	}
+}
+
+func (t *Tracker) recoverKnownClaim(ctx context.Context, b receiptBinding, r receipt, cause error) error {
+	saved, err := readBoundClaim(b, receiptName(r.Request.ID))
+	if errors.Is(err, ErrReceiptAttributionConflict) {
+		return err
+	}
+	if err != nil {
+		return unverifiedReceipt(b, r, errors.Join(cause, err))
+	}
+	return t.writeKnownReceipt(ctx, saved)
+}
+
+func (t *Tracker) writeKnownReceipt(ctx context.Context, r receipt) error {
+	dbCtx, cancel := context.WithTimeout(ctx, receiptWriteTimeout)
+	defer cancel()
+	return t.writeReceipt(dbCtx, r)
+}
+
+func unverifiedReceipt(b receiptBinding, r receipt, cause error) error {
+	// The parent binding is separate from the recovery directory. Store only
+	// review evidence here. This directory is never scanned for automatic replay.
+	if id, err := readReceiptDirectoryID(b.anchor); err == nil && id == b.id {
+		review := b.anchor + ".unverified"
+		if err := makeReceiptDirectory(review); err != nil {
+			return errors.Join(ErrReceiptPersistenceUnavailable, cause, err)
+		}
+		raw, err := json.Marshal(r)
+		if err == nil {
+			err = publishReceiptFile(filepath.Join(review, "receipt-"+Fingerprint(string(raw))+".json"), ".receipt-unverified-*.tmp", raw)
+		}
+		return errors.Join(ErrReceiptPersistenceUnavailable, cause, err)
+	}
+	return errors.Join(ErrReceiptPersistenceUnavailable, cause)
+}
+
+func (t *Tracker) applyReceipt(ctx context.Context, b receiptBinding, name string) error {
 	// Stable shard files are never unlinked. The OS releases their locks on
 	// process exit. A single lock covers reading the claim, MySQL, and cleanup.
-	lockPath := receiptLockPath(dir, name)
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0700); err != nil {
+	if err := b.verify(); err != nil {
+		return err
+	}
+	lockPath := receiptLockPath(b.dir, name)
+	if err := makeReceiptDirectory(filepath.Dir(lockPath)); err != nil {
 		return errors.Join(errReceiptDiskUnavailable, err)
 	}
 	lock, err := openReceiptLock(ctx, lockPath)
@@ -248,23 +299,29 @@ func (t *Tracker) applyReceipt(ctx context.Context, dir, name string) error {
 		return errors.Join(errReceiptDiskUnavailable, err)
 	}
 	defer lock.Close()
-	path := filepath.Join(dir, name)
+	if err := b.verify(); err != nil {
+		return err
+	}
+	path := filepath.Join(b.dir, name)
 	r, err := readReceipt(path)
+	if checkErr := b.verify(); checkErr != nil {
+		return checkErr
+	}
 	if os.IsNotExist(err) {
-		if receiptInReview(dir, name) {
+		if receiptInReview(b.dir, name) {
 			return ErrReceiptAttributionConflict
 		}
 		return nil // A concurrent worker already committed and removed this file.
 	}
 	if err != nil {
-		return err
+		return errors.Join(errReceiptDirectoryChanged, err)
 	}
-	if receiptInReview(dir, name) {
-		return quarantineReceipt(dir, name)
+	if receiptInReview(b.dir, name) {
+		return quarantineReceipt(b.dir, name)
 	}
 	if err := t.writeReceipt(ctx, r); err != nil {
 		if errors.Is(err, ErrReceiptAttributionConflict) {
-			return quarantineReceipt(dir, name)
+			return quarantineReceipt(b.dir, name)
 		}
 		return err
 	}
@@ -288,6 +345,12 @@ func moveReceiptToReview(dir, name string) error {
 		return err
 	}
 	review := receiptReviewDirectory(dir)
+	if err := makeReceiptDirectory(filepath.Dir(review)); err != nil {
+		return err
+	}
+	if err := makeReceiptDirectory(review); err != nil {
+		return err
+	}
 	target := filepath.Join(review, name)
 	if previous, err := os.Lstat(target); err == nil && !os.SameFile(sourceInfo, previous) {
 		// A publisher may have raced the first move. Keep both pieces of evidence
@@ -297,11 +360,11 @@ func moveReceiptToReview(dir, name string) error {
 			return err
 		}
 		review = filepath.Join(review, "duplicate-"+Fingerprint(string(raw)))
+		if err := makeReceiptDirectory(review); err != nil {
+			return err
+		}
 		target = filepath.Join(review, name)
 	} else if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if err := os.MkdirAll(review, 0700); err != nil {
 		return err
 	}
 	if err := os.Link(source, target); os.IsExist(err) {
@@ -330,7 +393,7 @@ func logReceiptError(requestID string, err error) {
 	name := receiptName(requestID)
 	switch {
 	case errors.Is(err, ErrReceiptPersistenceUnavailable):
-		log.Printf("YZCM usage: receipt_not_durable receipt=%s after provider response; local recovery and MySQL failed", name)
+		log.Printf("YZCM usage: receipt_not_durable receipt=%s after provider response; no verified ledger or recovery claim", name)
 	case errors.Is(err, errReceiptQuarantineFailed):
 		log.Printf("YZCM usage: receipt_quarantine_failed receipt=%s reason=attribution-conflict", name)
 	case errors.Is(err, ErrReceiptAttributionConflict):
@@ -341,38 +404,54 @@ func logReceiptError(requestID string, err error) {
 }
 
 func (t *Tracker) flushReceipts(parent context.Context) {
-	t.receiptScanMu.Lock()
+	if parent.Err() != nil || !t.receiptScanMu.TryLock() {
+		return
+	}
 	defer t.receiptScanMu.Unlock()
-	dir, err := t.receiptDirectory(false)
-	if err != nil {
-		return
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) == 0 {
-		return
-	}
-	// Continue past the last inspected name on the next pass even if moving
-	// a conflict failed. Work and MySQL wait remain bounded per pass.
-	start := sort.Search(len(entries), func(i int) bool { return entries[i].Name() > t.receiptCursor })
-	if start == len(entries) {
-		start = 0
-	}
 	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
+	b, err := t.bindReceiptDirectory()
+	if err != nil {
+		t.resetReceiptScan()
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	if t.receiptScan == nil || !os.SameFile(t.receiptScanInfo, b.info) {
+		t.resetReceiptScan()
+		f, err := os.Open(b.dir)
+		if err != nil {
+			return
+		}
+		info, err := f.Stat()
+		if err != nil || !os.SameFile(info, b.info) {
+			_ = f.Close()
+			return
+		}
+		t.receiptScan, t.receiptScanInfo = f, info
+	}
+	// Retain the directory stream across passes, so even failures early in the
+	// listing cannot monopolize recovery. Reopen only after EOF or replacement.
 	quarantined, failed := 0, 0
-	for _, entry := range entries[start:min(start+100, len(entries))] {
-		if ctx.Err() != nil {
-			break
+	for i := 0; i < 100 && ctx.Err() == nil; i++ {
+		entry := t.receiptScanNext
+		t.receiptScanNext = nil
+		if entry == nil {
+			batch, err := t.receiptScan.ReadDir(1)
+			if err != nil || len(batch) == 0 {
+				t.resetReceiptScan()
+				break
+			}
+			entry = batch[0]
 		}
 		name := entry.Name()
-		previous := t.receiptCursor
-		t.receiptCursor = name
 		if !entry.Type().IsRegular() {
 			continue
 		}
 		if strings.HasPrefix(name, ".receipt-") && strings.HasSuffix(name, ".tmp") {
 			if stat, err := entry.Info(); err == nil && time.Since(stat.ModTime()) > time.Hour {
-				_ = os.Remove(filepath.Join(dir, name))
+				_ = os.Remove(filepath.Join(b.dir, name))
 			}
 			continue
 		}
@@ -380,11 +459,11 @@ func (t *Tracker) flushReceipts(parent context.Context) {
 			continue
 		}
 		itemCtx, cancelItem := context.WithTimeout(ctx, receiptWriteTimeout)
-		err := t.applyReceipt(itemCtx, dir, name)
+		err := t.applyReceipt(itemCtx, b, name)
 		cancelItem()
 		if ctx.Err() != nil {
 			// Give a receipt cut short by the batch deadline a full next attempt.
-			t.receiptCursor = previous
+			t.receiptScanNext = entry
 		}
 		if errors.Is(err, errReceiptQuarantineFailed) {
 			failed++
@@ -395,4 +474,17 @@ func (t *Tracker) flushReceipts(parent context.Context) {
 	if quarantined+failed > 0 {
 		log.Printf("YZCM usage: receipt_review reason=attribution-conflict quarantined=%d quarantine_failed=%d", quarantined, failed)
 	}
+}
+
+func (t *Tracker) resetReceiptScan() {
+	if t.receiptScan != nil {
+		_ = t.receiptScan.Close()
+	}
+	t.receiptScan, t.receiptScanInfo, t.receiptScanNext = nil, nil, nil
+}
+
+func (t *Tracker) closeReceiptScan() {
+	t.receiptScanMu.Lock()
+	defer t.receiptScanMu.Unlock()
+	t.resetReceiptScan()
 }

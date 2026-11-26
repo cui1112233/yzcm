@@ -54,6 +54,23 @@ func SchemaStatements() []string {
 func (s Store) Record(ctx context.Context, r Request, keyHash string, status int) error {
 	return s.recordAt(ctx, r, keyHash, status, time.Now().UTC())
 }
+
+// MySQL checks INSERT permission and read-only status for this DML even though
+// its SELECT produces no rows. No request ID can be reserved or billed by it.
+func (s Store) probeReceiptWrite(ctx context.Context) error {
+	if s.DB == nil {
+		return errReceiptDatabaseUnavailable
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO yzcm_usage_requests
+(request_id,owner,team_id,actor_username,feature,credential_hash,created_at,http_status)
+SELECT '','',NULL,NULL,'','',UTC_TIMESTAMP(6),0 WHERE FALSE`)
+	return errors.Join(err, tx.Rollback())
+}
+
 func (s Store) recordAt(ctx context.Context, r Request, keyHash string, status int, at time.Time) error {
 	if !r.validIdentity() {
 		return errors.New("invalid usage identity")
