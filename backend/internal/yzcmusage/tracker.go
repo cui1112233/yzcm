@@ -55,6 +55,8 @@ type Tracker struct {
 	once              sync.Once
 	credentialMu      sync.Mutex
 	credentials       map[string]cachedCredential
+	receiptScanMu     sync.Mutex
+	receiptCursor     string
 }
 
 type cachedCredential struct {
@@ -199,14 +201,20 @@ func (t *trackedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if r.URL.Hostname() != "newapi.yzcm.site" || !paid || i.Owner == "" {
 		return t.base.RoundTrip(r)
 	}
+	key := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	if key == "" {
+		return t.base.RoundTrip(r)
+	}
+	if err := t.t.preflightReceipt(r.Context()); err != nil {
+		return nil, err
+	}
 	at := time.Now().UTC()
 	response, err := t.base.RoundTrip(r)
 	if err != nil {
 		return response, err
 	}
 	id := strings.TrimSpace(response.Header.Get("X-Oneapi-Request-Id"))
-	key := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-	if id == "" || key == "" || len(id) > 64 {
+	if id == "" || len(id) > 64 {
 		return response, nil
 	}
 	feature := i.Feature
@@ -220,11 +228,9 @@ func (t *trackedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		feature = "audio"
 	}
 	t.t.remember(key)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	if err := t.t.recordReceipt(ctx, Request{ID: id, Owner: i.Owner, TeamID: i.TeamID, ActorUsername: i.ActorUsername, Feature: feature}, Fingerprint(key), response.StatusCode, at); err != nil {
-		logReceiptError(err)
+	if err := t.t.recordReceipt(context.Background(), Request{ID: id, Owner: i.Owner, TeamID: i.TeamID, ActorUsername: i.ActorUsername, Feature: feature}, Fingerprint(key), response.StatusCode, at); err != nil {
+		logReceiptError(id, err)
 	}
-	cancel()
 	// A bounded worker, rather than a goroutine per response, performs lookups.
 	return response, nil
 }

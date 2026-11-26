@@ -11,7 +11,7 @@ import (
 )
 
 func TestTrackerPersistsOnlyAuthenticatedAttributionAndPreservesBody(t *testing.T) {
-	db, mock, err := sqlmock.New()
+	db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,6 +2,7 @@ package yzcmusage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -151,7 +152,7 @@ func TestConcurrentTrackersKeepFirstActorAndTeam(t *testing.T) {
 	}
 }
 
-func TestReceiptActorAndTeamConflictPreservesClaimUntilLedgerAgrees(t *testing.T) {
+func TestReceiptActorAndTeamConflictQuarantinesClaim(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -171,22 +172,117 @@ func TestReceiptActorAndTeamConflictPreservesClaimUntilLedgerAgrees(t *testing.T
 	if err := tracker.recordReceipt(context.Background(), original, hash, 200, at); !errors.Is(err, ErrReceiptAttributionConflict) {
 		t.Fatalf("conflicting stored receipt returned %v", err)
 	}
-	expectDuplicate("other", "team-b", "manager")
 	tracker.flushReceipts(context.Background())
-	files := receiptFiles(t, tracker.ReceiptDir)
+	if files := receiptFiles(t, tracker.ReceiptDir); len(files) != 0 {
+		t.Fatalf("conflict still occupies recovery: %v", files)
+	}
+	files := receiptFiles(t, receiptReviewDirectory(tracker.ReceiptDir))
 	if len(files) != 1 {
 		t.Fatalf("conflict record was discarded: %v", files)
 	}
 	if saved, err := readReceipt(files[0]); err != nil || saved.Request != original {
 		t.Fatalf("original claim changed: %+v %v", saved.Request, err)
 	}
-	expectDuplicate("member", "team-a", "founder")
-	tracker.flushReceipts(context.Background())
-	if files := receiptFiles(t, tracker.ReceiptDir); len(files) != 0 {
-		t.Fatalf("matching claim was retained: %v", files)
+	if err := tracker.recordReceipt(context.Background(), Request{ID: "same", Owner: "other", TeamID: "team-b", ActorUsername: "manager", Feature: "image"}, hash, 200, at); !errors.Is(err, ErrReceiptAttributionConflict) {
+		t.Fatalf("duplicate of quarantined receipt returned %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReceiptQuarantineResumesAfterPublishingReviewEvidence(t *testing.T) {
+	tracker := &Tracker{ReceiptDir: t.TempDir()}
+	original := receipt{
+		Request:        Request{ID: "quarantine-restart", Owner: "member", TeamID: "team-a", ActorUsername: "founder", Feature: "script"},
+		CredentialHash: Fingerprint("fixture-key"), Status: 200, At: time.Now().UTC(),
+	}
+	if err := tracker.saveReceipt(original); err != nil {
+		t.Fatal(err)
+	}
+	name := receiptName(original.Request.ID)
+	review := receiptReviewDirectory(tracker.ReceiptDir)
+	if err := os.MkdirAll(review, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(tracker.ReceiptDir, name), filepath.Join(review, name)); err != nil {
+		t.Fatal(err)
+	}
+	// Recovery starts after the review link was published, before active removal.
+	tracker.flushReceipts(context.Background())
+	if files := receiptFiles(t, tracker.ReceiptDir); len(files) != 0 {
+		t.Fatalf("active link retained: %v", files)
+	}
+	got, err := readReceipt(filepath.Join(review, name))
+	if err != nil || got.Request != original.Request || !got.At.Equal(original.At) {
+		t.Fatalf("quarantined original changed: %+v %v", got, err)
+	}
+}
+
+func TestReceiptQuarantineKeepsRacedDuplicateEvidence(t *testing.T) {
+	tracker := &Tracker{ReceiptDir: t.TempDir()}
+	first := receipt{
+		Request:        Request{ID: "raced", Owner: "member", TeamID: "team-a", ActorUsername: "founder", Feature: "script"},
+		CredentialHash: Fingerprint("fixture-key"), Status: 200, At: time.Now().UTC(),
+	}
+	if err := tracker.saveReceipt(first); err != nil {
+		t.Fatal(err)
+	}
+	name := receiptName(first.Request.ID)
+	if err := quarantineReceipt(tracker.ReceiptDir, name); !errors.Is(err, ErrReceiptAttributionConflict) || errors.Is(err, errReceiptQuarantineFailed) {
+		t.Fatal(err)
+	}
+	// This publisher passed its review check before the first evidence moved.
+	second := first
+	second.Request.Owner, second.Request.TeamID, second.Request.ActorUsername = "other", "team-b", "manager"
+	raw, err := json.Marshal(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tracker.ReceiptDir, name), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	tracker.flushReceipts(context.Background())
+	if files := receiptFiles(t, tracker.ReceiptDir); len(files) != 0 {
+		t.Fatalf("raced receipt still active: %v", files)
+	}
+	review := receiptReviewDirectory(tracker.ReceiptDir)
+	if got, err := readReceipt(filepath.Join(review, name)); err != nil || got.Request != first.Request {
+		t.Fatalf("first evidence changed: %+v %v", got, err)
+	}
+	if got, err := readReceipt(filepath.Join(review, "duplicate-"+Fingerprint(string(raw)), name)); err != nil || got.Request != second.Request {
+		t.Fatalf("raced evidence lost: %+v %v", got, err)
+	}
+}
+
+func TestReceiptFallbackUsesFirstClaimWhenLockDirectoryIsUnavailable(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: t.TempDir()}
+	original := receipt{
+		Request:        Request{ID: "fallback", Owner: "member", TeamID: "team-a", ActorUsername: "founder", Feature: "script"},
+		CredentialHash: Fingerprint("fixture-key"), Status: 200, At: time.Now().UTC(),
+	}
+	if err := tracker.saveReceipt(original); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tracker.ReceiptDir, ".locks"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectExec("INSERT INTO yzcm_usage_requests").WithArgs(original.Request.ID, original.Request.Owner, original.Request.TeamID,
+		original.Request.ActorUsername, original.Request.Feature, original.CredentialHash, original.At, 200).WillReturnResult(sqlmock.NewResult(0, 1))
+	duplicate := Request{ID: "fallback", Owner: "other", TeamID: "team-b", ActorUsername: "manager", Feature: "image"}
+	if err := tracker.recordReceipt(context.Background(), duplicate, Fingerprint("other-key"), 200, original.At.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if files := receiptFiles(t, tracker.ReceiptDir); len(files) != 1 {
+		t.Fatalf("fallback without the lock should retain the first claim: %v", files)
 	}
 }
 
