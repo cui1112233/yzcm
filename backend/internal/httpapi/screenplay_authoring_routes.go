@@ -322,6 +322,33 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"tool_run": run, "data": data})
 	})
+	handle("POST "+base+"/assistant/prepare-asset-edit", "edit", func(w http.ResponseWriter, r *http.Request, o, a string) {
+		var in struct {
+			Expected int64           `json:"expected_revision"`
+			Tool     string          `json:"tool"`
+			Args     json.RawMessage `json:"tool_args"`
+		}
+		if !decode(w, r, &in) {
+			return
+		}
+		st, e := svc.Load(r.Context(), o, r.PathValue("id"))
+		if e != nil {
+			authoringError(w, e)
+			return
+		}
+		if st.Revision != in.Expected {
+			authoringError(w, screenplay.ErrRevisionConflict)
+			return
+		}
+		action, summary, e := screenplay.PrepareAssistantAssetEdit(r.Context(), store, o, st.ProjectID, in.Tool, in.Args)
+		if e != nil {
+			authoringError(w, e)
+			return
+		}
+		st.Proposals = append(st.Proposals, screenplay.AssistantProposal{ID: newAgentID("proposal"), Summary: summary, Actions: []screenplay.AuthoringAction{action}, Status: "pending", Revision: st.Revision + 1})
+		st, e = svc.Save(r.Context(), o, st.ProjectID, st, in.Expected)
+		respond(w, st, e, a)
+	})
 	handle("POST "+base+"/assistant/apply", "edit", func(w http.ResponseWriter, r *http.Request, o, a string) {
 		var in struct {
 			Expected   int64  `json:"expected_revision"`
@@ -442,7 +469,7 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 					}
 					contextData["capabilities"] = caps
 					contextData["coverage"] = cov
-					system += "\n\n" + screenplay.FormatCapabilitiesForPrompt(caps, cov) + prompt.ScreenplayAuthoringReadTools
+					system += "\n\n" + screenplay.FormatCapabilitiesForPrompt(caps, cov) + prompt.ScreenplayAuthoringReadTools + prompt.ScreenplayAuthoringAssetEditTools
 				}
 				switch path {
 				case "chapters/plan":
@@ -509,7 +536,7 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 						return screenplay.ErrAIInvalidJSON
 					}
 					toolRuns := []screenplay.AssistantToolRun{}
-					if strings.TrimSpace(parsed.Tool) != "" {
+					if strings.TrimSpace(parsed.Tool) != "" && !screenplay.IsAssistantAssetEditTool(parsed.Tool) {
 						if len(parsed.Actions) > 0 {
 							return screenplay.ErrInvalidArgument
 						}
@@ -531,9 +558,19 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 						if json.Unmarshal([]byte(raw), &parsed) != nil || strings.TrimSpace(parsed.Reply) == "" {
 							return screenplay.ErrAIInvalidJSON
 						}
-						if strings.TrimSpace(parsed.Tool) != "" {
+						if strings.TrimSpace(parsed.Tool) != "" && !screenplay.IsAssistantAssetEditTool(parsed.Tool) {
 							return fmt.Errorf("%w: 本轮工具读取后必须直接回答", screenplay.ErrInvalidArgument)
 						}
+					}
+					if screenplay.IsAssistantAssetEditTool(parsed.Tool) {
+						if len(parsed.Actions) > 0 {
+							return screenplay.ErrInvalidArgument
+						}
+						action, summary, editErr := screenplay.PrepareAssistantAssetEdit(r.Context(), store, o, st.ProjectID, parsed.Tool, parsed.ToolArgs)
+						if editErr != nil {
+							return editErr
+						}
+						parsed = assistantWire{Reply: "已准备" + summary + "的方案，请核对后确认应用；当前资产尚未修改。", Summary: summary, Actions: []screenplay.AuthoringAction{action}}
 					}
 					if len(parsed.Actions) > 0 {
 						if len(parsed.Actions) > 1 {
