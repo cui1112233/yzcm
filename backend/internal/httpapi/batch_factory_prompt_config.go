@@ -30,12 +30,20 @@ func normalizeBatchFactoryProductionMode(value string) (string, error) {
 // browser into an immutable backend snapshot. This keeps prompt text owned by
 // the system preset library while retaining the exact version used by a book.
 func hydrateBatchFactoryPromptConfig(catalog *prompt.Catalog, raw json.RawMessage) (json.RawMessage, error) {
-	if catalog == nil || len(raw) == 0 {
+	if len(raw) == 0 {
 		return raw, nil
 	}
 	var config map[string]any
 	if err := json.Unmarshal(raw, &config); err != nil || config == nil {
 		return nil, fmt.Errorf("漫画提示词配置格式不正确")
+	}
+	if comic, ok := config["comic"].(map[string]any); ok {
+		if err := hydrateComicOutputStyles(catalog, comic); err != nil {
+			return nil, err
+		}
+	}
+	if catalog == nil {
+		return raw, nil
 	}
 	// Video selections are also chosen by ID in the browser. Resolve the
 	// published body here so the director receives the administrator's actual

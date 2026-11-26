@@ -87,7 +87,7 @@ type MultiModeCreationStore interface {
 
 **Interfaces:** Produces `ComicStyleOutput`, `NormalizeComicStyleOutputs`, `ResolveComicStyleSettings` above, plus frontend `normalizeComicOutputStyles(comic)` and `selectComicOutputStyle(comic, preset)` using metadata-only selections.
 
-- [ ] Write failing tests for legacy one-style read, five accepted, sixth rejected, duplicate IDs rejected, unknown/wrong-slot preset rejected, and no caller mutation. Include these boundary checks:
+- [x] Write failing tests for legacy one-style read, five accepted, sixth rejected, duplicate IDs rejected, unknown/wrong-slot preset rejected, and no caller mutation. Include these boundary checks:
 
 ```go
 func TestComicStylesRejectSix(t *testing.T) {
@@ -104,10 +104,10 @@ assert.throws(() => normalizeComicOutputStyles({ styles: Array.from({ length: 6 
 assert.equal(normalizeComicOutputStyles({ style: { presetId: 'old' } })[0].presetId, 'old');
 ```
 
-- [ ] Run from backend: `go test ./internal/batchfactoryv11 ./internal/httpapi -run 'TestComicStyles|Test.*ComicPromptConfig' -count=1`; first new tests must fail on the absent normalization. Frontend: `node --test src/user/pages/shuihuo/batchFactoryComicStyle.test.js`.
-- [ ] Implement deep-copy normalization, preserve selected order, validate 1～5 for effective production, hydrate each style and style reference through the backend catalog. When both legacy `style` and `styles` exist, `styles` owns the list; preserve the old style only as legacy compatibility metadata, not an extra sixth output.
-- [ ] Extend sparse settings merge/preset import-export so changing styles does not discard comic prompt preset, constraints or another mode's settings. Test a six-style saved preset is rejected without partially changing current form values.
-- [ ] Run the focused tests green and commit only these files: `feat: define bounded comic output styles`.
+- [x] Run from backend: `go test ./internal/batchfactoryv11 ./internal/httpapi -run 'TestComicStyles|Test.*ComicPromptConfig' -count=1`; first new tests must fail on the absent normalization. Frontend: `node --test src/user/pages/shuihuo/batchFactoryComicStyle.test.js`.
+- [x] Implement deep-copy normalization, preserve selected order, validate 1～5 for effective production, hydrate each style and style reference through the backend catalog. When both legacy `style` and `styles` exist, `styles` owns the list; preserve the old style only as legacy compatibility metadata, not an extra sixth output.
+- [x] Extend sparse settings merge/preset import-export so changing styles does not discard comic prompt preset, constraints or another mode's settings. Test a six-style saved preset is rejected without partially changing current form values.
+- [x] Run the focused tests green and commit only these files: `feat: define bounded comic output styles`.
 
 ### Task 2: 按画风保存页面、资产主图和合集，保护原有数据
 
@@ -251,3 +251,7 @@ Durable schema `8800502` (currently unused; recheck before application): creatio
 - Local runtime identity, UI acceptance and actual-vs-mock upload evidence: Task8.
 
 默认可在当前聊天顺序执行，每项完成后核对代码差异、测试和提交。若用户明确选择子任务代理，可将各自无文件冲突的测试/界面工作委派，但数据模型、迁移、接口与重启必须由主执行者串联核对；不因并行而跳过依赖或扩大上线权限。
+
+## 执行记录
+
+- 任务1完成：Go画风配置/解析/系统目录冻结测试通过；前端画风相关18项测试通过。旧预览测试读取了已退役V11转发文件，已改为检查实际V12接口文件。当前只完成配置基础，尚未开放多画风生产入口。

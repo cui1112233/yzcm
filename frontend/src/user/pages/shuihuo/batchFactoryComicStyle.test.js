@@ -158,13 +158,13 @@ test('comic style names stay readable on the white preview cards', () => {
 });
 
 test('authenticated preview loader accepts built-in comic scene previews', () => {
-  const source = fs.readFileSync(new URL('../../../shared/api/batchFactoryV11.js', import.meta.url), 'utf8');
+  const source = fs.readFileSync(new URL('../../../shared/api/batchFactoryV12.js', import.meta.url), 'utf8');
   assert.match(source, /COMIC_REFERENCE_SCENE_PREVIEW_PATTERN/);
   assert.match(source, /comic-reference-scene/);
 });
 
 test('authenticated preview loader accepts administrator-uploaded comic material previews', () => {
-  const source = fs.readFileSync(new URL('../../../shared/api/batchFactoryV11.js', import.meta.url), 'utf8');
+  const source = fs.readFileSync(new URL('../../../shared/api/batchFactoryV12.js', import.meta.url), 'utf8');
   assert.match(source, /COMIC_MATERIAL_PREVIEW_PATTERN/);
   assert.match(source, /comic-material/);
   assert.match(source, /COMIC_MATERIAL_PREVIEW_PATTERN\.test\(path\)/);

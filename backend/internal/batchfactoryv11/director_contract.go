@@ -117,6 +117,7 @@ type AIReasoningComicModule struct {
 	Assets               PresetSnapshot            `json:"assets"`
 	ImageDerivation      PresetSnapshot            `json:"imageDerivation"`
 	Style                PresetSnapshot            `json:"style"`
+	Styles               []ComicStyleOutput        `json:"styles,omitempty"`
 	Constraints          []PresetSnapshot          `json:"constraints"`
 	ImagePromptPrefix    string                    `json:"imagePromptPrefix"`
 	ImagePromptSuffix    string                    `json:"imagePromptSuffix"`
