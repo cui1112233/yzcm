@@ -1,0 +1,416 @@
+package scripteditor
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+type MemoryStore struct {
+	mu       sync.Mutex
+	works    map[string]Work
+	chapters map[string]Chapter
+	scripts  map[string]Script
+	now      func() time.Time
+	newID    func(string) string
+}
+
+func NewMemoryStore() *MemoryStore {
+	return &MemoryStore{
+		works: map[string]Work{}, chapters: map[string]Chapter{}, scripts: map[string]Script{},
+		now: time.Now, newID: randomID,
+	}
+}
+
+func (s *MemoryStore) activeWork(owner, id string) (Work, error) {
+	work, ok := s.works[id]
+	if !ok || work.OwnerUsername != owner || work.DeletedAt != nil {
+		return Work{}, ErrNotFound
+	}
+	return work, nil
+}
+
+func (s *MemoryStore) CreateWork(_ context.Context, owner string, input CreateWorkInput) (Work, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	owner, err := normalizedOwner(owner)
+	if err != nil || !input.Type.Valid() {
+		return Work{}, ErrValidation
+	}
+	title, err := NormalizeTitle(input.Title)
+	if err != nil {
+		return Work{}, err
+	}
+	now := s.now().UTC()
+	work := Work{ID: s.newID("work"), OwnerUsername: owner, Title: title, Type: input.Type, SourceFilename: strings.TrimSpace(input.SourceFilename), Mark: MarkNone, CreatedAt: now, UpdatedAt: now}
+	s.works[work.ID] = work
+	return work, nil
+}
+
+func (s *MemoryStore) ListWorks(_ context.Context, owner string, filter WorkFilter) ([]WorkSummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	query := strings.ToLower(strings.TrimSpace(filter.Query))
+	rows := make([]WorkSummary, 0)
+	for _, work := range s.works {
+		if work.OwnerUsername != owner || work.DeletedAt != nil || filter.Type != "" && work.Type != filter.Type || filter.Mark != "" && work.Mark != filter.Mark || query != "" && !strings.Contains(strings.ToLower(work.Title), query) {
+			continue
+		}
+		row := WorkSummary{Work: work}
+		for _, chapter := range s.chapters {
+			if chapter.OwnerUsername == owner && chapter.WorkID == work.ID {
+				row.ChapterCount++
+				row.WordCount += chapter.WordCount
+			}
+		}
+		for _, script := range s.scripts {
+			if script.OwnerUsername == owner && script.WorkID == work.ID {
+				row.ScriptCount++
+			}
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		switch filter.Sort {
+		case "name-asc":
+			return rows[i].Title < rows[j].Title
+		case "name-desc":
+			return rows[i].Title > rows[j].Title
+		case "updated-asc":
+			return rows[i].UpdatedAt.Before(rows[j].UpdatedAt)
+		default:
+			return rows[i].UpdatedAt.After(rows[j].UpdatedAt)
+		}
+	})
+	return rows, nil
+}
+
+func (s *MemoryStore) GetWork(_ context.Context, owner, id string) (WorkDetail, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	work, err := s.activeWork(owner, id)
+	if err != nil {
+		return WorkDetail{}, err
+	}
+	detail := WorkDetail{Work: work, Chapters: []Chapter{}, Scripts: []Script{}}
+	for _, chapter := range s.chapters {
+		if chapter.OwnerUsername == owner && chapter.WorkID == id {
+			detail.Chapters = append(detail.Chapters, chapter)
+		}
+	}
+	for _, script := range s.scripts {
+		if script.OwnerUsername == owner && script.WorkID == id {
+			detail.Scripts = append(detail.Scripts, cloneScript(script))
+		}
+	}
+	sort.Slice(detail.Chapters, func(i, j int) bool { return detail.Chapters[i].Order < detail.Chapters[j].Order })
+	sortScripts(detail.Scripts)
+	return detail, nil
+}
+
+func (s *MemoryStore) UpdateWork(_ context.Context, owner, id string, input UpdateWorkInput, expected int64) (Work, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	work, err := s.activeWork(owner, id)
+	if err != nil {
+		return Work{}, err
+	}
+	if work.Revision != expected {
+		return Work{}, ErrConflict
+	}
+	if input.Title != nil {
+		work.Title, err = NormalizeTitle(*input.Title)
+		if err != nil {
+			return Work{}, err
+		}
+	}
+	if input.Mark != nil {
+		if !input.Mark.Valid() {
+			return Work{}, ErrValidation
+		}
+		work.Mark = *input.Mark
+	}
+	work.Revision++
+	work.UpdatedAt = s.now().UTC()
+	s.works[id] = work
+	return work, nil
+}
+
+func (s *MemoryStore) DeleteWork(_ context.Context, owner, id string, expected int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	work, err := s.activeWork(owner, id)
+	if err != nil {
+		return err
+	}
+	if work.Revision != expected {
+		return ErrConflict
+	}
+	now := s.now().UTC()
+	work.DeletedAt, work.UpdatedAt, work.Revision = &now, now, work.Revision+1
+	s.works[id] = work
+	return nil
+}
+
+func (s *MemoryStore) CreateChapter(_ context.Context, owner, workID string, input CreateChapterInput) (Chapter, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.activeWork(owner, workID); err != nil {
+		return Chapter{}, err
+	}
+	title := strings.TrimSpace(input.Title)
+	if title == "" {
+		title = "新章节"
+	}
+	order := input.Order
+	if order <= 0 {
+		for _, chapter := range s.chapters {
+			if chapter.OwnerUsername == owner && chapter.WorkID == workID && chapter.Order >= order {
+				order = chapter.Order + 1
+			}
+		}
+	}
+	now := s.now().UTC()
+	chapter := Chapter{ID: s.newID("chapter"), WorkID: workID, OwnerUsername: owner, Title: title, Order: order, Content: input.Content, WordCount: countWords(input.Content), CreatedAt: now, UpdatedAt: now}
+	s.chapters[chapter.ID] = chapter
+	s.touchWork(workID, now)
+	return chapter, nil
+}
+
+func (s *MemoryStore) UpdateChapter(_ context.Context, owner, workID, id string, input UpdateChapterInput, expected int64) (Chapter, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.activeWork(owner, workID); err != nil {
+		return Chapter{}, err
+	}
+	chapter, ok := s.chapters[id]
+	if !ok || chapter.OwnerUsername != owner || chapter.WorkID != workID {
+		return Chapter{}, ErrNotFound
+	}
+	if chapter.Revision != expected {
+		return Chapter{}, ErrConflict
+	}
+	if input.Title != nil {
+		title := strings.TrimSpace(*input.Title)
+		if title == "" {
+			return Chapter{}, ErrValidation
+		}
+		chapter.Title = title
+	}
+	if input.Content != nil {
+		chapter.Content, chapter.WordCount = *input.Content, countWords(*input.Content)
+	}
+	chapter.Revision++
+	chapter.UpdatedAt = s.now().UTC()
+	s.chapters[id] = chapter
+	s.touchWork(workID, chapter.UpdatedAt)
+	return chapter, nil
+}
+
+func (s *MemoryStore) DeleteChapter(_ context.Context, owner, workID, id string, expected int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	chapter, ok := s.chapters[id]
+	if !ok || chapter.OwnerUsername != owner || chapter.WorkID != workID {
+		return ErrNotFound
+	}
+	if chapter.Revision != expected {
+		return ErrConflict
+	}
+	delete(s.chapters, id)
+	s.touchWork(workID, s.now().UTC())
+	return nil
+}
+
+func (s *MemoryStore) ReorderChapters(_ context.Context, owner, workID string, ids []string) ([]Chapter, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.activeWork(owner, workID); err != nil {
+		return nil, err
+	}
+	current := map[string]Chapter{}
+	for id, chapter := range s.chapters {
+		if chapter.OwnerUsername == owner && chapter.WorkID == workID {
+			current[id] = chapter
+		}
+	}
+	if len(current) != len(ids) {
+		return nil, ErrValidation
+	}
+	seen := map[string]bool{}
+	now := s.now().UTC()
+	rows := make([]Chapter, 0, len(ids))
+	for index, id := range ids {
+		chapter, ok := current[id]
+		if !ok || seen[id] {
+			return nil, ErrValidation
+		}
+		seen[id] = true
+		chapter.Order, chapter.Revision, chapter.UpdatedAt = index+1, chapter.Revision+1, now
+		s.chapters[id] = chapter
+		rows = append(rows, chapter)
+	}
+	s.touchWork(workID, now)
+	return rows, nil
+}
+
+func (s *MemoryStore) CreateScript(_ context.Context, owner, workID string, input CreateScriptInput) (Script, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.createScriptLocked(owner, workID, input)
+}
+
+func (s *MemoryStore) createScriptLocked(owner, workID string, input CreateScriptInput) (Script, error) {
+	if _, err := s.activeWork(owner, workID); err != nil {
+		return Script{}, err
+	}
+	if input.Episode <= 0 {
+		return Script{}, ErrValidation
+	}
+	version := input.Version
+	for _, row := range s.scripts {
+		if row.OwnerUsername == owner && row.WorkID == workID && row.Episode == input.Episode {
+			if version == row.Version {
+				return Script{}, ErrConflict
+			}
+			if version <= 0 && row.Version >= version {
+				version = row.Version + 1
+			}
+		}
+	}
+	if version <= 0 {
+		version = 1
+	}
+	title := strings.TrimSpace(input.Title)
+	if title == "" {
+		title = fmt.Sprintf("第%d集", input.Episode)
+	}
+	source := input.GenerationSource
+	if source == "" {
+		source = SourceManual
+	}
+	now := s.now().UTC()
+	row := Script{ID: s.newID("script"), WorkID: workID, OwnerUsername: owner, Episode: input.Episode, Version: version, Title: title, Content: input.Content, SourceChapterIDs: append([]string(nil), input.SourceChapterIDs...), GenerationSource: source, ModelID: input.ModelID, PromptID: input.PromptID, PromptRevision: input.PromptRevision, CreatedAt: now, UpdatedAt: now}
+	s.scripts[row.ID] = row
+	s.touchWork(workID, now)
+	return cloneScript(row), nil
+}
+
+func (s *MemoryStore) ListScripts(_ context.Context, owner, workID string) ([]Script, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.activeWork(owner, workID); err != nil {
+		return nil, err
+	}
+	rows := []Script{}
+	for _, row := range s.scripts {
+		if row.OwnerUsername == owner && row.WorkID == workID {
+			rows = append(rows, cloneScript(row))
+		}
+	}
+	sortScripts(rows)
+	return rows, nil
+}
+
+func (s *MemoryStore) UpdateScript(_ context.Context, owner, workID, id string, input UpdateScriptInput, expected int64) (Script, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row, ok := s.scripts[id]
+	if !ok || row.OwnerUsername != owner || row.WorkID != workID {
+		return Script{}, ErrNotFound
+	}
+	if row.Revision != expected {
+		return Script{}, ErrConflict
+	}
+	if input.Title != nil {
+		if strings.TrimSpace(*input.Title) == "" {
+			return Script{}, ErrValidation
+		}
+		row.Title = strings.TrimSpace(*input.Title)
+	}
+	if input.Content != nil {
+		row.Content = *input.Content
+	}
+	row.Revision++
+	row.UpdatedAt = s.now().UTC()
+	s.scripts[id] = row
+	s.touchWork(workID, row.UpdatedAt)
+	return cloneScript(row), nil
+}
+
+func (s *MemoryStore) DeleteScript(_ context.Context, owner, workID, id string, expected int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row, ok := s.scripts[id]
+	if !ok || row.OwnerUsername != owner || row.WorkID != workID {
+		return ErrNotFound
+	}
+	if row.Revision != expected {
+		return ErrConflict
+	}
+	delete(s.scripts, id)
+	s.touchWork(workID, s.now().UTC())
+	return nil
+}
+
+func (s *MemoryStore) CopyScript(_ context.Context, owner, workID, id string) (Script, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row, ok := s.scripts[id]
+	if !ok || row.OwnerUsername != owner || row.WorkID != workID {
+		return Script{}, ErrNotFound
+	}
+	return s.createScriptLocked(owner, workID, CreateScriptInput{Episode: row.Episode, Title: row.Title, Content: row.Content, SourceChapterIDs: row.SourceChapterIDs, GenerationSource: SourceCopy, ModelID: row.ModelID, PromptID: row.PromptID, PromptRevision: row.PromptRevision})
+}
+
+func (s *MemoryStore) PreferScript(_ context.Context, owner, workID, id string, expected int64) (Script, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row, ok := s.scripts[id]
+	if !ok || row.OwnerUsername != owner || row.WorkID != workID {
+		return Script{}, ErrNotFound
+	}
+	if row.Revision != expected {
+		return Script{}, ErrConflict
+	}
+	now := s.now().UTC()
+	for otherID, other := range s.scripts {
+		if other.OwnerUsername == owner && other.WorkID == workID && other.Episode == row.Episode && other.Preferred && otherID != id {
+			other.Preferred, other.Revision, other.UpdatedAt = false, other.Revision+1, now
+			s.scripts[otherID] = other
+		}
+	}
+	row.Preferred, row.Revision, row.UpdatedAt = true, row.Revision+1, now
+	s.scripts[id] = row
+	s.touchWork(workID, now)
+	return cloneScript(row), nil
+}
+
+func (s *MemoryStore) touchWork(id string, now time.Time) {
+	work, ok := s.works[id]
+	if !ok {
+		return
+	}
+	work.UpdatedAt = now
+	s.works[id] = work
+}
+
+func cloneScript(row Script) Script {
+	row.SourceChapterIDs = append([]string(nil), row.SourceChapterIDs...)
+	return row
+}
+
+func sortScripts(rows []Script) {
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Episode != rows[j].Episode {
+			return rows[i].Episode < rows[j].Episode
+		}
+		if rows[i].Version != rows[j].Version {
+			return rows[i].Version < rows[j].Version
+		}
+		return rows[i].CreatedAt.Before(rows[j].CreatedAt)
+	})
+}
