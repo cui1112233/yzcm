@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/auth"
 	"qiantie/backend/internal/yzcmusage"
 )
@@ -35,13 +36,14 @@ type BridgeUserResolver interface {
 }
 
 type BridgeAuth struct {
-	Secret          string
-	Now             func() time.Time
-	MaxSkew         time.Duration
-	Users           BridgeUserResolver
-	AuthStore       auth.Store
-	SessionResolver func(context.Context, string) (BridgeIdentity, error)
-	IdentityScope   func(context.Context, BridgeIdentity, string) (BridgeIdentity, error)
+	Secret             string
+	Now                func() time.Time
+	MaxSkew            time.Duration
+	Users              BridgeUserResolver
+	AuthStore          auth.Store
+	AccountCenterStore accountcenter.Store
+	SessionResolver    func(context.Context, string) (BridgeIdentity, error)
+	IdentityScope      func(context.Context, BridgeIdentity, string) (BridgeIdentity, error)
 }
 
 func canonicalBridgePayload(username, issuedAt, isOwner, method, pathname string) string {
@@ -134,6 +136,10 @@ func (a BridgeAuth) authenticate(req *http.Request) (BridgeIdentity, error) {
 }
 
 func (a BridgeAuth) Middleware(next http.Handler) http.Handler {
+	return a.middleware(next, false)
+}
+
+func (a BridgeAuth) middleware(next http.Handler, requireAccountCenter bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		identity, err := a.authenticate(req)
 		if err != nil {
@@ -145,6 +151,7 @@ func (a BridgeAuth) Middleware(next http.Handler) http.Handler {
 			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 			return
 		}
+		actorUsername := identity.Username
 		if a.IdentityScope != nil {
 			identity, err = a.IdentityScope(req.Context(), identity, req.Header.Get(HeaderNovelFetchAccount))
 			if err != nil {
@@ -153,6 +160,17 @@ func (a BridgeAuth) Middleware(next http.Handler) http.Handler {
 			}
 		}
 		ctx := context.WithValue(req.Context(), bridgeIdentityKey{}, identity)
+		if requireAccountCenter || a.AccountCenterStore != nil {
+			ctx, err = a.accountCenterContext(ctx, actorUsername)
+			if requireAccountCenter && err != nil {
+				if errors.Is(err, accountcenter.ErrNotFound) || errors.Is(err, accountcenter.ErrForbidden) {
+					writeAccountCenterForbidden(w)
+				} else {
+					writeAuthError(w, http.StatusServiceUnavailable, "账号中心暂不可用")
+				}
+				return
+			}
+		}
 		ctx = yzcmusage.WithIdentity(ctx, identity.Username, usageFeature(req.URL.Path))
 		next.ServeHTTP(w, req.WithContext(ctx))
 	})

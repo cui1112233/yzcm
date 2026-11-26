@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/agentproxy"
 	"qiantie/backend/internal/agentworkspace"
 	"qiantie/backend/internal/aicut"
@@ -70,6 +71,7 @@ type RouterOptions struct {
 	AuthRateLimits                  AuthRateLimitConfig
 	Users                           BridgeUserResolver
 	AuthStore                       auth.Store
+	AccountCenterStore              accountcenter.Store
 	SessionResolver                 func(context.Context, string) (BridgeIdentity, error)
 	Slice                           int
 	RegisterV11                     func(*http.ServeMux)
@@ -468,7 +470,7 @@ func NewRouter(options RouterOptions) http.Handler {
 	// Release notes ship inside this binary and are matched against the release
 	// manifest, so a stale or mismatched release cannot show the wrong payload.
 	registerProductUpdateRoute(root, options.RuntimeManifestPath, releasenotes.Default())
-	auth := BridgeAuth{Secret: options.BridgeSecret, Now: options.Now, Users: options.Users, AuthStore: options.AuthStore, SessionResolver: options.SessionResolver}
+	auth := BridgeAuth{Secret: options.BridgeSecret, Now: options.Now, Users: options.Users, AuthStore: options.AuthStore, AccountCenterStore: options.AccountCenterStore, SessionResolver: options.SessionResolver}
 	novelScope := novelFetchAccountScopeResolver(options.AuthStore, options.MemberProfileStore)
 	novelCompatAuth := auth
 	novelCompatAuth.IdentityScope = novelScope

@@ -11,8 +11,59 @@ import (
 	"strings"
 	"time"
 
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/auth"
 )
+
+type accountCenterIdentityKey struct{}
+
+func AccountCenterIdentityFromContext(ctx context.Context) (accountcenter.RequestIdentity, bool) {
+	identity, ok := ctx.Value(accountCenterIdentityKey{}).(accountcenter.RequestIdentity)
+	return identity, ok && identity.Actor.Username != ""
+}
+
+// AccountCenterMiddleware requires a valid account-center identity in addition
+// to ordinary bridge authentication. Existing routes can migrate independently.
+func (a BridgeAuth) AccountCenterMiddleware(next http.Handler) http.Handler {
+	return a.middleware(next, true)
+}
+
+func (a BridgeAuth) accountCenterContext(ctx context.Context, username string) (context.Context, error) {
+	if a.AccountCenterStore == nil {
+		return ctx, errors.New("account center store unavailable")
+	}
+	if existing, ok := AccountCenterIdentityFromContext(ctx); ok {
+		if strings.EqualFold(existing.Actor.Username, username) {
+			return ctx, nil
+		}
+		ctx = context.WithValue(ctx, accountCenterIdentityKey{}, accountcenter.RequestIdentity{})
+	}
+	actor, err := a.AccountCenterStore.ResolveIdentity(ctx, username)
+	if err != nil {
+		return ctx, err
+	}
+	if !strings.EqualFold(actor.Username, username) || !actor.Active || actor.ArchivedAt != nil {
+		return ctx, accountcenter.ErrForbidden
+	}
+	identity := accountcenter.RequestIdentity{Actor: actor, Subject: actor}
+	return context.WithValue(ctx, accountCenterIdentityKey{}, identity), nil
+}
+
+// authorizeAccountCenter applies the policy to a server-resolved target. A
+// missing target is represented by its zero identity and denied like any other
+// unauthorized target.
+func authorizeAccountCenter(w http.ResponseWriter, r *http.Request, action accountcenter.Action, target accountcenter.PolicyTarget) bool {
+	identity, ok := AccountCenterIdentityFromContext(r.Context())
+	if !ok || !(accountcenter.Policy{}).Can(identity.Actor, action, target) {
+		writeAccountCenterForbidden(w)
+		return false
+	}
+	return true
+}
+
+func writeAccountCenterForbidden(w http.ResponseWriter) {
+	writeAuthError(w, http.StatusForbidden, "无权执行此操作")
+}
 
 type AuthOptions struct {
 	Store           auth.Store
