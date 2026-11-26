@@ -50,24 +50,25 @@ func Fingerprint(key string) string {
 type Tracker struct {
 	ReceiptDir string
 	// DBOnly is explicit and exclusive to installations without local receipt claims.
-	DBOnly            bool
-	Store             Store
-	Client            Client
-	ResolveCredential func(context.Context, string, string) (string, error)
-	wake              chan struct{}
-	once              sync.Once
-	credentialMu      sync.Mutex
-	credentials       map[string]cachedCredential
-	receiptBindingMu  sync.Mutex
-	receiptBound      *receiptBinding
-	receiptScanMu     sync.Mutex
-	receiptScan       *os.File
-	receiptScanInfo   os.FileInfo
-	receiptScanNext   os.DirEntry
-	receiptProbeMu    sync.Mutex
-	receiptProbe      *receiptProbe
-	receiptProbeErr   error
-	receiptProbeRetry time.Time
+	DBOnly             bool
+	Store              Store
+	Client             Client
+	ResolveCredential  func(context.Context, string, string) (string, error)
+	wake               chan struct{}
+	once               sync.Once
+	credentialMu       sync.Mutex
+	credentials        map[string]cachedCredential
+	receiptBindingMu   sync.Mutex
+	receiptBound       *receiptBinding
+	receiptDBOnlyBound bool
+	receiptScanMu      sync.Mutex
+	receiptScan        *os.File
+	receiptScanInfo    os.FileInfo
+	receiptScanNext    os.DirEntry
+	receiptProbeMu     sync.Mutex
+	receiptProbe       *receiptProbe
+	receiptProbeErr    error
+	receiptProbeRetry  time.Time
 }
 
 type cachedCredential struct {

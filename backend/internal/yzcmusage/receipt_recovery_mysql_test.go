@@ -111,7 +111,11 @@ func TestReceiptMySQLHiddenFirstClaimBlocksNewPaidCalls(t *testing.T) {
 	if err := os.Mkdir(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	first := &Tracker{ReceiptDir: dir}
+	first := &Tracker{Store: Store{DB: db}, ReceiptDir: dir}
+	if err := first.InitializeReceiptStorage(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	first.Store.DB = nil // Simulate a ledger outage after this process validated its authority.
 	second := &Tracker{Store: Store{DB: db}, ReceiptDir: dir}
 	t.Cleanup(second.closeReceiptScan)
 	ctx := context.Background()
@@ -213,13 +217,16 @@ func TestReceiptMySQLHiddenFirstClaimBlocksNewPaidCalls(t *testing.T) {
 func TestReceiptMySQLReadOnlyPreflightRejectsPaidCall(t *testing.T) {
 	db, _ := receiptRecoveryMySQL(t)
 	db.SetMaxOpenConns(1)
+	tracker := &Tracker{Store: Store{DB: db}, DBOnly: true}
+	if err := tracker.InitializeReceiptStorage(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.Exec(`SET SESSION TRANSACTION READ ONLY`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Ping(); err != nil {
 		t.Fatalf("read-only host should still answer Ping: %v", err)
 	}
-	tracker := &Tracker{Store: Store{DB: db}, DBOnly: true}
 	calls := 0
 	base := transportFunc(func(*http.Request) (*http.Response, error) {
 		calls++
@@ -382,7 +389,7 @@ func receiptRecoveryMySQL(t *testing.T) (*sql.DB, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, stmt := range append(SchemaStatements(), `ALTER TABLE yzcm_usage_requests ADD COLUMN team_id VARCHAR(64) NULL, ADD COLUMN actor_username VARCHAR(32) NULL`) {
+	for _, stmt := range append(SchemaStatements(), `ALTER TABLE yzcm_usage_requests ADD COLUMN team_id VARCHAR(64) NULL, ADD COLUMN actor_username VARCHAR(32) NULL`, ReceiptBindingStatement()) {
 		if _, err := db.Exec(stmt); err != nil {
 			t.Fatal(err)
 		}

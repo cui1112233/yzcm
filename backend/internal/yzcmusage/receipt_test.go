@@ -29,7 +29,7 @@ func receiptFiles(t *testing.T, dir string) []string {
 }
 
 func (t *Tracker) saveReceipt(r receipt) error {
-	b, err := t.bindReceiptDirectory()
+	b, err := t.bindReceiptDirectory(context.Background())
 	if err != nil {
 		return err
 	}
@@ -37,11 +37,31 @@ func (t *Tracker) saveReceipt(r receipt) error {
 }
 
 func (t *Tracker) recordReceipt(ctx context.Context, r Request, hash string, status int, at time.Time) error {
-	b, err := t.bindReceiptDirectory()
+	b, err := t.bindReceiptDirectory(ctx)
 	if err != nil {
 		return err
 	}
 	return t.recordBoundReceipt(ctx, &b, receipt{Request: r, CredentialHash: hash, Status: status, At: at})
+}
+
+// File-recovery unit tests start with an already validated binding. The
+// database initialization and cold-start protocol have their own tests.
+func cacheReceiptTestBinding(t *testing.T, tracker *Tracker) {
+	t.Helper()
+	dir, err := filepath.Abs(tracker.ReceiptDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := receiptBinding{dir: dir, anchor: filepath.Join(filepath.Dir(dir), "."+filepath.Base(dir)+"-receipt-id"), id: strings.Repeat("a", 32), pathDigest: receiptPathDigest(dir)}
+	row := receiptBindingRow{StoreID: b.id, Origin: receiptBindingUpgrade}
+	if err := preparePendingReceiptDirectory(context.Background(), b, row); err != nil {
+		t.Fatal(err)
+	}
+	b.info, err = visibleReceiptDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracker.receiptBound = &b
 }
 
 func TestFailedReceiptSurvivesRestartWithoutKeyOrContent(t *testing.T) {
@@ -55,6 +75,7 @@ func TestFailedReceiptSurvivesRestartWithoutKeyOrContent(t *testing.T) {
 	r := Request{ID: "request1", Owner: "alice", Feature: "image", TeamID: "team-a", ActorUsername: "founder"}
 	hash := Fingerprint("secret-key")
 	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: dir}
+	cacheReceiptTestBinding(t, tracker)
 	m.ExpectExec("INSERT INTO yzcm_usage_requests").WithArgs(r.ID, r.Owner, r.TeamID, r.ActorUsername, r.Feature, hash, at, 200).WillReturnError(errors.New("db temporarily unavailable"))
 	tracker.recordReceipt(context.Background(), r, hash, 200, at)
 	entries := receiptFiles(t, dir)
@@ -69,6 +90,7 @@ func TestFailedReceiptSurvivesRestartWithoutKeyOrContent(t *testing.T) {
 		t.Fatal("sensitive content persisted")
 	}
 	restart := &Tracker{Store: Store{DB: db}, ReceiptDir: dir}
+	cacheReceiptTestBinding(t, restart)
 	m.ExpectExec("INSERT INTO yzcm_usage_requests").WithArgs(r.ID, r.Owner, r.TeamID, r.ActorUsername, r.Feature, hash, at, 200).WillReturnResult(sqlmock.NewResult(0, 1))
 	restart.flushReceipts(context.Background())
 	entries = receiptFiles(t, dir)
@@ -84,6 +106,7 @@ func TestReceiptDuplicateCannotMoveOwnerAndFailedFlushRetainsFile(t *testing.T) 
 	defer db.Close()
 	dir := t.TempDir()
 	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: dir}
+	cacheReceiptTestBinding(t, tracker)
 	at := time.Now().UTC()
 	hash := Fingerprint("secret")
 	if err := tracker.saveReceipt(receipt{Request: Request{ID: "same", Owner: "alice", Feature: "image"}, CredentialHash: hash, Status: 200, At: at}); err != nil {
@@ -116,6 +139,7 @@ func TestDuplicateActorAndTeamUseOriginalSpooledReceiptAfterDatabaseRecovers(t *
 	}
 	defer db.Close()
 	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: t.TempDir()}
+	cacheReceiptTestBinding(t, tracker)
 	at := time.Now().UTC()
 	original := Request{ID: "same", Owner: "member", TeamID: "team-a", ActorUsername: "founder", Feature: "script"}
 	hash := Fingerprint("fixture-key")
@@ -143,6 +167,8 @@ func TestConcurrentTrackersKeepFirstActorAndTeam(t *testing.T) {
 	defer db.Close()
 	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: t.TempDir()}
 	second := &Tracker{Store: Store{DB: db}, ReceiptDir: tracker.ReceiptDir}
+	cacheReceiptTestBinding(t, tracker)
+	cacheReceiptTestBinding(t, second)
 	at := time.Now().UTC()
 	original := Request{ID: "same", Owner: "member", TeamID: "team-a", ActorUsername: "founder", Feature: "script"}
 	hash := Fingerprint("fixture-key")
@@ -175,6 +201,7 @@ func TestReceiptActorAndTeamConflictQuarantinesClaim(t *testing.T) {
 	}
 	defer db.Close()
 	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: t.TempDir()}
+	cacheReceiptTestBinding(t, tracker)
 	at := time.Now().UTC()
 	original := Request{ID: "same", Owner: "member", TeamID: "team-a", ActorUsername: "founder", Feature: "script"}
 	hash := Fingerprint("fixture-key")
@@ -209,6 +236,7 @@ func TestReceiptActorAndTeamConflictQuarantinesClaim(t *testing.T) {
 
 func TestReceiptQuarantineResumesAfterPublishingReviewEvidence(t *testing.T) {
 	tracker := &Tracker{ReceiptDir: t.TempDir()}
+	cacheReceiptTestBinding(t, tracker)
 	original := receipt{
 		Request:        Request{ID: "quarantine-restart", Owner: "member", TeamID: "team-a", ActorUsername: "founder", Feature: "script"},
 		CredentialHash: Fingerprint("fixture-key"), Status: 200, At: time.Now().UTC(),
@@ -237,6 +265,7 @@ func TestReceiptQuarantineResumesAfterPublishingReviewEvidence(t *testing.T) {
 
 func TestReceiptQuarantineKeepsRacedDuplicateEvidence(t *testing.T) {
 	tracker := &Tracker{ReceiptDir: t.TempDir()}
+	cacheReceiptTestBinding(t, tracker)
 	first := receipt{
 		Request:        Request{ID: "raced", Owner: "member", TeamID: "team-a", ActorUsername: "founder", Feature: "script"},
 		CredentialHash: Fingerprint("fixture-key"), Status: 200, At: time.Now().UTC(),
@@ -278,6 +307,7 @@ func TestReceiptFallbackUsesFirstClaimWhenLockDirectoryIsUnavailable(t *testing.
 	}
 	defer db.Close()
 	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: t.TempDir()}
+	cacheReceiptTestBinding(t, tracker)
 	original := receipt{
 		Request:        Request{ID: "fallback", Owner: "member", TeamID: "team-a", ActorUsername: "founder", Feature: "script"},
 		CredentialHash: Fingerprint("fixture-key"), Status: 200, At: time.Now().UTC(),
@@ -308,6 +338,7 @@ func TestReceiptLockReleasesOnProcessExitAndOrphanTempIsReaped(t *testing.T) {
 	hash := Fingerprint("fixture-key")
 	if dir := os.Getenv("QIANTIE_RECEIPT_LOCK_TEST_CHILD"); dir != "" {
 		tracker := &Tracker{ReceiptDir: dir}
+		cacheReceiptTestBinding(t, tracker)
 		if err := tracker.saveReceipt(receipt{Request: original, CredentialHash: hash, Status: 200, At: at}); err != nil {
 			t.Fatal(err)
 		}
@@ -376,7 +407,9 @@ func TestReceiptLockReleasesOnProcessExitAndOrphanTempIsReaped(t *testing.T) {
 	defer db.Close()
 	mock.ExpectExec("INSERT INTO yzcm_usage_requests").WithArgs(original.ID, original.Owner, original.TeamID, original.ActorUsername, original.Feature, hash, at, 200).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	(&Tracker{Store: Store{DB: db}, ReceiptDir: dir}).flushReceipts(ctx)
+	restarted := &Tracker{Store: Store{DB: db}, ReceiptDir: dir}
+	cacheReceiptTestBinding(t, restarted)
+	restarted.flushReceipts(ctx)
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
@@ -405,6 +438,7 @@ func TestTrackerDatabaseFailureKeepsGenerationResponse(t *testing.T) {
 	defer db.Close()
 	dir := t.TempDir()
 	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: dir}
+	cacheReceiptTestBinding(t, tracker)
 	m.ExpectExec("INSERT INTO yzcm_usage_requests").WillReturnError(errors.New("db down"))
 	transport := tracker.Wrap(transportFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Header: http.Header{"X-Oneapi-Request-Id": []string{"actual-call"}}, Body: io.NopCloser(strings.NewReader("unchanged private generation"))}, nil
@@ -435,6 +469,7 @@ func TestTrackerStartupFlushesOldReceipt(t *testing.T) {
 	db, m, _ := sqlmock.New()
 	defer db.Close()
 	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: t.TempDir()}
+	cacheReceiptTestBinding(t, tracker)
 	at := time.Now().UTC()
 	hash := Fingerprint("key")
 	if err := tracker.saveReceipt(receipt{Request: Request{ID: "old", Owner: "alice", Feature: "image"}, CredentialHash: hash, Status: 200, At: at}); err != nil {
@@ -471,9 +506,7 @@ func TestReceiptScanBoundsDirectoryWorkAndCancellation(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if _, err := tracker.bindReceiptDirectory(); err != nil {
-				t.Fatal(err)
-			}
+			cacheReceiptTestBinding(t, tracker)
 			ctx := context.Background()
 			canceled, stop := context.WithCancel(ctx)
 			stop()
@@ -551,6 +584,7 @@ func TestKnownReceiptBindingRejectsReplacementOfEntireParent(t *testing.T) {
 		t.Fatal(err)
 	}
 	tracker := &Tracker{ReceiptDir: dir}
+	cacheReceiptTestBinding(t, tracker)
 	if _, err := tracker.preflightReceipt(context.Background()); err != nil {
 		t.Fatal(err)
 	}

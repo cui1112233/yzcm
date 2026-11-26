@@ -18,6 +18,7 @@ func TestTrackerPersistsOnlyAuthenticatedAttributionAndPreservesBody(t *testing.
 	defer db.Close()
 	mock.ExpectExec("INSERT INTO yzcm_usage_requests").WithArgs("req-1", "alice", "", "", "image", Fingerprint("private-key"), sqlmock.AnyArg(), 200).WillReturnResult(sqlmock.NewResult(0, 1))
 	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: t.TempDir()}
+	cacheReceiptTestBinding(t, tracker)
 	transport := tracker.Wrap(transportFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Header: http.Header{"X-Oneapi-Request-Id": []string{"req-1"}}, Body: io.NopCloser(strings.NewReader("unchanged result"))}, nil
 	}))
@@ -75,6 +76,7 @@ func TestTrackerRecordsActorAndTeamSeparatelyFromChargedSubject(t *testing.T) {
 		WithArgs("req-team", "member", "team-a", "founder", "script", Fingerprint("fixture-key"), sqlmock.AnyArg(), 200).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: t.TempDir()}
+	cacheReceiptTestBinding(t, tracker)
 	transport := tracker.Wrap(transportFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Header: http.Header{"X-Oneapi-Request-Id": []string{"req-team"}}}, nil
 	}))

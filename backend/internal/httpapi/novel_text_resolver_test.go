@@ -85,6 +85,7 @@ func TestNovelResolverBackgroundCallsKeepOriginalMemberBilling(t *testing.T) {
 	}
 	defer db.Close()
 	tracker := &yzcmusage.Tracker{Store: yzcmusage.Store{DB: db}, ReceiptDir: t.TempDir()}
+	expectActiveUsageReceiptBinding(t, mock, tracker.ReceiptDir)
 	attempts := 0
 	client := &http.Client{Transport: tracker.Wrap(roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		attempts++

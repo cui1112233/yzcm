@@ -84,12 +84,15 @@ func (t *Tracker) preflightReceipt(ctx context.Context) (*receiptBinding, error)
 		return nil, err
 	}
 	if t.DBOnly && strings.TrimSpace(t.ReceiptDir) == "" {
+		if err := t.bindReceiptDBOnly(ctx); err != nil {
+			return nil, errors.Join(ErrReceiptPersistenceUnavailable, err)
+		}
 		if err := t.checkReceiptWriter(ctx); err != nil {
 			return nil, errors.Join(ErrReceiptPersistenceUnavailable, err)
 		}
 		return nil, nil
 	}
-	b, err := t.bindReceiptDirectory()
+	b, err := t.bindReceiptDirectory(ctx)
 	if err != nil {
 		return nil, errors.Join(ErrReceiptPersistenceUnavailable, err)
 	}
@@ -410,7 +413,7 @@ func (t *Tracker) flushReceipts(parent context.Context) {
 	defer t.receiptScanMu.Unlock()
 	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
-	b, err := t.bindReceiptDirectory()
+	b, err := t.bindReceiptDirectory(ctx)
 	if err != nil {
 		t.resetReceiptScan()
 		return

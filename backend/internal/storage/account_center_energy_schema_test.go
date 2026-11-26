@@ -45,6 +45,54 @@ func TestEnergyAttributionMigrationRegisteredAfterAccountGovernance(t *testing.T
 	}
 }
 
+func TestEnergyReceiptBindingMigrationRegisteredOnce(t *testing.T) {
+	var count int
+	for _, migration := range AppMigrations() {
+		if migration.Version == 8800408 {
+			count++
+			if len(migration.SQL) != 1 || migration.SQL[0] != yzcmusage.ReceiptBindingStatement() {
+				t.Fatalf("unexpected receipt-binding migration: %+v", migration)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("receipt-binding migration registered %d times", count)
+	}
+}
+
+func TestEnergyReceiptBindingMigrationMySQLResumesAfterDDLCommit(t *testing.T) {
+	ctx := context.Background()
+	db := energyMigrationTestDatabase(t)
+	var migration Migration
+	for _, candidate := range AccountCenterEnergyMigrations() {
+		if candidate.Version == 8800408 {
+			migration = candidate
+		}
+	}
+	if migration.Version == 0 {
+		t.Fatal("receipt-binding migration missing")
+	}
+	if _, err := db.ExecContext(ctx, migration.SQL[0]); err != nil {
+		t.Fatal(err)
+	}
+	const storeID = "0123456789abcdef0123456789abcdef"
+	if _, err := db.ExecContext(ctx, `INSERT INTO yzcm_usage_receipt_bindings(binding_slot,path_digest,store_id,state,origin) VALUES ('member-system',?,?,'pending','new')`, yzcmusage.Fingerprint("fixture"), storeID); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := RunMigrations(ctx, db, []Migration{migration}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var actual, state, checksum string
+	if err := db.QueryRowContext(ctx, `SELECT store_id,state FROM yzcm_usage_receipt_bindings WHERE binding_slot='member-system'`).Scan(&actual, &state); err != nil || actual != storeID || state != "pending" {
+		t.Fatalf("migration altered reservation: id=%s state=%s error=%v", actual, state, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT checksum FROM schema_migrations WHERE version=8800408`).Scan(&checksum); err != nil || checksum != ChecksumFor(migration) {
+		t.Fatalf("missing migration ledger checksum: %s %v", checksum, err)
+	}
+}
+
 func TestEnergyAttributionMySQLPreservesOwnerActorAndTeam(t *testing.T) {
 	for _, interrupted := range []bool{false, true} {
 		t.Run(fmt.Sprintf("interrupted=%t", interrupted), func(t *testing.T) {
@@ -87,7 +135,7 @@ VALUES ('founder','member','team-a','create_account','2025-01-01 00:00:01')`)
 			if interrupted {
 				exec(migration.SQL[0]) // MySQL committed the DDL before writing the ledger row.
 			}
-			if err := RunMigrations(ctx, db, []Migration{migration}); err != nil {
+			if err := RunMigrations(ctx, db, AccountCenterEnergyMigrations()); err != nil {
 				t.Fatal(err)
 			}
 			check := func(id, wantOwner, wantTeam, wantActor string, wantTokens sql.NullInt64) {
@@ -161,19 +209,30 @@ func checkConcurrentEnergyTrackers(t *testing.T, db *sql.DB) {
 	started := make(chan struct{})
 	var once sync.Once
 	failedDB, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherFunc(func(expected, actual string) error {
-		once.Do(func() { close(started) })
+		if strings.Contains(actual, "INSERT INTO yzcm_usage_requests") {
+			once.Do(func() { close(started) })
+		}
 		return sqlmock.QueryMatcherRegexp.Match(expected, actual)
 	})))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer failedDB.Close()
-	mock.ExpectExec("INSERT INTO yzcm_usage_requests").
-		WithArgs("cross-tracker", "member", "team-a", "founder", "model", yzcmusage.Fingerprint("fixture-key"), sqlmock.AnyArg(), 200).
-		WillDelayFor(200 * time.Millisecond).WillReturnError(errors.New("fixture connection failure"))
 	dir := t.TempDir()
 	first := &yzcmusage.Tracker{Store: yzcmusage.Store{DB: failedDB}, ReceiptDir: dir}
 	second := &yzcmusage.Tracker{Store: yzcmusage.Store{DB: db}, ReceiptDir: dir}
+	if err := second.InitializeReceiptStorage(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var pathDigest, storeID, state, origin string
+	if err := db.QueryRow(`SELECT path_digest,store_id,state,origin FROM yzcm_usage_receipt_bindings WHERE binding_slot='member-system'`).Scan(&pathDigest, &storeID, &state, &origin); err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectQuery("SELECT path_digest,store_id,state,origin FROM yzcm_usage_receipt_bindings").WithArgs("member-system").
+		WillReturnRows(sqlmock.NewRows([]string{"path_digest", "store_id", "state", "origin"}).AddRow(pathDigest, storeID, state, origin))
+	mock.ExpectExec("INSERT INTO yzcm_usage_requests").
+		WithArgs("cross-tracker", "member", "team-a", "founder", "model", yzcmusage.Fingerprint("fixture-key"), sqlmock.AnyArg(), 200).
+		WillDelayFor(200 * time.Millisecond).WillReturnError(errors.New("fixture connection failure"))
 	request := func(tracker *yzcmusage.Tracker, owner, team, actor string) error {
 		ctx := yzcmusage.WithAttribution(context.Background(), owner, team, actor)
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, yzcmusage.Origin+"/v1/chat/completions", nil)

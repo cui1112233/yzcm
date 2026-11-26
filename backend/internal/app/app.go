@@ -471,6 +471,9 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	}
 	imageCapacityController := imagecapacity.NewController(imageCapacityPolicies, imageCapacityRedis, "qiantie:imagecapacity")
 	usageTracker := &yzcmusage.Tracker{Store: usageStore, Client: yzcmusage.Client{HTTP: safehttp.NewClientWithTimeout(12 * time.Second)}, ReceiptDir: filepath.Join(cfg.MemberSystemDir, "usage-receipts")}
+	if err := usageTracker.InitializeReceiptStorage(ctx); err != nil {
+		log.Printf("YZCM usage: receipt storage unavailable at startup: %v", err)
+	}
 	safehttp.SetManagedOutboundDecorator(func(base http.RoundTripper, timeout time.Duration) http.RoundTripper {
 		return imageCapacityController.WrapTransportWithTimeout(usageTracker.Wrap(base), timeout)
 	})

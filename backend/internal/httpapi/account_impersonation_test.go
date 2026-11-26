@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -198,6 +201,7 @@ func TestEnergyAttributionFromAuthenticatedAccountSwitch(t *testing.T) {
 	}
 	defer db.Close()
 	tracker := &yzcmusage.Tracker{Store: yzcmusage.Store{DB: db}, ReceiptDir: t.TempDir()}
+	expectActiveUsageReceiptBinding(t, mock, tracker.ReceiptDir)
 	const path = "/api/batch-factory/v11/energy-attribution-test"
 	requestID := "switch-receipt"
 	transport := tracker.Wrap(roundTripperFunc(func(*http.Request) (*http.Response, error) {
@@ -239,6 +243,21 @@ func TestEnergyAttributionFromAuthenticatedAccountSwitch(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func expectActiveUsageReceiptBinding(t *testing.T, mock sqlmock.Sqlmock, dir string) {
+	t.Helper()
+	storeID := strings.Repeat("a", 32)
+	for _, path := range []string{filepath.Join(dir, ".receipt-directory-id"), filepath.Join(filepath.Dir(dir), "."+filepath.Base(dir)+"-receipt-id")} {
+		if err := os.WriteFile(path, []byte(storeID), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		dir = strings.ToLower(dir)
+	}
+	mock.ExpectQuery("SELECT path_digest,store_id,state,origin FROM yzcm_usage_receipt_bindings").WithArgs("member-system").
+		WillReturnRows(sqlmock.NewRows([]string{"path_digest", "store_id", "state", "origin"}).AddRow(yzcmusage.Fingerprint(dir), storeID, "active", "upgrade"))
 }
 
 func TestImpersonationUsesSubjectAndAuditsActorUntilExit(t *testing.T) {

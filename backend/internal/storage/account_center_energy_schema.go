@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+
+	"qiantie/backend/internal/yzcmusage"
 )
 
 // Governance writes record membership creation and its audit event together.
@@ -40,6 +42,10 @@ ADD INDEX yzcm_usage_team_time (team_id, created_at),
 ADD INDEX yzcm_usage_actor_time (actor_username, created_at)`, backfillEnergyTeam},
 		CallbackChecksum: "v88-yzcm-usage-attribution-v1",
 		Adopt:            resumeEnergyTeamBackfill,
+	}, {
+		Version:          8800408,
+		CallbackChecksum: "v88-yzcm-usage-receipt-binding-v1",
+		SQL:              []string{yzcmusage.ReceiptBindingStatement()},
 	}}
 }
 
