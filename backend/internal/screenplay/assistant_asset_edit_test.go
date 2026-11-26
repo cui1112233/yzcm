@@ -108,3 +108,27 @@ func TestAssistantAssetEditConfirmationDoesNotOverwriteNewerAsset(t *testing.T) 
 		t.Fatal(rows)
 	}
 }
+
+func TestAssistantLegacyIncompleteAssetProposalCannotClearExistingFields(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+	_, _ = s.CreateProject(ctx, Project{ID: "p", OwnerUsername: "alice"})
+	old, _ := s.CreateAsset(ctx, Asset{ID: "a", ProjectID: "p", OwnerUsername: "alice", Type: AssetCharacter, Name: "甲", Prompt: "保留图词", Voice: "保留音色", Extra: map[string]string{"image_path": "保留图"}})
+	repo := NewMemoryAuthoringRepository()
+	svc := AuthoringService{Store: s, Repository: repo}
+	state, _ := svc.Load(ctx, "alice", "p")
+	state.Proposals = []AssistantProposal{{ID: "old", Status: "pending", Revision: 1, Actions: []AuthoringAction{{Kind: "asset", TargetID: "a", ExpectedRevision: old.Revision, Asset: &Asset{Type: AssetCharacter, Name: "甲", Description: "缺少其他字段"}}}}}
+	state, e := svc.Save(ctx, "alice", "p", state, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = svc.Apply(ctx, "alice", "p", "old", state.Revision, true); e == nil {
+		t.Fatal("legacy incomplete proposal applied")
+	}
+	rows, _ := s.ListAssets(ctx, "alice", "p", "")
+	before, _ := json.Marshal(old)
+	after, _ := json.Marshal(rows[0])
+	if string(before) != string(after) {
+		t.Fatal("legacy action cleared data", rows)
+	}
+}

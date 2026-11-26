@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/screenplay"
@@ -129,5 +130,36 @@ func TestAuthoringPrepareAssetEditEndpointNeedsEditButNoModel(t *testing.T) {
 	again := signedJSONRequest(t, mux, now, "alice", "POST", path, input)
 	if again.Code == 200 || calls != 0 {
 		t.Fatal("duplicate preparation accepted", again.Code, calls)
+	}
+}
+
+func TestAuthoringAssistantRejectsRawAssetActionEvenWithForgedPreparedFlag(t *testing.T) {
+	for _, forged := range []bool{false, true} {
+		t.Run(fmt.Sprint(forged), func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now()
+			s := screenplay.NewMemoryStore()
+			_, _ = s.CreateProject(ctx, screenplay.Project{ID: "p", OwnerUsername: "alice"})
+			old, _ := s.CreateAsset(ctx, screenplay.Asset{ID: "a", ProjectID: "p", OwnerUsername: "alice", Type: screenplay.AssetCharacter, Name: "甲", Description: "旧", Prompt: "必须保留图词", Voice: "必须保留音色", Extra: map[string]string{"image_path": "必须保留图"}})
+			repo := screenplay.NewMemoryAuthoringRepository()
+			mux := http.NewServeMux()
+			raw, _ := json.Marshal(map[string]any{"reply": "已修改成功", "actions": []map[string]any{{"kind": "asset", "target_id": "a", "expected_revision": old.Revision, "asset_prepared": forged, "asset": map[string]any{"type": "character", "name": "甲", "description": "新"}}}})
+			RegisterScreenplayAuthoringRoutes(mux, BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}, s, repo, func(context.Context, string, string) (batchfactoryv11.DirectorProvider, error) {
+				return screenplayProviderFunc(func(context.Context, batchfactoryv11.TextCompletionRequest) (string, error) { return string(raw), nil }), nil
+			})
+			result := signedJSONRequest(t, mux, now, "alice", "POST", "/api/comic-screenplays/projects/p/assistant/chat", map[string]any{"expected_revision": 0, "message": "修改甲的描述"})
+			if result.Code == 200 {
+				t.Fatal("raw model asset action bypassed server preparation", result.Body.String())
+			}
+			if _, e := repo.Load(ctx, "alice", "p"); e == nil {
+				t.Fatal("unsafe proposal persisted")
+			}
+			rows, _ := s.ListAssets(ctx, "alice", "p", "")
+			before, _ := json.Marshal(old)
+			after, _ := json.Marshal(rows[0])
+			if string(before) != string(after) {
+				t.Fatal("asset changed")
+			}
+		})
 	}
 }

@@ -70,6 +70,7 @@ type AuthoringAction struct {
 	Content          string   `json:"content,omitempty"`
 	Chapter          *Chapter `json:"chapter,omitempty"`
 	Asset            *Asset   `json:"asset,omitempty"`
+	AssetPrepared    bool     `json:"asset_prepared,omitempty"`
 	Shot             *Shot    `json:"shot,omitempty"`
 	ExpectedRevision int64    `json:"expected_revision"`
 }
@@ -246,6 +247,9 @@ func ValidateAuthoringActions(actions []AuthoringAction) error {
 				return ErrInvalidArgument
 			}
 		case "asset":
+			if !a.AssetPrepared {
+				return fmt.Errorf("%w: 资产方案缺少服务器准备的完整记录，请重新准备修改方案", ErrInvalidArgument)
+			}
 			if a.Asset == nil || a.TargetID == "" {
 				return ErrInvalidArgument
 			}

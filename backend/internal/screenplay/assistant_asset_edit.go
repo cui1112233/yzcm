@@ -188,6 +188,6 @@ func PrepareAssistantAssetEdit(ctx context.Context, store Store, owner, project,
 	if !changed {
 		return fail("没有需要修改的字段")
 	}
-	action := AuthoringAction{Kind: "asset", TargetID: found.ID, Asset: &desired, ExpectedRevision: found.Revision}
+	action := AuthoringAction{Kind: "asset", TargetID: found.ID, Asset: &desired, AssetPrepared: true, ExpectedRevision: found.Revision}
 	return action, fmt.Sprintf("修改%s「%s」", label, found.Name), nil
 }

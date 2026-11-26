@@ -19,7 +19,7 @@ func TestMySQLAuthoringAssetCommitRollsBackIfProposalSaveFails(t *testing.T) {
 			defer db.Close()
 			store := NewMySQLStore(db)
 			repo := store.AuthoringRepository()
-			state := AuthoringState{Owner: "alice", ProjectID: "p", Revision: 5, Proposals: []AssistantProposal{{ID: "proposal", Status: "pending", Revision: 5, Actions: []AuthoringAction{{Kind: "asset", TargetID: "asset", ExpectedRevision: 2, Asset: &Asset{Type: AssetCharacter, Name: "甲", Description: "新描述", Prompt: "保留图词"}}}}}}
+			state := AuthoringState{Owner: "alice", ProjectID: "p", Revision: 5, Proposals: []AssistantProposal{{ID: "proposal", Status: "pending", Revision: 5, Actions: []AuthoringAction{{Kind: "asset", AssetPrepared: true, TargetID: "asset", ExpectedRevision: 2, Asset: &Asset{Type: AssetCharacter, Name: "甲", Description: "新描述", Prompt: "保留图词"}}}}}}
 			body, _ := json.Marshal(state)
 			m.ExpectBegin()
 			m.ExpectQuery("SELECT id FROM screenplay_projects").WithArgs("p", "alice").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("p"))
@@ -84,7 +84,7 @@ func TestAuthoringAssetAtomicFailureNeverFallsBackToSeparateWrites(t *testing.T)
 	repo := NewMemoryAuthoringRepository()
 	svc := AuthoringService{Store: s, Repository: repo}
 	state, _ := svc.Load(ctx, "alice", "p")
-	state.Proposals = []AssistantProposal{{ID: "proposal", Status: "pending", Revision: 1, Actions: []AuthoringAction{{Kind: "asset", TargetID: "a", Asset: &desired, ExpectedRevision: asset.Revision}}}}
+	state.Proposals = []AssistantProposal{{ID: "proposal", Status: "pending", Revision: 1, Actions: []AuthoringAction{{Kind: "asset", AssetPrepared: true, TargetID: "a", Asset: &desired, ExpectedRevision: asset.Revision}}}}
 	state, e := svc.Save(ctx, "alice", "p", state, 0)
 	if e != nil {
 		t.Fatal(e)

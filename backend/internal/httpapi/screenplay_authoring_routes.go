@@ -536,6 +536,7 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 						return screenplay.ErrAIInvalidJSON
 					}
 					toolRuns := []screenplay.AssistantToolRun{}
+					assetPrepared := false
 					if strings.TrimSpace(parsed.Tool) != "" && !screenplay.IsAssistantAssetEditTool(parsed.Tool) {
 						if len(parsed.Actions) > 0 {
 							return screenplay.ErrInvalidArgument
@@ -571,8 +572,14 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 							return editErr
 						}
 						parsed = assistantWire{Reply: "已准备" + summary + "的方案，请核对后确认应用；当前资产尚未修改。", Summary: summary, Actions: []screenplay.AuthoringAction{action}}
+						assetPrepared = true
 					}
 					if len(parsed.Actions) > 0 {
+						for _, action := range parsed.Actions {
+							if action.Kind == "asset" && !assetPrepared {
+								return fmt.Errorf("%w: 资产修改必须通过服务器工具准备", screenplay.ErrInvalidArgument)
+							}
+						}
 						if len(parsed.Actions) > 1 {
 							return screenplay.ErrInvalidArgument
 						}
