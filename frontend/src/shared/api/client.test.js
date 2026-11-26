@@ -74,7 +74,7 @@ test('business writes use the tab-confirmed actor and explicit switch state even
       ['/api/business', 'actor', 'verified-id', 'Bearer actor-session'],
       ['/api/business', 'actor', 'verified-id', 'Bearer other-tab-session'],
       ['/api/business', null, null, 'Bearer other-tab-session'],
-      ['/api/account-impersonation/current', null, null, 'Bearer other-tab-session']
+      ['/api/account-impersonation/current', 'actor', 'verified-id', 'Bearer other-tab-session']
     ]);
   } finally {
     globalThis.localStorage = previousStorage;

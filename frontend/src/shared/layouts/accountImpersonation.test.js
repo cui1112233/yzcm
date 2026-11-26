@@ -7,9 +7,9 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { getAccountImpersonation, startAccountImpersonation, stopAccountImpersonation } from '../api/accountImpersonation.js';
 
-async function loadLocalModule(file, companion) {
+async function loadLocalModule(file, ...companions) {
   const result = await build({
-    ...(companion ? { stdin: { contents: `export * from ${JSON.stringify(file)};\nexport * from ${JSON.stringify(companion)};`, resolveDir: fileURLToPath(new URL('.', import.meta.url)) } }
+    ...(companions.length ? { stdin: { contents: [file, ...companions].map(module => `export * from ${JSON.stringify(module)};`).join('\n'), resolveDir: fileURLToPath(new URL('.', import.meta.url)) } }
       : { entryPoints: [fileURLToPath(new URL(file, import.meta.url))] }),
     platform: 'node', packages: 'external', format: 'cjs', bundle: true, write: false,
     jsx: 'automatic', loader: { '.css': 'empty' }
@@ -38,6 +38,52 @@ test('reads, starts and stops the server-managed switch with the login session c
     ['/api/account-impersonation/current', 'DELETE', 'same-origin']
   ]);
   assert.deepEqual(JSON.parse(requests[1][1].body), { username: 'member' });
+});
+
+test('successful start and exit block old-page writes and discard a late status response', async () => {
+  const api = await loadLocalModule('../api/accountImpersonation.js', '../api/client.js', '../api/accountImpersonationState.js');
+  const originalStorage = globalThis.localStorage;
+  const originalFetch = globalThis.fetch;
+  globalThis.localStorage = { getItem: key => key === 'auth_token' ? 'actor-session' : null };
+  let releaseStatus;
+  let pending;
+  try {
+    for (const action of ['start', 'stop']) {
+      const wasActive = action === 'stop';
+      const oldStatus = { actorUsername: 'actor', active: wasActive, canSwitch: !wasActive, ...(wasActive ? { impersonationId: 'switch-one', subject: { username: 'subject' } } : {}) };
+      const expectation = { actorUsername: 'actor', username: oldStatus.subject?.username || 'actor', impersonationId: oldStatus.impersonationId || 'none' };
+      const writes = [];
+      globalThis.fetch = (path, options) => {
+        const response = payload => new Response(JSON.stringify(payload), { headers: { 'Content-Type': 'application/json' } });
+        if (options.method === 'GET') return new Promise(resolve => { releaseStatus = () => resolve(response(oldStatus)); });
+        const headerNames = ['X-Qiantie-Expected-Actor', 'X-Qiantie-Expected-Impersonation'];
+        writes.push([path, ...headerNames.map(header => options.headers.get(header))]);
+        return Promise.resolve(response({ active: !wasActive }));
+      };
+      api.setVerifiedImpersonation(null);
+      api.setVerifiedImpersonation(expectation);
+      const oldGeneration = api.getPageIdentityGeneration();
+      pending = api.getAccountImpersonation();
+      if (wasActive) await api.stopAccountImpersonation();
+      else await api.startAccountImpersonation('subject');
+
+      const write = () => api.apiRequest('/api/business', { method: 'POST' });
+      await assert.rejects(write(), { code: 'IMPERSONATION_UNCONFIRMED' });
+      releaseStatus();
+      const lateStatus = await pending;
+      assert.equal(lateStatus.active, wasActive);
+      assert.equal(api.setVerifiedImpersonation(expectation, 'actor-session', oldGeneration), false);
+      assert.equal(api.setVerifiedImpersonation(expectation, 'actor-session', api.getPageIdentityGeneration()), false);
+      await assert.rejects(write(), { code: 'IMPERSONATION_UNCONFIRMED' });
+      assert.deepEqual(writes, [[wasActive ? '/api/account-impersonation/current' : '/api/account-impersonation', 'actor', expectation.impersonationId]]);
+    }
+  } finally {
+    releaseStatus?.();
+    await pending?.catch(() => {});
+    if (originalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalStorage;
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('personal-center business content waits for a confirmed status and has a retry path', async () => {

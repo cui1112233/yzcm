@@ -375,6 +375,83 @@ func TestImpersonationRejectsCrossTabActorAndSwitchChanges(t *testing.T) {
 	}
 }
 
+func TestImpersonationControlsRejectStalePageWithoutChangingCurrentSession(t *testing.T) {
+	router, store, _ := newImpersonationTestRouter(t)
+	control := func(method, path, expectedActor, expectedID string, cookie *http.Cookie) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, strings.NewReader(`{"username":"member"}`))
+		r.Header.Set("Authorization", "Bearer dev")
+		r.Header.Set("X-Qiantie-Expected-Actor", expectedActor)
+		r.Header.Set("X-Qiantie-Expected-Impersonation", expectedID)
+		if cookie != nil {
+			r.AddCookie(cookie)
+		}
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, r)
+		return w
+	}
+	if w := control(http.MethodPost, impersonationTestPath, "founder", "none", nil); w.Code != http.StatusConflict || len(store.sessions) != 0 || len(w.Result().Cookies()) != 0 {
+		t.Errorf("cross-tab start = %d %s, sessions = %d, Set-Cookie headers = %d", w.Code, w.Body, len(store.sessions), len(w.Result().Cookies()))
+	}
+	router, store, _ = newImpersonationTestRouter(t)
+	if w := control(http.MethodPost, impersonationTestPath, "dev", strings.Repeat("A", 43), nil); w.Code != http.StatusConflict || len(store.sessions) != 0 || len(w.Result().Cookies()) != 0 {
+		t.Fatalf("start from a switched expectation = %d %s, sessions = %d", w.Code, w.Body, len(store.sessions))
+	}
+	started := control(http.MethodPost, impersonationTestPath, "dev", "none", nil)
+	if started.Code != http.StatusCreated || len(started.Result().Cookies()) != 1 || len(store.sessions) != 1 {
+		t.Fatalf("matching start = %d %s", started.Code, started.Body)
+	}
+	var id string
+	for _, session := range store.sessions {
+		id = session.ID
+	}
+	cookie := started.Result().Cookies()[0]
+	if w := control(http.MethodDelete, impersonationCurrentTestPath, "dev", id, nil); w.Code != http.StatusConflict || len(store.sessions) != 1 || len(w.Result().Cookies()) != 0 {
+		t.Fatalf("stop without the current cookie = %d %s, sessions = %d", w.Code, w.Body, len(store.sessions))
+	}
+	for _, tc := range []struct{ actor, id string }{{"founder", id}, {"dev", "none"}, {"dev", strings.Repeat("A", 43)}} {
+		if w := control(http.MethodDelete, impersonationCurrentTestPath, tc.actor, tc.id, cookie); w.Code != http.StatusConflict || len(store.sessions) != 1 || len(w.Result().Cookies()) != 0 {
+			t.Fatalf("stale stop = %d %s, sessions = %d, Set-Cookie headers = %d", w.Code, w.Body, len(store.sessions), len(w.Result().Cookies()))
+		}
+	}
+	if w := control(http.MethodDelete, impersonationCurrentTestPath, "dev", id, cookie); w.Code != http.StatusOK || len(store.sessions) != 0 || len(w.Result().Cookies()) != 1 || w.Result().Cookies()[0].MaxAge >= 0 {
+		t.Fatalf("matching stop = %d %s", w.Code, w.Body)
+	}
+}
+
+func TestImpersonationRejectsBlankOrMalformedExpectationHeaders(t *testing.T) {
+	router, _, _ := newImpersonationTestRouter(t)
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+	}{
+		{"actor only empty", map[string]string{"X-Qiantie-Expected-Actor": ""}},
+		{"switch only whitespace", map[string]string{"X-Qiantie-Expected-Impersonation": " \t "}},
+		{"both blank", map[string]string{"X-Qiantie-Expected-Actor": " ", "X-Qiantie-Expected-Impersonation": ""}},
+		{"actor blank", map[string]string{"X-Qiantie-Expected-Actor": "", "X-Qiantie-Expected-Impersonation": "none"}},
+		{"switch blank", map[string]string{"X-Qiantie-Expected-Actor": "founder", "X-Qiantie-Expected-Impersonation": " "}},
+		{"switch malformed", map[string]string{"X-Qiantie-Expected-Actor": "founder", "X-Qiantie-Expected-Impersonation": strings.Repeat("!", 43)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, path := range []string{impersonationBusinessTestPath, impersonationTestPath, impersonationCurrentTestPath} {
+				method := http.MethodPost
+				if path == impersonationCurrentTestPath {
+					method = http.MethodDelete
+				}
+				r := httptest.NewRequest(method, path, strings.NewReader(`{"username":"member"}`))
+				r.Header.Set("Authorization", "Bearer founder")
+				for name, value := range tc.headers {
+					r.Header.Set(name, value)
+				}
+				w := httptest.NewRecorder()
+				router.ServeHTTP(w, r)
+				if w.Code != http.StatusConflict || len(w.Result().Cookies()) != 0 {
+					t.Errorf("%s %s = %d %s, Set-Cookie headers = %d", method, path, w.Code, w.Body, len(w.Result().Cookies()))
+				}
+			}
+		})
+	}
+}
+
 func TestImpersonationBlocksV11AndV12CredentialWrites(t *testing.T) {
 	registry := batchfactoryv11.NewMemoryVideoProviderRegistry()
 	credentials := external.NewMemoryStore()

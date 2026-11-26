@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"net"
 	"net/http"
@@ -45,6 +46,32 @@ type impersonationStatus struct {
 type impersonationSubject struct {
 	Username    string `json:"username"`
 	DisplayName string `json:"displayName"`
+}
+
+type impersonationExpectation struct{ actor, id string }
+
+func readImpersonationExpectation(r *http.Request) (impersonationExpectation, bool) {
+	actors, actorPresent := r.Header[expectedActorHeader]
+	ids, idPresent := r.Header[expectedImpersonationHeader]
+	if !actorPresent && !idPresent {
+		return impersonationExpectation{}, true
+	}
+	if len(actors) != 1 || len(ids) != 1 {
+		return impersonationExpectation{}, false
+	}
+	expected := impersonationExpectation{actor: strings.TrimSpace(actors[0]), id: strings.TrimSpace(ids[0])}
+	if expected.actor == "" {
+		return impersonationExpectation{}, false
+	}
+	if expected.id != noImpersonationExpected {
+		if len(expected.id) != base64.RawURLEncoding.EncodedLen(32) {
+			return impersonationExpectation{}, false
+		}
+		if _, err := base64.RawURLEncoding.Strict().DecodeString(expected.id); err != nil {
+			return impersonationExpectation{}, false
+		}
+	}
+	return expected, true
 }
 
 func (s accountImpersonation) register(root *http.ServeMux) {
@@ -152,6 +179,11 @@ func (s accountImpersonation) active(r *http.Request, actor accountcenter.Identi
 func (s accountImpersonation) start(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	identity, _ := AccountCenterIdentityFromContext(r.Context())
+	expected, valid := readImpersonationExpectation(r)
+	if !valid || expected.actor != "" && (expected.actor != identity.Actor.Username || expected.id != noImpersonationExpected) {
+		writeImpersonationConflict(w)
+		return
+	}
 	if _, err := s.find(r, identity.Actor.Username); err == nil {
 		writeAuthError(w, http.StatusConflict, "请先退出当前切换")
 		return
@@ -242,7 +274,17 @@ func (s accountImpersonation) status(w http.ResponseWriter, r *http.Request) {
 func (s accountImpersonation) stop(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	identity, _ := AccountCenterIdentityFromContext(r.Context())
-	if err := s.end(r, identity.Actor); err != nil {
+	expected, valid := readImpersonationExpectation(r)
+	if !valid || expected.actor != "" && (expected.actor != identity.Actor.Username || expected.id == noImpersonationExpected) {
+		writeImpersonationConflict(w)
+		return
+	}
+	err := s.end(r, identity.Actor, expected.id)
+	if errors.Is(err, accountcenter.ErrConflict) {
+		writeImpersonationConflict(w)
+		return
+	}
+	if err != nil {
 		writeImpersonationUnavailable(w)
 		return
 	}
@@ -250,16 +292,25 @@ func (s accountImpersonation) stop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, inactiveImpersonationStatus(identity.Actor))
 }
 
-func (s accountImpersonation) end(r *http.Request, actor accountcenter.Identity) error {
+func (s accountImpersonation) end(r *http.Request, actor accountcenter.Identity, expectedID string) error {
 	session, err := s.find(r, actor.Username)
 	if errors.Is(err, accountcenter.ErrNotFound) {
+		if expectedID != "" {
+			return accountcenter.ErrConflict
+		}
 		return nil
 	}
 	if err != nil {
 		return err
 	}
+	if expectedID != "" && expectedID != session.ID {
+		return accountcenter.ErrConflict
+	}
 	if err := s.auth.AccountCenterStore.RevokeImpersonation(r.Context(), session.ID, actor.Username, s.now()); err != nil {
 		if errors.Is(err, accountcenter.ErrNotFound) {
+			if expectedID != "" {
+				return accountcenter.ErrConflict
+			}
 			return nil
 		}
 		return err
@@ -283,16 +334,16 @@ func (s accountImpersonation) middleware(root *http.ServeMux, next http.Handler)
 			next.ServeHTTP(w, r)
 			return
 		}
-		expectedActor, expectedID := "", ""
+		var expected impersonationExpectation
 		if impersonationWriteMethod(r.Method) && r.URL.Path != "/api/login/logout" {
-			expectedActor = strings.TrimSpace(r.Header.Get(expectedActorHeader))
-			expectedID = strings.TrimSpace(r.Header.Get(expectedImpersonationHeader))
+			var valid bool
+			expected, valid = readImpersonationExpectation(r)
+			if !valid || expected.actor != "" && bearerToken(r) == "" {
+				writeImpersonationConflict(w)
+				return
+			}
 		}
-		hasExpectation := expectedActor != "" || expectedID != ""
-		if hasExpectation && (expectedActor == "" || expectedID == "" || bearerToken(r) == "") {
-			writeImpersonationConflict(w)
-			return
-		}
+		hasExpectation := expected.actor != ""
 		_, cookieErr := r.Cookie(impersonationCookieName)
 		if !hasExpectation && (s.auth.AccountCenterStore == nil || bearerToken(r) == "" || cookieErr != nil) {
 			next.ServeHTTP(w, r)
@@ -308,7 +359,7 @@ func (s accountImpersonation) middleware(root *http.ServeMux, next http.Handler)
 				if resolved, resolveErr := s.auth.AccountCenterStore.ResolveIdentity(r.Context(), actor.Username); resolveErr == nil {
 					logoutActor = resolved
 				}
-				_ = s.end(r, logoutActor)
+				_ = s.end(r, logoutActor, "")
 			}
 			clearImpersonationCookie(w, r)
 			next.ServeHTTP(w, r)
@@ -319,12 +370,12 @@ func (s accountImpersonation) middleware(root *http.ServeMux, next http.Handler)
 			writeAuthError(w, http.StatusUnauthorized, "登录已失效，请重新登录")
 			return
 		}
-		if hasExpectation && expectedActor != actor.Username {
+		if hasExpectation && expected.actor != actor.Username {
 			writeImpersonationConflict(w)
 			return
 		}
 		if cookieErr != nil {
-			if expectedID != noImpersonationExpected {
+			if expected.id != noImpersonationExpected {
 				writeImpersonationConflict(w)
 				return
 			}
@@ -357,7 +408,7 @@ func (s accountImpersonation) middleware(root *http.ServeMux, next http.Handler)
 			}
 			return
 		}
-		if hasExpectation && expectedID != active.identity.ImpersonationID {
+		if hasExpectation && expected.id != active.identity.ImpersonationID {
 			writeImpersonationConflict(w)
 			return
 		}

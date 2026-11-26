@@ -2,6 +2,7 @@ import { Alert, Avatar, Button, Input, Modal, Spin, message } from 'antd';
 import { ChartNoAxesCombined, ChevronLeft, Crown, ExternalLink, KeyRound, LogOut, ShieldCheck, UserRound, UsersRound } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { getAccountImpersonation, startAccountImpersonation, stopAccountImpersonation } from '../api/accountImpersonation.js';
+import { getPageIdentityGeneration } from '../api/accountImpersonationState.js';
 import { setEffectiveImpersonationAccount } from '../api/auth';
 import { getToken } from '../api/client';
 import { Link } from '../components/Link';
@@ -53,11 +54,12 @@ export function useAccountImpersonation(enabled) {
       clearTimeout(timer);
       currentRequest?.abort();
       const request = new AbortController();
+      const generation = getPageIdentityGeneration();
       currentRequest = request;
       setSnapshot(previous => previous.token === token && previous.error ? { ...previous, error: '' } : previous);
       try {
         const next = await getAccountImpersonation(request.signal);
-        if (request.signal.aborted || getToken() !== token) return;
+        if (request.signal.aborted || generation !== getPageIdentityGeneration() || getToken() !== token) return;
         if (!next?.actorUsername || typeof next.active !== 'boolean' || typeof next.canSwitch !== 'boolean' ||
           (next.active && (!next.impersonationId || !next.subject?.username))) {
           throw new Error('无法确认账号切换状态');
@@ -66,7 +68,7 @@ export function useAccountImpersonation(enabled) {
           actorUsername: next.actorUsername,
           username: next.active ? next.subject.username : next.actorUsername,
           impersonationId: next.active ? next.impersonationId : 'none'
-        }, token);
+        }, token, generation);
         if (!accepted) {
           reload();
           return;
@@ -75,7 +77,7 @@ export function useAccountImpersonation(enabled) {
         setSnapshot({ token, status: next, error: '' });
         if (next.active) timer = setTimeout(refresh, Math.min(30, next.expiresInSeconds || 1) * 1000);
       } catch {
-        if (request.signal.aborted) return;
+        if (request.signal.aborted || generation !== getPageIdentityGeneration()) return;
         if (getToken() !== token) {
           setSnapshot({ token: '', status: null, error: '' });
           return;
@@ -122,7 +124,6 @@ export function AccountImpersonationBanner({ status }) {
     setBusy(true);
     try {
       await stopAccountImpersonation();
-      // Until reload replaces the old page, its in-flight actions still expect this switch.
       reloadForAccountSwitch();
     } catch (error) {
       message.error(error.message || '退出账号切换失败');

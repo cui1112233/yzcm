@@ -22,8 +22,8 @@ export function setToken(token) {
   }
 }
 
-export function setVerifiedImpersonation(identity, token = getToken()) {
-  return token === getToken() && rememberVerifiedImpersonation(identity, token);
+export function setVerifiedImpersonation(identity, token = getToken(), generation) {
+  return token === getToken() && rememberVerifiedImpersonation(identity, token, generation);
 }
 
 export function getVerifiedImpersonation() {
