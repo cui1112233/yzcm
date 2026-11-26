@@ -34,6 +34,7 @@ const navItems = [
   // document navigation so the SPA cannot swap in a stale React-only page.
   { href: '/novel-fetch', icon: BookOpen, label: '批量测书', reload: true },
   { href: '/novel-creation', icon: FilePenLine, label: '小说创作' },
+  { href: '/script-editor', icon: FilePenLine, label: '剧本编辑' },
   { href: '/batch-factory', icon: Clapperboard, label: '水货生产' },
   { href: '/comic-screenplay', icon: FilePenLine, label: '漫剧创作' },
   { href: '/agent', icon: Bot, label: 'CM 画布' },

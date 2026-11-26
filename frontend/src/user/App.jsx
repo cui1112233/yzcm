@@ -24,6 +24,7 @@ const AICutPage = lazy(() => import('./pages/AICutPage'));
 const AICutLibraryPage = lazy(() => import('./pages/AICutLibraryPage'));
 const ComicScreenplayPage = lazy(() => import('./pages/ComicScreenplayPage'));
 const NovelCreationPage = lazy(() => import('./pages/NovelCreationPage'));
+const ScriptEditorPage = lazy(() => import('./pages/ScriptEditorPage'));
 const PluginRewritePage = lazy(() => import('./pages/PluginRewritePage'));
 const PluginToolPage = lazy(() => import('./pages/PluginToolPage'));
 const MemberCenterPage = lazy(() => import('./pages/MemberCenterPage'));
@@ -79,6 +80,7 @@ function getPage(pathname) {
     '/novel-fetch-react': NovelFetchPage,
     '/novel-fetch-workshop': NovelFetchPage,
     '/novel-creation': NovelCreationPage,
+    '/script-editor': ScriptEditorPage,
     // The cover-based project library is the only Batch Factory entry.
     '/batch-factory': ShuihuoProductionPage,
     '/agent': AgentPage,
