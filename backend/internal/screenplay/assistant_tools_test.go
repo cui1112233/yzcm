@@ -108,3 +108,70 @@ func TestAssistantReadToolsBoundResultsAndRespectPromptFilter(t *testing.T) {
 		t.Fatal("missing requested shot silently ignored")
 	}
 }
+
+func TestAssistantReadShotIDsScopedAndStrict(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+	for _, p := range []string{"p", "other"} {
+		_, _ = s.CreateProject(ctx, Project{ID: p, OwnerUsername: "alice"})
+	}
+	for _, b := range []struct {
+		p      string
+		n      int
+		engine StoryboardEngine
+		id     string
+	}{{"p", 1, EngineXiaoluoV7, "one"}, {"p", 2, EngineXiaoluoV7, "episode-two"}, {"p", 1, EngineXiaoyunqueV3, "engine-other"}, {"other", 1, EngineXiaoluoV7, "foreign"}} {
+		_, e := s.SaveStoryboard(ctx, Storyboard{ProjectID: b.p, OwnerUsername: "alice", EpisodeNo: b.n, Engine: b.engine, Shots: []StoryboardShot{{ID: b.id, Seq: 1, VideoDesc: b.id}, {ID: b.id + "-2", Seq: 2, VideoDesc: b.id + "-2"}}})
+		if e != nil {
+			t.Fatal(e)
+		}
+	}
+	for _, tool := range []string{"get_shot_numbers", "read_shot_video_prompts", "read_shot_image_prompts", "get_all_shots_voicetext"} {
+		raw, _ := json.Marshal(map[string]any{"episode_no": 1, "engine": EngineXiaoluoV7, "shot_ids": []string{"one-2", "one"}})
+		run, data, e := ReadAssistantTool(ctx, s, "alice", "p", tool, raw)
+		if e != nil || !run.OK {
+			t.Fatalf("%s: %v", tool, e)
+		}
+		rows := data["shots"].([]map[string]any)
+		if len(rows) != 2 || rows[0]["id"] != "one" || rows[1]["id"] != "one-2" {
+			t.Fatal(data)
+		}
+	}
+	for _, ids := range []any{[]string{"one", "missing"}, []string{"foreign"}, []string{"episode-two"}, []string{"engine-other"}, []string{""}, []string{" one "}, []string{strings.Repeat("x", 257)}, []string{}, nil, []any{1}, []any{nil}, strings.Split(strings.Repeat("one,", 200)+"one", ",")} {
+		raw, _ := json.Marshal(map[string]any{"episode_no": 1, "engine": EngineXiaoluoV7, "shot_ids": ids})
+		if _, _, e := ReadAssistantTool(ctx, s, "alice", "p", "read_shot_video_prompts", raw); e == nil {
+			t.Fatalf("invalid IDs accepted: %s", raw)
+		}
+	}
+	for _, raw := range []string{`{"shot_ids":["one"],"shot_numbers":[1]}`, `{"shot_ids":["one"],"shot_id":"one"}`, `{"shot_ids":["one"],"shot_numbers":[]}`} {
+		if _, _, e := ReadAssistantTool(ctx, s, "alice", "p", "read_shot_video_prompts", json.RawMessage(raw)); e == nil {
+			t.Fatal("mixed selectors accepted", raw)
+		}
+	}
+	for _, tool := range []string{"get_shot_detail", "read_assets", "get_current_screenplay", "analyze_screenplay", "get_editor_status"} {
+		if _, _, e := ReadAssistantTool(ctx, s, "alice", "p", tool, json.RawMessage(`{"shot_id":"one","shot_ids":["one"]}`)); e == nil {
+			t.Fatal("ignored shot_ids", tool)
+		}
+	}
+}
+
+func TestAssistantReadShotIDsAcceptsBoundaryWithoutExpanding(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+	_, _ = s.CreateProject(ctx, Project{ID: "p", OwnerUsername: "alice"})
+	ids := make([]string, 200)
+	shots := make([]StoryboardShot, 201)
+	for i := range shots {
+		id := string(rune(0x4e00 + i))
+		shots[i] = StoryboardShot{ID: id, Seq: i + 1}
+		if i < 200 {
+			ids[i] = id
+		}
+	}
+	_, _ = s.SaveStoryboard(ctx, Storyboard{ProjectID: "p", OwnerUsername: "alice", EpisodeNo: 1, Engine: EngineXiaoluoV7, Shots: shots})
+	raw, _ := json.Marshal(map[string]any{"shot_ids": ids})
+	_, data, e := ReadAssistantTool(ctx, s, "alice", "p", "get_shot_numbers", raw)
+	if e != nil || data["matched_total"] != 200 || len(data["shots"].([]map[string]any)) != 200 {
+		t.Fatal(data, e)
+	}
+}

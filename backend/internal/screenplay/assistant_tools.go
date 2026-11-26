@@ -16,6 +16,7 @@ type assistantReadArgs struct {
 	Episode       int              `json:"episode_no"`
 	Engine        StoryboardEngine `json:"engine"`
 	ShotID        string           `json:"shot_id"`
+	ShotIDs       []string         `json:"shot_ids"`
 	ShotNumbers   []int            `json:"shot_numbers"`
 	AssetType     string           `json:"asset_type"`
 	Name          string           `json:"name"`
@@ -56,6 +57,31 @@ func ReadAssistantTool(ctx context.Context, store Store, owner, project, name st
 	var tail any
 	if dec.Decode(&tail) != io.EOF {
 		return invalid("工具参数必须是一个对象")
+	}
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &fields)
+	wantedIDs := map[string]bool{}
+	if _, hasIDs := fields["shot_ids"]; hasIDs {
+		switch name {
+		case "get_shot_numbers", "read_shot_video_prompts", "read_shot_image_prompts", "get_all_shots_voicetext":
+		default:
+			return invalid("此工具不接受shot_ids；镜头详情请使用单个shot_id")
+		}
+		if _, mixed := fields["shot_numbers"]; mixed {
+			return invalid("shot_ids不能与shot_numbers混用")
+		}
+		if _, mixed := fields["shot_id"]; mixed {
+			return invalid("shot_ids不能与shot_id混用")
+		}
+		if len(args.ShotIDs) == 0 || len(args.ShotIDs) > 200 {
+			return invalid("shot_ids必须是1至200个真实镜头ID的字符串数组")
+		}
+		for _, id := range args.ShotIDs {
+			if id == "" || strings.TrimSpace(id) != id || len(id) > 256 {
+				return invalid("镜头ID必须是1至256字节的真实字符串，不能含首尾空白")
+			}
+			wantedIDs[id] = true
+		}
 	}
 	if args.Episode < 0 || len(args.ShotNumbers) > 200 || len(args.ShotID) > 256 || len(args.Name) > 256 || len(args.Focus) > 2048 || len(args.Engine) > 128 {
 		return invalid("工具筛选条件超出范围")
@@ -187,10 +213,14 @@ func ReadAssistantTool(ctx context.Context, store Store, owner, project, name st
 	rows := []map[string]any{}
 	matched := 0
 	foundNumbers := map[int]bool{}
+	foundIDs := map[string]bool{}
 	if name == "get_shot_detail" && args.ShotID == "" {
 		return invalid("请指定真实shot_id")
 	}
 	for _, shot := range board.Shots {
+		if len(wantedIDs) > 0 && !wantedIDs[shot.ID] {
+			continue
+		}
 		if args.ShotID != "" && shot.ID != args.ShotID {
 			continue
 		}
@@ -202,6 +232,7 @@ func ReadAssistantTool(ctx context.Context, store Store, owner, project, name st
 			return invalid("保存的镜头编号超出范围")
 		}
 		foundNumbers[shot.Seq] = true
+		foundIDs[shot.ID] = true
 		if len(rows) >= 200 || budget <= 0 {
 			data["truncated"] = true
 			continue
@@ -240,6 +271,11 @@ func ReadAssistantTool(ctx context.Context, store Store, owner, project, name st
 	for n := range wanted {
 		if !foundNumbers[n] {
 			return run, nil, fmt.Errorf("%w: 请求的镜头序号%d不存在", ErrNotFound, n)
+		}
+	}
+	for id := range wantedIDs {
+		if !foundIDs[id] {
+			return run, nil, fmt.Errorf("%w: 请求的镜头ID不在当前作品及所选剧集和引擎中", ErrNotFound)
 		}
 	}
 	data["shots"] = rows

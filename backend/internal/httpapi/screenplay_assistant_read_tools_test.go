@@ -132,3 +132,34 @@ func TestAuthoringReadToolEndpointNeedsNoModelAndChecksMembership(t *testing.T) 
 		t.Fatal("read-only member could not inspect", res.Code, res.Body.String(), calls)
 	}
 }
+
+func TestAuthoringReadToolShotIDsUseAuthenticatedScope(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	s := screenplay.NewMemoryStore()
+	repo := screenplay.NewMemoryAuthoringRepository()
+	for _, owner := range []string{"alice", "bob"} {
+		_, _ = s.CreateProject(ctx, screenplay.Project{ID: "p", OwnerUsername: owner})
+		_, _ = s.SaveStoryboard(ctx, screenplay.Storyboard{ProjectID: "p", OwnerUsername: owner, EpisodeNo: 1, Engine: screenplay.EngineXiaoluoV7, Shots: []screenplay.StoryboardShot{{ID: owner + "-shot", Seq: 1, VideoDesc: owner + "视频"}, {ID: owner + "-other", Seq: 2, VideoDesc: owner + "未选"}}})
+	}
+	mux := http.NewServeMux()
+	RegisterScreenplayAuthoringRoutes(mux, BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}, s, repo, nil)
+	for _, tc := range []struct {
+		id string
+		ok bool
+	}{{"alice-shot", true}, {"bob-shot", false}, {"missing", false}} {
+		res := signedJSONRequest(t, mux, now, "alice", "POST", "/api/comic-screenplays/projects/p/assistant/read-tool", map[string]any{"tool": "read_shot_video_prompts", "tool_args": map[string]any{"episode_no": 1, "engine": screenplay.EngineXiaoluoV7, "shot_ids": []string{tc.id}}})
+		if (res.Code == 200) != tc.ok {
+			t.Fatal(tc, res.Code, res.Body.String())
+		}
+		if strings.Contains(res.Body.String(), "bob视频") || strings.Contains(res.Body.String(), "alice未选") {
+			t.Fatal("scope leak", res.Body.String())
+		}
+		if tc.ok && !strings.Contains(res.Body.String(), "alice视频") {
+			t.Fatal("missing selected prompt", res.Body.String())
+		}
+	}
+	if _, e := repo.Load(ctx, "alice", "p"); e == nil {
+		t.Fatal("read persisted conversation")
+	}
+}

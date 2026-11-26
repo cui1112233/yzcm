@@ -49,3 +49,20 @@ MySQL通过同一数据库、同一Serializable事务锁定作品、待确认状
 - 覆盖：三类资产准备/确认新增删除、未确认不写、重复确认、跨用户/跨作品、只读成员、同名新增冲突、服务器ID、伪造参数、删除前/确认前新引用、历史版本引用、资产版本改变、MySQL新增/删除确认写失败回滚和禁止分开保存、SQL NULL资产列表。
 - 真实headless Chrome组件测试`node --test frontend/src/user/pages/comic-assistant-asset-crud.browser.test.js`通过（1/1，无跳过）：核对新增/删除文字和资产名、保留文件说明、确认弹窗前零写入、确认后单次正确POST、applied按钮禁用。`comic-assistant-intelligence.source.test.js`5项回归通过。
 - 本层未调用付费模型、未远端推送、未部署、未重启4001。真实4001新增/删除保存回读及独立审查由主负责人接续，不能将本层自动化测试当作整体D01完成。
+
+## 2026-11-27 D01读取筛选和中文工具名补齐
+
+四项镜头列表读取（get_shot_numbers、read_shot_video_prompts、read_shot_image_prompts、get_all_shots_voicetext）增加shot_ids：必须为1至200项字符串数组，每个ID为1至256字节，无首尾空白，仍受整个参数8192字节上限约束。空数组/null、数字/null元素、空白和超长ID均拒绝；重复ID去重，结果仍按真实镜头序号排列。shot_ids不得与shot_numbers或shot_id同时出现（即使后者为空也拒绝），避免悄悄扩大或改变范围。get_shot_detail保留单shot_id合同，资产/作品概览等其他工具明确拒绝shot_ids，不默默忽略。
+
+先按认证成员可访问的当前作品和episode_no/engine选择真实分镜，多集/多引擎仍要求明确选择。随后逐一核对所有指定ID；任一ID不存在、属于其他作品/成员或不在所选剧集/引擎中，整次返回错误，不返回部分命中的结果，不扫描其他作品来猜测ID。提示词合同同步放在后端prompt模块。
+
+助手消息展示九项读取工具各自中文名称，保留分镜失败核对原名称和未知工具“只读工具”回退；工具摘要和失败颜色保持现有逻辑。中文名映射只查自身键，未知名称如toString也走回退。
+
+### 本层测试证据与限制
+
+- 先红：干净源码加测试后get_shot_numbers的shot_ids报“工具参数无效”；真实Chrome组件原界面显示“只读工具”，与“读取当前剧本”断言不符。随后分别实现并转绿。
+- 独立干净源码为`_local-archive-20261028/luoshui-parity-20261126/runtime-source`，HEAD `e8a12dd110a248b31cb42714b7c8c2b17b50d6c4`；独立overlay `review-overlay/assistant-read-ids.json`仅覆盖本层读取实现、读取测试、HTTP读取测试和后端prompt，不借用其他会话脏文件。
+- `go test -overlay ../../review-overlay/assistant-read-ids.json ./internal/screenplay -count=1`通过。业务用例覆盖四项真实ID读取、200项边界、未选镜头不扩入、不存在/跨作品/跨剧集/跨引擎拒绝、参数类型/长度/混用拒绝和单ID详情合同保留。
+- 定向`./internal/screenplay ./internal/httpapi -run 'Test(AssistantRead|Authoring.*ReadTool|AuthoringAssistantRead)' -count=1`通过；签名HTTP读取验证认证alice仅取得选中的实际提示词，bob或不存在ID拒绝，读取不保存会话，也不调用模型。
+- `node --test frontend/src/user/pages/comic-assistant-read-labels.browser.test.js frontend/src/user/pages/comic-assistant-intelligence.source.test.js frontend/src/user/pages/comic-assistant-asset-crud.browser.test.js`为7/7通过、无跳过。真实headless Chrome加载实际React+Antd组件，核对九项中文名、原失败核对名、未知及继承键回退与真实摘要；新增/删除确认组件也回归通过。
+- 未调用付费模型、未远端推送、未部署、未重启4001。本层只证明源码自动化合同，不代表4001已经运行新版本，也不代表D01其他工具或整条创作链完成。
