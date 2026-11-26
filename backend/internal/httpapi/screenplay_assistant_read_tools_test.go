@@ -91,3 +91,44 @@ func TestAuthoringAssistantReadToolRejectsScopeOverridesAndSecondCall(t *testing
 		})
 	}
 }
+
+func TestAuthoringReadToolEndpointNeedsNoModelAndChecksMembership(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	s := screenplay.NewMemoryStore()
+	_, _ = s.CreateProject(ctx, screenplay.Project{ID: "alice-only", OwnerUsername: "alice"})
+	_, _ = s.CreateAsset(ctx, screenplay.Asset{ProjectID: "alice-only", OwnerUsername: "alice", Type: screenplay.AssetCharacter, Name: "实际人物"})
+	repo := screenplay.NewMemoryAuthoringRepository()
+	mux := http.NewServeMux()
+	calls := 0
+	RegisterScreenplayAuthoringRoutes(mux, BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}, s, repo, func(context.Context, string, string) (batchfactoryv11.DirectorProvider, error) {
+		calls++
+		return nil, nil
+	})
+	path := "/api/comic-screenplays/projects/alice-only/assistant/read-tool"
+	res := signedJSONRequest(t, mux, now, "alice", "POST", path, map[string]any{"tool": "read_assets", "tool_args": map[string]any{"asset_type": "character"}})
+	if res.Code != 200 || !strings.Contains(res.Body.String(), "实际人物") || calls != 0 {
+		t.Fatal(res.Code, res.Body.String(), calls)
+	}
+	if _, e := repo.Load(ctx, "alice", "alice-only"); e == nil {
+		t.Fatal("read endpoint persisted conversation")
+	}
+	res = signedJSONRequest(t, mux, now, "bob", "POST", path, map[string]any{"tool": "read_assets"})
+	if res.Code == 200 || strings.Contains(res.Body.String(), "实际人物") || calls != 0 {
+		t.Fatal("cross-member read", res.Code, res.Body.String())
+	}
+	res = signedJSONRequest(t, mux, now, "alice", "POST", path, map[string]any{"tool": "run_all_agents"})
+	if res.Code == 200 || calls != 0 {
+		t.Fatal("write tool invoked", res.Code, calls)
+	}
+	svc := screenplay.AuthoringService{Store: s, Repository: repo}
+	state, _ := svc.Load(ctx, "alice", "alice-only")
+	state.Members = []screenplay.MemberGrant{{Username: "reader", Read: true}}
+	if _, e := svc.Save(ctx, "alice", "alice-only", state, 0); e != nil {
+		t.Fatal(e)
+	}
+	res = signedJSONRequest(t, mux, now, "reader", "POST", path, map[string]any{"tool": "read_assets"})
+	if res.Code != 200 || !strings.Contains(res.Body.String(), "实际人物") || calls != 0 {
+		t.Fatal("read-only member could not inspect", res.Code, res.Body.String(), calls)
+	}
+}

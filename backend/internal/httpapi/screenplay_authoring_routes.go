@@ -306,6 +306,22 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 			writeJSON(w, 200, map[string]any{"projects": projects})
 		})
 	}
+	// Read permissions suffice: this inspector never resolves or calls a model.
+	handle("POST "+base+"/assistant/read-tool", "read", func(w http.ResponseWriter, r *http.Request, o, a string) {
+		var in struct {
+			Tool string          `json:"tool"`
+			Args json.RawMessage `json:"tool_args"`
+		}
+		if !decode(w, r, &in) {
+			return
+		}
+		run, data, e := assistantReadScopedTool(r.Context(), store, o, r.PathValue("id"), in.Tool, in.Args)
+		if e != nil {
+			authoringError(w, e)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"tool_run": run, "data": data})
+	})
 	handle("POST "+base+"/assistant/apply", "edit", func(w http.ResponseWriter, r *http.Request, o, a string) {
 		var in struct {
 			Expected   int64  `json:"expected_revision"`
@@ -494,22 +510,12 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 					}
 					toolRuns := []screenplay.AssistantToolRun{}
 					if strings.TrimSpace(parsed.Tool) != "" {
-						var run screenplay.AssistantToolRun
-						var detail map[string]any
 						if len(parsed.Actions) > 0 {
 							return screenplay.ErrInvalidArgument
 						}
-						if parsed.Tool == "storyboard_failures" {
-							if len(parsed.ToolArgs) > 0 && strings.TrimSpace(string(parsed.ToolArgs)) != "{}" {
-								return screenplay.ErrInvalidArgument
-							}
-							run, detail = assistantReadStoryboardFailures(r.Context(), store, o, st.ProjectID)
-						} else {
-							var toolErr error
-							run, detail, toolErr = screenplay.ReadAssistantTool(r.Context(), store, o, st.ProjectID, parsed.Tool, parsed.ToolArgs)
-							if toolErr != nil {
-								return toolErr
-							}
+						run, detail, toolErr := assistantReadScopedTool(r.Context(), store, o, st.ProjectID, parsed.Tool, parsed.ToolArgs)
+						if toolErr != nil {
+							return toolErr
 						}
 						toolRuns = append(toolRuns, run)
 						contextData["tool_result"] = detail
