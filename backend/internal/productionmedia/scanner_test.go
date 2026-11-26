@@ -36,14 +36,19 @@ func TestScannerDiscoversExistingComicImageWithoutDuplicatingFile(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	mock.ExpectQuery("SELECT i.owner_username").WillReturnRows(sqlmock.NewRows([]string{"owner_username", "storage_ref", "media_type"}).AddRow("alice", artifact.StorageRef, "image/png").AddRow("alice", "missing.png", "image/png"))
-	mock.ExpectQuery("SELECT i.owner_username").WillReturnRows(sqlmock.NewRows([]string{"owner_username", "storage_ref", "media_type"}))
-	mock.ExpectQuery("SELECT owner_username").WillReturnRows(sqlmock.NewRows([]string{"owner_username", "storage_ref", "media_type"}))
-	mock.ExpectQuery("FROM batch_factory_v12_text_page_artifacts").WillReturnRows(sqlmock.NewRows([]string{"owner_username", "storage_ref", "media_type"}).AddRow("alice", artifact.StorageRef, "image/png"))
-	mock.ExpectQuery("FROM batch_factory_v12_text_backgrounds").WillReturnRows(sqlmock.NewRows([]string{"owner_username", "storage_ref", "media_type"}).AddRow("alice", artifact.StorageRef, "image/png"))
-	mock.ExpectQuery("SELECT owner_username").WillReturnRows(sqlmock.NewRows([]string{"owner_username", "output_url"}))
+	expectRows := func() {
+		mock.ExpectQuery("SELECT i.owner_username").WillReturnRows(sqlmock.NewRows([]string{"owner_username", "storage_ref", "media_type"}).AddRow("alice", artifact.StorageRef, "image/png").AddRow("alice", "missing.png", "image/png"))
+		mock.ExpectQuery("SELECT i.owner_username").WillReturnRows(sqlmock.NewRows([]string{"owner_username", "storage_ref", "media_type"}))
+		mock.ExpectQuery("SELECT owner_username").WillReturnRows(sqlmock.NewRows([]string{"owner_username", "storage_ref", "media_type"}))
+		mock.ExpectQuery("FROM batch_factory_v12_text_page_artifacts").WillReturnRows(sqlmock.NewRows([]string{"owner_username", "storage_ref", "media_type"}).AddRow("alice", artifact.StorageRef, "image/png"))
+		mock.ExpectQuery("FROM batch_factory_v12_text_backgrounds").WillReturnRows(sqlmock.NewRows([]string{"owner_username", "storage_ref", "media_type"}).AddRow("alice", artifact.StorageRef, "image/png"))
+		mock.ExpectQuery("SELECT owner_username").WillReturnRows(sqlmock.NewRows([]string{"owner_username", "output_url"}))
+	}
+	expectRows()
 	recorder := &recordingEnqueuer{}
-	scanner := Scanner{DB: db, Repository: recorder, Local: files, Prefix: "production-media", RetentionDays: func(string) int { return 7 }}
+	retentionReads := 0
+	retentionDays := 7
+	scanner := Scanner{DB: db, Repository: recorder, Local: files, Prefix: "production-media", RetentionDays: func(string) int { retentionReads++; return retentionDays }}
 	summary, err := scanner.RunOnce(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -54,8 +59,19 @@ func TestScannerDiscoversExistingComicImageWithoutDuplicatingFile(t *testing.T) 
 	if recorder.items[0].MediaKind != KindComicImage || recorder.items[0].ObjectKey != "production-media/comic/images/"+artifact.StorageRef {
 		t.Fatalf("item=%+v", recorder.items[0])
 	}
+	if retentionReads != 1 {
+		t.Fatalf("one owner across media types read config %d times, want 1 per scan", retentionReads)
+	}
 	if restorer.calls != 0 {
 		t.Fatalf("scanner rehydrated %d cleaned objects", restorer.calls)
+	}
+	retentionDays = 14
+	expectRows()
+	if _, err := scanner.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if retentionReads != 2 || recorder.items[3].RetentionDays != 14 {
+		t.Fatalf("next scan did not refresh retention: reads=%d items=%+v", retentionReads, recorder.items)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

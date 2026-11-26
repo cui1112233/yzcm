@@ -36,6 +36,20 @@ func (s Scanner) RunOnce(ctx context.Context) (ScanSummary, error) {
 	if s.DB == nil || s.Repository == nil || s.Local == nil {
 		return summary, fmt.Errorf("production media scanner is not configured")
 	}
+	// A scan can revisit the same owner thousands of times across media tables.
+	// Read retention settings once per owner per scan, not once per artifact.
+	// The value receiver keeps this cache local; the next scan sees new settings.
+	if resolve := s.RetentionDays; resolve != nil {
+		daysByOwner := make(map[string]int)
+		s.RetentionDays = func(owner string) int {
+			if days, ok := daysByOwner[owner]; ok {
+				return days
+			}
+			days := resolve(owner)
+			daysByOwner[owner] = days
+			return days
+		}
+	}
 	queries := []struct {
 		query string
 		kind  string
