@@ -1,7 +1,7 @@
 package prompt
 
 const ScreenplayAuthoringAssistant = `你是作品内创作助手。只依据提供的真实作品上下文回答。返回 JSON {"reply":"说明","summary":"修改摘要","actions":[],"question":"","suggestions":[]}。
-- reply：给用户的说明。summary：修改摘要。actions：修改动作，允许且每次最多一个：document {kind,content,expected_revision}；chapter {kind,chapter:{id,title,source_text,script_text}}；shot {kind,target_id,shot:{...},expected_revision}。资产修改只能使用后文modify_character、modify_scene、modify_prop工具，不得直接生成asset动作或asset_prepared标记。
+- reply：给用户的说明。summary：修改摘要。actions：修改动作，允许且每次最多一个：document {kind,content,expected_revision}；chapter {kind,chapter:{id,title,source_text,script_text}}。资产修改只能使用后文modify_character、modify_scene、modify_prop工具，不得直接生成asset动作或asset_prepared标记。创作分镜文字只能通过后文镜头修改工具准备，不得直接生成shot或creative_shot动作。
 - question：当你判断信息不足、需要用户补充才能给出可靠建议时，在这里写出要问用户的问题（例如缺少集数、目标人物、修改范围）；能直接回答时留空。不要为了追问而追问，也不要代替用户做决定。
 - suggestions：导航建议数组，逐项 {label:"建议标题", entry:"面板标识", reason:"为什么"}。entry 只能取用户上下文里「当前作品链路状态」给出的入口值。建议用户去某个面板完成下一步，但绝不声称你已执行。
 - 你会收到一段「当前作品链路状态」：那是只读事实，描述哪些环节已就绪、覆盖度与建议的下一步；可据此回答和给导航建议。
@@ -27,3 +27,10 @@ const ScreenplayAuthoringAssetEditTools = `
 const ScreenplayAuthoringSuggestionContract = `{"label":"去资产页解析角色","entry":"assets","reason":"分镜前需要先建立角色一致性"}`
 const ScreenplayAuthoringPlan = `根据作品原文和用户要求规划章节，返回 JSON {"chapters":[{"id":"唯一简短编号","title":"章标题","source_text":"完整对应原文","script_text":""}]}。不得捏造原文。`
 const ScreenplayAuthoringChapter = `根据给出的章节原文和作品上下文创作中文分集剧本，使用清晰的第N集标题、场次、角色和对白。只返回剧本正文，不省略结尾。`
+
+const ScreenplayAuthoringShotEditTools = `
+【已有创作分镜文字修改】仅当用户明确请求修改时，使用工具准备待确认方案。只处理当前作品真实board的已有镜头，不新增删除、不生成媒体。
+- modify_storyboard：action必须update，new_data仅填写用户要求修改的video_desc（视频提示词）、image_prompt、line（台词/旁白）、voice_actor、emotion。
+- modify_script_text暂不支持：当前创作分镜没有独立画面描述字段；不能把画面描述写进台词或视频词代替。
+- modify_image_prompt、modify_video_prompt：new_prompt为新提示词，action仅replace或append（追加原文末尾，不自动加换行）。不支持rewrite、optimize、fix_violations或instruction。
+所有工具用从真实读取结果取得的shot_id字符串或正整数shot_number定位，可给episode_no和engine；多个剧集/引擎必须明确指定。shot_index与原版数字shot_id不能猜测转换，需先读取真实ID或序号。不能传身份、作品、媒体字段、准备/确认标记；字段精确小写且不能重复。未要求修改的字段不要填写。服务器会保留完整原镜头及未请求字段、来源、协议、绑定和媒体；准备成功只表示等待用户确认，不得声称已经修改。`

@@ -1,5 +1,13 @@
 # 作品助手工具接入
 
+## 2026-11-27 D01已有创作镜头文字方案（实施边界）
+
+本层接modify_storyboard的update及modify_image_prompt、modify_video_prompt的直接replace/append。原件§6.2/§7.2已核对：modify_script_text指画面描述，当前创作StoryboardShot没有独立画面描述及其消费端，因此明确拒绝，保留待办；不能把它写入Line或VideoDesc冒充已接入。原版数值shot_id和shot_index不猜测索引基准，使用本系统真实字符串shot_id或唯一shot_number。只处理已保存创作board中的镜头文字；不增删镜头、不AI rewrite/fix_violations、不生成媒体。按当前认证作品的episode_no/engine选board，再按真实shot_id或唯一shot_number定位；多board必须明确选择，编号和序号冲突、未知或跨范围目标均拒绝。参数使用精确字段名，拒绝重复键、空值、身份、作品、媒体和准备标记。
+
+独立creative_shot动作保存服务器读取的完整原镜头、目标board ID/版本、修改字段前后文本；修改未指定字段、协议、来源、绑定和媒体均保留。准备不写board。前端显示集数、引擎、真实镜头ID/序号与字段前后对照，沿用原确认。模型直接返回creative_shot或旧shot动作均不能绕过服务器准备；旧shot仅对应legacy文档，服务层历史兼容保留，模型入口明确拒绝不完整旧方案。准备成功回复由服务器改成待确认，不采用模型的完成声称。
+
+确认核对作品、作者记录版本、pending状态、board ID/版本和原镜头完整内容。生产只接受同一MySQL数据库仓库，在一个事务中锁定作品、作者状态、board与目标镜头，复用现有镜头校验与协议序列化，仅UPDATE该镜头，递增board版本并保存applied回执。任一步失败全部回退；禁止分开写再记状态、禁止删除重插镜头或清空媒体版本；重复确认拒绝且不重复写。内存仓库也需专用原子提交能力，不允许通用Store降级分开保存。
+
 落实总计划D01，按原资料40项创作工具与38项编辑工具分别对照，不把同名不同参数混成一项，也不把静态名称登记当作已实现。
 
 ## 第一部分：真实只读数据
@@ -72,3 +80,16 @@ MySQL通过同一数据库、同一Serializable事务锁定作品、待确认状
 复审发现Go标准JSON结构体解码会接受大小写别名，而原筛选存在性检查按精确字段名取值：SHOT_IDS可能绕过筛选并返回全部镜头；重复shot_numbers后置空数组也可能扩大范围。已先用失败测试复现，再改为逐字段读取顶层JSON：只接受规定的精确小写字段名，解码后同名字段第二次出现即拒绝（包括用Unicode转义拼出同名字段），最后再执行原类型、范围和混用校验。拒绝请求不返回任何镜头结果；后端提示词也明确小写与不重复合同。
 
 独立e8a12dd1源码及同一assistant-read-ids overlay验证：新增大小写、SHOT_ID/SHOT_NUMBERS混用、shot_ids/shot_numbers/shot_id/episode_no/engine重复键、转义重复键和其他读取工具大小写别名用例先红再绿；screenplay全包通过，签名HTTP补充用例要求400且无提示词数据。未重启4001、未部署、未调用模型。
+
+
+### D01创作镜头文字层测试与交接
+
+- 原件依据：归档`luoshui-dev-audit-20261126/20-backend.md` §6.2/§7.2。已接三项工具的直接文字分支，不代表全部40/38项接通。modify_script_text没有本系统创作board画面描述消费端，明确拒绝并保留待办；不新增虚设字段。原版数值shot_id/shot_index不自动转换，改用真实字符串ID或唯一shot_number。
+- 无模型准备接口：POST `assistant/prepare-shot-edit`，权限edit，输入expected_revision、tool、tool_args；只追加pending方案。确认仍为原`assistant/apply`。支持modify_storyboard action=update、new_data中video_desc/image_prompt/line/voice_actor/emotion；modify_image_prompt/modify_video_prompt action=replace/append（兼容mode，但冲突拒绝），new_prompt为文字。直接追加不自动加分隔符。单个文字字段16384字节、参数32768字节上限。
+- 先红：业务测试原先缺PrepareAssistantShotEdit编译失败；HTTP真实受控工具请求报“不支持的只读工具”；真实Chrome组件缺“第2集”和前后文字。各自实现后转绿。补充红绿：JSON RawMessage在方案保存时自动规范空白，原始字节比较会误报冲突，改成JSON序列化后的完整镜头比较。
+- 干净测试基线`_local-archive-20261028/luoshui-parity-20261126/runtime-source` HEAD d868a3c1，独立overlay `review-overlay/assistant-shot-edit.json`。不移动快照HEAD、不借其他脏文件、不重启4001。
+- `go test -overlay ../../review-overlay/assistant-shot-edit.json ./internal/screenplay -count=1`通过；`./internal/screenplay ./internal/httpapi -run 'Test(Assistant|Authoring.*(Shot|Asset|Read)|MySQLAuthoring)' -count=1`通过。
+- 覆盖：准备零写入、完整原字段/来源/协议/绑定保留；真实镜头ID与唯一序号、剧集/引擎歧义、跨作品/跨用户/只读成员拒绝；ID/序号冲突、大小写/重复/未知字段/null、增删/AI重写/违规修正/媒体字段拒绝；原作者版本、board版本、同版本镜头内容变化；重复确认；完整合法creative_shot快照伪造和旧raw shot动作均不能从模型绕过准备。
+- MySQL通过sqlmock验证同一个事务中目标镜头UPDATE、board版本UPDATE、作者回执UPDATE的任一步失败均Rollback；提交结果不确定返回失败、不声称成功；跨数据库仓库拒绝且不降级分开写；完整未知protocol_json根字段也保留。未运行真实数据库故障注入。内存Store也在两个仓库锁内一次提交，不走先写镜头再Save作者状态。
+- 真实Chrome加载实际React+Antd组件：镜头前后对照与单次确认、原资产新增删除、九项读取中文名、智能展示回归合计8/8通过，无跳过。前端无系统提示词，后端prompt明确支持与不支持范围。
+- 未调用付费模型、未推送、未部署、未重启4001；实际4001保存回读及独立审查交主负责人接续。仅此层源码合同完成，不能标记D01整体完成。

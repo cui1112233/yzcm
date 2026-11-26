@@ -349,6 +349,33 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 		st, e = svc.Save(r.Context(), o, st.ProjectID, st, in.Expected)
 		respond(w, st, e, a)
 	})
+	handle("POST "+base+"/assistant/prepare-shot-edit", "edit", func(w http.ResponseWriter, r *http.Request, o, a string) {
+		var in struct {
+			Expected int64           `json:"expected_revision"`
+			Tool     string          `json:"tool"`
+			Args     json.RawMessage `json:"tool_args"`
+		}
+		if !decode(w, r, &in) {
+			return
+		}
+		st, e := svc.Load(r.Context(), o, r.PathValue("id"))
+		if e != nil {
+			authoringError(w, e)
+			return
+		}
+		if st.Revision != in.Expected {
+			authoringError(w, screenplay.ErrRevisionConflict)
+			return
+		}
+		action, summary, e := screenplay.PrepareAssistantShotEdit(r.Context(), store, o, st.ProjectID, in.Tool, in.Args)
+		if e != nil {
+			authoringError(w, e)
+			return
+		}
+		st.Proposals = append(st.Proposals, screenplay.AssistantProposal{ID: newAgentID("proposal"), Summary: summary, Actions: []screenplay.AuthoringAction{action}, Status: "pending", Revision: st.Revision + 1})
+		st, e = svc.Save(r.Context(), o, st.ProjectID, st, in.Expected)
+		respond(w, st, e, a)
+	})
 	handle("POST "+base+"/assistant/apply", "edit", func(w http.ResponseWriter, r *http.Request, o, a string) {
 		var in struct {
 			Expected   int64  `json:"expected_revision"`
@@ -469,7 +496,7 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 					}
 					contextData["capabilities"] = caps
 					contextData["coverage"] = cov
-					system += "\n\n" + screenplay.FormatCapabilitiesForPrompt(caps, cov) + prompt.ScreenplayAuthoringReadTools + prompt.ScreenplayAuthoringAssetEditTools
+					system += "\n\n" + screenplay.FormatCapabilitiesForPrompt(caps, cov) + prompt.ScreenplayAuthoringReadTools + prompt.ScreenplayAuthoringAssetEditTools + prompt.ScreenplayAuthoringShotEditTools
 				}
 				switch path {
 				case "chapters/plan":
@@ -537,7 +564,8 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 					}
 					toolRuns := []screenplay.AssistantToolRun{}
 					assetPrepared := false
-					if strings.TrimSpace(parsed.Tool) != "" && !screenplay.IsAssistantAssetEditTool(parsed.Tool) {
+					shotPrepared := false
+					if strings.TrimSpace(parsed.Tool) != "" && !screenplay.IsAssistantAssetEditTool(parsed.Tool) && !screenplay.IsAssistantShotEditTool(parsed.Tool) {
 						if len(parsed.Actions) > 0 {
 							return screenplay.ErrInvalidArgument
 						}
@@ -559,7 +587,7 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 						if json.Unmarshal([]byte(raw), &parsed) != nil || strings.TrimSpace(parsed.Reply) == "" {
 							return screenplay.ErrAIInvalidJSON
 						}
-						if strings.TrimSpace(parsed.Tool) != "" && !screenplay.IsAssistantAssetEditTool(parsed.Tool) {
+						if strings.TrimSpace(parsed.Tool) != "" && !screenplay.IsAssistantAssetEditTool(parsed.Tool) && !screenplay.IsAssistantShotEditTool(parsed.Tool) {
 							return fmt.Errorf("%w: 本轮工具读取后必须直接回答", screenplay.ErrInvalidArgument)
 						}
 					}
@@ -574,8 +602,23 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 						parsed = assistantWire{Reply: "已准备" + summary + "的方案，请核对后确认应用；当前资产尚未修改。", Summary: summary, Actions: []screenplay.AuthoringAction{action}}
 						assetPrepared = true
 					}
+
+					if screenplay.IsAssistantShotEditTool(parsed.Tool) {
+						if len(parsed.Actions) > 0 {
+							return screenplay.ErrInvalidArgument
+						}
+						action, summary, editErr := screenplay.PrepareAssistantShotEdit(r.Context(), store, o, st.ProjectID, parsed.Tool, parsed.ToolArgs)
+						if editErr != nil {
+							return editErr
+						}
+						parsed = assistantWire{Reply: "已准备" + summary + "的方案，请核对后确认应用；当前分镜尚未修改。", Summary: summary, Actions: []screenplay.AuthoringAction{action}}
+						shotPrepared = true
+					}
 					if len(parsed.Actions) > 0 {
 						for _, action := range parsed.Actions {
+							if action.Kind == "shot" || action.Kind == "creative_shot" && !shotPrepared {
+								return fmt.Errorf("%w: 创作分镜修改必须通过服务器工具准备完整方案", screenplay.ErrInvalidArgument)
+							}
 							if action.Kind == "asset" && !assetPrepared {
 								return fmt.Errorf("%w: 资产修改必须通过服务器工具准备", screenplay.ErrInvalidArgument)
 							}
