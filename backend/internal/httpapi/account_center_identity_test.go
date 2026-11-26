@@ -59,29 +59,35 @@ func TestAccountCenterIdentityRouterAttachesAuthenticatedActorOnce(t *testing.T)
 }
 
 func TestAccountCenterIdentityStrictRouteRejectsUnavailableIdentity(t *testing.T) {
+	now := time.Now()
+	const forbiddenBody = "{\"error\":\"无权执行此操作\"}\n"
 	for _, tc := range []struct {
-		name string
-		user accountcenter.Identity
-		err  error
-		want int
+		name         string
+		user         accountcenter.Identity
+		err          error
+		missingStore bool
 	}{
-		{name: "missing", err: accountcenter.ErrNotFound, want: http.StatusForbidden},
-		{name: "disabled", user: accountcenter.Identity{Username: "alice", Role: accountcenter.RoleMember}, want: http.StatusForbidden},
-		{name: "wrong username", user: accountcenter.Identity{Username: "carol", Role: accountcenter.RoleMember, Active: true}, want: http.StatusForbidden},
-		{name: "database unavailable", err: errors.New("internal database error"), want: http.StatusServiceUnavailable},
+		{name: "missing", err: accountcenter.ErrNotFound},
+		{name: "disabled", user: accountcenter.Identity{Username: "alice", Role: accountcenter.RoleMember}},
+		{name: "archived", user: accountcenter.Identity{Username: "alice", Role: accountcenter.RoleMember, Active: true, ArchivedAt: &now}},
+		{name: "wrong username", user: accountcenter.Identity{Username: "carol", Role: accountcenter.RoleMember, Active: true}},
+		{name: "database unavailable", err: errors.New("internal database error")},
+		{name: "missing store", missingStore: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			now := time.Now()
-			auth := BridgeAuth{Secret: "test-secret", Now: func() time.Time { return now }, AccountCenterStore: accountCenterIdentityStore{
-				resolve: func(context.Context, string) (accountcenter.Identity, error) { return tc.user, tc.err },
-			}}
+			auth := BridgeAuth{Secret: "test-secret", Now: func() time.Time { return now }}
+			if !tc.missingStore {
+				auth.AccountCenterStore = accountCenterIdentityStore{
+					resolve: func(context.Context, string) (accountcenter.Identity, error) { return tc.user, tc.err },
+				}
+			}
 			request := httptest.NewRequest(http.MethodGet, "/account-test", nil)
 			SignBridgeRequest(request, "alice", false, now, "test-secret")
 			protected := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("strict route received an unresolved identity") })
 			response := httptest.NewRecorder()
 			auth.AccountCenterMiddleware(protected).ServeHTTP(response, request)
-			if response.Code != tc.want {
-				t.Fatalf("strict status = %d %s, want %d", response.Code, response.Body, tc.want)
+			if response.Code != http.StatusForbidden || response.Body.String() != forbiddenBody {
+				t.Errorf("strict response = %d %q, want %d %q", response.Code, response.Body, http.StatusForbidden, forbiddenBody)
 			}
 			legacy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if _, ok := AccountCenterIdentityFromContext(r.Context()); ok {

@@ -163,11 +163,7 @@ func (a BridgeAuth) middleware(next http.Handler, requireAccountCenter bool) htt
 		if requireAccountCenter || a.AccountCenterStore != nil {
 			ctx, err = a.accountCenterContext(ctx, actorUsername)
 			if requireAccountCenter && err != nil {
-				if errors.Is(err, accountcenter.ErrNotFound) || errors.Is(err, accountcenter.ErrForbidden) {
-					writeAccountCenterForbidden(w)
-				} else {
-					writeAuthError(w, http.StatusServiceUnavailable, "账号中心暂不可用")
-				}
+				writeAccountCenterForbidden(w)
 				return
 			}
 		}
