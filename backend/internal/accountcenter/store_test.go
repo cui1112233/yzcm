@@ -19,7 +19,7 @@ func TestAccountCenterLegacyImportPreservesFormalRolesAndTeam(t *testing.T) {
 	ctx := context.Background()
 	db := accountCenterDatabase(t)
 	store := accountcenter.NewMySQLStore(db)
-	dir := t.TempDir()
+	dir, _ := legacySourceDirectories(t)
 	profiles := `[{"username":"owner","role":"dev","displayName":"开发创始"},{"username":"dev","role":"dev"},{"username":"lead","role":"manager"},{"username":"worker","role":"member","boundTo":"lead","displayName":"组员甲"},{"username":"archived","role":"member","boundTo":"lead"}]`
 	writeLegacyFile(t, dir, "member-profiles.json", profiles)
 	writeLegacyFile(t, dir, "team-collaboration.json", `{"teams":[{"id":"existing-team","name":"原团队","managerUsername":"lead"}]}`)
@@ -66,7 +66,7 @@ func TestAccountCenterLegacyImportRollsBackAndRetries(t *testing.T) {
 	if _, err := db.Exec(`UPDATE accounts SET is_owner = TRUE WHERE username = 'worker'`); err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
+	dir, _ := legacySourceDirectories(t)
 	if err := store.ImportLegacy(ctx, dir); !errors.Is(err, accountcenter.ErrConflict) {
 		t.Fatalf("import with two owners = %v", err)
 	}
@@ -90,7 +90,8 @@ func TestAccountCenterSetRoleProtectsFounderAndDeveloper(t *testing.T) {
 	ctx := context.Background()
 	db := accountCenterDatabase(t)
 	store := accountcenter.NewMySQLStore(db)
-	if err := store.ImportLegacy(ctx, t.TempDir()); err != nil {
+	dir, _ := legacySourceDirectories(t)
+	if err := store.ImportLegacy(ctx, dir); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SetRole(ctx, "owner", "dev", accountcenter.RoleDeveloper); err != nil {
@@ -125,7 +126,8 @@ func TestAccountCenterMySQLRejectsCrossTeamActiveMembership(t *testing.T) {
 	ctx := context.Background()
 	db := accountCenterDatabase(t)
 	store := accountcenter.NewMySQLStore(db)
-	if err := store.ImportLegacy(ctx, t.TempDir()); err != nil {
+	dir, _ := legacySourceDirectories(t)
+	if err := store.ImportLegacy(ctx, dir); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.CreateTeam(ctx, accountcenter.Team{ID: "first", Name: "测试团队一", ManagerUsername: "owner", CreatedBy: "owner"}); err != nil {
@@ -182,7 +184,7 @@ func TestAccountCenterLegacyImportPreservesSecondaryAndArchivedTeams(t *testing.
 	ctx := context.Background()
 	db := accountCenterDatabase(t)
 	store := accountcenter.NewMySQLStore(db)
-	dir := t.TempDir()
+	dir, _ := legacySourceDirectories(t)
 	writeLegacyFile(t, dir, "member-profiles.json", `[{"username":"lead","role":"manager"},{"username":"dev","role":"dev"},{"username":"worker","role":"member","boundTo":"lead"}]`)
 	writeLegacyFile(t, dir, "team-collaboration.json", `{"teams":[
 		{"id":"secondary","name":"额外团队","managerUsername":"lead"},
@@ -240,7 +242,9 @@ func TestAccountCenterLegacyImportRetriesWhenSourceDirectoryReturns(t *testing.T
 	ctx := context.Background()
 	db := accountCenterDatabase(t)
 	store := accountcenter.NewMySQLStore(db)
-	dir := filepath.Join(t.TempDir(), "legacy-system")
+	configured, fallback := legacySourceDirectories(t)
+	dir := filepath.Join(filepath.Dir(configured), "missing-system")
+	writeLegacyFile(t, fallback, "team-collaboration.json", `{"teams":[{"id":"fallback-team","name":"备用目录团队","managerUsername":"owner"}]}`)
 	for _, source := range []string{"", dir} {
 		if err := store.ImportLegacy(ctx, source); err == nil {
 			t.Fatalf("unavailable source %q was accepted", source)
@@ -267,7 +271,11 @@ func TestAccountCenterLegacyImportAcceptsExistingEmptyDirectory(t *testing.T) {
 	ctx := context.Background()
 	db := accountCenterDatabase(t)
 	store := accountcenter.NewMySQLStore(db)
-	if err := store.ImportLegacy(ctx, t.TempDir()); err != nil {
+	dir, fallback := legacySourceDirectories(t)
+	if err := os.Remove(fallback); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ImportLegacy(ctx, dir); err != nil {
 		t.Fatal(err)
 	}
 	var imported bool
@@ -276,11 +284,78 @@ func TestAccountCenterLegacyImportAcceptsExistingEmptyDirectory(t *testing.T) {
 	}
 }
 
+func TestAccountCenterLegacyImportUsesFallbackTeamAndGrantFiles(t *testing.T) {
+	ctx := context.Background()
+	db := accountCenterDatabase(t)
+	store := accountcenter.NewMySQLStore(db)
+	dir, fallback := legacySourceDirectories(t)
+	writeLegacyFile(t, dir, "member-profiles.json", `[{"username":"lead","role":"manager"},{"username":"worker","role":"member","boundTo":"lead"}]`)
+	writeLegacyFile(t, fallback, "team-collaboration.json", `{"teams":[
+		{"id":"fallback-current","name":"备用目录当前团队","managerUsername":"lead"},
+		{"id":"fallback-archived","name":"备用目录历史团队","managerUsername":"lead","archivedAt":"2026-11-25T00:00:00Z"}
+	]}`)
+	writeLegacyFile(t, fallback, "grants.json", `{`)
+	if err := store.ImportLegacy(ctx, dir); err == nil {
+		t.Fatal("import accepted unreadable fallback grants")
+	}
+	var markers int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM account_center_imports`).Scan(&markers); err != nil || markers != 0 {
+		t.Fatalf("failed fallback import left %d markers, %v", markers, err)
+	}
+	writeLegacyFile(t, fallback, "grants.json", `[{"id":"fallback-grant","actor":"owner","subject":"worker","capability":"preset:draft","scope":"script"}]`)
+	if err := store.ImportLegacy(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	activeTeams, err := store.ListTeams(ctx, accountcenter.TeamFilter{Username: "worker"})
+	if err != nil || len(activeTeams) != 1 || activeTeams[0].ID != "fallback-current" {
+		t.Fatalf("active fallback teams = %+v, %v", activeTeams, err)
+	}
+	teams, err := store.ListTeams(ctx, accountcenter.TeamFilter{ManagerUsername: "lead", IncludeArchived: true})
+	if err != nil || len(teams) != 2 || teams[0].ID != "fallback-archived" || teams[0].ArchivedAt == nil {
+		t.Fatalf("fallback team history = %+v, %v", teams, err)
+	}
+	var endedMemberships int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM account_center_memberships WHERE team_id = 'fallback-archived' AND ended_at IS NOT NULL`).Scan(&endedMemberships); err != nil || endedMemberships != 2 {
+		t.Fatalf("fallback archived membership count = %d, %v", endedMemberships, err)
+	}
+	grants, err := store.ListGrants(ctx, "worker")
+	if err != nil || len(grants) != 1 || grants[0].ID != "fallback-grant" {
+		t.Fatalf("fallback grants = %+v, %v", grants, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM account_center_imports WHERE completed_at IS NOT NULL`).Scan(&markers); err != nil || markers != 1 {
+		t.Fatalf("completed fallback import has %d markers, %v", markers, err)
+	}
+}
+
+func TestAccountCenterLegacyImportPrefersConfiguredTeamAndGrantFiles(t *testing.T) {
+	ctx := context.Background()
+	db := accountCenterDatabase(t)
+	store := accountcenter.NewMySQLStore(db)
+	dir, fallback := legacySourceDirectories(t)
+	writeLegacyFile(t, dir, "team-collaboration.json", `{"teams":[{"id":"configured-team","name":"配置目录团队","managerUsername":"owner"}]}`)
+	writeLegacyFile(t, dir, "grants.json", `[{"id":"configured-grant","actor":"owner","subject":"worker","capability":"preset:draft","scope":"script"}]`)
+	for _, name := range []string{"team-collaboration.json", "grants.json", "member-profiles.json", "member-archives.json"} {
+		writeLegacyFile(t, fallback, name, `{`)
+	}
+	if err := store.ImportLegacy(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	teams, err := store.ListTeams(ctx, accountcenter.TeamFilter{Username: "owner"})
+	if err != nil || len(teams) != 1 || teams[0].ID != "configured-team" {
+		t.Fatalf("configured teams = %+v, %v", teams, err)
+	}
+	grants, err := store.ListGrants(ctx, "worker")
+	if err != nil || len(grants) != 1 || grants[0].ID != "configured-grant" {
+		t.Fatalf("configured grants = %+v, %v", grants, err)
+	}
+}
+
 func TestAccountCenterRoleAndArchiveSameValueRequestsAreIdempotent(t *testing.T) {
 	ctx := context.Background()
 	db := accountCenterDatabase(t)
 	store := accountcenter.NewMySQLStore(db)
-	if err := store.ImportLegacy(ctx, t.TempDir()); err != nil {
+	dir, _ := legacySourceDirectories(t)
+	if err := store.ImportLegacy(ctx, dir); err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
@@ -312,7 +387,8 @@ func TestAccountCenterMySQLStoresGrantsAuditsAndImpersonations(t *testing.T) {
 	ctx := context.Background()
 	db := accountCenterDatabase(t)
 	store := accountcenter.NewMySQLStore(db)
-	if err := store.ImportLegacy(ctx, t.TempDir()); err != nil {
+	dir, _ := legacySourceDirectories(t)
+	if err := store.ImportLegacy(ctx, dir); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 11, 26, 1, 0, 0, 0, time.UTC)
@@ -413,6 +489,19 @@ func writeLegacyFile(t *testing.T, dir, name, data string) {
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func legacySourceDirectories(t *testing.T) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "runs", "instance", "system")
+	fallback := filepath.Join(root, "data", "system")
+	for _, path := range []string{dir, fallback} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir, fallback
 }
 
 func isDuplicateKey(err error) bool {

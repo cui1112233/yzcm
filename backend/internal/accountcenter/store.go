@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -469,16 +470,18 @@ ON DUPLICATE KEY UPDATE import_key = import_key`, legacyImportKey); err != nil {
 	var archives []legacyArchive
 	var collaboration struct{ Teams []legacyTeam }
 	var grants []legacyGrant
+	fallbackDir := filepath.Join(systemDir, "..", "..", "..", "data", "system")
 	for _, file := range []struct {
-		name string
-		dest any
+		name        string
+		dest        any
+		fallbackDir string
 	}{
-		{"member-profiles.json", &profiles},
-		{"member-archives.json", &archives},
-		{"team-collaboration.json", &collaboration},
-		{"grants.json", &grants},
+		{"member-profiles.json", &profiles, ""},
+		{"member-archives.json", &archives, ""},
+		{"team-collaboration.json", &collaboration, fallbackDir},
+		{"grants.json", &grants, fallbackDir},
 	} {
-		if err := readLegacyFile(source, file.name, file.dest); err != nil {
+		if err := readLegacyFile(source, file.fallbackDir, file.name, file.dest); err != nil {
 			return err
 		}
 	}
@@ -537,8 +540,21 @@ func legacyAccounts(ctx context.Context, tx *sql.Tx) ([]legacyAccount, error) {
 	return accounts, rows.Err()
 }
 
-func readLegacyFile(source *os.Root, name string, dest any) error {
+func readLegacyFile(source *os.Root, fallbackDir, name string, dest any) error {
 	_, err := source.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) && fallbackDir != "" {
+		// The old team and grant readers check the configured directory first.
+		fallback, openErr := os.OpenRoot(fallbackDir)
+		if errors.Is(openErr, os.ErrNotExist) {
+			return nil
+		}
+		if openErr != nil {
+			return fmt.Errorf("open legacy account center fallback directory: %w", openErr)
+		}
+		defer fallback.Close()
+		source = fallback
+		_, err = source.Lstat(name)
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
