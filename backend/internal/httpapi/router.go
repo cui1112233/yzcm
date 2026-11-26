@@ -1002,7 +1002,7 @@ func NewRouter(options RouterOptions) http.Handler {
 		root.Handle("PUT /api/tasks/", novelAuth.Middleware(http.HandlerFunc(legacyTaskAlias)))
 		root.Handle("DELETE /api/tasks/", novelAuth.Middleware(http.HandlerFunc(legacyTaskAlias)))
 		root.Handle("/api/web-submit/", sessionOnlyNovelAuth.Middleware(http.HandlerFunc(legacyWebSubmitAlias)))
-		RegisterNovelFetchIntegrations(root, sessionOnlyNovelAuth, options.NovelFetchStore, options.NovelFetchQueue)
+		RegisterNovelFetchIntegrations(root, sessionOnlyCompatAuth, options.NovelFetchStore, options.NovelFetchQueue)
 		registerCanonicalNovelFetchWebSubmitAliases(root, auth)
 		registerModelCatalogRoutes(root, novelAuth, options.NovelFetchStore, options.UserConfigStore, options.AuthStore, options.MemberProfileStore)
 	}

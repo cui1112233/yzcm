@@ -184,8 +184,8 @@ export function AccountCenterLayout({ account, username, avatar, pathname, onRet
       { href: 'http://newapi.yzcm.site/', label: 'YZCM API', external: true },
       { href: '/usage', label: '用量与制作' },
       ...(canManage ? [{ href: '/team', label: '组员管理' }] : []),
-      ...(canGovernAccounts ? [{ href: '/accounts', label: '账号与角色', developer: true }] : []),
-      ...(canAccessAdmin ? [{ href: '/admin/presets', label: '管理后台', reload: true, developer: true }] : [])
+      ...(canGovernAccounts ? [{ href: '/accounts', label: '账号与角色' }] : []),
+      ...(canAccessAdmin ? [{ href: '/admin/presets', label: '管理后台', reload: true }] : [])
     ];
     return <div className="account-center-workspace profile-glass-workspace">
       <header className="pg-shell-header">
@@ -196,7 +196,7 @@ export function AccountCenterLayout({ account, username, avatar, pathname, onRet
       <nav className="pg-navigation" aria-label="个人中心导航">
         {entries.map(entry => entry.external
           ? <a key={entry.href} href={entry.href} target="_blank" rel="noreferrer" title="一战晟铭专属 API 控制台">{entry.label}<ExternalLink size={12} aria-hidden="true" /></a>
-          : <Link key={entry.href} href={entry.href} reload={entry.reload} aria-current={pathname === entry.href ? 'page' : undefined} className={pathname === entry.href ? 'active' : ''}>{entry.label}{entry.developer ? <small>DEV</small> : null}</Link>)}
+          : <Link key={entry.href} href={entry.href} reload={entry.reload} aria-current={pathname === entry.href ? 'page' : undefined} className={pathname === entry.href ? 'active' : ''}>{entry.label}</Link>)}
       </nav>
       <main className="account-center-main pg-main">{content}</main>
       <footer className="pg-shell-footer"><button type="button" onClick={onReturn} aria-label="返回工作台"><ChevronLeft size={16} />返回工作台</button><button type="button" onClick={onLogout}><LogOut size={16} />退出登录</button></footer>

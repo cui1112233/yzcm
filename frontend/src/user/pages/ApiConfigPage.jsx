@@ -282,8 +282,8 @@ export default function ApiConfigPage() {
     <PageHeader title="API 配置" subtitle="统一管理平台预设模型与各渠道 API 接口；业务页面按凭证自动读取可用模型。" />
     {!canManageApi ? <div className="ac-managed-api-card">
       <span><ShieldCheck size={28} /></span>
-      <div><div><h2>模型服务由团队托管</h2>{member ? <RoleBadge role={member.role} /> : null}</div><p>你可在获授权的业务下拉框中选择管理员已配置凭证的模型；不会显示 API Key。</p></div>
-      <Tag color={config?.managedBy ? 'green' : 'gold'}>{config?.managedBy ? `托管账号 @${config.managedBy}` : '等待绑定 MANAGER'}</Tag>
+      <div><div><h2>模型服务由团队托管</h2>{member ? <RoleBadge canonicalRole={member.canonicalRole} /> : null}</div><p>你可在获授权的业务下拉框中选择管理员已配置凭证的模型；不会显示 API Key。</p></div>
+      <Tag color={config?.managedBy ? 'green' : 'gold'}>{config?.managedBy ? `托管账号 @${config.managedBy}` : '等待绑定管理者'}</Tag>
     </div> : <Panel title="平台预设模型" eyebrow="PLATFORM PRESETS" className="ac-form-panel" action={<Space size={12}>
         <span className="ac-muted-copy" role="status" aria-live="polite">{SAVE_STATUS_TEXT[saveStatus]}</span>
         <Button icon={<RefreshCw size={15} />} loading={quotaLoading} onClick={refreshQuotaState}>刷新额度</Button>

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { getMemberCenter, getTeamMembers, markAllNotificationsRead } from '../../shared/api/member';
 import { Link } from '../../shared/components/Link';
 import { FeatureBars, MemberIdentity, PageHeader, Panel, RoleBadge, avatarFallback, formatDate, formatTokens } from './accountCenterShared';
+import { canonicalRoleLabel, readMonthlyTokenLimit } from './accountCenterMemberState.js';
 import './member-identity-card.css';
 
 export default function MemberCenterPage() {
@@ -42,11 +43,15 @@ export default function MemberCenterPage() {
   if (loading) return <div className="account-center-page"><Skeleton active paragraph={{ rows: 10 }} /></div>;
   if (!self) return <div className="account-center-page"><div className="ac-empty">无法读取会员资料</div></div>;
 
-  const quota = self.monthlyTokenLimit;
-  const quotaPercent = quota === null ? 0 : Math.min(100, Math.round((Number(month.totalTokens || 0) / Math.max(quota, 1)) * 100));
-  const canManageTeam = ['dev', 'manager'].includes(self.role);
-  const apiEnabled = self.role === 'member' ? self.apiEnabled : true;
-  const teamName = center?.team?.name || (self.role === 'dev' ? 'qiantie 核心' : '未加入独立团队');
+  const quota = readMonthlyTokenLimit(self);
+  const isLimited = quota.status === 'limited';
+  const used = Number(month.totalTokens || 0);
+  const quotaPercent = isLimited ? Math.min(100, Math.round((used / Math.max(quota.limit, 1)) * 100)) : 0;
+  const quotaLabel = quota.status === 'unlimited' ? '不限额' : '暂不可用';
+  const membershipRole = canonicalRoleLabel(self.canonicalRole);
+  const canManageTeam = self.capabilities?.includes('team_governance');
+  const apiEnabled = self.apiEnabled || canManageTeam;
+  const teamName = center?.team?.name || (['开发创始', '开发者'].includes(self.canonicalRole) ? 'qiantie 核心' : '未加入独立团队');
 
   return <div className="account-center-page member-dashboard-page">
     <PageHeader title="会员中心" subtitle="身份、授权、团队、额度与 AI 服务状态总览" />
@@ -59,20 +64,26 @@ export default function MemberCenterPage() {
           <div className="member-glass-profile">
             <Avatar className="member-glass-avatar" src={self.avatarUrl}>{avatarFallback(self)}</Avatar>
             <div className="member-glass-copy">
-              <div className="member-glass-name"><h2 title={self.displayName}>{self.displayName}</h2><RoleBadge role={self.role} /></div>
+              <div className="member-glass-name"><h2 title={self.displayName}>{self.displayName}</h2><RoleBadge canonicalRole={self.canonicalRole} /></div>
               <p title={`@${self.username}`}>@{self.username}</p>
               <span className={`member-glass-access ${apiEnabled ? 'is-enabled' : ''}`}><ShieldCheck size={18} />{apiEnabled ? 'AI 服务已启用' : 'AI 服务未授权'}</span>
             </div>
           </div>
           <dl className="member-glass-facts">
             <div><dt>所属团队</dt><dd title={teamName}>{teamName}</dd></div>
-            <div><dt>当前身份</dt><dd title={self.role === 'dev' ? '开发（最高权限）' : undefined}>{self.role === 'dev' ? '开发' : self.role === 'manager' ? '团队管理' : '团队成员'}</dd></div>
+            <div><dt>当前身份</dt><dd>{membershipRole}</dd></div>
             <div><dt>加入时间</dt><dd>{formatDate(self.createdAt).slice(0, 10)}</dd></div>
           </dl>
         </section>
 
         <div className="ac-dashboard-grid ac-dashboard-grid-3">
-          <Panel title="本月额度" eyebrow="MONTHLY QUOTA"><div className="ac-quota-value"><strong>{formatTokens(month.totalTokens)}</strong><span>/ {quota === null ? '不限额' : `${formatTokens(quota)} Tokens`}</span></div><Progress percent={quota === null ? 0 : quotaPercent} showInfo={quota !== null} status={quotaPercent >= 100 ? 'exception' : 'active'} /><div className="ac-panel-footnote">{quota === null ? '当前账号没有设置月度上限' : `剩余 ${formatTokens(Math.max(0, quota - Number(month.totalTokens || 0)))} Tokens`}</div></Panel>
+          <Panel title="本月额度" eyebrow="MONTHLY QUOTA">
+            <div className="ac-quota-value"><strong>{formatTokens(month.totalTokens)}</strong><span>/ {isLimited ? `${formatTokens(quota.limit)} Tokens` : quotaLabel}</span></div>
+            {isLimited && <>
+              <Progress percent={quotaPercent} status={quotaPercent >= 100 ? 'exception' : 'active'} />
+              <div className="ac-panel-footnote">剩余 {formatTokens(Math.max(0, quota.limit - used))} Tokens</div>
+            </>}
+          </Panel>
           <Panel title="AI 服务状态" eyebrow="AI ACCESS"><div className="ac-service-list">{['Agent 代理', '私人定制', '小说创作', '生图工具'].map(label => <div key={label}><span className={apiEnabled ? 'dot-on' : 'dot-off'} />{label}<b>{apiEnabled ? '已启用' : '未授权'}</b></div>)}</div><Link href="/api-config" className="ac-text-link">查看 API 配置 <ArrowUpRight size={14} /></Link></Panel>
           <Panel title="用量构成" eyebrow="USAGE BREAKDOWN"><FeatureBars byFeature={month.byFeature} total={month.totalTokens} limit={5} /></Panel>
         </div>
@@ -85,7 +96,7 @@ export default function MemberCenterPage() {
       </div>
 
       <aside className="ac-member-side">
-        <Panel title="团队概览" action={canManageTeam ? <Link href="/team" className="ac-text-link">查看组员 <ArrowUpRight size={14} /></Link> : null}><div className="ac-team-brand"><span className="ac-team-logo">{teamName.slice(0, 1).toUpperCase()}</span><div><strong>{teamName}</strong><small>{center?.team ? `Team ID · ${center.team.id.slice(0, 8)}` : '核心团队'}</small></div></div><div className="ac-team-kpis"><div><small>组员</small><strong>{members.length || (self.role === 'member' ? 1 : 0)}</strong></div><div><small>已授权</small><strong>{members.filter(item => item.apiEnabled).length}</strong></div><div><small>本月消耗</small><strong>{formatTokens(canManageTeam ? teamMonth : month.totalTokens)}</strong></div></div><div className="ac-side-summary"><span>今日消耗</span><strong>{formatTokens(canManageTeam ? teamDay : day.totalTokens)} Tokens</strong></div></Panel>
+        <Panel title="团队概览" action={canManageTeam ? <Link href="/team" className="ac-text-link">查看组员 <ArrowUpRight size={14} /></Link> : null}><div className="ac-team-brand"><span className="ac-team-logo">{teamName.slice(0, 1).toUpperCase()}</span><div><strong>{teamName}</strong><small>{center?.team ? `Team ID · ${center.team.id.slice(0, 8)}` : '核心团队'}</small></div></div><div className="ac-team-kpis"><div><small>组员</small><strong>{members.length || (self.canonicalRole === '组员' ? 1 : 0)}</strong></div><div><small>已授权</small><strong>{members.filter(item => item.apiEnabled).length}</strong></div><div><small>本月消耗</small><strong>{formatTokens(canManageTeam ? teamMonth : month.totalTokens)}</strong></div></div><div className="ac-side-summary"><span>今日消耗</span><strong>{formatTokens(canManageTeam ? teamDay : day.totalTokens)} Tokens</strong></div></Panel>
 
         <Panel title="通知"><div className="ac-team-kpis"><div><small>未读</small><strong>{unread}</strong></div><div><small>最近</small><strong>{notifications.length}</strong></div><div><small>MFA</small><strong>{self.mfaEnabled ? 'ON' : '—'}</strong></div></div><div className="ac-side-summary"><span><Bell size={14} /> 安全与团队动态</span><strong>{unread ? `${unread} 条待查看` : '已清空'}</strong></div></Panel>
 

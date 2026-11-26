@@ -12,8 +12,56 @@ import (
 	"testing"
 	"time"
 
+	ac "qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/auth"
 )
+
+func TestAccountCenterMemberProfileResponsesKeepCanonicalRoleAndUnknownQuota(t *testing.T) {
+	now := time.Now()
+	accounts := &authTestStore{account: auth.Account{Username: "alice", Active: true}}
+	profiles := NewMemberProfileStore(t.TempDir())
+	if err := profiles.writeArray("member-profiles.json", []map[string]any{
+		{"username": "alice", "role": "dev", "monthlyTokenLimit": 2500, "displayName": "旧名称"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	center := accountCenterIdentityStore{resolve: func(context.Context, string) (ac.Identity, error) {
+		return ac.Identity{Username: "alice", DisplayName: "旧名称", Role: ac.RoleManager, Active: true}, nil
+	}}
+	mux := http.NewServeMux()
+	bridge := BridgeAuth{Secret: "secret", Now: func() time.Time { return now }, AccountCenterStore: center, AuthStore: accounts}
+	RegisterMemberProfileRoutes(mux, bridge, profiles, accounts, t.TempDir())
+	image := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\nimage"))
+	for _, tc := range []struct {
+		method, path string
+		input        map[string]any
+	}{
+		{"GET", "/api/member/me", nil},
+		{"PATCH", "/api/member/profile", map[string]any{"displayName": "更新名称"}},
+		{"POST", "/api/member/avatar", map[string]any{"avatarDataUrl": image}},
+	} {
+		resp := signedJSONRequest(t, mux, now, "alice", tc.method, tc.path, tc.input)
+		var payload struct {
+			Member map[string]any `json:"member"`
+			Quota  map[string]any `json:"memberQuota"`
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil || resp.Code != 200 {
+			t.Fatalf("%s = %d %s, %v", tc.path, resp.Code, resp.Body, err)
+		}
+		if payload.Member["canonicalRole"] != "管理者" || payload.Member["monthlyTokenLimitStatus"] != "unavailable" || payload.Member["monthlyTokenLimit"] != nil {
+			t.Errorf("%s did not preserve canonical role and unknown quota: %+v", tc.path, payload.Member)
+		}
+		if tc.method == "GET" && (payload.Quota["level"] != "unavailable" || payload.Quota["limit"] != nil) {
+			t.Errorf("unknown quota returned as a valid limit: %+v", payload.Quota)
+		}
+		if tc.method != "GET" && payload.Member["displayName"] != "更新名称" {
+			t.Errorf("%s lost saved profile name: %+v", tc.path, payload.Member)
+		}
+		if tc.path == "/api/member/avatar" && !strings.HasPrefix(toString(payload.Member["avatarUrl"]), "/user-content/avatars/") {
+			t.Errorf("avatar response lost stored avatar: %+v", payload.Member)
+		}
+	}
+}
 
 func TestMemberProfileIncludesDetailsAndUsageShape(t *testing.T) {
 	dir := t.TempDir()

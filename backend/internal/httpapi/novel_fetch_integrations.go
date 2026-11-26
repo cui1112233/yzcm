@@ -96,8 +96,7 @@ func integrationCreateDocuments(ctx context.Context, store novelfetchworkshop.St
 			"name":         bookName,
 			"importSource": "integration",
 			"importedAt":   time.Now().UTC().Format(time.RFC3339Nano),
-			"status":       "queued",
-			"queueState":   "queued",
+			"status":       "input_ready",
 		}
 		if author := strings.TrimSpace(book.Author); author != "" {
 			meta["author"] = author
@@ -115,7 +114,31 @@ func integrationCreateDocuments(ctx context.Context, store novelfetchworkshop.St
 	return created, duplicates, failed
 }
 
-func RegisterNovelFetchIntegrations(root *http.ServeMux, middleware NovelFetchBridgeAuth, store novelfetchworkshop.Store, queue novelfetchworkshop.ProcessQueue) {
+func enqueueIntegrationDocuments(ctx context.Context, store novelfetchworkshop.Store, queue novelfetchworkshop.ProcessQueue, owner string, ids []string) (workshopRetryQueueResult, error) {
+	result, err := enqueueWorkshopRetries(ctx, store, queue, owner, ids, false)
+	if err != nil {
+		return result, err
+	}
+	for _, job := range result.Jobs {
+		if job["status"] != "queued" {
+			continue
+		}
+		document, readErr := store.GetDocument(ctx, owner, toString(job["book_id"]))
+		if readErr != nil || toString(document.Meta["status"]) != "input_ready" ||
+			firstText(document.Meta["currentProcessJobId"], document.Meta["current_process_job_id"]) != "" {
+			continue
+		}
+		document.Meta["status"] = "queued"
+		document.Meta["queueState"] = "queued"
+		document.Meta["currentProcessJobId"] = toString(job["id"])
+		appendNovelFetchDocumentLog(&document, "queue_queued", "任务已进入小说获取队列", time.Now().UTC())
+		// The worker may have claimed and advanced the document in the meantime.
+		_, _ = store.CompareAndSwapDocument(ctx, owner, document)
+	}
+	return result, nil
+}
+
+func RegisterNovelFetchIntegrations(root *http.ServeMux, middleware BridgeAuth, store novelfetchworkshop.Store, queue novelfetchworkshop.ProcessQueue) {
 	if root == nil || store == nil {
 		return
 	}
@@ -148,7 +171,7 @@ func RegisterNovelFetchIntegrations(root *http.ServeMux, middleware NovelFetchBr
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "status": "failed", "error": "Redis 任务队列未配置", "created": len(created)})
 				return
 			}
-			result, err := enqueueWorkshopRetries(req.Context(), store, queue, identity.Username, created, false)
+			result, err := enqueueIntegrationDocuments(req.Context(), store, queue, identity.Username, created)
 			if err != nil {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "status": "failed", "error": err.Error(), "created": len(created), "failed": result.Failed})
 				return
@@ -230,7 +253,7 @@ func RegisterNovelFetchIntegrations(root *http.ServeMux, middleware NovelFetchBr
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "status": "failed", "error": "Redis 任务队列未配置", "accepted": len(created)})
 				return
 			}
-			result, err := enqueueWorkshopRetries(req.Context(), store, queue, identity.Username, created, false)
+			result, err := enqueueIntegrationDocuments(req.Context(), store, queue, identity.Username, created)
 			if err != nil {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "status": "failed", "error": err.Error(), "accepted": result.Queued, "failed": result.Failed})
 				return

@@ -1,10 +1,12 @@
 import { Avatar, Progress } from 'antd';
 import { Crown, ShieldCheck, BadgeCheck } from 'lucide-react';
+import { canonicalRoleLabel } from './accountCenterMemberState.js';
 
-export const ROLE_META = {
-  dev: { label: 'DEV', name: '开发', icon: Crown, tone: 'gold' },
-  manager: { label: 'MANAGER', name: '管理', icon: ShieldCheck, tone: 'blue' },
-  member: { label: 'MEMBER', name: '组员', icon: BadgeCheck, tone: 'green' }
+const ROLE_META = {
+  开发创始: { icon: Crown, style: 'dev' },
+  开发者: { icon: Crown, style: 'dev' },
+  管理者: { icon: ShieldCheck, style: 'manager' },
+  组员: { icon: BadgeCheck, style: 'member' }
 };
 
 export const FEATURE_LABELS = {
@@ -23,10 +25,6 @@ export const FEATURE_LABELS = {
   tts: '配音',
   unknown: '其他'
 };
-
-export function roleMeta(role) {
-  return ROLE_META[role] || ROLE_META.member;
-}
 
 export function formatTokens(value) {
   const number = Number(value) || 0;
@@ -47,12 +45,13 @@ export function avatarFallback(member) {
   return String(member?.displayName || member?.username || '?').trim().slice(0, 1).toUpperCase();
 }
 
-export function RoleBadge({ role, compact = false }) {
-  const meta = roleMeta(role);
-  const Icon = meta.icon;
-  return <span className={`member-role-badge role-${role || 'member'}${compact ? ' compact' : ''}`}>
-    <Icon size={compact ? 11 : 14} strokeWidth={2.1} aria-hidden="true" />
-    {meta.label}
+export function RoleBadge({ canonicalRole, compact = false }) {
+  const label = canonicalRoleLabel(canonicalRole);
+  const meta = ROLE_META[label];
+  const Icon = meta?.icon;
+  return <span className={`member-role-badge${meta ? ` role-${meta.style}` : ''}${compact ? ' compact' : ''}`}>
+    {Icon && <Icon size={compact ? 11 : 14} strokeWidth={2.1} aria-hidden="true" />}
+    {label}
   </span>;
 }
 

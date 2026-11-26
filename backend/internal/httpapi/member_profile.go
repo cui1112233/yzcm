@@ -638,6 +638,17 @@ func RegisterMemberProfileRoutes(root *http.ServeMux, authMiddleware BridgeAuth,
 	}
 	registerMemberAvatarContentRoute(root, avatarDir)
 	registerMemberImageContentRoute(root, "/user-content/backgrounds/{file}", windowBackgroundDir(avatarDir))
+	const quotaUnavailable = "unavailable"
+	presentProfile := func(req *http.Request, member map[string]any) map[string]any {
+		member["monthlyTokenLimit"] = nil
+		member["monthlyTokenLimitStatus"] = quotaUnavailable
+		if identity, ok := AccountCenterIdentityFromContext(req.Context()); ok {
+			displayName, avatarURL := member["displayName"], member["avatarUrl"]
+			setFormalAccountFields(req.Context(), authMiddleware.AccountCenterStore, member, identity.Subject, identity.ImpersonationID != "")
+			member["displayName"], member["avatarUrl"] = displayName, avatarURL
+		}
+		return member
+	}
 	root.Handle("GET /api/member/me", authMiddleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		identity, ok := BridgeIdentityFromContext(req.Context())
 		if !ok {
@@ -655,13 +666,9 @@ func RegisterMemberProfileRoutes(root *http.ServeMux, authMiddleware BridgeAuth,
 			return
 		}
 		member["boundTo"] = nil
-		member["monthlyTokenLimit"] = nil
 		member["apiScopes"] = nil
 		if manager != nil {
 			member["boundTo"] = manager["username"]
-		}
-		if requestIdentity, ok := AccountCenterIdentityFromContext(req.Context()); ok {
-			setFormalAccountFields(req.Context(), authMiddleware.AccountCenterStore, member, requestIdentity.Subject, requestIdentity.ImpersonationID != "")
 		}
 		notifications := profiles.listNotifications(identity.Username, 8)
 		unread := 0
@@ -676,14 +683,17 @@ func RegisterMemberProfileRoutes(root *http.ServeMux, authMiddleware BridgeAuth,
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"member":              member,
+			"member":              presentProfile(req, member),
 			"presence":            map[string]any{"online": true},
 			"manager":             manager,
 			"team":                team,
 			"notificationSummary": map[string]any{"unread": unread, "recent": notifications},
-			"memberQuota":         memberQuota(member["monthlyTokenLimit"], usageMonthTokens(usage)),
-			"teamGovernance":      nil,
-			"usage":               usage,
+			"memberQuota": map[string]any{
+				"used": usageMonthTokens(usage), "status": quotaUnavailable, "level": quotaUnavailable,
+				"limit": nil, "remaining": nil, "percent": nil, "threshold": nil,
+			},
+			"teamGovernance": nil,
+			"usage":          usage,
 		})
 	})))
 	root.Handle("PATCH /api/member/profile", authMiddleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -706,7 +716,7 @@ func RegisterMemberProfileRoutes(root *http.ServeMux, authMiddleware BridgeAuth,
 			writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"member": member})
+		writeJSON(w, http.StatusOK, map[string]any{"member": presentProfile(req, member)})
 	})))
 	root.Handle("POST /api/member/avatar", authMiddleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		identity, ok := BridgeIdentityFromContext(req.Context())
@@ -730,7 +740,7 @@ func RegisterMemberProfileRoutes(root *http.ServeMux, authMiddleware BridgeAuth,
 			writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"member": member})
+		writeJSON(w, http.StatusOK, map[string]any{"member": presentProfile(req, member)})
 	})))
 	root.Handle("POST /api/member/window-background", authMiddleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		identity, ok := BridgeIdentityFromContext(req.Context())

@@ -20,8 +20,10 @@ func accountCenterBusinessWrite(r *http.Request) bool {
 	namespace, _, _ := strings.Cut(apiPath, "/")
 	switch namespace {
 	case "account-center", "account-impersonation", "account-admin", "team-admin", "account-recovery",
-		"login", "member", "admin", "applications", "client-errors", "settings", "config",
-		"local-executor", "giant-material-executor", "integrations":
+		"login", "member", "admin", "applications", "client-errors", "settings", "config":
+		return false
+	}
+	if executorLifecycleWrite(r.Method, apiPath) {
 		return false
 	}
 	// Merge media links are short-lived access to existing artifacts.
@@ -33,6 +35,33 @@ func accountCenterBusinessWrite(r *http.Request) bool {
 		}
 	}
 	return true
+}
+
+func executorLifecycleWrite(method, apiPath string) bool {
+	if method != http.MethodPost {
+		return false
+	}
+	executor, route, _ := strings.Cut(apiPath, "/")
+	if executor != "local-executor" && executor != "giant-material-executor" {
+		return false
+	}
+	switch route {
+	case "v1/pair", "v1/heartbeat", "v1/jobs/claim":
+		return true
+	}
+	jobRoute, ok := strings.CutPrefix(route, "v1/jobs/")
+	_, action, job := strings.Cut(jobRoute, "/")
+	if !ok || !job {
+		return false
+	}
+	switch action {
+	case "renew", "progress", "fail", "result":
+		return true
+	case "acceptance", "release", "artifact":
+		return executor == "local-executor"
+	default:
+		return false
+	}
 }
 
 func (a BridgeAuth) allowBusinessSubject(w http.ResponseWriter, r *http.Request, username string) bool {
