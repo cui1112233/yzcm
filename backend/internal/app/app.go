@@ -272,6 +272,7 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	screenplayStore := screenplay.NewMySQLStore(db)
 	scriptEditorService := scripteditor.NewService(scripteditor.NewMySQLStore(db))
 	scriptEditorService.ComicStore = screenplayStore
+	scriptEditorService.ComicAuthoring = screenplayStore.AuthoringRepository()
 	novelCreationStore := novelcreation.NewMySQLStore(db)
 	agentAssetStore := agentworkspace.NewMySQLAssetStore(db)
 	var agentAssetObjects agentworkspace.AssetObjectStore

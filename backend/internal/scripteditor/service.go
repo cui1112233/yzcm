@@ -8,8 +8,9 @@ import (
 )
 
 type Service struct {
-	Store      Store
-	ComicStore screenplay.Store
+	Store          Store
+	ComicStore     screenplay.Store
+	ComicAuthoring screenplay.AuthoringRepository
 }
 
 func NewService(store Store) *Service { return &Service{Store: store} }

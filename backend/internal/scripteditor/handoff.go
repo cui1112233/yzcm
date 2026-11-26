@@ -18,7 +18,7 @@ type HandoffInput struct {
 }
 
 func (s *Service) CreateComicHandoff(ctx context.Context, owner, workID string, input HandoffInput) (Handoff, error) {
-	if s == nil || s.Store == nil || s.ComicStore == nil {
+	if s == nil || s.Store == nil || s.ComicStore == nil || s.ComicAuthoring == nil {
 		return Handoff{}, ErrValidation
 	}
 	input.RequestKey = strings.TrimSpace(input.RequestKey)
@@ -83,6 +83,28 @@ func (s *Service) CreateComicHandoff(ctx context.Context, owner, workID string, 
 	}
 	_, err = s.ComicStore.SaveScreenplay(ctx, screenplay.Document{ID: documentID, ProjectID: project.ID, OwnerUsername: owner, Source: "script-editor", Content: content, EpisodeCount: len(episodes), SegmentCount: len(shots)}, shots, parsed.Characters, parsed.Scenes)
 	if err != nil {
+		_ = s.ComicStore.DeleteProject(ctx, owner, project.ID)
+		return Handoff{}, err
+	}
+	chapterByID := make(map[string]Chapter, len(work.Chapters))
+	for _, chapter := range work.Chapters {
+		chapterByID[chapter.ID] = chapter
+	}
+	authoringChapters := make([]screenplay.Chapter, 0, len(episodes))
+	for index, episode := range episodes {
+		script := preferred[episode]
+		sources := make([]string, 0, len(script.SourceChapterIDs))
+		for _, chapterID := range script.SourceChapterIDs {
+			if chapter, ok := chapterByID[chapterID]; ok {
+				sources = append(sources, chapter.Title+"\n"+chapter.Content)
+			}
+		}
+		if len(sources) == 0 && index == 0 {
+			sources = append(sources, sourceParts...)
+		}
+		authoringChapters = append(authoringChapters, screenplay.Chapter{ID: randomID("chapter"), Title: script.Title, SourceText: strings.Join(sources, "\n\n"), ScriptText: script.Content})
+	}
+	if _, err = s.ComicAuthoring.Save(ctx, screenplay.AuthoringState{ProjectID: project.ID, Owner: owner, Chapters: authoringChapters, Display: map[string]any{"editor_version": "studio", "active_tab": "script", "font_size": 14}}, 0); err != nil {
 		_ = s.ComicStore.DeleteProject(ctx, owner, project.ID)
 		return Handoff{}, err
 	}
