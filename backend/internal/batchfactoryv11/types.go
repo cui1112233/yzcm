@@ -315,6 +315,7 @@ type UpdateBookAssetInput struct {
 }
 
 type BookAssetImage struct {
+	StyleID      string    `json:"styleId,omitempty"`
 	ID           string    `json:"id"`
 	AssetID      string    `json:"assetId"`
 	URL          string    `json:"url"`
@@ -335,6 +336,7 @@ type CreateBookAssetImageInput struct {
 }
 
 type ComicPage struct {
+	StyleID            string   `json:"styleId,omitempty"`
 	ID                 string   `json:"id"`
 	BatchID            string   `json:"batchId"`
 	BookID             string   `json:"bookId"`
@@ -427,6 +429,7 @@ type ComicCollectionItem struct {
 }
 
 type ComicCollection struct {
+	StyleID   string                `json:"styleId,omitempty"`
 	ID        string                `json:"id"`
 	BatchID   string                `json:"batchId"`
 	BookID    string                `json:"bookId"`
@@ -456,6 +459,7 @@ type ComicPageStore interface {
 // StaleComicPage 是“停在 generating 且长时间没有更新”的页定位信息。
 // 只用于启动/定时回收，不参与正常读写。
 type StaleComicPage struct {
+	StyleID  string `json:"styleId,omitempty"`
 	Owner    string
 	BatchID  string
 	BookID   string

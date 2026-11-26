@@ -25,7 +25,7 @@ func (s *MySQLStore) ListBookAssetImages(ctx context.Context, owner, batchID, bo
 	if err := ensureBookAssetOwnership(ctx, s.db, owner, batchID, bookID, assetID); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,url,COALESCE(storage_ref,''),media_type,source,is_primary,revision,created_at FROM batch_factory_v12_book_asset_images WHERE owner_username=? AND asset_id=? ORDER BY created_at,id`, owner, assetID)
+	rows, err := queryComicStyleRows(ctx, s.db, `SELECT id,url,COALESCE(storage_ref,''),media_type,source,is_primary,revision,created_at FROM batch_factory_v12_book_asset_images WHERE owner_username=? AND asset_id=? ORDER BY created_at,id`, owner, assetID)
 	if err != nil {
 		return nil, err
 	}
@@ -36,7 +36,7 @@ func (s *MySQLStore) ListBookAssetImages(ctx context.Context, owner, batchID, bo
 		if err := rows.Scan(&image.ID, &image.URL, &image.StorageRef, &image.MediaType, &image.Source, &image.IsPrimary, &image.Revision, &image.CreatedAt); err != nil {
 			return nil, err
 		}
-		image.AssetID = assetID
+		image.AssetID, image.StyleID = assetID, comicStyleID(ctx)
 		images = append(images, image)
 	}
 	if err := rows.Err(); err != nil {
@@ -62,7 +62,7 @@ func (s *MySQLStore) CreateBookAssetImage(ctx context.Context, owner, batchID, b
 		return BookAssetImage{}, err
 	}
 	var primaryCount int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM batch_factory_v12_book_asset_images WHERE owner_username=? AND asset_id=? AND is_primary=TRUE FOR UPDATE`, owner, assetID).Scan(&primaryCount); err != nil {
+	if err := queryComicStyleRow(ctx, tx, `SELECT COUNT(*) FROM batch_factory_v12_book_asset_images WHERE owner_username=? AND asset_id=? AND is_primary=TRUE FOR UPDATE`, owner, assetID).Scan(&primaryCount); err != nil {
 		return BookAssetImage{}, err
 	}
 	id, err := newID("asset-image")
@@ -70,8 +70,8 @@ func (s *MySQLStore) CreateBookAssetImage(ctx context.Context, owner, batchID, b
 		return BookAssetImage{}, err
 	}
 	now := time.Now().UTC()
-	image := BookAssetImage{ID: id, AssetID: assetID, URL: input.URL, StorageRef: input.StorageRef, MediaType: input.MediaType, Source: input.Source, IsPrimary: primaryCount == 0, Revision: 1, CreatedAt: now}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO batch_factory_v12_book_asset_images(id,owner_username,asset_id,url,storage_ref,media_type,source,is_primary,revision,created_at) VALUES(?,?,?,?,?,?,?,?,1,?)`, image.ID, owner, image.AssetID, image.URL, nullableString(image.StorageRef), image.MediaType, image.Source, image.IsPrimary, now); err != nil {
+	image := BookAssetImage{ID: id, AssetID: assetID, StyleID: comicStyleID(ctx), URL: input.URL, StorageRef: input.StorageRef, MediaType: input.MediaType, Source: input.Source, IsPrimary: primaryCount == 0, Revision: 1, CreatedAt: now}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO batch_factory_v12_book_asset_images(id,owner_username,asset_id,url,storage_ref,media_type,source,is_primary,revision,created_at,style_id) VALUES(?,?,?,?,?,?,?,?,1,?,?)`, image.ID, owner, image.AssetID, image.URL, nullableString(image.StorageRef), image.MediaType, image.Source, image.IsPrimary, now, comicStyleID(ctx)); err != nil {
 		return BookAssetImage{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -93,23 +93,23 @@ func (s *MySQLStore) SetPrimaryBookAssetImage(ctx context.Context, owner, batchI
 		return BookAssetImage{}, err
 	}
 	var image BookAssetImage
-	err = tx.QueryRowContext(ctx, `SELECT url,COALESCE(storage_ref,''),media_type,source,is_primary,revision,created_at FROM batch_factory_v12_book_asset_images WHERE id=? AND owner_username=? AND asset_id=? FOR UPDATE`, imageID, owner, assetID).Scan(&image.URL, &image.StorageRef, &image.MediaType, &image.Source, &image.IsPrimary, &image.Revision, &image.CreatedAt)
+	err = queryComicStyleRow(ctx, tx, `SELECT url,COALESCE(storage_ref,''),media_type,source,is_primary,revision,created_at FROM batch_factory_v12_book_asset_images WHERE id=? AND owner_username=? AND asset_id=? FOR UPDATE`, imageID, owner, assetID).Scan(&image.URL, &image.StorageRef, &image.MediaType, &image.Source, &image.IsPrimary, &image.Revision, &image.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return BookAssetImage{}, ErrNotFound
 	}
 	if err != nil {
 		return BookAssetImage{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE batch_factory_v12_book_asset_images SET is_primary=FALSE,revision=revision+1 WHERE owner_username=? AND asset_id=? AND is_primary=TRUE AND id<>?`, owner, assetID, imageID); err != nil {
+	if _, err := execComicStyle(ctx, tx, `UPDATE batch_factory_v12_book_asset_images SET is_primary=FALSE,revision=revision+1 WHERE owner_username=? AND asset_id=? AND is_primary=TRUE AND id<>?`, owner, assetID, imageID); err != nil {
 		return BookAssetImage{}, err
 	}
 	if !image.IsPrimary {
-		if _, err := tx.ExecContext(ctx, `UPDATE batch_factory_v12_book_asset_images SET is_primary=TRUE,revision=revision+1 WHERE id=? AND owner_username=? AND asset_id=?`, imageID, owner, assetID); err != nil {
+		if _, err := execComicStyle(ctx, tx, `UPDATE batch_factory_v12_book_asset_images SET is_primary=TRUE,revision=revision+1 WHERE id=? AND owner_username=? AND asset_id=?`, imageID, owner, assetID); err != nil {
 			return BookAssetImage{}, err
 		}
 		image.IsPrimary, image.Revision = true, image.Revision+1
 	}
-	image.ID, image.AssetID = imageID, assetID
+	image.ID, image.AssetID, image.StyleID = imageID, assetID, comicStyleID(ctx)
 	if err := tx.Commit(); err != nil {
 		return BookAssetImage{}, err
 	}

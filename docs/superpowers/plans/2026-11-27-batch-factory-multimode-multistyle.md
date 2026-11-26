@@ -119,13 +119,13 @@ assert.equal(normalizeComicOutputStyles({ style: { presetId: 'old' } })[0].prese
 
 **Interfaces:** Consumes Task1 styles; produces immutable `ForComicStyle(styleID) ComicPageStore` on both stores. Asset-image queries/writes also carry an explicit style ID. Base source segments/videos retain their original IDs and scope.
 
-- [ ] Write the isolation test against memory and real isolated MySQL: same book/video under styles A/B creates distinct page IDs, both retain their own primary image; listing A never includes B; switching A's candidate does not touch B. Reusing another member's page/image/collection fails ownership checks.
-- [ ] Add an upgrade fixture with old page/image/collection IDs and a published receipt. After migration all IDs, primary flags and receipts must remain unchanged. Add a test for a late optimistic write conflict in A while B continues to save successfully.
-- [ ] Run new tests RED before changing schema. Provision a new isolated MySQL test database; never run migration fixtures against daily4001 or production data.
-- [ ] Register additive migration `8800501`, verified unused on 2026-11-27. Before implementation recheck latest registered migrations and choose a fresh unused number if another chat has occupied it; do not modify an applied migration checksum.
-- [ ] Add indexed `style_id` scope to pages, collections and asset images; replace the old page uniqueness on owner/batch/book/video with uniqueness including style. Locate the actual old index by its columns in `information_schema`, not an assumed name. Record an explicit legacy style binding per book before the first multi-style settings change, and adopt historical rows to that original style transactionally. Unknown history stays in the original empty legacy scope and is never copied to all selected styles.
-- [ ] Implement scoped adapters through private helpers with explicit style arguments. Preserve existing retry/backoff, ownership checks, optimistic revisions and stale-generation lease checks. Collection item validation must verify page style as well as ownership and book.
-- [ ] Execute MySQL tests with two concurrent same-video writes in different styles, process restart/readback and migration rerun. Run `go test ./internal/storage ./internal/batchfactoryv11 -run 'Test.*ComicStyle|Test.*ComicPage' -count=1`. Commit `feat: persist isolated comic style outputs`.
+- [x] Write the isolation test against memory and real isolated MySQL: same book/video under styles A/B creates distinct page IDs, both retain their own primary image; listing A never includes B; switching A's candidate does not touch B. Reusing another member's page/image/collection fails ownership checks.
+- [x] Add an upgrade fixture with old page/image/collection IDs and a published receipt. After migration all IDs, primary flags and receipts must remain unchanged. Add a test for a late optimistic write conflict in A while B continues to save successfully.
+- [x] Run new tests RED before changing schema. Provision a new isolated MySQL test database; never run migration fixtures against daily4001 or production data.
+- [x] Register additive migration `8800501`, verified unused on 2026-11-27. Before implementation recheck latest registered migrations and choose a fresh unused number if another chat has occupied it; do not modify an applied migration checksum.
+- [x] Add indexed `style_id` scope to pages, collections and asset images; replace the old page uniqueness on owner/batch/book/video with uniqueness including style. Locate the actual old index by its columns in `information_schema`, not an assumed name. Record an immutable legacy style binding per book before the first multi-style operation. Keep its original physical empty scope and resolve the original display style to it; moving old rows would break in-flight provider saves that already captured the empty scope. Unknown history stays in that legacy scope and is never copied to all selected styles.
+- [x] Implement scoped adapters through private helpers with explicit style arguments. Preserve existing retry/backoff, ownership checks, optimistic revisions and stale-generation lease checks. Collection item validation must verify page style as well as ownership and book.
+- [x] Execute MySQL tests with two concurrent same-video writes in different styles, process restart/readback and migration rerun. Run `go test ./internal/storage ./internal/batchfactoryv11 -run 'Test.*ComicStyle|Test.*ComicPage' -count=1`. Commit `feat: persist isolated comic style outputs`.
 
 ### Task 3: 贯通画风到出图、参考图、缓存、下载接口
 
@@ -255,3 +255,5 @@ Durable schema `8800502` (currently unused; recheck before application): creatio
 ## 执行记录
 
 - 任务1完成：Go画风配置/解析/系统目录冻结测试通过；前端画风相关18项测试通过。旧预览测试读取了已退役V11转发文件，已改为检查实际V12接口文件。当前只完成配置基础，尚未开放多画风生产入口。
+
+- 任务2完成：真实MySQL8.4空表结构夹具验证画风页面/资产图/合集隔离、并发写回、重复图片保存与迁移重复启动；原有图片ID及主图保留。迁移8800501。旧画风使用不可变关联映射到原物理范围，避免破坏在途请求。完整batchfactoryv11/storage单元测试已在当前共享源码上通过；临时依赖覆盖仅用于费用模块并发修改期间，最终单元测试不再使用覆盖。

@@ -132,5 +132,6 @@ func AppMigrations() []Migration {
 	out = append(out, AccountCenterMigrations()...)
 	out = append(out, AccountCenterEnergyMigrations()...)
 	out = append(out, ScriptEditorMigrations()...)
+	out = append(out, ComicStyleOutputMigrations()...)
 	return out
 }
