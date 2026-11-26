@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -67,6 +68,16 @@ func TestReceiptBindingMySQLDefaultStartupAndWholeParentReplacement(t *testing.T
 	}
 	checkCount(1)
 	checkRow("first-after-app-startup")
+	// Both genuine marker files are in this ordinary backup, but A's next claim
+	// is newer than the backup and will remain only on the original directory.
+	backup := filepath.Join(root, "older-file-backup")
+	copyReceiptFixtureTree(t, parent, backup)
+	var otherVolumeBackup string
+	if alt := otherReceiptTestVolume(t); alt != "" {
+		otherVolumeBackup = filepath.Join(alt, "older-file-backup")
+		copyReceiptFixtureTree(t, parent, otherVolumeBackup)
+		assertOtherReceiptVolume(t, parent, otherVolumeBackup)
+	}
 	first.Store.DB = nil // The running process already verified its immutable binding.
 	const spooled = "claim-before-parent-loss"
 	respond(first, spooled)
@@ -104,12 +115,29 @@ func TestReceiptBindingMySQLDefaultStartupAndWholeParentReplacement(t *testing.T
 	if err := os.Remove(parent); err != nil {
 		t.Fatal(err)
 	}
+	for attempt, snapshot := range []string{backup, otherVolumeBackup} {
+		if snapshot == "" {
+			continue
+		}
+		copyReceiptFixtureTree(t, snapshot, parent)
+		for _, path := range []string{filepath.Join(dir, receiptDirectoryIDFile), filepath.Join(parent, ".usage-receipts-receipt-id")} {
+			if id, err := readReceiptDirectoryID(path); err != nil || id != row.StoreID {
+				t.Fatalf("test backup must contain the genuine marker bytes: %q %v", id, err)
+			}
+		}
+		checkBlocked(&Tracker{Store: store, ReceiptDir: dir})
+		rejected := parent + fmt.Sprintf("-rejected-%d", attempt)
+		if err := os.Rename(parent, rejected); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := os.Rename(hidden, parent); err != nil {
 		t.Fatal(err)
 	}
 	checkBlocked(&Tracker{ReceiptDir: dir}) // A fresh process cannot verify authority with MySQL down.
 	marker := filepath.Join(dir, receiptDirectoryIDFile)
-	if err := os.Remove(marker); err != nil {
+	markerOriginal := marker + ".fixture-original"
+	if err := os.Rename(marker, markerOriginal); err != nil {
 		t.Fatal(err)
 	}
 	checkBlocked(&Tracker{Store: store, ReceiptDir: dir})
@@ -120,6 +148,13 @@ func TestReceiptBindingMySQLDefaultStartupAndWholeParentReplacement(t *testing.T
 	if err := os.WriteFile(marker, []byte(row.StoreID), 0600); err != nil {
 		t.Fatal(err)
 	}
+	checkBlocked(&Tracker{Store: store, ReceiptDir: dir}) // Correct bytes cannot impersonate the original marker.
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(markerOriginal, marker); err != nil {
+		t.Fatal(err)
+	}
 	restarted := &Tracker{Store: store, ReceiptDir: dir}
 	t.Cleanup(restarted.closeReceiptScan)
 	restarted.flushReceipts(ctx)
@@ -127,6 +162,108 @@ func TestReceiptBindingMySQLDefaultStartupAndWholeParentReplacement(t *testing.T
 	checkRow(spooled)
 	if files := receiptFiles(t, dir); len(files) != 0 {
 		t.Fatalf("replayed claim was not consumed: %v", files)
+	}
+}
+
+func TestReceiptBindingMySQLRepeatedSyncFailureKeepsPending(t *testing.T) {
+	db, _ := receiptRecoveryMySQL(t)
+	store := Store{DB: db}
+	ctx := context.Background()
+	for _, stage := range []string{"inner-marker", "anchor-marker", "receipt-directory", "member-directory", "existing-ancestor"} {
+		t.Run(stage, func(t *testing.T) {
+			root := t.TempDir()
+			parent := filepath.Join(root, "member-system")
+			dir := filepath.Join(parent, "usage-receipts")
+			syncTarget := map[string]string{
+				"inner-marker":      filepath.Join(dir, receiptDirectoryIDFile),
+				"anchor-marker":     filepath.Join(parent, ".usage-receipts-receipt-id"),
+				"receipt-directory": dir,
+				"member-directory":  parent,
+				"existing-ancestor": root,
+			}[stage]
+			var id string
+			t.Cleanup(func() {
+				_, _ = db.Exec(`DELETE FROM yzcm_usage_receipt_bindings WHERE binding_slot=? AND path_digest=?`, receiptBindingSlot, receiptPathDigest(dir))
+			})
+			for _, fault := range []error{syscall.EIO, os.ErrPermission} {
+				faults, paid := 0, 0
+				tracker := &Tracker{Store: store, ReceiptDir: dir, receiptBindingSync: func(f *os.File) error {
+					if f.Name() == syncTarget {
+						faults++
+						return fault
+					}
+					return f.Sync()
+				}}
+				base := transportFunc(func(*http.Request) (*http.Response, error) {
+					paid++
+					return fakeBilledResponse("unexpected"), nil
+				})
+				resp, err := tracker.Wrap(base).RoundTrip(billingTestRequest(t, Request{Owner: "member"}))
+				if resp != nil || !errors.Is(err, fault) || !errors.Is(err, ErrReceiptPersistenceUnavailable) || faults != 1 || paid != 0 {
+					t.Fatalf("failed sync not enforced: response=%v error=%v faults=%d paid=%d", resp, err, faults, paid)
+				}
+				row, found, err := store.loadReceiptBinding(ctx)
+				if err != nil || !found || row.State != receiptBindingPending || row.FilesystemIdentity != "" || row.SyncParentLevels != 2 || id != "" && row.StoreID != id {
+					t.Fatalf("failure changed reservation: row=%+v found=%t error=%v", row, found, err)
+				}
+				id = row.StoreID
+				for _, path := range []string{filepath.Join(dir, receiptDirectoryIDFile), filepath.Join(parent, ".usage-receipts-receipt-id")} {
+					if marker, err := readReceiptDirectoryID(path); err != nil || marker != id {
+						t.Fatalf("cold retry must see an already-published marker: %q %v", marker, err)
+					}
+				}
+			}
+			tracker := &Tracker{Store: store, ReceiptDir: dir}
+			if err := tracker.InitializeReceiptStorage(ctx); err != nil {
+				t.Fatal(err)
+			}
+			row, found, err := store.loadReceiptBinding(ctx)
+			if err != nil || !found || row.State != receiptBindingActive || row.FilesystemIdentity == "" || row.StoreID != id {
+				t.Fatalf("recovery changed identity: row=%+v found=%t error=%v", row, found, err)
+			}
+		})
+	}
+}
+
+func TestReceiptBindingMySQLRejectsMarkerReplacementDuringSync(t *testing.T) {
+	db, _ := receiptRecoveryMySQL(t)
+	store := Store{DB: db}
+	ctx := context.Background()
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "usage-receipts")
+	marker := filepath.Join(dir, receiptDirectoryIDFile)
+	oldMarker := marker + ".original"
+	tracker := &Tracker{Store: store, ReceiptDir: dir, receiptBindingSync: func(f *os.File) error {
+		if f.Name() == parent {
+			id, err := readReceiptDirectoryID(marker)
+			if err != nil {
+				return err
+			}
+			if err := os.Rename(marker, oldMarker); err != nil {
+				return err
+			}
+			if err := os.WriteFile(marker, []byte(id), 0600); err != nil {
+				return err
+			}
+		}
+		return f.Sync()
+	}}
+	if err := tracker.InitializeReceiptStorage(ctx); !errors.Is(err, errReceiptDirectoryChanged) {
+		t.Fatalf("marker changed after it was synced: %v", err)
+	}
+	row, found, err := store.loadReceiptBinding(ctx)
+	if err != nil || !found || row.State != receiptBindingPending || row.FilesystemIdentity != "" {
+		t.Fatalf("replacement became authoritative: row=%+v found=%t error=%v", row, found, err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(oldMarker, marker); err != nil {
+		t.Fatal(err)
+	}
+	restarted := &Tracker{Store: store, ReceiptDir: dir}
+	if err := restarted.InitializeReceiptStorage(ctx); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -174,7 +311,7 @@ func TestReceiptBindingMySQLResumesPendingAndPreservesLegacyFiles(t *testing.T) 
 			parent := t.TempDir()
 			dir, anchor := filepath.Join(parent, "usage-receipts"), filepath.Join(parent, ".usage-receipts-receipt-id")
 			id := fmt.Sprintf("%032x", phase+1)
-			pending := receiptBindingRow{PathDigest: receiptPathDigest(dir), StoreID: id, State: receiptBindingPending, Origin: receiptBindingNew}
+			pending := receiptBindingRow{PathDigest: receiptPathDigest(dir), StoreID: id, State: receiptBindingPending, Origin: receiptBindingNew, SyncParentLevels: 1}
 			if _, err := store.reserveReceiptBinding(ctx, pending); err != nil {
 				t.Fatal(err)
 			}
@@ -218,8 +355,8 @@ func TestReceiptBindingMySQLResumesPendingAndPreservesLegacyFiles(t *testing.T) 
 			if err != nil || !found || active.StoreID != id || active.State != receiptBindingActive {
 				t.Fatalf("resume changed reservation: %+v found=%t error=%v", active, found, err)
 			}
-			if err := store.finishReceiptBinding(ctx, pending, func(receiptBindingRow) error {
-				return errors.New("stale pending reader attempted to touch active files")
+			if _, err := store.finishReceiptBinding(ctx, pending, func(receiptBindingRow) (string, error) {
+				return "", errors.New("stale pending reader attempted to touch active files")
 			}); err != nil {
 				t.Fatal(err)
 			}

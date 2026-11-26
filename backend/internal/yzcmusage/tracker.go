@@ -59,6 +59,7 @@ type Tracker struct {
 	credentialMu       sync.Mutex
 	credentials        map[string]cachedCredential
 	receiptBindingMu   sync.Mutex
+	receiptBindingSync func(*os.File) error // Used to inject disk failures during binding tests.
 	receiptBound       *receiptBinding
 	receiptDBOnlyBound bool
 	receiptScanMu      sync.Mutex

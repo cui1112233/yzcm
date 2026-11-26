@@ -15,6 +15,7 @@ import (
 
 const receiptDirectoryIDFile = ".receipt-directory-id"
 const receiptBindingTimeout = 5 * time.Second
+const maxReceiptSyncParentLevels = 64
 
 var errReceiptDirectoryChanged = errors.New("configured usage receipt directory is missing, inaccessible or no longer matches its binding")
 
@@ -37,6 +38,7 @@ type receiptBinding struct {
 	dir, anchor, id string
 	pathDigest      string
 	info            os.FileInfo
+	objects         receiptFilesystemObjects
 }
 
 func visibleReceiptDirectory(path string) (os.FileInfo, error) {
@@ -75,6 +77,10 @@ func readReceiptDirectoryID(path string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
+	return readReceiptMarker(f)
+}
+
+func readReceiptMarker(f *os.File) (string, error) {
 	raw, err := io.ReadAll(io.LimitReader(f, 33))
 	if err != nil {
 		return "", err
@@ -122,12 +128,17 @@ func newReceiptStoreID() (string, error) {
 }
 
 func inspectUnboundReceiptDirectory(b receiptBinding) (receiptBindingRow, error) {
-	row := receiptBindingRow{PathDigest: b.pathDigest, State: receiptBindingPending}
+	row := receiptBindingRow{PathDigest: b.pathDigest, State: receiptBindingPending, SyncParentLevels: 1}
 	_, dirErr := visibleReceiptDirectory(b.dir)
 	parentID, parentErr := readReceiptDirectoryID(b.anchor)
 	if dirErr != nil {
 		if os.IsNotExist(dirErr) && os.IsNotExist(parentErr) {
 			row.Origin = receiptBindingNew
+			levels, err := receiptParentSyncLevels(b.dir)
+			if err != nil {
+				return row, err
+			}
+			row.SyncParentLevels = levels
 		} else {
 			return row, errors.Join(errReceiptDirectoryChanged, dirErr, parentErr)
 		}
@@ -150,77 +161,71 @@ func inspectUnboundReceiptDirectory(b receiptBinding) (receiptBindingRow, error)
 	return row, nil
 }
 
-func preparePendingReceiptDirectory(ctx context.Context, b receiptBinding, row receiptBindingRow) error {
+func preparePendingReceiptDirectory(ctx context.Context, b receiptBinding, row receiptBindingRow, syncFile func(*os.File) error) (string, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return "", err
+	}
+	if row.SyncParentLevels < 1 || row.SyncParentLevels > maxReceiptSyncParentLevels {
+		return "", errReceiptDirectoryChanged
 	}
 	parentID, parentErr := readReceiptDirectoryID(b.anchor)
 	inside := filepath.Join(b.dir, receiptDirectoryIDFile)
 	innerID, innerErr := readReceiptDirectoryID(inside)
 	if !matchingOrMissingReceiptID(parentID, parentErr, row.StoreID) || !matchingOrMissingReceiptID(innerID, innerErr, row.StoreID) {
-		return errReceiptDirectoryChanged
+		return "", errReceiptDirectoryChanged
 	}
 	info, err := visibleReceiptDirectory(b.dir)
 	if err != nil {
 		// Only a fresh pending row may provision a missing directory. An
 		// upgrade never replaces a directory that might already hold receipts.
 		if !os.IsNotExist(err) || row.Origin != receiptBindingNew || parentErr == nil {
-			return errors.Join(errReceiptDirectoryChanged, err)
+			return "", errors.Join(errReceiptDirectoryChanged, err)
 		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return "", err
 		}
-		if err := createPendingReceiptRoot(b.dir); err != nil {
-			return err
+		if err := os.MkdirAll(b.dir, 0700); err != nil {
+			return "", err
 		}
 		info, err = visibleReceiptDirectory(b.dir)
 		if err != nil {
-			return err
+			return "", err
 		}
 	}
 	if row.Origin == receiptBindingAdopt && innerErr != nil {
-		return errReceiptDirectoryChanged
+		return "", errReceiptDirectoryChanged
 	}
 	for _, marker := range []struct {
 		path string
 		err  error
 	}{{inside, innerErr}, {b.anchor, parentErr}} {
 		if err := ctx.Err(); err != nil {
-			return err
+			return "", err
 		}
 		if marker.err != nil {
 			if err := publishReceiptFile(marker.path, ".receipt-binding-*.tmp", []byte(row.StoreID)); err != nil {
-				return err
+				return "", err
 			}
 		}
 	}
 	b.info = info
-	return b.verify()
+	return b.syncPendingFilesystem(ctx, row.SyncParentLevels, syncFile)
 }
 
-func createPendingReceiptRoot(dir string) error {
-	ancestor := filepath.Dir(dir)
-	for {
-		_, err := os.Stat(ancestor)
+func receiptParentSyncLevels(dir string) (int, error) {
+	for level, parent := 1, filepath.Dir(dir); level <= maxReceiptSyncParentLevels; level, parent = level+1, filepath.Dir(parent) {
+		info, err := os.Stat(parent)
 		if err == nil {
-			break
+			if !info.IsDir() {
+				return 0, errReceiptDirectoryChanged
+			}
+			return level, nil
 		}
-		if !os.IsNotExist(err) || filepath.Dir(ancestor) == ancestor {
-			return err
-		}
-		ancestor = filepath.Dir(ancestor)
-	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
-	for parent := filepath.Dir(dir); ; parent = filepath.Dir(parent) {
-		if err := syncReceiptDirectory(parent); err != nil {
-			return err
-		}
-		if parent == ancestor {
-			return nil
+		if !os.IsNotExist(err) || filepath.Dir(parent) == parent {
+			return 0, err
 		}
 	}
+	return 0, errReceiptDirectoryChanged
 }
 
 func matchingOrMissingReceiptID(id string, err error, want string) bool {
@@ -264,7 +269,7 @@ func (t *Tracker) bindReceiptDBOnly(parent context.Context) error {
 			return err
 		}
 	}
-	if row.PathDigest != pathDigest || row.State != receiptBindingActive || row.Origin != receiptBindingDBOnly {
+	if row.PathDigest != pathDigest || row.State != receiptBindingActive || row.Origin != receiptBindingDBOnly || row.FilesystemIdentity != "" || row.SyncParentLevels != 0 {
 		return errReceiptDirectoryChanged
 	}
 	t.receiptBindingMu.Lock()
@@ -317,11 +322,13 @@ func (t *Tracker) bindReceiptDirectory(parent context.Context) (receiptBinding, 
 		return b, errReceiptDirectoryChanged
 	}
 	b.id = row.StoreID
+	filesystemIdentity := row.FilesystemIdentity
 	switch row.State {
 	case receiptBindingPending:
-		if err := t.Store.finishReceiptBinding(ctx, row, func(current receiptBindingRow) error {
-			return preparePendingReceiptDirectory(ctx, b, current)
-		}); err != nil {
+		filesystemIdentity, err = t.Store.finishReceiptBinding(ctx, row, func(current receiptBindingRow) (string, error) {
+			return preparePendingReceiptDirectory(ctx, b, current, t.receiptBindingSync)
+		})
+		if err != nil {
 			return b, err
 		}
 	case receiptBindingActive:
@@ -332,12 +339,16 @@ func (t *Tracker) bindReceiptDirectory(parent context.Context) (receiptBinding, 
 	if err != nil {
 		return b, errors.Join(errReceiptDirectoryChanged, err)
 	}
-	if err := b.verify(); err != nil {
+	b.objects, err = b.filesystemObjects()
+	if err != nil || b.objects.encode() != filesystemIdentity {
+		return b, errors.Join(errReceiptDirectoryChanged, err)
+	}
+	if err := b.verifyVisible(); err != nil {
 		return b, err
 	}
 	t.receiptBindingMu.Lock()
 	defer t.receiptBindingMu.Unlock()
-	if t.receiptBound != nil && (t.receiptBound.id != b.id || !os.SameFile(t.receiptBound.info, b.info)) {
+	if t.receiptBound != nil && (t.receiptBound.id != b.id || t.receiptBound.objects != b.objects || !os.SameFile(t.receiptBound.info, b.info)) {
 		return b, errReceiptDirectoryChanged
 	}
 	t.receiptBound = &b
@@ -346,10 +357,12 @@ func (t *Tracker) bindReceiptDirectory(parent context.Context) (receiptBinding, 
 
 func (b receiptBinding) verify() error {
 	info, dirErr := os.Lstat(b.dir)
-	parentID, parentErr := readReceiptDirectoryID(b.anchor)
-	innerID, innerErr := readReceiptDirectoryID(filepath.Join(b.dir, receiptDirectoryIDFile))
-	if dirErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || parentErr != nil || innerErr != nil || parentID != b.id || innerID != b.id || !os.SameFile(info, b.info) {
-		return errors.Join(errReceiptDirectoryChanged, dirErr, parentErr, innerErr)
+	if dirErr != nil || !info.IsDir() || !os.SameFile(info, b.info) {
+		return errors.Join(errReceiptDirectoryChanged, dirErr)
+	}
+	actual, err := b.filesystemObjects()
+	if err != nil || actual != b.objects {
+		return errors.Join(errReceiptDirectoryChanged, err)
 	}
 	return nil
 }

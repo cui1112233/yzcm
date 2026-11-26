@@ -93,6 +93,31 @@ func TestEnergyReceiptBindingMigrationMySQLResumesAfterDDLCommit(t *testing.T) {
 	}
 }
 
+func TestEnergyReceiptBindingMigrationMySQLRejectsIncompleteDDL(t *testing.T) {
+	ctx := context.Background()
+	db := energyMigrationTestDatabase(t)
+	var migration Migration
+	for _, candidate := range AccountCenterEnergyMigrations() {
+		if candidate.Version == 8800408 {
+			migration = candidate
+		}
+	}
+	if migration.Version == 0 {
+		t.Fatal("receipt-binding migration missing")
+	}
+	wrong := strings.Replace(migration.SQL[0], "filesystem_identity VARCHAR(224)", "filesystem_identity VARCHAR(64)", 1)
+	if _, err := db.ExecContext(ctx, wrong); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunMigrations(ctx, db, []Migration{migration}); err == nil || !strings.Contains(err.Error(), "unexpected usage receipt binding definition") {
+		t.Fatalf("incomplete DDL was adopted: %v", err)
+	}
+	var rows int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version=8800408`).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("incomplete DDL was stamped in the ledger: rows=%d error=%v", rows, err)
+	}
+}
+
 func TestEnergyAttributionMySQLPreservesOwnerActorAndTeam(t *testing.T) {
 	for _, interrupted := range []bool{false, true} {
 		t.Run(fmt.Sprintf("interrupted=%t", interrupted), func(t *testing.T) {
@@ -224,12 +249,13 @@ func checkConcurrentEnergyTrackers(t *testing.T, db *sql.DB) {
 	if err := second.InitializeReceiptStorage(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	var pathDigest, storeID, state, origin string
-	if err := db.QueryRow(`SELECT path_digest,store_id,state,origin FROM yzcm_usage_receipt_bindings WHERE binding_slot='member-system'`).Scan(&pathDigest, &storeID, &state, &origin); err != nil {
+	var pathDigest, storeID, state, origin, filesystemIdentity string
+	var parentLevels int
+	if err := db.QueryRow(`SELECT path_digest,store_id,state,origin,filesystem_identity,sync_parent_levels FROM yzcm_usage_receipt_bindings WHERE binding_slot='member-system'`).Scan(&pathDigest, &storeID, &state, &origin, &filesystemIdentity, &parentLevels); err != nil {
 		t.Fatal(err)
 	}
-	mock.ExpectQuery("SELECT path_digest,store_id,state,origin FROM yzcm_usage_receipt_bindings").WithArgs("member-system").
-		WillReturnRows(sqlmock.NewRows([]string{"path_digest", "store_id", "state", "origin"}).AddRow(pathDigest, storeID, state, origin))
+	mock.ExpectQuery("SELECT path_digest,store_id,state,origin").WithArgs("member-system").
+		WillReturnRows(sqlmock.NewRows([]string{"path_digest", "store_id", "state", "origin", "filesystem_identity", "sync_parent_levels"}).AddRow(pathDigest, storeID, state, origin, filesystemIdentity, parentLevels))
 	mock.ExpectExec("INSERT INTO yzcm_usage_requests").
 		WithArgs("cross-tracker", "member", "team-a", "founder", "model", yzcmusage.Fingerprint("fixture-key"), sqlmock.AnyArg(), 200).
 		WillDelayFor(200 * time.Millisecond).WillReturnError(errors.New("fixture connection failure"))

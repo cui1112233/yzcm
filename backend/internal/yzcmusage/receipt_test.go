@@ -53,11 +53,15 @@ func cacheReceiptTestBinding(t *testing.T, tracker *Tracker) {
 		t.Fatal(err)
 	}
 	b := receiptBinding{dir: dir, anchor: filepath.Join(filepath.Dir(dir), "."+filepath.Base(dir)+"-receipt-id"), id: strings.Repeat("a", 32), pathDigest: receiptPathDigest(dir)}
-	row := receiptBindingRow{StoreID: b.id, Origin: receiptBindingUpgrade}
-	if err := preparePendingReceiptDirectory(context.Background(), b, row); err != nil {
+	row := receiptBindingRow{StoreID: b.id, Origin: receiptBindingUpgrade, SyncParentLevels: 1}
+	if _, err := preparePendingReceiptDirectory(context.Background(), b, row, nil); err != nil {
 		t.Fatal(err)
 	}
 	b.info, err = visibleReceiptDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.objects, err = b.filesystemObjects()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -44,9 +44,54 @@ ADD INDEX yzcm_usage_actor_time (actor_username, created_at)`, backfillEnergyTea
 		Adopt:            resumeEnergyTeamBackfill,
 	}, {
 		Version:          8800408,
-		CallbackChecksum: "v88-yzcm-usage-receipt-binding-v1",
+		CallbackChecksum: "v88-yzcm-usage-receipt-binding-v2",
 		SQL:              []string{yzcmusage.ReceiptBindingStatement()},
+		Adopt:            adoptEnergyReceiptBindingTable,
+		Reconcile:        verifyEnergyReceiptBindingTable,
 	}}
+}
+
+func verifyEnergyReceiptBindingTable(ctx context.Context, tx *sql.Tx) error {
+	found, err := adoptEnergyReceiptBindingTable(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("usage receipt binding table missing")
+	}
+	return nil
+}
+
+func adoptEnergyReceiptBindingTable(ctx context.Context, tx *sql.Tx) (bool, error) {
+	var engine string
+	err := tx.QueryRowContext(ctx, `SELECT ENGINE FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = 'yzcm_usage_receipt_bindings'`).Scan(&engine)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var columns, matching, primaryColumns int
+	err = tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(CASE
+ WHEN column_name='binding_slot' AND column_type='varchar(64)' AND collation_name='ascii_bin' AND is_nullable='NO' AND column_key='PRI' THEN 1
+ WHEN column_name='path_digest' AND column_type='char(64)' AND collation_name='ascii_bin' AND is_nullable='NO' THEN 1
+ WHEN column_name='store_id' AND column_type='char(32)' AND collation_name='ascii_bin' AND is_nullable='NO' THEN 1
+ WHEN column_name='state' AND column_type='enum(''pending'',''active'')' AND is_nullable='NO' THEN 1
+ WHEN column_name='origin' AND column_type='enum(''new'',''upgrade'',''adopt'',''db-only'')' AND is_nullable='NO' THEN 1
+ WHEN column_name='filesystem_identity' AND column_type='varchar(224)' AND collation_name='ascii_bin' AND is_nullable='YES' THEN 1
+ WHEN column_name='sync_parent_levels' AND column_type='smallint unsigned' AND is_nullable='NO' AND column_default='1' THEN 1
+ WHEN column_name='created_at' AND column_type='datetime(6)' AND is_nullable='NO' AND UPPER(column_default)='CURRENT_TIMESTAMP(6)' THEN 1
+ WHEN column_name='activated_at' AND column_type='datetime(6)' AND is_nullable='YES' THEN 1
+ ELSE 0 END), 0), COALESCE(SUM(column_key='PRI'), 0)
+FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'yzcm_usage_receipt_bindings'`).Scan(&columns, &matching, &primaryColumns)
+	if err != nil {
+		return false, err
+	}
+	if engine != "InnoDB" || columns != 9 || matching != 9 || primaryColumns != 1 {
+		return false, fmt.Errorf("unexpected usage receipt binding definition: engine=%s columns=%d matching=%d primary=%d", engine, columns, matching, primaryColumns)
+	}
+	return true, nil
 }
 
 // MySQL commits the atomic ALTER separately from the backfill and ledger row.

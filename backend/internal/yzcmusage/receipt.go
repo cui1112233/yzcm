@@ -270,7 +270,9 @@ func (t *Tracker) writeKnownReceipt(ctx context.Context, r receipt) error {
 func unverifiedReceipt(b receiptBinding, r receipt, cause error) error {
 	// The parent binding is separate from the recovery directory. Store only
 	// review evidence here. This directory is never scanned for automatic replay.
-	if id, err := readReceiptDirectoryID(b.anchor); err == nil && id == b.id {
+	parent, parentErr := readReceiptObject(filepath.Dir(b.dir), true, "")
+	anchor, anchorErr := readReceiptObject(b.anchor, false, b.id)
+	if parentErr == nil && anchorErr == nil && parent == b.objects.parent && anchor == b.objects.anchor {
 		review := b.anchor + ".unverified"
 		if err := makeReceiptDirectory(review); err != nil {
 			return errors.Join(ErrReceiptPersistenceUnavailable, cause, err)

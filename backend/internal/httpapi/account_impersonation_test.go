@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -248,16 +246,19 @@ func TestEnergyAttributionFromAuthenticatedAccountSwitch(t *testing.T) {
 func expectActiveUsageReceiptBinding(t *testing.T, mock sqlmock.Sqlmock, dir string) {
 	t.Helper()
 	storeID := strings.Repeat("a", 32)
-	for _, path := range []string{filepath.Join(dir, ".receipt-directory-id"), filepath.Join(filepath.Dir(dir), "."+filepath.Base(dir)+"-receipt-id")} {
-		if err := os.WriteFile(path, []byte(storeID), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
 	if runtime.GOOS == "windows" {
 		dir = strings.ToLower(dir)
 	}
-	mock.ExpectQuery("SELECT path_digest,store_id,state,origin FROM yzcm_usage_receipt_bindings").WithArgs("member-system").
-		WillReturnRows(sqlmock.NewRows([]string{"path_digest", "store_id", "state", "origin"}).AddRow(yzcmusage.Fingerprint(dir), storeID, "active", "upgrade"))
+	rows := func() *sqlmock.Rows {
+		return sqlmock.NewRows([]string{"path_digest", "store_id", "state", "origin", "filesystem_identity", "sync_parent_levels"}).
+			AddRow(yzcmusage.Fingerprint(dir), storeID, "pending", "upgrade", "", 1)
+	}
+	mock.ExpectQuery("SELECT path_digest,store_id,state,origin").WithArgs("member-system").WillReturnRows(rows())
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT path_digest,store_id,state,origin.*FOR UPDATE").WithArgs("member-system").WillReturnRows(rows())
+	mock.ExpectExec("UPDATE yzcm_usage_receipt_bindings SET filesystem_identity=").WithArgs(sqlmock.AnyArg(), "member-system").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 }
 
 func TestImpersonationUsesSubjectAndAuditsActorUntilExit(t *testing.T) {
