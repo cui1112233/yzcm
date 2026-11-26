@@ -70,6 +70,7 @@ type AuthoringAction struct {
 	Content          string   `json:"content,omitempty"`
 	Chapter          *Chapter `json:"chapter,omitempty"`
 	Asset            *Asset   `json:"asset,omitempty"`
+	AssetOperation   string   `json:"asset_operation,omitempty"`
 	AssetPrepared    bool     `json:"asset_prepared,omitempty"`
 	Shot             *Shot    `json:"shot,omitempty"`
 	ExpectedRevision int64    `json:"expected_revision"`
@@ -250,6 +251,9 @@ func ValidateAuthoringActions(actions []AuthoringAction) error {
 			if !a.AssetPrepared {
 				return fmt.Errorf("%w: 资产方案缺少服务器准备的完整记录，请重新准备修改方案", ErrInvalidArgument)
 			}
+			if a.AssetOperation != "" && a.AssetOperation != "update" && a.AssetOperation != "add" && a.AssetOperation != "delete" {
+				return ErrInvalidArgument
+			}
 			if a.Asset == nil || a.TargetID == "" {
 				return ErrInvalidArgument
 			}
@@ -341,7 +345,7 @@ func (s AuthoringService) Apply(ctx context.Context, o, p, id string, v int64, c
 				}
 				return e
 			}
-			if _, e = s.Store.UpdateAsset(ctx, o, p, a.TargetID, *a.Asset, a.ExpectedRevision); e != nil {
+			if e = applyAssistantAssetMemory(ctx, s.Store, o, p, a); e != nil {
 				return e
 			}
 		case "shot":

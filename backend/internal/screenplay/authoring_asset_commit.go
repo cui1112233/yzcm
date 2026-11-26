@@ -20,7 +20,7 @@ func (s *MySQLStore) CommitAuthoringAsset(ctx context.Context, repository Author
 	if !ok || repo == nil || s == nil || s.db == nil || repo.db != s.db {
 		return AuthoringState{}, fmt.Errorf("%w: 资产和确认记录必须使用同一MySQL数据库", ErrInvalidState)
 	}
-	tx, e := s.db.BeginTx(ctx, nil)
+	tx, e := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if e != nil {
 		return AuthoringState{}, e
 	}
@@ -73,7 +73,24 @@ func (s *MySQLStore) CommitAuthoringAsset(ctx context.Context, repository Author
 	if action.Kind != "asset" {
 		return AuthoringState{}, ErrInvalidArgument
 	}
-	if _, e = updateAssetInTx(ctx, tx, owner, project, action.TargetID, *action.Asset, action.ExpectedRevision); e != nil {
+	if action.Asset.OwnerUsername != "" && action.Asset.OwnerUsername != owner || action.Asset.ProjectID != "" && action.Asset.ProjectID != project {
+		return AuthoringState{}, ErrInvalidArgument
+	}
+	switch action.AssetOperation {
+	case "add":
+		if action.Asset.ID != action.TargetID || action.ExpectedRevision != 0 {
+			return AuthoringState{}, ErrInvalidArgument
+		}
+		asset := *action.Asset
+		asset.OwnerUsername = owner
+		asset.ProjectID = project
+		_, e = createAssetInTx(ctx, tx, asset)
+	case "delete":
+		e = deleteAssistantAssetInTx(ctx, tx, owner, project, action)
+	default:
+		_, e = updateAssetInTx(ctx, tx, owner, project, action.TargetID, *action.Asset, action.ExpectedRevision)
+	}
+	if e != nil {
 		return AuthoringState{}, e
 	}
 	state.Proposals[index].Status = "applied"

@@ -18,9 +18,9 @@ const ScreenplayAuthoringReadTools = `
 存在多个剧集或引擎必须明确筛选；不能猜第一个。参数不含owner、project_id、文件路径、URL或任何写入字段。工具失败必须说明真实原因；truncated=true说明结果仅为部分。读取不等于修改成功。`
 
 const ScreenplayAuthoringAssetEditTools = `
-【待确认的资产修改】只在用户明确要求修改现有记录时使用modify_character、modify_scene、modify_prop，不直接执行写入。
+【待确认的资产修改】只在用户明确要求新增、修改或删除资产时使用modify_character、modify_scene、modify_prop，不直接执行写入。
 格式：{"tool":"modify_character","tool_args":{"character_id":"从真实数据取得的编号","description":"用户要求的新描述"},"reply":"准备修改方案","actions":[]}。
-场景用scene_id，道具用prop_id，也可统一用asset_id；无法取得ID时只能用完整的character_name、scene_name、prop_name精确查找，不能猜部分名称。action仅允许update。可修改name、identity、description、image_prompt、voice（只限人物）、episodes、tag；也可把新字段放在new_data内。没有请求修改的字段不要填写。不能传owner、project_id、权限、路径或确认标记；不能新增、删除或生图。服务器会读原记录、保留其他字段并填入真实版本，生成待用户确认的方案。读取后准备方案不需要再调用模型。不要把“方案已准备”说成“修改已完成”。`
+场景用scene_id，道具用prop_id，也可统一用asset_id；无法取得ID时只能用完整的character_name、scene_name、prop_name精确查找，不能猜部分名称。action支持add、update、delete，省略时为update。兼容add_character、add_scene、add_prop及delete_character、delete_scene、delete_prop别名，别名不能搭配冲突的action。新增必须给name或对应类型的完整名称，可用new_data；不得给资产ID，编号由服务器生成。删除只给真实ID或完整名称，不附修改字段；存在镜头引用时会拒绝，不能自动解绑。可修改name、identity、description、image_prompt、voice（只限人物）、episodes、tag；也可把新字段放在new_data内。没有请求修改的字段不要填写。不能传owner、project_id、权限、路径或确认标记；不能生图。删除仅移除资产记录，保留原素材文件。服务器会准备完整资产方案；修改与删除读取真实记录和版本，修改保留其他字段；新增避免同类型重名。所有操作均须由用户确认。读取后准备方案不需要再调用模型。不要把“方案已准备”说成“修改已完成”。`
 
 // ScreenplayAuthoringSuggestion 是助手给出的导航建议（前端据此渲染可点击卡片）。
 // 它与动作不同：不修改任何数据、不消耗额度，只是引导用户到正确面板。

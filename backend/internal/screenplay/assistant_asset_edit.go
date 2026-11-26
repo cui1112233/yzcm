@@ -33,14 +33,27 @@ type assistantAssetEditArgs struct {
 }
 
 func IsAssistantAssetEditTool(name string) bool {
-	return name == "modify_character" || name == "modify_scene" || name == "modify_prop"
+	switch name {
+	case "modify_character", "modify_scene", "modify_prop", "add_character", "add_scene", "add_prop", "delete_character", "delete_scene", "delete_prop":
+		return true
+	}
+	return false
 }
 
-// PrepareAssistantAssetEdit only prepares an existing, revision-protected asset
-// proposal. Identity and every unchanged field come from this owner's store.
+// PrepareAssistantAssetEdit prepares add/update/delete without writing assets.
+// IDs, scope and existing snapshots are supplied by the server.
 func PrepareAssistantAssetEdit(ctx context.Context, store Store, owner, project, name string, raw json.RawMessage) (AuthoringAction, string, error) {
 	fail := func(reason string) (AuthoringAction, string, error) {
 		return AuthoringAction{}, "", fmt.Errorf("%w: %s", ErrInvalidArgument, reason)
+	}
+	implied := ""
+	if strings.HasPrefix(name, "add_") {
+		implied = "add"
+		name = "modify_" + strings.TrimPrefix(name, "add_")
+	}
+	if strings.HasPrefix(name, "delete_") {
+		implied = "delete"
+		name = "modify_" + strings.TrimPrefix(name, "delete_")
 	}
 	var kind AssetType
 	var label, alias, targetName string
@@ -70,8 +83,17 @@ func PrepareAssistantAssetEdit(ctx context.Context, store Store, owner, project,
 	if d.Decode(&tail) != io.EOF {
 		return fail("修改参数必须是一个对象")
 	}
-	if args.Action != "" && args.Action != "update" {
-		return fail("此入口只准备现有资产修改，不能新增或删除")
+	if implied != "" {
+		if args.Action != "" && args.Action != implied {
+			return fail("工具名和操作类型冲突")
+		}
+		args.Action = implied
+	}
+	if args.Action == "" {
+		args.Action = "update"
+	}
+	if args.Action != "add" && args.Action != "update" && args.Action != "delete" {
+		return fail("操作必须是add、update或delete")
 	}
 	switch kind {
 	case AssetCharacter:
@@ -101,12 +123,12 @@ func PrepareAssistantAssetEdit(ctx context.Context, store Store, owner, project,
 		id = alias
 	}
 	fields := args.assistantAssetFields
-	if id == "" && targetName == "" && fields.Name != nil {
+	if args.Action != "add" && id == "" && targetName == "" && fields.Name != nil {
 		targetName = *fields.Name
 		fields.Name = nil
 	}
 	targetName = strings.TrimSpace(targetName)
-	if (id == "" && targetName == "") || len(id) > 256 || len(targetName) > 256 {
+	if (args.Action != "add" && id == "" && targetName == "") || len(id) > 256 || len(targetName) > 256 {
 		return fail("请提供真实资产编号或完整名称")
 	}
 	if args.NewData != nil {
@@ -140,6 +162,28 @@ func PrepareAssistantAssetEdit(ctx context.Context, store Store, owner, project,
 	if e != nil {
 		return AuthoringAction{}, "", e
 	}
+	if args.Action == "add" {
+		if id != "" {
+			return fail("新增资产编号由服务器生成，不能指定编号")
+		}
+		if targetName != "" {
+			if fields.Name != nil && strings.TrimSpace(*fields.Name) != targetName {
+				return fail("新增名称冲突")
+			}
+			fields.Name = &targetName
+		}
+		if fields.Name == nil || strings.TrimSpace(*fields.Name) == "" {
+			return fail("新增资产名称不能为空")
+		}
+		desired := Asset{ID: newScreenplayID("asset"), OwnerUsername: owner, ProjectID: project, Type: kind, Degree: DegreeStandard}
+		applyAssistantAssetFields(&desired, fields)
+		for _, asset := range assets {
+			if strings.EqualFold(strings.TrimSpace(asset.Name), desired.Name) {
+				return fail("同类型资产已使用这个名称")
+			}
+		}
+		return AuthoringAction{Kind: "asset", AssetOperation: "add", TargetID: desired.ID, Asset: &desired, AssetPrepared: true}, fmt.Sprintf("新增%s「%s」", label, desired.Name), nil
+	}
 	var found *Asset
 	for _, asset := range assets {
 		if (id != "" && asset.ID != id) || (id == "" && asset.Name != targetName) {
@@ -156,6 +200,15 @@ func PrepareAssistantAssetEdit(ctx context.Context, store Store, owner, project,
 	}
 	if found == nil {
 		return AuthoringAction{}, "", fmt.Errorf("%w: 当前作品没有指定的%s", ErrNotFound, label)
+	}
+	if args.Action == "delete" {
+		if fields.Name != nil || fields.Identity != nil || fields.Description != nil || fields.Prompt != nil || fields.Voice != nil || fields.Episodes != nil || fields.Tag != nil {
+			return fail("删除不能同时修改字段")
+		}
+		if err := checkAssistantAssetReferences(ctx, store, owner, project, *found); err != nil {
+			return AuthoringAction{}, "", err
+		}
+		return AuthoringAction{Kind: "asset", AssetOperation: "delete", TargetID: found.ID, Asset: found, AssetPrepared: true, ExpectedRevision: found.Revision}, fmt.Sprintf("删除%s「%s」（保留原素材文件）", label, found.Name), nil
 	}
 	desired := *found
 	if found.Extra != nil {
@@ -190,4 +243,15 @@ func PrepareAssistantAssetEdit(ctx context.Context, store Store, owner, project,
 	}
 	action := AuthoringAction{Kind: "asset", TargetID: found.ID, Asset: &desired, AssetPrepared: true, ExpectedRevision: found.Revision}
 	return action, fmt.Sprintf("修改%s「%s」", label, found.Name), nil
+}
+
+func applyAssistantAssetFields(desired *Asset, fields assistantAssetFields) {
+	for _, f := range []struct {
+		dst   *string
+		value *string
+	}{{&desired.Name, fields.Name}, {&desired.Identity, fields.Identity}, {&desired.Description, fields.Description}, {&desired.Prompt, fields.Prompt}, {&desired.Voice, fields.Voice}, {&desired.Episodes, fields.Episodes}, {&desired.Tag, fields.Tag}} {
+		if f.value != nil {
+			*f.dst = strings.TrimSpace(*f.value)
+		}
+	}
 }

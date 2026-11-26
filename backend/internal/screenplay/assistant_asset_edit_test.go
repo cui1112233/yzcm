@@ -29,7 +29,7 @@ func TestAssistantAssetEditPreparesFullScopedSnapshotWithoutWriting(t *testing.T
 	if _, _, e := PrepareAssistantAssetEdit(ctx, s, "alice", "p", "modify_character", json.RawMessage(`{"character_id":"a","name":"乙"}`)); e == nil {
 		t.Fatal("rename collision should fail before confirmation")
 	}
-	for _, args := range []string{`{"character_id":"a","owner":"bob","description":"x"}`, `{"character_id":"a","action":"delete"}`, `{"character_id":"a","action":"add","description":"x"}`, `{"character_id":"a","new_data":{"project_id":"other"}}`, `{"character_id":"a","character_name":"另一人","description":"x"}`, `{"character_id":"a","prompt":"一","image_prompt":"二"}`} {
+	for _, args := range []string{`{"character_id":"a","owner":"bob","description":"x"}`, `{"character_id":"a","action":"add","description":"x"}`, `{"character_id":"a","new_data":{"project_id":"other"}}`, `{"character_id":"a","character_name":"另一人","description":"x"}`, `{"character_id":"a","prompt":"一","image_prompt":"二"}`} {
 		if _, _, e := PrepareAssistantAssetEdit(ctx, s, "alice", "p", "modify_character", json.RawMessage(args)); e == nil {
 			t.Fatal("invalid update accepted", args)
 		}

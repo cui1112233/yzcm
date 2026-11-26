@@ -3,6 +3,7 @@ package screenplay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/DATA-DOG/go-sqlmock"
 	"testing"
@@ -137,6 +138,107 @@ func TestMySQLUpdateAssetStandaloneStillCommits(t *testing.T) {
 	asset, e := s.UpdateAsset(context.Background(), "alice", "p", "a", Asset{Type: AssetCharacter, Name: "甲", Description: "新", Prompt: "保留"}, 2)
 	if e != nil || asset.Revision != 3 || asset.SortOrder != 4 || asset.SourceBatch != 1 || asset.Degree != AssetDegree("standard") || asset.Prompt != "保留" {
 		t.Fatal(asset, e)
+	}
+	if e = m.ExpectationsWereMet(); e != nil {
+		t.Fatal(e)
+	}
+}
+
+func TestMySQLAuthoringAssetCRUDAndReceiptAreOneTransaction(t *testing.T) {
+	for _, op := range []string{"add", "delete"} {
+		for _, failReceipt := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/%v", op, failReceipt), func(t *testing.T) {
+				db, m, e := sqlmock.New()
+				if e != nil {
+					t.Fatal(e)
+				}
+				defer db.Close()
+				store := NewMySQLStore(db)
+				asset := Asset{ID: "a", ProjectID: "p", OwnerUsername: "alice", Type: AssetProp, Name: "信封", Degree: DegreeStandard}
+				revision := int64(2)
+				if op == "add" {
+					revision = 0
+				}
+				state := AuthoringState{Owner: "alice", ProjectID: "p", Revision: 5, Proposals: []AssistantProposal{{ID: "proposal", Status: "pending", Revision: 5, Actions: []AuthoringAction{{Kind: "asset", AssetOperation: op, AssetPrepared: true, TargetID: "a", ExpectedRevision: revision, Asset: &asset}}}}}
+				body, _ := json.Marshal(state)
+				m.ExpectBegin()
+				m.ExpectQuery("SELECT id FROM screenplay_projects").WithArgs("p", "alice").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("p"))
+				m.ExpectQuery("SELECT body,revision FROM screenplay_authoring").WithArgs("alice", "p").WillReturnRows(sqlmock.NewRows([]string{"body", "revision"}).AddRow(body, 5))
+				if op == "add" {
+					m.ExpectQuery("SELECT COUNT").WithArgs("p", "alice", "prop", "信封").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+					m.ExpectQuery("SELECT COALESCE").WithArgs("p", "alice").WillReturnRows(sqlmock.NewRows([]string{"sort"}).AddRow(1))
+					m.ExpectExec("INSERT INTO screenplay_assets").WillReturnResult(sqlmock.NewResult(1, 1))
+				} else {
+					m.ExpectQuery("SELECT asset_type,name,revision").WithArgs("a", "p", "alice").WillReturnRows(sqlmock.NewRows([]string{"type", "name", "revision"}).AddRow("prop", "信封", 2))
+					m.ExpectQuery("SELECT id,character_names,scene_name,prop_names").WithArgs("p", "alice").WillReturnRows(sqlmock.NewRows([]string{"id", "characters", "scene", "props"}))
+					m.ExpectQuery("SELECT id,characters_text,scene_name,props_text,protocol_json").WithArgs("p", "alice").WillReturnRows(sqlmock.NewRows([]string{"id", "characters", "scene", "props", "protocol"}))
+					m.ExpectExec("DELETE FROM screenplay_assets").WithArgs("a", "p", "alice", int64(2)).WillReturnResult(sqlmock.NewResult(0, 1))
+				}
+				if failReceipt {
+					m.ExpectExec("UPDATE screenplay_authoring").WillReturnError(fmt.Errorf("receipt failed"))
+					m.ExpectRollback()
+				} else {
+					m.ExpectExec("UPDATE screenplay_authoring").WillReturnResult(sqlmock.NewResult(0, 1))
+					m.ExpectCommit()
+				}
+				result, e := store.CommitAuthoringAsset(context.Background(), store.AuthoringRepository(), "alice", "p", "proposal", 5)
+				if failReceipt && e == nil {
+					t.Fatal("receipt failure ignored")
+				}
+				if !failReceipt && (e != nil || result.Proposals[0].Status != "applied" || result.Revision != 6) {
+					t.Fatal(result, e)
+				}
+				if e = m.ExpectationsWereMet(); e != nil {
+					t.Fatal(e)
+				}
+			})
+		}
+	}
+}
+
+func TestMySQLAssistantAssetDeleteRejectsLatestReferenceAndRevision(t *testing.T) {
+	for _, scenario := range []string{"reference", "revision"} {
+		t.Run(scenario, func(t *testing.T) {
+			db, m, e := sqlmock.New()
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer db.Close()
+			store := NewMySQLStore(db)
+			asset := Asset{ID: "a", ProjectID: "p", OwnerUsername: "alice", Type: AssetCharacter, Name: "甲"}
+			state := AuthoringState{Revision: 5, Proposals: []AssistantProposal{{ID: "proposal", Status: "pending", Revision: 5, Actions: []AuthoringAction{{Kind: "asset", AssetOperation: "delete", AssetPrepared: true, TargetID: "a", ExpectedRevision: 2, Asset: &asset}}}}}
+			body, _ := json.Marshal(state)
+			m.ExpectBegin()
+			m.ExpectQuery("SELECT id FROM screenplay_projects").WithArgs("p", "alice").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("p"))
+			m.ExpectQuery("SELECT body,revision FROM screenplay_authoring").WithArgs("alice", "p").WillReturnRows(sqlmock.NewRows([]string{"body", "revision"}).AddRow(body, 5))
+			revision := 2
+			if scenario == "revision" {
+				revision = 3
+			}
+			m.ExpectQuery("SELECT asset_type,name,revision").WithArgs("a", "p", "alice").WillReturnRows(sqlmock.NewRows([]string{"type", "name", "revision"}).AddRow("character", "甲", revision))
+			if scenario == "reference" {
+				m.ExpectQuery("SELECT id,character_names,scene_name,prop_names").WithArgs("p", "alice").WillReturnRows(sqlmock.NewRows([]string{"id", "characters", "scene", "props"}).AddRow("empty", nil, "", nil).AddRow("latest-shot", `["甲"]`, "", nil))
+			}
+			m.ExpectRollback()
+			if _, e = store.CommitAuthoringAsset(context.Background(), store.AuthoringRepository(), "alice", "p", "proposal", 5); e == nil {
+				t.Fatal("unsafe delete committed")
+			}
+			if e = m.ExpectationsWereMet(); e != nil {
+				t.Fatal(e)
+			}
+		})
+	}
+}
+
+func TestMySQLCreateAssetKeepsValidationBeforeDatabase(t *testing.T) {
+	db, m, e := sqlmock.New()
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer db.Close()
+	_, e = NewMySQLStore(db).CreateAsset(context.Background(), Asset{Type: AssetCharacter})
+	if !errors.Is(e, ErrInvalidArgument) {
+		t.Fatal("invalid asset should be rejected before transaction", e)
 	}
 	if e = m.ExpectationsWereMet(); e != nil {
 		t.Fatal(e)

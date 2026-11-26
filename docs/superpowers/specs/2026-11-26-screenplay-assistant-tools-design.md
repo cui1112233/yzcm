@@ -27,3 +27,25 @@
 ## 第一部分验收
 
 先红绿测试真实结果与保存前后内容一致；跨用户/跨作品拒绝、所选引擎和剧集隔离、无数据、歧义、未知工具/参数、超限和被截断状态。真实HTTP受控助手两轮读取结果并落消息工具记录；无写库副作用；原storyboard_failures与138/293回归不退。
+
+## 2026-11-27 D01资产新增/删除层
+
+本层把上述第一步的update扩展为add/update/delete。三个modify工具省略action仍为update；支持add_character/add_scene/add_prop和delete_character/delete_scene/delete_prop别名，别名与action冲突立即拒绝。工具参数继续严格拒绝身份、作品、权限、路径、媒体字段和服务器准备标记；模型直接返回asset动作（包括伪造asset_prepared）仍被HTTP入口拒绝。
+
+新增按类型和完整名称排重；服务器准备时分配唯一资产编号和完整待确认快照，准备不写资产。确认再次检查同名记录；同一方案只应用一次，不在重试时另生成编号。删除先读真实记录和版本，检查本作品所有保存的剧本版本、全部剧集和引擎的分镜引用；确认阶段再次检查真实版本和引用。人物/场景/道具引用按对应结构化字段完整名称解析，与实际参考图匹配的逗号、顿号、分号、斜杠、竖线、换行、@规则一致；姓名内部空格保留。扩展协议中的显式资产ID引用也检查。引用存在时指出资产与镜头并拒绝，不自动解绑；只删除资产记录，原素材文件和媒体记录保留。
+
+MySQL通过同一数据库、同一Serializable事务锁定作品、待确认状态和目标资产；删除扫描并FOR UPDATE锁住本作品两张镜头表的完整查询范围，空范围也受保护，防止本事务检查后、提交前出现新引用。新增复用现有CreateAsset的校验与INSERT事务函数，资产写入和方案applied状态一起提交，确认状态写失败则资产新增/删除回滚。更新保留原完整字段与版本保护。
+
+并发边界：当前镜头表缺少project_id/owner_username前导索引，删除范围查询可能扩大锁定范围，暂时阻塞其他作品镜头写入；未新增迁移。其他创作入口原本允许保存尚未提取成资产的名称，删除事务之后的新创作仍遵循此合同，不把名称强制变成外键。内存仓库用于受控测试，生产原子保证由MySQL实现。下游失效标记仍复用原逻辑，在资产与确认事务提交后执行；该标记失败不回退已提交的资产及applied回执。
+
+前端待确认列表明确显示新增资产/修改资产/删除资产和真实名称，删除显示“保留原素材文件”；沿用原确认按钮和版本字段，applied/stale方案不可再次执行。后端prompt模块同步工具合同，前端没有新增系统提示词。
+
+### 本层测试证据
+
+- 先红：新增CRUD测试中三个add_*别名均以“不支持的修改工具”失败；再实现并转绿。
+- 继续红绿：嵌套协议绑定漏检、姓名空格/@引用漏检分别先失败再修正；CreateAsset事务拆分后原校验顺序用失败测试捕获并恢复。
+- 干净测试源码：`_local-archive-20261028/luoshui-parity-20261126/runtime-source`（HEAD db2ee863）；独立Go overlay：`review-overlay/assistant-asset-crud.json`，仅覆盖本层及已有助手必需文件，不改变干净目录HEAD。
+- `go test -overlay .../assistant-asset-crud.json ./internal/screenplay -count=1`通过；定向`./internal/screenplay ./internal/httpapi -run 'Test(Assistant|MySQL.*Asset|Authoring.*Asset)' -count=1`通过。
+- 覆盖：三类资产准备/确认新增删除、未确认不写、重复确认、跨用户/跨作品、只读成员、同名新增冲突、服务器ID、伪造参数、删除前/确认前新引用、历史版本引用、资产版本改变、MySQL新增/删除确认写失败回滚和禁止分开保存、SQL NULL资产列表。
+- 真实headless Chrome组件测试`node --test frontend/src/user/pages/comic-assistant-asset-crud.browser.test.js`通过（1/1，无跳过）：核对新增/删除文字和资产名、保留文件说明、确认弹窗前零写入、确认后单次正确POST、applied按钮禁用。`comic-assistant-intelligence.source.test.js`5项回归通过。
+- 本层未调用付费模型、未远端推送、未部署、未重启4001。真实4001新增/删除保存回读及独立审查由主负责人接续，不能将本层自动化测试当作整体D01完成。
