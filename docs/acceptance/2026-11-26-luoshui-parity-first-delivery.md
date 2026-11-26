@@ -67,3 +67,13 @@
 - a6bd32ee补四个镜头列表工具shot_ids与九项中文工具名。独立复查发现大小写/重复JSON键可绕过筛选，先红复现后d868a3c1严格逐字段解析，拒绝大小写变体与重复键（含转义重名）。复审通过；业务全包、相关HTTP及Chrome组件通过。前端构建成功，仍有原有动态导入/包体积提醒，未称零告警。
 - 干净提交d868a3c1已测试构建，但实际4001已由同机其他任务运行其后代1e22c0f7，未回退覆盖。运行SHA/manifest一致。四工具真实读取只返回指定ID；缺失404、混用400、大写别名400，作者状态未变。证据assistant-read-ids-runtime.json。没有模型调用、付费或本任务远端发布。
 - D01仍未完整：按原件工具名称去重，新增/删除六个别名补入后，剩余54个名称尚未接入作品助手调度；此数字不等于54个手动功能缺失。会话、工作流、制作链及交付仍待执行。
+
+## 11月27日：现有创作镜头的文字修改
+
+- 96530f05接modify_storyboard的update（已有台词/配音角色/情绪/图片提示词/视频提示词），以及modify_image_prompt、modify_video_prompt的replace/append。多板明确集/引擎与真实镜头；服务器完整快照、待确认、作者和board双版本核验。模型直接shot/creative_shot或伪造准备标记拒绝。
+- 只UPDATE目标镜头文字、board版本和applied回执，同一MySQL事务；不删镜头重插，保留协议根字段/来源/资产绑定/媒体。前端展示真实目标及字段前后对照。独立规格/质量复查通过；screenplay全包、相关HTTP、真实Chrome8项通过。
+- modify_script_text仍未实现：当前创作board没有独立画面描述消费字段，未把台词冒充画面描述，也未新增仅保存却不使用的字段。新增/删除镜头、AI rewrite/fix_violations与数字shot_index兼容仍未接，此层不能标完整原件协议。
+- 首次启动96530f05因共享迁移8800408历史checksum被9aab9038改变而失败，自动回退1e22c0f7成功。未直接改用户ledger或放过checksum。4a276374恢复原408精确SQL/标记，以新8800411升级两列；严格拒绝未知及曾执行v2的checksum。原7列、新9列、DDL提交后重试、畸形字段/默认值、错误checksum均在随机隔离MySQL通过，独立复查通过。已有v2 ledger明确不自动兼容；本机原v1正常升级。
+- 最终从干净精确4a276374测试业务/prompt/storage/yzcmusage及相关HTTP，重新构建React与Go embed；4001实际SHA/manifest均4a276374、health200。旧1e22c0f7程序保留，可回退；新列兼容旧字段写入。
+- 真实归档样例只改自建镜头视频提示词：准备无变化，确认后差异仅video_desc，镜头ID稳定，重复确认409，再恢复原文本。证据assistant-shot-edit-runtime.json；原408 checksum未变、411登记、9列已存在见migration-408-forward-runtime.json。验收未调用模型，没有本任务远端推送或上线。
+- 剩余原件未接助手名称51个（不表示51个手动功能缺失），已接名称也有上述未支持分支。D02等大工作包保持待办。
