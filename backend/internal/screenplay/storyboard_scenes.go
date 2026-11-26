@@ -12,7 +12,11 @@ import (
 	"qiantie/backend/internal/prompt/luoshui"
 )
 
-type storyboardSceneInput struct{ Content string }
+type storyboardSceneInput struct {
+	Content         string
+	SourceChapterID string `json:"source_chapter_id,omitempty"`
+	Structured      bool   `json:"-"`
+}
 
 func storyboardScenesForEpisode(req StoryboardRequest, state *AuthoringState, episode episodeInput) ([]storyboardSceneInput, error) {
 	if state != nil && !req.UseOriginalContentDirectly {
@@ -30,7 +34,7 @@ func storyboardScenesForEpisode(req StoryboardRequest, state *AuthoringState, ep
 					if json.Unmarshal([]byte(object), &doc) == nil && len(doc.Scenes) > 0 {
 						units := make([]storyboardSceneInput, 0, len(doc.Scenes))
 						for _, scene := range doc.Scenes {
-							units = append(units, storyboardSceneInput{Content: string(scene)})
+							units = append(units, storyboardSceneInput{Content: string(scene), Structured: true})
 						}
 						return units, nil
 					}
@@ -79,6 +83,9 @@ func splitStoryboardScenes(content string) ([]storyboardSceneInput, error) {
 }
 
 func (s *StoryboardService) generateSceneShots(ctx context.Context, req StoryboardRequest, episode episodeInput, units []storyboardSceneInput, selected prompt.CreativePromptSnapshot, roles, scenes, props, style, synopsis, prefix, extra, planning, model string, useHistory bool, aspectRatio string) ([]StoryboardShot, []int, error) {
+	if selected.SourceID == 138 {
+		return s.generateScenes138(ctx, req, episode, units, selected, roles, scenes, props, prefix, extra, planning, model, useHistory)
+	}
 	if req.sceneOnlyIndex == nil && selected.SourceID > 0 && !useHistory && len(units) > 1 && s.SceneConcurrency != 1 {
 		return s.generateConcurrentScenes(ctx, req, episode, units, selected, roles, scenes, props, style, synopsis, prefix, extra, planning, model, aspectRatio)
 	}

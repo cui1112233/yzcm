@@ -10,21 +10,25 @@ import (
 )
 
 type StoryboardGenerationCall struct {
+	RequestJSON string                 `json:"request_json,omitempty"`
+	ReceiptKey  *ScriptBatchReceiptKey `json:"receipt_key,omitempty"`
+
 	Status      string `json:"status"`
 	InputDigest string `json:"input_digest"`
 	RawResponse string `json:"raw_response,omitempty"`
 	Error       string `json:"error,omitempty"`
 }
 type StoryboardGenerationEpisode struct {
-	SceneCount    int                                 `json:"scene_count,omitempty"`
-	EpisodeNo     int                                 `json:"episode_no"`
-	Status        string                              `json:"status"`
-	Error         string                              `json:"error,omitempty"`
-	Calls         map[string]StoryboardGenerationCall `json:"calls"`
-	Storyboard    *Storyboard                         `json:"storyboard,omitempty"`
-	Warnings      []string                            `json:"warnings,omitempty"`
-	AddedAssetIDs []string                            `json:"added_asset_ids,omitempty"`
-	PendingAssets []Asset                             `json:"pending_assets,omitempty"`
+	SceneProgress map[int]StoryboardGenerationSceneSummary `json:"scene_progress,omitempty"`
+	SceneCount    int                                      `json:"scene_count,omitempty"`
+	EpisodeNo     int                                      `json:"episode_no"`
+	Status        string                                   `json:"status"`
+	Error         string                                   `json:"error,omitempty"`
+	Calls         map[string]StoryboardGenerationCall      `json:"calls"`
+	Storyboard    *Storyboard                              `json:"storyboard,omitempty"`
+	Warnings      []string                                 `json:"warnings,omitempty"`
+	AddedAssetIDs []string                                 `json:"added_asset_ids,omitempty"`
+	PendingAssets []Asset                                  `json:"pending_assets,omitempty"`
 }
 type StoryboardGenerationAttempt struct {
 	PromptID          string                               `json:"prompt_id,omitempty"`

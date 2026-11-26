@@ -70,7 +70,7 @@ func TestRecoveredProtocolsKeepDistinctFieldsReportsAndDurations(t *testing.T) {
 		supported          bool
 	}{
 		{"137", "storyboard_image_voice_v1", "json_with_report", 0, 0, 0, true},
-		{"138", "storyboard_image_voice_v1", "json_with_report", 0, 0, 0, false},
+		{"138", "storyboard_image_voice_v1", "json_with_report", 0, 0, 0, true},
 		{"139", "storyboard_image_voice_v1", "json_object", 15, 15, 15, true},
 		{"147", "storyboard_seedance_timed_v1", "json_object", 2, 15, 0, true},
 		{"175", "storyboard_nine_grid_v1", "json_object", 15, 15, 15, true},

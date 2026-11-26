@@ -58,7 +58,7 @@ func TestScreenplayCreativeHTTPOriginalStoryboardCatalog(t *testing.T) {
 			t.Fatal("unclassified prompt", row.ID)
 		}
 	}
-	if original != 41 || compat != 2 || unavailable != 1 || zipOriginal != 1 {
+	if original != 41 || compat != 2 || unavailable != 0 || zipOriginal != 1 {
 		t.Fatalf("original=%d compatibility=%d unavailable=%d zip-original=%d", original, compat, unavailable, zipOriginal)
 	}
 }

@@ -145,3 +145,5 @@ export function reviewStoryboardDoctor(id,{episode,engine,model}={},request=apiR
   if(!String(model||'').trim())throw Error('请先选择文本模型');
   return request(doctorPath(id,episode,engine),{method:'POST',body:JSON.stringify({model:String(model||'')}),timeoutMs:300000,suppressGlobalError:true});
 }
+
+export function recoverStoryboardGenerationAttempt(id,key,request=apiRequest){if(!key||!String(key).match(/^[a-zA-Z0-9_-]+$/))throw Error("生成请求编号无效");return request(`/api/comic-screenplays/projects/${projectID(id)}/storyboard-generation-attempts/${encodeURIComponent(key)}/recover`,{method:"POST",body:JSON.stringify({}),suppressGlobalError:true});}

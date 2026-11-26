@@ -197,9 +197,26 @@ func (s *StoryboardService) Generate(ctx context.Context, req StoryboardRequest)
 	sceneInputs := map[int][]storyboardSceneInput{}
 	sceneCounts := map[int]int{}
 	for _, ep := range episodes {
-		units, e := storyboardScenesForEpisode(req, authoring, ep)
+		var units []storyboardSceneInput
+		var e error
+		if selected.SourceID == 138 {
+			units, e = storyboard138ScenesForEpisode(req, authoring, ep)
+		} else {
+			units, e = storyboardScenesForEpisode(req, authoring, ep)
+		}
 		if e != nil {
 			return out, fmt.Errorf("第%d集：%w", ep.No, e)
+		}
+		if selected.SourceID == 138 {
+			if e := validate138Episode(req, authoring, ep.No); e != nil {
+				return out, e
+			}
+			if e := validate138Sources(units); e != nil {
+				return out, e
+			}
+			if s.Authoring == nil || s.Authoring.Receipts == nil {
+				return out, fmt.Errorf("%w: 分镜回包保存目录未配置", ErrInvalidState)
+			}
 		}
 		sceneInputs[ep.No] = units
 		sceneCounts[ep.No] = len(units)
@@ -264,6 +281,11 @@ func (s *StoryboardService) Generate(ctx context.Context, req StoryboardRequest)
 	}
 	if replay != nil {
 		return replay.replay()
+	}
+	if selected.SourceID == 138 {
+		session.receipts = storyboard138Receipts(s.Authoring)
+		guard := guard138Value(project, authoring, assets, prefix, &session.attempt)
+		session.verifyCurrent = func(c context.Context) error { return s.guard138(c, req, guard) }
 	}
 	req.generationSession = session
 	roles, scenes, props = session.attempt.Roles, session.attempt.Scenes, session.attempt.Props
@@ -338,6 +360,11 @@ func (s *StoryboardService) Generate(ctx context.Context, req StoryboardRequest)
 				case AssetProp:
 					known.props[a.Name] = true
 				}
+			}
+		}
+		if selected.SourceID == 138 && session.verifyCurrent != nil {
+			if e := session.verifyCurrent(ctx); e != nil {
+				return result, e
 			}
 		}
 		storyboard := Storyboard{

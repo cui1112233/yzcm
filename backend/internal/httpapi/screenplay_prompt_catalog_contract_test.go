@@ -32,8 +32,8 @@ func TestScreenplayPromptCatalogExposesProtocolAndDisabledReasons(t *testing.T) 
 			t.Fatal("public metadata leaked system body")
 		}
 		if p.SourceID == 138 {
-			if p.Supported || p.Reason == "" {
-				t.Fatal("unsupported choice became enabled", p)
+			if !p.Supported || p.Reason != "" || p.Parser != "cm_storyboard138_source_batches_v1" {
+				t.Fatal("138 source continuation adapter missing", p)
 			}
 			found[p.SourceID] = true
 		}

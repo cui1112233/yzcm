@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,9 +22,12 @@ type StoryboardGenerationEpisodeSummary struct {
 }
 
 type StoryboardGenerationSceneSummary struct {
-	Index  int    `json:"index"`
-	Status string `json:"status"`
-	Error  string `json:"error,omitempty"`
+	Index      int    `json:"index"`
+	BatchCount int    `json:"batch_count,omitempty"`
+	Covered    int    `json:"covered,omitempty"`
+	Total      int    `json:"total,omitempty"`
+	Status     string `json:"status"`
+	Error      string `json:"error,omitempty"`
 }
 type StoryboardGenerationSummary struct {
 	RequestKey        string                               `json:"request_key"`
@@ -41,6 +43,7 @@ type StoryboardGenerationSummary struct {
 	EpisodeNumbers    []int                                `json:"episode_numbers"`
 	Episodes          []StoryboardGenerationEpisodeSummary `json:"episodes"`
 	Error             string                               `json:"error,omitempty"`
+	CanRecover        bool                                 `json:"can_recover"`
 	CanRetry          bool                                 `json:"can_retry"`
 	CancelRequested   bool                                 `json:"cancel_requested"`
 	Prefix            *string                              `json:"prefix,omitempty"`
@@ -65,7 +68,7 @@ func (a StoryboardGenerationAttempt) Summary() StoryboardGenerationSummary {
 		count := ep.SceneCount
 		for phase := range ep.Calls {
 			if strings.HasPrefix(phase, "storyboard_scene_") {
-				if i, e := strconv.Atoi(strings.TrimPrefix(phase, "storyboard_scene_")); e == nil && i > count {
+				if i, ok := parseScenePhase(phase); ok && i > count {
 					count = i
 				}
 			}
@@ -80,13 +83,30 @@ func (a StoryboardGenerationAttempt) Summary() StoryboardGenerationSummary {
 			if ok {
 				status = call.Status
 			}
-			scenes = append(scenes, StoryboardGenerationSceneSummary{Index: i, Status: status, Error: call.Error})
+			summary := StoryboardGenerationSceneSummary{Index: i, Status: status, Error: call.Error}
+			if progress, ok := ep.SceneProgress[i]; ok {
+				summary = progress
+			}
+			for phase, c := range ep.Calls {
+				if n, ok := parseScenePhase(phase); ok && n == i {
+					if c.Status == "invalid" || c.Status == "unknown" || c.Status == "calling" || c.Status == "failed" {
+						summary.Status = c.Status
+						summary.Error = c.Error
+					} else if summary.Status == "pending" {
+						summary.Status = c.Status
+					}
+				}
+			}
+			scenes = append(scenes, summary)
 		}
 		out.Episodes = append(out.Episodes, StoryboardGenerationEpisodeSummary{EpisodeNo: n, Status: ep.Status, Error: ep.Error, Scenes: scenes})
 		if ep.Status == "unknown" || ep.Status == "calling" || ep.Status == "saving" {
 			out.CanRetry = false
 		}
 		for _, call := range ep.Calls {
+			if a.PromptID == "luoshui_storyboard_138" && call.ReceiptKey != nil && (call.Status == "calling" || call.Status == "unknown") {
+				out.CanRecover = true
+			}
 			if call.Status == "calling" || call.Status == "unknown" {
 				out.CanRetry = false
 			}
@@ -116,12 +136,12 @@ func generationAttemptResult(a StoryboardGenerationAttempt) StoryboardResult {
 			if len(phase) <= len("storyboard_scene_") || phase[:len("storyboard_scene_")] != "storyboard_scene_" {
 				continue
 			}
-			if scene, err := strconv.Atoi(phase[len("storyboard_scene_"):]); err == nil && scene > 0 {
+			if scene, ok := parseScenePhase(phase); ok {
 				out.FailedScenes = append(out.FailedScenes, StoryboardSceneFailure{Episode: n, Scene: scene})
 			}
 		}
 	}
-	out.PartialFailure = len(out.Storyboards) > 0 && len(out.FailedEpisodes) > 0
+	out.PartialFailure = (len(out.Storyboards) > 0 && len(out.FailedEpisodes) > 0) || hasAwaiting138(&a)
 	return out
 }
 func (a StoryboardGenerationAttempt) Public() map[string]any {
@@ -152,6 +172,8 @@ func (a StoryboardGenerationAttempt) replay() (StoryboardResult, error) {
 
 type storyboardGenerationSession struct {
 	mu                  sync.Mutex
+	verifyCurrent       func(context.Context) error
+	receipts            ScriptBatchReceipts
 	store               StoryboardGenerationStore
 	owner, project, key string
 	attempt             StoryboardGenerationAttempt
@@ -232,6 +254,15 @@ func beginStoryboardGeneration(ctx context.Context, store StoryboardGenerationSt
 			}
 		}
 		if req.RetryOf != "" {
+			if prior.PromptID == "luoshui_storyboard_138" {
+				depth := 0
+				for a := prior; a != nil && a.RetryOf != ""; a = state.Attempts[a.RetryOf] {
+					depth++
+					if depth >= 64 {
+						return fmt.Errorf("%w: 续接请求已达64轮上限", ErrInvalidState)
+					}
+				}
+			}
 			if !req.ConfirmedRetry {
 				return fmt.Errorf("%w: 续跑须用户明确确认", ErrInvalidArgument)
 			}
@@ -271,6 +302,18 @@ func beginStoryboardGeneration(ctx context.Context, store StoryboardGenerationSt
 				}
 			}
 		}
+		if id, _ := base["prompt_id"].(string); id == "luoshui_storyboard_138" {
+			size := 0
+			for _, a := range state.Attempts {
+				if a.PromptID == id {
+					b, _ := json.Marshal(a)
+					size += len(b)
+				}
+			}
+			if size > 16<<20 {
+				return fmt.Errorf("%w: 已保存分批记录达到上限，请先整理旧任务", ErrInvalidState)
+			}
+		}
 		now := time.Now().UTC()
 		a := &StoryboardGenerationAttempt{RequestKey: req.IdempotencyKey, RetryOf: req.RetryOf, InputDigest: digest, Engine: engine, Status: "running", ChapterID: req.ChapterID, PlanningChapterID: req.PlanningChapterID, UseOriginal: req.UseOriginalContentDirectly, EpisodeNumbers: numbers, Episodes: map[int]*StoryboardGenerationEpisode{}, CreatedAt: now, UpdatedAt: now, Roles: roles, Scenes: scenes, Props: props, ExternalHistory: external, Prefix: req.Prefix, ExtraContent: req.ExtraContent}
 		a.UsePlanning = req.UsePlanning
@@ -301,6 +344,7 @@ func beginStoryboardGeneration(ctx context.Context, store StoryboardGenerationSt
 							}
 						}
 					}
+					ep.SceneProgress = parent.SceneProgress
 					ep.AddedAssetIDs = append([]string{}, parent.AddedAssetIDs...)
 					ep.PendingAssets = append([]Asset{}, parent.PendingAssets...)
 					if len(ep.PendingAssets) > 0 {
@@ -368,6 +412,31 @@ func (s *storyboardGenerationSession) call(ctx context.Context, episode int, pha
 		}
 		return TextResponse{Content: cached.RawResponse, Model: request.Model}, nil
 	}
+	var receiptKey *ScriptBatchReceiptKey
+	if s.attempt.PromptID == "luoshui_storyboard_138" && strings.Contains(phase, "_batch_") {
+		if s.receipts == nil || len(raw) > max138Bytes {
+			return TextResponse{}, ErrInvalidState
+		}
+		totalBytes, totalCalls := 0, 0
+		for _, ep := range s.attempt.Episodes {
+			for _, c := range ep.Calls {
+				totalBytes += len(c.RawResponse) + len(c.RequestJSON)
+				totalCalls++
+			}
+		}
+		if totalCalls >= max138Calls || totalBytes+len(raw)+max138Bytes > max138RunBytes {
+			return TextResponse{}, fmt.Errorf("%w: 分批调用或存储达到上限", ErrInvalidState)
+		}
+		var scene, batch int
+		if _, e := fmt.Sscanf(phase, "storyboard_scene_%d_batch_%d", &scene, &batch); e != nil {
+			return TextResponse{}, ErrInvalidArgument
+		}
+		k := ScriptBatchReceiptKey{Owner: s.owner, Project: s.project, Chapter: fmt.Sprintf("storyboard138:%d:%d", episode, scene), Generation: s.key, InputDigest: digest, Batch: batch}
+		receiptKey = &k
+		if e := s.receipts.Save(ctx, ScriptBatchReceipt{Key: k}); e != nil {
+			return TextResponse{}, fmt.Errorf("%w: 无法准备分镜回包保存，请稍后再试", ErrInvalidState)
+		}
+	}
 	if e := s.mutate(ctx, func(a *StoryboardGenerationAttempt) error {
 		ep := a.Episodes[episode]
 		if a.Status != "running" || ep == nil {
@@ -379,13 +448,28 @@ func (s *storyboardGenerationSession) call(ctx context.Context, episode int, pha
 			}
 		}
 		ep.Status = "calling"
-		ep.Calls[phase] = StoryboardGenerationCall{Status: "calling", InputDigest: digest}
+		call := StoryboardGenerationCall{Status: "calling", InputDigest: digest}
+		if receiptKey != nil {
+			call.ReceiptKey = receiptKey
+			call.RequestJSON = string(raw)
+		}
+		ep.Calls[phase] = call
 		return nil
 	}); e != nil {
 		return TextResponse{}, e
 	}
 	response, callErr := generator.Generate(ctx, request)
+	var receiptSaveErr error
+	if receiptKey != nil {
+		saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		receiptSaveErr = s.receipts.Save(saveCtx, returnedScriptReceipt(*receiptKey, response.Content, callErr))
+		cancel()
+
+	}
 	saveErr := s.mutate(context.WithoutCancel(ctx), func(a *StoryboardGenerationAttempt) error {
+		if receiptKey != nil && a.Status != "running" {
+			return ErrInvalidState
+		}
 		ep := a.Episodes[episode]
 		call := ep.Calls[phase]
 		if callErr != nil {
@@ -394,11 +478,18 @@ func (s *storyboardGenerationSession) call(ctx context.Context, episode int, pha
 				call.Status = "failed"
 			}
 			call.Error = callErr.Error()
+			if receiptKey != nil {
+				call.Error = boundedScriptDiagnostic(call.Error, 4096)
+			}
 			ep.Status = call.Status
 			ep.Error = call.Error
 		} else {
 			call.Status = "received"
-			if len(response.Content) > 8<<20 {
+			limit := 8 << 20
+			if receiptKey != nil {
+				limit = max138Bytes
+			}
+			if len(response.Content) > limit {
 				call.Status = "unknown"
 				call.Error = "模型返回超过安全存储上限，结果需人工核对"
 				ep.Status = "unknown"
@@ -413,13 +504,16 @@ func (s *storyboardGenerationSession) call(ctx context.Context, episode int, pha
 	if saveErr != nil {
 		return TextResponse{}, saveErr
 	}
+	if receiptSaveErr != nil {
+		return response, fmt.Errorf("%w: 独立回包文件保存失败，原始结果已存数据库，请确认续跑以免费复用", ErrInvalidState)
+	}
 	if callErr != nil {
 		return response, callErr
 	}
 	if ctx.Err() != nil {
 		return response, ctx.Err()
 	}
-	if s.callStatus(episode, phase) == "unknown" {
+	if s.callStatus(episode, phase) == "unknown" || s.callStatus(episode, phase) == "invalid" {
 		return response, ErrInvalidState
 	}
 	return response, nil
@@ -494,6 +588,9 @@ func (s *storyboardGenerationSession) finish(ctx context.Context, result *Storyb
 				success++
 				continue
 			}
+			if ep.Status == "awaiting_continue" {
+				continue
+			}
 			uncertain := false
 			for _, call := range ep.Calls {
 				uncertain = uncertain || call.Status == "unknown" || call.Status == "calling"
@@ -518,6 +615,8 @@ func (s *storyboardGenerationSession) finish(ctx context.Context, result *Storyb
 			a.Status = "unknown"
 		case ctx.Err() != nil:
 			a.Status = "cancelled"
+		case hasAwaiting138(a):
+			a.Status = "partial"
 		case success > 0:
 			a.Status = "partial"
 		default:

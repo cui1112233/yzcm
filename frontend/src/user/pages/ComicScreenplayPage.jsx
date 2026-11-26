@@ -388,6 +388,7 @@ export default function ComicScreenplayPage() {
       const result = await task(controller.signal);
       if(selectedProject.current!==selectedId)return false;await refreshCurrentProject(selectedId);
       if (result?.requires_confirmation) { message.info('尚未确认使用作品拥有者的生成服务，本次未生成'); return { requires_confirmation: true, not_started: true }; }
+      if(result?.generation_attempt?.status==='partial'&&result.generation_attempt.episodes?.some(ep=>ep.status==='awaiting_continue')){message.info('本批已保存，待继续生成；完整覆盖后才发布分镜。');return result;}
       const warnings = collectWarnings(result);
       const partialFailure = describePartialFailure(result);
       if (partialFailure) {
