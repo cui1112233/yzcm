@@ -1,15 +1,14 @@
 package storage
 
 import (
-	"reflect"
 	"strings"
 	"testing"
 )
 
 func TestNovelCreationMigrationCreatesOwnerScopedLongFormDomain(t *testing.T) {
 	migrations := NovelCreationMigrations()
-	if len(migrations) != 11 {
-		t.Fatalf("migrations=%d, want 11", len(migrations))
+	if len(migrations) != 12 {
+		t.Fatalf("migrations=%d, want 12", len(migrations))
 	}
 	migration := migrations[0]
 	if migration.Version != 8800300 {
@@ -73,8 +72,27 @@ func TestNovelCreationMigrationCreatesOwnerScopedLongFormDomain(t *testing.T) {
 }
 
 func TestNovelCreationMigrationsAreStableAcrossCalls(t *testing.T) {
-	if !reflect.DeepEqual(NovelCreationMigrations(), NovelCreationMigrations()) {
-		t.Fatal("migration result changed between calls")
+	first, second := NovelCreationMigrations(), NovelCreationMigrations()
+	for i, migration := range first {
+		if ChecksumFor(migration) != ChecksumFor(second[i]) {
+			t.Fatalf("migration %d changed between calls", migration.Version)
+		}
+	}
+}
+
+func TestNovelRunUsageAttributionMigrationRegisteredOnce(t *testing.T) {
+	count := 0
+	for _, migration := range AppMigrations() {
+		if migration.Version == 8800407 {
+			count++
+			sql := strings.Join(migration.SQL, "\n")
+			if !strings.Contains(sql, "usage_team_id VARCHAR(64) NULL") || !strings.Contains(sql, "usage_actor_username VARCHAR(32) NULL") {
+				t.Fatalf("novel run attribution columns must be nullable: %s", sql)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("novel run usage migration count=%d, want 1", count)
 	}
 }
 

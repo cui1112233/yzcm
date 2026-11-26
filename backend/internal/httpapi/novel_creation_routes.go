@@ -42,7 +42,11 @@ func RegisterNovelCreationRoutes(mux *http.ServeMux, auth BridgeAuth, service *n
 				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "请先登录"})
 				return
 			}
-			fn(w, req, strings.TrimSpace(identity.Username))
+			owner := strings.TrimSpace(identity.Username)
+			if account, ok := AccountCenterIdentityFromContext(req.Context()); ok && strings.EqualFold(account.Subject.Username, owner) {
+				owner = account.Subject.Username
+			}
+			fn(w, req, owner)
 		})))
 	}
 	decode := func(w http.ResponseWriter, req *http.Request, target any) bool {

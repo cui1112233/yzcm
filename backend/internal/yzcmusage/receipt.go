@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -30,22 +31,33 @@ func (r receipt) valid() bool {
 
 func receiptName(requestID string) string { return "receipt-" + Fingerprint(requestID) + ".json" }
 
-func readReceipt(path string) (receipt, bool) {
+func receiptLockPath(dir, name string) string {
+	shard := sha256.Sum256([]byte(name))[0]
+	return filepath.Join(dir, ".locks", fmt.Sprintf("%02x", shard))
+}
+
+func readReceipt(path string) (receipt, error) {
 	var r receipt
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return r, false
+	if err != nil {
+		return r, err
+	}
+	if !info.Mode().IsRegular() {
+		return r, errors.New("invalid usage receipt file")
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return r, false
+		return r, err
 	}
 	defer file.Close()
 	raw, err := io.ReadAll(io.LimitReader(file, 16385))
-	if err != nil || len(raw) > 16384 || json.Unmarshal(raw, &r) != nil {
-		return r, false
+	if err != nil {
+		return r, err
 	}
-	return r, r.valid() && filepath.Base(path) == receiptName(r.Request.ID)
+	if len(raw) > 16384 || json.Unmarshal(raw, &r) != nil || !r.valid() || filepath.Base(path) != receiptName(r.Request.ID) {
+		return r, errors.New("invalid usage receipt payload")
+	}
+	return r, nil
 }
 
 func (t *Tracker) receiptDirectory(create bool) (string, error) {
@@ -78,6 +90,12 @@ func (t *Tracker) saveReceipt(r receipt) error {
 	if err != nil {
 		return err
 	}
+	dest := filepath.Join(dir, receiptName(r.Request.ID))
+	if _, err := os.Lstat(dest); err == nil {
+		return syncReceiptDirectory(dir)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	raw, err := json.Marshal(r)
 	if err != nil {
 		return err
@@ -104,34 +122,58 @@ func (t *Tracker) saveReceipt(r receipt) error {
 	}
 	// Hard-link publication is atomic and never replaces an existing receipt.
 	// The first attribution therefore survives duplicate deliveries and restarts.
-	dest := filepath.Join(dir, receiptName(r.Request.ID))
-	if err = os.Link(tmp, dest); err != nil && !os.IsExist(err) {
+	if err = os.Link(tmp, dest); os.IsExist(err) {
+		return syncReceiptDirectory(dir)
+	} else if err != nil {
 		return err
 	}
-	return nil
+	return syncReceiptDirectory(dir)
 }
-func (t *Tracker) recordReceipt(ctx context.Context, r Request, hash string, status int, at time.Time) {
-	// Serialize publication for the same request ID so a duplicate cannot
-	// overtake the first insertion while its disk receipt is being saved.
-	idHash := sha256.Sum256([]byte(r.ID))
-	lock := &t.receiptLocks[int(idHash[0])%len(t.receiptLocks)]
-	lock.Lock()
-	defer lock.Unlock()
-
-	snapshot := receipt{Request: r, CredentialHash: hash, Status: status, At: at}
-	// A later duplicate can reach us before the recovery worker. If the first
-	// receipt was already durable on disk, insert that snapshot into MySQL.
-	if dir, err := t.receiptDirectory(false); err == nil {
-		if saved, ok := readReceipt(filepath.Join(dir, receiptName(r.ID))); ok {
-			snapshot = saved
-		}
+func (t *Tracker) recordReceipt(ctx context.Context, r Request, hash string, status int, at time.Time) error {
+	if err := t.saveReceipt(receipt{Request: r, CredentialHash: hash, Status: status, At: at}); err != nil {
+		return err
 	}
-	if err := t.Store.recordAt(ctx, snapshot.Request, snapshot.CredentialHash, snapshot.Status, snapshot.At); err != nil {
-		if spoolErr := t.saveReceipt(snapshot); spoolErr != nil {
-			log.Print("YZCM usage: request persistence and recovery receipt failed")
-		} else {
-			log.Print("YZCM usage: request deferred to durable recovery receipt")
+	dir, err := t.receiptDirectory(false)
+	if err != nil {
+		return err
+	}
+	return t.applyReceipt(ctx, dir, receiptName(r.ID))
+}
+
+func (t *Tracker) applyReceipt(ctx context.Context, dir, name string) error {
+	// Stable shard files are never unlinked. The OS releases their locks on
+	// process exit. A single lock covers reading the claim, MySQL, and cleanup.
+	lockPath := receiptLockPath(dir, name)
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0700); err != nil {
+		return err
+	}
+	lock, err := openReceiptLock(ctx, lockPath)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	path := filepath.Join(dir, name)
+	r, err := readReceipt(path)
+	if os.IsNotExist(err) {
+		return nil // A concurrent worker already committed and removed this file.
+	}
+	if err != nil {
+		return err
+	}
+	if err := t.Store.recordAt(ctx, r.Request, r.CredentialHash, r.Status, r.At); err != nil {
+		if errors.Is(err, ErrReceiptAttributionConflict) {
+			return fmt.Errorf("%s: %w", name, err)
 		}
+		return err
+	}
+	return os.Remove(path)
+}
+
+func logReceiptError(err error) {
+	if errors.Is(err, ErrReceiptAttributionConflict) {
+		log.Printf("YZCM usage: %s (recovery receipt retained)", err)
+	} else {
+		log.Print("YZCM usage: request receipt pending or could not be persisted")
 	}
 }
 func (t *Tracker) flushReceipts(parent context.Context) {
@@ -156,19 +198,20 @@ func (t *Tracker) flushReceipts(parent context.Context) {
 			return
 		}
 		name := entry.Name()
-		if entry.Type()&os.ModeSymlink != 0 || entry.IsDir() || !strings.HasPrefix(name, "receipt-") || !strings.HasSuffix(name, ".json") || len(name) != len("receipt-")+64+len(".json") {
+		if !entry.Type().IsRegular() {
 			continue
 		}
-		path := filepath.Join(dir, name)
-		r, ok := readReceipt(path)
-		if !ok {
+		if strings.HasPrefix(name, ".receipt-") && strings.HasSuffix(name, ".tmp") {
+			if stat, err := entry.Info(); err == nil && time.Since(stat.ModTime()) > time.Hour {
+				_ = os.Remove(filepath.Join(dir, name))
+			}
 			continue
 		}
-		if err = t.Store.recordAt(ctx, r.Request, r.CredentialHash, r.Status, r.At); err != nil {
+		if !strings.HasPrefix(name, "receipt-") || !strings.HasSuffix(name, ".json") || len(name) != len("receipt-")+64+len(".json") {
 			continue
 		}
-		if err = os.Remove(path); err != nil && !os.IsNotExist(err) {
-			log.Print("YZCM usage: recovered receipt cleanup failed")
+		if err := t.applyReceipt(ctx, dir, name); err != nil && errors.Is(err, ErrReceiptAttributionConflict) {
+			logReceiptError(err)
 		}
 	}
 }

@@ -1,5 +1,11 @@
 package storage
 
+import (
+	"context"
+	"database/sql"
+	"fmt"
+)
+
 func NovelCreationMigrations() []Migration {
 	return []Migration{{
 		Version:          8800300,
@@ -359,5 +365,27 @@ func NovelCreationMigrations() []Migration {
  agent_json JSON NOT NULL,
  updated_at DATETIME(6) NOT NULL,
  PRIMARY KEY (owner_username)
- ) ENGINE=InnoDB`}}}
+ ) ENGINE=InnoDB`}}, {
+		Version:          8800407,
+		CallbackChecksum: "v88-novel-run-usage-attribution-v1",
+		SQL: []string{`ALTER TABLE novel_runs
+ADD COLUMN usage_team_id VARCHAR(64) NULL,
+ADD COLUMN usage_actor_username VARCHAR(32) NULL`},
+		Adopt: adoptNovelRunUsageColumns,
+	}}
+}
+
+func adoptNovelRunUsageColumns(ctx context.Context, tx *sql.Tx) (bool, error) {
+	var columns, valid int
+	err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(is_nullable = 'YES' AND data_type = 'varchar' AND
+  character_maximum_length = CASE column_name WHEN 'usage_team_id' THEN 64 ELSE 32 END), 0)
+FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'novel_runs'
+AND column_name IN ('usage_team_id','usage_actor_username')`).Scan(&columns, &valid)
+	if err != nil || columns == 0 {
+		return false, err
+	}
+	if columns != 2 || valid != 2 {
+		return false, fmt.Errorf("incomplete novel run usage attribution columns")
+	}
+	return true, nil
 }

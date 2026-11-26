@@ -3,6 +3,7 @@ package yzcmusage_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -51,8 +52,8 @@ func TestMySQLSharedKeyLedgerIsolation(t *testing.T) {
 		}
 	}
 	// A duplicate delivery cannot move an existing request to a different member.
-	if err = store.Record(ctx, yzcmusage.Request{ID: a, Owner: ownerB, Feature: "image"}, yzcmusage.Fingerprint("shared-test-key"), 200); err != nil {
-		t.Fatal(err)
+	if err = store.Record(ctx, yzcmusage.Request{ID: a, Owner: ownerB, Feature: "image"}, yzcmusage.Fingerprint("shared-test-key"), 200); !errors.Is(err, yzcmusage.ErrReceiptAttributionConflict) {
+		t.Fatalf("unexpected conflicting receipt result: %v", err)
 	}
 	for _, e := range []yzcmusage.Entry{{ID: a, Owner: ownerA, Model: "QA-FIXTURE", Quota: 3356, InputTokens: 12, OutputTokens: 8, Cost: .049, Currency: "CNY"}, {ID: b, Owner: ownerB, Model: "QA-FIXTURE", Quota: 1000, InputTokens: 40, OutputTokens: 20, Cost: .5, Currency: "CNY"}} {
 		if err = store.Settle(ctx, e); err != nil {

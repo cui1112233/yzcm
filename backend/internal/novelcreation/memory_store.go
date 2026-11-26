@@ -312,7 +312,7 @@ func (s *MemoryStore) GetRun(_ context.Context, owner, runID string) (Run, error
 	return cloneRun(run), nil
 }
 
-func (s *MemoryStore) CreateRun(_ context.Context, owner string, run Run) (Run, error) {
+func (s *MemoryStore) CreateRun(ctx context.Context, owner string, run Run) (Run, error) {
 	if err := validateRawJSON("run prompt snapshot", run.PromptSnapshot); err != nil {
 		return Run{}, err
 	}
@@ -342,6 +342,7 @@ func (s *MemoryStore) CreateRun(_ context.Context, owner string, run Run) (Run, 
 	}
 	now := time.Now().UTC()
 	run.CreatedAt, run.UpdatedAt = now, now
+	run.captureUsage(ctx, owner)
 	s.runs[memoryKey(owner, run.ID)] = cloneRun(run)
 	s.runByKey[key] = run.ID
 	session.CurrentRunID, session.UpdatedAt = run.ID, now

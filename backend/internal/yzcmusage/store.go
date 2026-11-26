@@ -6,7 +6,11 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
+
+var ErrReceiptAttributionConflict = errors.New("usage receipt attribution conflicts with the ledger")
 
 type Store struct{ DB *sql.DB }
 type Pending struct {
@@ -57,7 +61,17 @@ func (s Store) recordAt(ctx context.Context, r Request, keyHash string, status i
 	_, err := s.DB.ExecContext(ctx, `INSERT INTO yzcm_usage_requests
 (request_id,owner,team_id,actor_username,feature,credential_hash,created_at,http_status)
 VALUES(?,?,NULLIF(?,''),NULLIF(?,''),?,?,?,?)
-ON DUPLICATE KEY UPDATE request_id = yzcm_usage_requests.request_id`, r.ID, r.Owner, r.TeamID, r.ActorUsername, r.Feature, keyHash, at.UTC(), status)
+`, r.ID, r.Owner, r.TeamID, r.ActorUsername, r.Feature, keyHash, at.UTC(), status)
+	var duplicate *mysql.MySQLError
+	if !errors.As(err, &duplicate) || duplicate.Number != 1062 {
+		return err
+	}
+	var owner, teamID, actor string
+	err = s.DB.QueryRowContext(ctx, `SELECT owner,COALESCE(team_id,''),COALESCE(actor_username,'') FROM yzcm_usage_requests WHERE request_id=?`, r.ID).
+		Scan(&owner, &teamID, &actor)
+	if err == nil && (r.Owner != owner || r.TeamID != teamID || r.ActorUsername != actor) {
+		return ErrReceiptAttributionConflict
+	}
 	return err
 }
 

@@ -363,6 +363,7 @@ func (s *Service) ConfirmShortStoryWithModel(ctx context.Context, owner, id stri
 	if err != nil {
 		return
 	}
+	ctx = source.usageContext(ctx, owner)
 	model := source.ModelID
 	thinking := source.ThinkingLevel
 	if strings.TrimSpace(modelID) != "" {

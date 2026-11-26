@@ -9,6 +9,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
+	"qiantie/backend/internal/yzcmusage"
 )
 
 func newNovelCreationMockStore(t *testing.T) (*MySQLStore, sqlmock.Sqlmock) {
@@ -75,14 +76,14 @@ func TestMySQLStoreCreateProjectWritesEmptyOptionalTextAsNull(t *testing.T) {
 
 func TestMySQLStoreIdempotentRunSurvivesReopen(t *testing.T) {
 	store, mock := newNovelCreationMockStore(t)
-	ctx := context.Background()
+	ctx := yzcmusage.WithAttribution(context.Background(), "alice", "team-a", "founder")
 	run := Run{ID: "run-1", ProjectID: "project-1", SessionID: "session-1", IdempotencyKey: "send-1", Status: RunQueued}
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO novel_runs
-(run_id, owner_username, project_id, session_id, idempotency_key, status, model_id, thinking_level, prompt_snapshot_json, runtime_snapshot_json, error_code, error_message, created_at, updated_at, finished_at)
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+(run_id, owner_username, project_id, session_id, idempotency_key, status, model_id, thinking_level, prompt_snapshot_json, runtime_snapshot_json, error_code, error_message, created_at, updated_at, finished_at, usage_team_id, usage_actor_username)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 WHERE EXISTS (SELECT 1 FROM novel_projects WHERE owner_username = ? AND project_id = ? AND deleted_at IS NULL)
   AND EXISTS (SELECT 1 FROM novel_sessions WHERE owner_username = ? AND session_id = ? AND project_id = ?)`)).
-		WithArgs(run.ID, "alice", run.ProjectID, run.SessionID, run.IdempotencyKey, run.Status, "", "", nil, nil, "", nil, sqlmock.AnyArg(), sqlmock.AnyArg(), nil, "alice", run.ProjectID, "alice", run.SessionID, run.ProjectID).
+		WithArgs(run.ID, "alice", run.ProjectID, run.SessionID, run.IdempotencyKey, run.Status, "", "", nil, nil, "", nil, sqlmock.AnyArg(), sqlmock.AnyArg(), nil, "team-a", "founder", "alice", run.ProjectID, "alice", run.SessionID, run.ProjectID).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta(`UPDATE novel_sessions SET current_run_id = ?, updated_at = ? WHERE owner_username = ? AND session_id = ? AND project_id = ?`)).
 		WithArgs(run.ID, sqlmock.AnyArg(), "alice", run.SessionID, run.ProjectID).
@@ -96,16 +97,16 @@ WHERE EXISTS (SELECT 1 FROM novel_projects WHERE owner_username = ? AND project_
 		t.Fatalf("run ID=%q, want %q", first.ID, run.ID)
 	}
 
-	query := `SELECT r.run_id, r.project_id, r.session_id, r.idempotency_key, r.status, r.model_id, r.thinking_level, r.prompt_snapshot_json, r.runtime_snapshot_json, r.error_code, COALESCE(r.error_message, ''), r.created_at, r.updated_at, r.finished_at
+	query := `SELECT r.run_id, r.project_id, r.session_id, r.idempotency_key, r.status, r.model_id, r.thinking_level, r.prompt_snapshot_json, r.runtime_snapshot_json, r.error_code, COALESCE(r.error_message, ''), r.created_at, r.updated_at, r.finished_at, COALESCE(r.usage_team_id, ''), COALESCE(r.usage_actor_username, '')
 FROM novel_runs r JOIN novel_projects p ON p.owner_username = r.owner_username AND p.project_id = r.project_id
 WHERE r.owner_username = ? AND r.idempotency_key = ? AND p.deleted_at IS NULL`
 	now := time.Now().UTC()
 	mock.ExpectQuery(regexp.QuoteMeta(query)).WithArgs("alice", "send-1").WillReturnRows(sqlmock.NewRows([]string{
-		"run_id", "project_id", "session_id", "idempotency_key", "status", "model_id", "thinking_level", "prompt_snapshot_json", "runtime_snapshot_json", "error_code", "error_message", "created_at", "updated_at", "finished_at",
-	}).AddRow("run-1", "project-1", "session-1", "send-1", RunQueued, "", "", nil, nil, "", "", now, now, nil))
+		"run_id", "project_id", "session_id", "idempotency_key", "status", "model_id", "thinking_level", "prompt_snapshot_json", "runtime_snapshot_json", "error_code", "error_message", "created_at", "updated_at", "finished_at", "usage_team_id", "usage_actor_username",
+	}).AddRow("run-1", "project-1", "session-1", "send-1", RunQueued, "", "", nil, nil, "", "", now, now, nil, "team-a", "founder"))
 
 	second, found, err := NewMySQLStore(store.db.(sqlDatabase).DB).FindRunByIdempotencyKey(ctx, "alice", "send-1")
-	if err != nil || !found || second.ID != first.ID {
+	if err != nil || !found || second.ID != first.ID || second.UsageTeamID != "team-a" || second.UsageActor != "founder" {
 		t.Fatalf("recovered=%+v found=%v err=%v", second, found, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

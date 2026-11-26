@@ -299,15 +299,13 @@ WHERE m.owner_username = ? AND m.session_id = ? AND m.sequence_no > ? AND p.dele
 	return messages, nil
 }
 
-const runColumns = `run_id, project_id, session_id, idempotency_key, status, model_id, thinking_level, prompt_snapshot_json, runtime_snapshot_json, error_code, COALESCE(error_message, ''), created_at, updated_at, finished_at`
-
-const qualifiedRunColumns = `r.run_id, r.project_id, r.session_id, r.idempotency_key, r.status, r.model_id, r.thinking_level, r.prompt_snapshot_json, r.runtime_snapshot_json, r.error_code, COALESCE(r.error_message, ''), r.created_at, r.updated_at, r.finished_at`
+const qualifiedRunColumns = `r.run_id, r.project_id, r.session_id, r.idempotency_key, r.status, r.model_id, r.thinking_level, r.prompt_snapshot_json, r.runtime_snapshot_json, r.error_code, COALESCE(r.error_message, ''), r.created_at, r.updated_at, r.finished_at, COALESCE(r.usage_team_id, ''), COALESCE(r.usage_actor_username, '')`
 
 func scanRun(scanner novelRowScanner) (Run, error) {
 	var run Run
 	var prompt, runtime []byte
 	var finishedAt sql.NullTime
-	err := scanner.Scan(&run.ID, &run.ProjectID, &run.SessionID, &run.IdempotencyKey, &run.Status, &run.ModelID, &run.ThinkingLevel, &prompt, &runtime, &run.ErrorCode, &run.ErrorMessage, &run.CreatedAt, &run.UpdatedAt, &finishedAt)
+	err := scanner.Scan(&run.ID, &run.ProjectID, &run.SessionID, &run.IdempotencyKey, &run.Status, &run.ModelID, &run.ThinkingLevel, &prompt, &runtime, &run.ErrorCode, &run.ErrorMessage, &run.CreatedAt, &run.UpdatedAt, &finishedAt, &run.UsageTeamID, &run.UsageActor)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Run{}, &DomainError{Code: ErrProjectNotFound, Message: "run not found"}
 	}
@@ -364,11 +362,12 @@ func (s *MySQLStore) CreateRun(ctx context.Context, owner string, run Run) (Run,
 	}
 	now := time.Now().UTC()
 	run.CreatedAt, run.UpdatedAt = now, now
+	run.captureUsage(ctx, owner)
 	result, err := s.db.ExecContext(ctx, `INSERT INTO novel_runs
-(run_id, owner_username, project_id, session_id, idempotency_key, status, model_id, thinking_level, prompt_snapshot_json, runtime_snapshot_json, error_code, error_message, created_at, updated_at, finished_at)
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+(run_id, owner_username, project_id, session_id, idempotency_key, status, model_id, thinking_level, prompt_snapshot_json, runtime_snapshot_json, error_code, error_message, created_at, updated_at, finished_at, usage_team_id, usage_actor_username)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 WHERE EXISTS (SELECT 1 FROM novel_projects WHERE owner_username = ? AND project_id = ? AND deleted_at IS NULL)
-  AND EXISTS (SELECT 1 FROM novel_sessions WHERE owner_username = ? AND session_id = ? AND project_id = ?)`, run.ID, owner, run.ProjectID, run.SessionID, run.IdempotencyKey, run.Status, run.ModelID, run.ThinkingLevel, nullableRawJSON(run.PromptSnapshot), nullableRawJSON(run.RuntimeSnapshot), run.ErrorCode, nullableString(run.ErrorMessage), run.CreatedAt, run.UpdatedAt, run.FinishedAt, owner, run.ProjectID, owner, run.SessionID, run.ProjectID)
+  AND EXISTS (SELECT 1 FROM novel_sessions WHERE owner_username = ? AND session_id = ? AND project_id = ?)`, run.ID, owner, run.ProjectID, run.SessionID, run.IdempotencyKey, run.Status, run.ModelID, run.ThinkingLevel, nullableRawJSON(run.PromptSnapshot), nullableRawJSON(run.RuntimeSnapshot), run.ErrorCode, nullableString(run.ErrorMessage), run.CreatedAt, run.UpdatedAt, run.FinishedAt, nullableString(run.UsageTeamID), nullableString(run.UsageActor), owner, run.ProjectID, owner, run.SessionID, run.ProjectID)
 	var mysqlErr *mysql.MySQLError
 	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
 		return Run{}, &DomainError{Code: ErrRunInProgress, Message: "idempotency key already has a run", Cause: err}

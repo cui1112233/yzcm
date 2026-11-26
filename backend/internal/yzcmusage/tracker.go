@@ -22,6 +22,15 @@ func WithAttribution(ctx context.Context, owner, teamID, actorUsername string) c
 	return context.WithValue(ctx, identityKey{}, previous)
 }
 
+// AttributionForOwner reads the accepted attribution only for the same subject.
+func AttributionForOwner(ctx context.Context, owner string) (teamID, actorUsername string) {
+	i, _ := ctx.Value(identityKey{}).(identity)
+	if i.Owner == owner {
+		return i.TeamID, i.ActorUsername
+	}
+	return "", ""
+}
+
 func WithIdentity(ctx context.Context, owner, feature string) context.Context {
 	previous, _ := ctx.Value(identityKey{}).(identity)
 	if owner != "" && previous.Owner == "" {
@@ -46,7 +55,6 @@ type Tracker struct {
 	once              sync.Once
 	credentialMu      sync.Mutex
 	credentials       map[string]cachedCredential
-	receiptLocks      [64]sync.Mutex
 }
 
 type cachedCredential struct {
@@ -213,7 +221,9 @@ func (t *trackedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	t.t.remember(key)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	t.t.recordReceipt(ctx, Request{ID: id, Owner: i.Owner, TeamID: i.TeamID, ActorUsername: i.ActorUsername, Feature: feature}, Fingerprint(key), response.StatusCode, at)
+	if err := t.t.recordReceipt(ctx, Request{ID: id, Owner: i.Owner, TeamID: i.TeamID, ActorUsername: i.ActorUsername, Feature: feature}, Fingerprint(key), response.StatusCode, at); err != nil {
+		logReceiptError(err)
+	}
 	cancel()
 	// A bounded worker, rather than a goroutine per response, performs lookups.
 	return response, nil

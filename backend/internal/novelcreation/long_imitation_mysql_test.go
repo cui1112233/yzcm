@@ -116,7 +116,7 @@ func TestLongImitationMySQLReceivesBoundedHashForFullLengthExternalKey(t *testin
 		t.Fatal("unbounded key passed to SQL")
 	}
 	st, m := newNovelCreationMockStore(t)
-	m.ExpectExec("INSERT INTO novel_runs").WithArgs(run.ID, "alice", run.ProjectID, run.SessionID, run.IdempotencyKey, run.Status, run.ModelID, run.ThinkingLevel, sqlmock.AnyArg(), nil, "", nil, sqlmock.AnyArg(), sqlmock.AnyArg(), nil, "alice", run.ProjectID, "alice", run.SessionID, run.ProjectID).WillReturnResult(sqlmock.NewResult(1, 1))
+	m.ExpectExec("INSERT INTO novel_runs").WithArgs(run.ID, "alice", run.ProjectID, run.SessionID, run.IdempotencyKey, run.Status, run.ModelID, run.ThinkingLevel, sqlmock.AnyArg(), nil, "", nil, sqlmock.AnyArg(), sqlmock.AnyArg(), nil, nil, nil, "alice", run.ProjectID, "alice", run.SessionID, run.ProjectID).WillReturnResult(sqlmock.NewResult(1, 1))
 	m.ExpectExec("UPDATE novel_sessions SET current_run_id").WithArgs(run.ID, sqlmock.AnyArg(), "alice", run.SessionID, run.ProjectID).WillReturnResult(sqlmock.NewResult(1, 1))
 	saved, e := st.CreateRun(context.Background(), "alice", run)
 	if e != nil || saved.IdempotencyKey != run.IdempotencyKey {

@@ -3,13 +3,20 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/yzcmusage"
 )
 
@@ -59,6 +66,8 @@ func TestEnergyAttributionMySQLPreservesOwnerActorAndTeam(t *testing.T) {
 			exec(`UPDATE account_center_teams SET archived_at=NOW(6) WHERE id='archived-team'`)
 			exec(`INSERT INTO account_center_memberships (team_id,username,joined_at,ended_at) VALUES
 ('team-a','member','2025-01-01',NULL), ('archived-team','archived','2025-01-01',NULL), ('team-a','former','2025-01-01','2025-02-01')`)
+			exec(`INSERT INTO account_center_audit_events(actor_username,subject_username,team_id,action,created_at)
+VALUES ('founder','member','team-a','create_account','2025-01-01 00:00:01')`)
 			hash := yzcmusage.Fingerprint("fixture-key")
 			for _, legacy := range []struct{ id, owner, at string }{
 				{"legacy", "member", "2025-02-01"}, {"earlier", "member", "2024-12-31"},
@@ -106,9 +115,12 @@ func TestEnergyAttributionMySQLPreservesOwnerActorAndTeam(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, owner := range []string{"member", "other"} {
-				if err := store.Record(ctx, yzcmusage.Request{ID: "receipt", Owner: owner, TeamID: "team-b", ActorUsername: "other", Feature: "script"}, hash, 200); err != nil {
-					t.Fatal(err)
+				if err := store.Record(ctx, yzcmusage.Request{ID: "receipt", Owner: owner, TeamID: "team-b", ActorUsername: "other", Feature: "script"}, hash, 200); !errors.Is(err, yzcmusage.ErrReceiptAttributionConflict) {
+					t.Fatalf("unexpected duplicate result: %v", err)
 				}
+			}
+			if err := store.Record(ctx, yzcmusage.Request{ID: "receipt", Owner: "member", TeamID: "team-a", ActorUsername: "founder", Feature: "script"}, hash, 200); err != nil {
+				t.Fatal(err)
 			}
 			if err := store.Settle(ctx, yzcmusage.Entry{ID: "receipt", Owner: "other", InputTokens: 999}); err != nil {
 				t.Fatal(err)
@@ -130,7 +142,138 @@ func TestEnergyAttributionMySQLPreservesOwnerActorAndTeam(t *testing.T) {
 			if month["calls"] != int64(1) || month["pricedCalls"] != int64(1) || month["actualCost"] != 0.05 {
 				t.Fatalf("duplicate receipt changed the member's charge: %v", month)
 			}
+			if !interrupted {
+				checkConcurrentEnergyTrackers(t, db)
+				check("cross-tracker", "member", "team-a", "founder", sql.NullInt64{})
+			}
 		})
+	}
+}
+
+type energyReceiptTransport struct{}
+
+func (energyReceiptTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: 200, Header: http.Header{"X-Oneapi-Request-Id": []string{"cross-tracker"}}, Body: io.NopCloser(strings.NewReader("ok"))}, nil
+}
+
+func checkConcurrentEnergyTrackers(t *testing.T, db *sql.DB) {
+	t.Helper()
+	started := make(chan struct{})
+	var once sync.Once
+	failedDB, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherFunc(func(expected, actual string) error {
+		once.Do(func() { close(started) })
+		return sqlmock.QueryMatcherRegexp.Match(expected, actual)
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer failedDB.Close()
+	mock.ExpectExec("INSERT INTO yzcm_usage_requests").
+		WithArgs("cross-tracker", "member", "team-a", "founder", "model", yzcmusage.Fingerprint("fixture-key"), sqlmock.AnyArg(), 200).
+		WillDelayFor(200 * time.Millisecond).WillReturnError(errors.New("fixture connection failure"))
+	dir := t.TempDir()
+	first := &yzcmusage.Tracker{Store: yzcmusage.Store{DB: failedDB}, ReceiptDir: dir}
+	second := &yzcmusage.Tracker{Store: yzcmusage.Store{DB: db}, ReceiptDir: dir}
+	request := func(tracker *yzcmusage.Tracker, owner, team, actor string) error {
+		ctx := yzcmusage.WithAttribution(context.Background(), owner, team, actor)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, yzcmusage.Origin+"/v1/chat/completions", nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer fixture-key")
+		response, err := tracker.Wrap(energyReceiptTransport{}).RoundTrip(req)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- request(first, "member", "team-a", "founder") }()
+	select {
+	case <-started:
+	case err := <-done:
+		t.Fatalf("first tracker did not reach its database: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("first tracker did not reach its database")
+	}
+	if err := request(second, "other", "team-b", "manager"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "receipt-*.json"))
+	if err != nil || len(files) != 0 {
+		t.Fatalf("a confirmed receipt must be cleaned up, files=%v err=%v", files, err)
+	}
+}
+
+func TestEnergyMySQLBackfillRequiresFormalUnambiguousMembership(t *testing.T) {
+	ctx := context.Background()
+	db := energyMigrationTestDatabase(t)
+	base := append(AuthMigrations(), YZCMUsageMigrations()...)
+	base = append(base, AccountCenterMigrations()...)
+	if err := RunMigrations(ctx, db, base); err != nil {
+		t.Fatal(err)
+	}
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, username := range []string{"founder", "lead", "onlylead", "imported", "unproved"} {
+		exec(`INSERT INTO accounts(username,password_hash,password_algorithm,is_owner,active,created_at,updated_at)
+VALUES (?, 'fixture', 'fixture', ?, TRUE, NOW(6), NOW(6))`, username, username == "founder")
+	}
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"member-profiles.json": `[{"username":"lead","role":"manager"},{"username":"onlylead","role":"manager"},{"username":"imported","boundTo":"lead"},{"username":"unproved","boundTo":"onlylead"}]`,
+		"team-collaboration.json": `{"teams":[
+{"id":"go-team-lead","managerUsername":"lead","createdAt":"2025-01-01T00:00:00Z"},
+{"id":"archived","managerUsername":"lead","createdAt":"2025-02-01T00:00:00Z","archivedAt":"2025-04-01T00:00:00Z"},
+{"id":"only","managerUsername":"onlylead","createdAt":"2025-01-01T00:00:00Z"}]}`,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := accountcenter.NewMySQLStore(db)
+	if err := store.ImportLegacy(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	for username, action := range map[string]string{"proved": "create_account", "ambiguous": "create_account", "invited": "accept_invite"} {
+		if err := store.WithAdmin(ctx, true, func(tx accountcenter.AdminTx) error {
+			if err := tx.Change(ctx, accountcenter.AdminChange{Action: action, TeamID: "go-team-lead", Actor: "founder", Username: username, DisplayName: username, Role: accountcenter.RoleMember, PasswordHash: "fixture", PasswordAlgorithm: "fixture", InviteDigest: yzcmusage.Fingerprint("fixture-invitation")}); err != nil {
+				return err
+			}
+			return tx.AppendAudit(ctx, accountcenter.AuditEvent{ActorUsername: "founder", SubjectUsername: username, TeamID: "go-team-lead", Action: action})
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Even an audited current membership cannot disambiguate another applicable interval.
+	exec(`INSERT INTO account_center_memberships(team_id,username,joined_at,ended_at)
+VALUES ('only','ambiguous',NOW(6)-INTERVAL 1 DAY,NOW(6)+INTERVAL 2 DAY)`)
+	hash := yzcmusage.Fingerprint("fixture-key")
+	for _, username := range []string{"imported", "unproved"} {
+		exec(`INSERT INTO yzcm_usage_requests(request_id,owner,feature,credential_hash,created_at,http_status) VALUES (?,?,'script',?,'2025-03-02',200)`, username, username, hash)
+	}
+	for _, username := range []string{"proved", "ambiguous", "invited"} {
+		exec(`INSERT INTO yzcm_usage_requests(request_id,owner,feature,credential_hash,created_at,http_status) VALUES (?,?,'script',?,NOW(6)+INTERVAL 1 DAY,200)`, username, username, hash)
+	}
+	if err := RunMigrations(ctx, db, AccountCenterEnergyMigrations()); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]string{"imported": "", "unproved": "", "ambiguous": "", "proved": "go-team-lead", "invited": "go-team-lead"} {
+		var team sql.NullString
+		err := db.QueryRowContext(ctx, `SELECT team_id FROM yzcm_usage_requests WHERE request_id=?`, id).Scan(&team)
+		if err != nil || team != (sql.NullString{String: want, Valid: want != ""}) {
+			t.Errorf("%s team=%v, want %q, err=%v", id, team, want, err)
+		}
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"qiantie/backend/internal/yzcmusage"
 )
 
 // Store is the durable boundary for the novel-creation domain. Production
@@ -155,12 +157,22 @@ type Run struct {
 	ModelID         string          `json:"modelId"`
 	ThinkingLevel   string          `json:"thinkingLevel"`
 	PromptSnapshot  json.RawMessage `json:"-"`
+	UsageTeamID     string          `json:"-"`
+	UsageActor      string          `json:"-"`
 	RuntimeSnapshot json.RawMessage `json:"runtimeSnapshot,omitempty"`
 	ErrorCode       string          `json:"errorCode,omitempty"`
 	ErrorMessage    string          `json:"errorMessage,omitempty"`
 	CreatedAt       time.Time       `json:"createdAt"`
 	UpdatedAt       time.Time       `json:"updatedAt"`
 	FinishedAt      *time.Time      `json:"finishedAt,omitempty"`
+}
+
+func (r Run) usageContext(ctx context.Context, owner string) context.Context {
+	return yzcmusage.WithAttribution(ctx, owner, r.UsageTeamID, r.UsageActor)
+}
+
+func (r *Run) captureUsage(ctx context.Context, owner string) {
+	r.UsageTeamID, r.UsageActor = yzcmusage.AttributionForOwner(ctx, owner)
 }
 
 type RunUpdate struct {

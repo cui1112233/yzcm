@@ -84,7 +84,7 @@ func TestNovelResolverBackgroundCallsKeepOriginalMemberBilling(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	tracker := &yzcmusage.Tracker{Store: yzcmusage.Store{DB: db}}
+	tracker := &yzcmusage.Tracker{Store: yzcmusage.Store{DB: db}, ReceiptDir: t.TempDir()}
 	attempts := 0
 	client := &http.Client{Transport: tracker.Wrap(roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		attempts++
@@ -104,8 +104,9 @@ func TestNovelResolverBackgroundCallsKeepOriginalMemberBilling(t *testing.T) {
 		t.Fatal("catalog owner changed", got)
 	}
 	for attempt := 1; attempt <= 2; attempt++ {
-		mock.ExpectExec("INSERT INTO yzcm_usage_requests").WithArgs(fmt.Sprintf("job-attempt-%d", attempt), "member", "", "", "novel-creation", yzcmusage.Fingerprint("fixture-key"), sqlmock.AnyArg(), 200).WillReturnResult(sqlmock.NewResult(0, 1))
-		if result, err := provider.Complete(context.Background(), batchfactoryv11.TextCompletionRequest{}); err != nil || result != "ok" {
+		mock.ExpectExec("INSERT INTO yzcm_usage_requests").WithArgs(fmt.Sprintf("job-attempt-%d", attempt), "member", "team-a", "founder", "novel-creation", yzcmusage.Fingerprint("fixture-key"), sqlmock.AnyArg(), 200).WillReturnResult(sqlmock.NewResult(0, 1))
+		ctx := yzcmusage.WithAttribution(context.Background(), "member", "team-a", "founder")
+		if result, err := provider.Complete(ctx, batchfactoryv11.TextCompletionRequest{}); err != nil || result != "ok" {
 			t.Fatalf("background completion %q %v", result, err)
 		}
 	}
