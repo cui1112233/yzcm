@@ -60,3 +60,12 @@ func TestMultiModeCreateHTTPReturnsFourStableProjectsAndFullSource(t *testing.T)
 		t.Fatal(err)
 	}
 }
+
+func TestMultiModePresetCompatibility(t *testing.T) {
+	if multiModePresetCompatible("comic", map[string]any{"productionMode": "video"}) {
+		t.Fatal("video preset accepted for comic")
+	}
+	if !multiModePresetCompatible("illustrated_text", map[string]any{"productionMode": "comic"}) {
+		t.Fatal("existing comic execution preset rejected")
+	}
+}

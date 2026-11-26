@@ -69,6 +69,10 @@ func registerMultiModeCreationRoutes(mux *http.ServeMux, store batchfactoryv11.S
 					writeJSON(w, 400, map[string]string{"error": "自动化预设不存在或不属于当前账号"})
 					return
 				}
+				if !multiModePresetCompatible(project.Mode, preset.Config) {
+					writeJSON(w, 400, map[string]string{"error": "所选预设不适用于当前生产模式"})
+					return
+				}
 			}
 			if project.Settings == nil {
 				project.Settings = batchfactoryv11.SettingsPatch{}
@@ -150,4 +154,13 @@ func registerMultiModeCreationRoutes(mux *http.ServeMux, store batchfactoryv11.S
 		}
 		writeJSON(w, 200, result)
 	})
+}
+
+func multiModePresetCompatible(mode batchfactoryv11.CreationMode, config map[string]any) bool {
+	selected, _ := config["productionMode"].(string)
+	expected := string(mode)
+	if expected == "illustrated_text" {
+		expected = "comic"
+	}
+	return selected == "" || selected == expected
 }
