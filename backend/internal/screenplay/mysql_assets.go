@@ -157,8 +157,23 @@ func (s *MySQLStore) UpdateAsset(ctx context.Context, owner, projectID, assetID 
 		return Asset{}, err
 	}
 	defer tx.Rollback()
+	saved, err := updateAssetInTx(ctx, tx, owner, projectID, assetID, changes, expectedRevision)
+	if err != nil {
+		return Asset{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return Asset{}, err
+	}
+	return saved, nil
+}
+
+func updateAssetInTx(ctx context.Context, tx *sql.Tx, owner, projectID, assetID string, changes Asset, expectedRevision int64) (Asset, error) {
+	changes.Name = strings.TrimSpace(changes.Name)
+	if !validAssetType(changes.Type) || changes.Name == "" {
+		return Asset{}, fmt.Errorf("%w: 资产类型和名称不能为空", ErrInvalidArgument)
+	}
 	var current Asset
-	err = tx.QueryRowContext(ctx, `SELECT degree, revision, created_at, sort_order, source_batch FROM screenplay_assets WHERE id = ? AND project_id = ? AND owner_username = ? FOR UPDATE`, assetID, projectID, owner).Scan(&current.Degree, &current.Revision, &current.CreatedAt, &current.SortOrder, &current.SourceBatch)
+	err := tx.QueryRowContext(ctx, `SELECT degree, revision, created_at, sort_order, source_batch FROM screenplay_assets WHERE id = ? AND project_id = ? AND owner_username = ? FOR UPDATE`, assetID, projectID, owner).Scan(&current.Degree, &current.Revision, &current.CreatedAt, &current.SortOrder, &current.SourceBatch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Asset{}, fmt.Errorf("%w: 资产 %s", ErrNotFound, assetID)
 	}
@@ -189,9 +204,6 @@ func (s *MySQLStore) UpdateAsset(ctx context.Context, owner, projectID, assetID 
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return Asset{}, ErrRevisionConflict
-	}
-	if err := tx.Commit(); err != nil {
-		return Asset{}, err
 	}
 	changes.ID = assetID
 	changes.ProjectID = projectID

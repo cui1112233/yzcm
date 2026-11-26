@@ -330,6 +330,13 @@ func (s AuthoringService) Apply(ctx context.Context, o, p, id string, v int64, c
 				return e
 			}
 		case "asset":
+			if committer, ok := s.Store.(AuthoringAssetCommitter); ok {
+				out, e = committer.CommitAuthoringAsset(ctx, s.Repository, o, p, id, v)
+				if e == nil {
+					e = InvalidateAuthoringContent(ctx, s.Store, o, p, "asset")
+				}
+				return e
+			}
 			if _, e = s.Store.UpdateAsset(ctx, o, p, a.TargetID, *a.Asset, a.ExpectedRevision); e != nil {
 				return e
 			}
