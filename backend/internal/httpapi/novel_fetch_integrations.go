@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -70,72 +71,188 @@ func integrationPlatformID(values ...string) string {
 	return "2"
 }
 
-// integrationCreateDocuments 只创建任务元数据；真正入队交给 enqueueWorkshopRetries，
-// 与工作台重试走同一条经过测试的处理链路。
-func integrationCreateDocuments(ctx context.Context, store novelfetchworkshop.Store, owner string, books []novelFetchIntegrationBook, platformID string, maxTxt int) (created []string, duplicates int, failed int) {
+type integrationResult struct {
+	created, accepted, skipped, failed, pending, reconciled int
+	unavailable                                             bool
+	errors                                                  map[string]string
+}
+
+func (r integrationResult) status() string {
+	if r.failed == 0 {
+		return "ok"
+	}
+	if r.accepted > 0 || r.skipped > 0 || r.reconciled > 0 || r.pending > 0 {
+		return "partial_failed"
+	}
+	return "failed"
+}
+
+func (r integrationResult) payload() map[string]any {
+	payload := map[string]any{
+		"ok": r.failed == 0, "status": r.status(), "created": r.created, "accepted": r.accepted,
+		"failed": r.failed, "skipped_duplicate": r.skipped, "state_pending": r.pending,
+		"reconciled": r.reconciled, "errors": r.errors, "results": []any{},
+	}
+	if r.failed > 0 {
+		payload["error"] = "部分或全部书籍尚未成功处理"
+	}
+	return payload
+}
+
+func (r integrationResult) statusCode() int {
+	if r.unavailable {
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusOK
+}
+
+func integrationInputReady(doc novelfetchworkshop.Document, platformID string) bool {
+	return toString(doc.Meta["importSource"]) == "integration" &&
+		toString(doc.Meta["platformId"]) == platformID &&
+		novelfetchworkshop.DeriveTaskStatus(doc) == novelfetchworkshop.TaskStatusInputReady &&
+		firstText(doc.Meta["currentProcessJobId"], doc.Meta["current_process_job_id"]) == ""
+}
+
+func ensureIntegrationDocument(ctx context.Context, store novelfetchworkshop.Store, owner, bookID, platformID string, maxTxt int, book novelFetchIntegrationBook) (bool, error) {
+	if _, err := store.GetDocument(ctx, owner, bookID); err == nil {
+		return false, nil
+	} else if !errors.Is(err, novelfetchworkshop.ErrNotFound) {
+		return false, err
+	}
+	bookName := strings.TrimSpace(firstText(book.BookName, book.Name))
+	meta := map[string]any{
+		"platformId": platformID, "bookName": bookName, "name": bookName,
+		"importSource": "integration", "importedAt": time.Now().UTC().Format(time.RFC3339Nano), "status": "input_ready",
+	}
+	if author := strings.TrimSpace(book.Author); author != "" {
+		meta["author"] = author
+	}
+	if category := strings.TrimSpace(book.Category); category != "" {
+		meta["category"] = category
+	}
+	doc := novelfetchworkshop.Document{BookID: bookID, Meta: meta, MaxTxt: maxTxt}
+	_, err := store.CompareAndSwapDocument(ctx, owner, doc)
+	if errors.Is(err, novelfetchworkshop.ErrDocumentChanged) {
+		// Another request created the same account's book. Reuse its document.
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func recordIntegrationQueued(ctx context.Context, store novelfetchworkshop.Store, owner, bookID, platformID, jobID string) (bool, error) {
+	for range 3 {
+		doc, err := store.GetDocument(ctx, owner, bookID)
+		if err != nil || !integrationInputReady(doc, platformID) {
+			return false, err
+		}
+		doc.Meta["status"], doc.Meta["queueState"], doc.Meta["currentProcessJobId"] = "queued", "queued", jobID
+		appendNovelFetchDocumentLog(&doc, "queue_queued", "任务已进入小说获取队列", time.Now().UTC())
+		if _, err = store.CompareAndSwapDocument(ctx, owner, doc); !errors.Is(err, novelfetchworkshop.ErrDocumentChanged) {
+			return err == nil, err
+		}
+		// A worker or another write changed the version. Recheck eligibility
+		// before attempting to add the queue receipt to the new document.
+	}
+	return false, novelfetchworkshop.ErrDocumentChanged
+}
+
+func admitIntegrationBook(ctx context.Context, store novelfetchworkshop.Store, queue novelfetchworkshop.ProcessQueue, owner, bookID, platformID string, result *integrationResult) error {
+	doc, err := store.GetDocument(ctx, owner, bookID)
+	if err != nil {
+		return errors.New("读取书籍任务失败，可重试")
+	}
+	if !integrationInputReady(doc, platformID) {
+		result.skipped++
+		return nil
+	}
+	admission, canAdmit := queue.(novelfetchworkshop.ProcessBookAdmissionQueue)
+	bookLocks, canCheckQueue := queue.(novelfetchworkshop.ProcessBookConflictQueue)
+	if !canAdmit || !canCheckQueue {
+		result.unavailable = true
+		return errors.New("任务队列未配置或无法核对已有任务，可重试")
+	}
+	entered := false
+	err = admission.WithBookAdmission(ctx, owner, bookID, func(lockedCtx context.Context) error {
+		entered = true
+		doc, err := store.GetDocument(lockedCtx, owner, bookID)
+		if err != nil {
+			return errors.New("读取书籍任务失败，可重试")
+		}
+		eligible := func(doc novelfetchworkshop.Document) bool { return integrationInputReady(doc, platformID) }
+		if !eligible(doc) {
+			result.skipped++
+			return nil
+		}
+		scope := novelfetchworkshop.ProcessJob{Owner: owner, PlatformID: platformID, BookIDs: []string{bookID}}
+		conflicts, err := bookLocks.ConflictingBookIDs(lockedCtx, scope)
+		if err != nil {
+			return errors.New("无法核对已有队列任务，可重试")
+		}
+		jobID := conflicts[bookID]
+		accepted := false
+		if jobID == "" {
+			submitted, err := enqueueWorkshopRetriesWhere(lockedCtx, store, queue, owner, []string{bookID}, false, eligible)
+			if err != nil || submitted.Failed != 0 {
+				return errors.New(firstText(submitted.Errors[bookID], "任务入队失败，可重试"))
+			}
+			accepted = submitted.Queued > 0
+			if accepted {
+				result.accepted++
+			}
+			if len(submitted.Jobs) > 0 {
+				jobID = toString(submitted.Jobs[0]["id"])
+			}
+		}
+		if jobID != "" {
+			reconciled, err := recordIntegrationQueued(lockedCtx, store, owner, bookID, platformID, jobID)
+			if err != nil {
+				result.pending++
+				return errors.New("队列已接收，任务状态待补记，可重试")
+			}
+			if reconciled && !accepted {
+				result.reconciled++
+			}
+		}
+		if !accepted {
+			result.skipped++
+		}
+		return nil
+	})
+	if err != nil && !entered {
+		return errors.New("入队准备暂不可用，可重试")
+	}
+	return err
+}
+
+func processIntegrationBooks(ctx context.Context, store novelfetchworkshop.Store, queue novelfetchworkshop.ProcessQueue, owner string, books []novelFetchIntegrationBook, platformID string, maxTxt int) integrationResult {
+	result := integrationResult{errors: map[string]string{}}
 	seen := map[string]bool{}
 	for _, book := range books {
 		bookID := novelFetchSafeBookID(firstText(book.BookID, book.BookIDAlt))
 		if bookID == "" || !novelFetchBookIDPattern.MatchString(bookID) {
-			failed++
+			result.failed++
 			continue
 		}
 		if seen[bookID] {
-			duplicates++
+			result.skipped++
 			continue
 		}
 		seen[bookID] = true
-		if existing, err := store.GetDocument(ctx, owner, bookID); err == nil && existing.BookID != "" {
-			duplicates++
+		created, err := ensureIntegrationDocument(ctx, store, owner, bookID, platformID, maxTxt, book)
+		if err != nil {
+			result.failed++
+			result.errors[bookID] = "保存书籍任务失败，可重试"
 			continue
 		}
-		bookName := strings.TrimSpace(firstText(book.BookName, book.Name))
-		meta := map[string]any{
-			"platformId":   platformID,
-			"bookName":     bookName,
-			"name":         bookName,
-			"importSource": "integration",
-			"importedAt":   time.Now().UTC().Format(time.RFC3339Nano),
-			"status":       "input_ready",
+		if created {
+			result.created++
 		}
-		if author := strings.TrimSpace(book.Author); author != "" {
-			meta["author"] = author
+		if err := admitIntegrationBook(ctx, store, queue, owner, bookID, platformID, &result); err != nil {
+			result.failed++
+			result.errors[bookID] = err.Error()
 		}
-		if category := strings.TrimSpace(book.Category); category != "" {
-			meta["category"] = category
-		}
-		document := novelfetchworkshop.Document{BookID: bookID, Meta: meta, MaxTxt: maxTxt, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
-		if err := store.PutDocument(ctx, owner, document); err != nil {
-			failed++
-			continue
-		}
-		created = append(created, bookID)
 	}
-	return created, duplicates, failed
-}
-
-func enqueueIntegrationDocuments(ctx context.Context, store novelfetchworkshop.Store, queue novelfetchworkshop.ProcessQueue, owner string, ids []string) (workshopRetryQueueResult, error) {
-	result, err := enqueueWorkshopRetries(ctx, store, queue, owner, ids, false)
-	if err != nil {
-		return result, err
-	}
-	for _, job := range result.Jobs {
-		if job["status"] != "queued" {
-			continue
-		}
-		document, readErr := store.GetDocument(ctx, owner, toString(job["book_id"]))
-		if readErr != nil || toString(document.Meta["status"]) != "input_ready" ||
-			firstText(document.Meta["currentProcessJobId"], document.Meta["current_process_job_id"]) != "" {
-			continue
-		}
-		document.Meta["status"] = "queued"
-		document.Meta["queueState"] = "queued"
-		document.Meta["currentProcessJobId"] = toString(job["id"])
-		appendNovelFetchDocumentLog(&document, "queue_queued", "任务已进入小说获取队列", time.Now().UTC())
-		// The worker may have claimed and advanced the document in the meantime.
-		_, _ = store.CompareAndSwapDocument(ctx, owner, document)
-	}
-	return result, nil
+	return result
 }
 
 func RegisterNovelFetchIntegrations(root *http.ServeMux, middleware BridgeAuth, store novelfetchworkshop.Store, queue novelfetchworkshop.ProcessQueue) {
@@ -164,27 +281,13 @@ func RegisterNovelFetchIntegrations(root *http.ServeMux, middleware BridgeAuth, 
 		if maxTxt <= 0 {
 			maxTxt = 4000
 		}
-		created, duplicates, failed := integrationCreateDocuments(req.Context(), store, identity.Username, input.Books, platformID, maxTxt)
-		queued := 0
-		if len(created) > 0 {
-			if queue == nil {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "status": "failed", "error": "Redis 任务队列未配置", "created": len(created)})
-				return
-			}
-			result, err := enqueueIntegrationDocuments(req.Context(), store, queue, identity.Username, created)
-			if err != nil {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "status": "failed", "error": err.Error(), "created": len(created), "failed": result.Failed})
-				return
-			}
-			queued = result.Queued
-			failed += result.Failed
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true, "status": "ok", "job_id": "", "source": firstText(input.Source, "changdu-workbench"),
-			"accepted": queued, "created": len(created), "skipped_duplicate": duplicates, "failed": failed,
-			"results": []any{}, "poll_url": "/api/process/jobs/latest",
-			"auto_queue_enabled": novelFetchAutomationEnabled(settings),
-		})
+		result := processIntegrationBooks(req.Context(), store, queue, identity.Username, input.Books, platformID, maxTxt)
+		payload := result.payload()
+		payload["job_id"] = ""
+		payload["source"] = firstText(input.Source, "changdu-workbench")
+		payload["poll_url"] = "/api/process/jobs/latest"
+		payload["auto_queue_enabled"] = novelFetchAutomationEnabled(settings)
+		writeJSON(w, result.statusCode(), payload)
 	}))
 
 	bookIDFetchHandler := middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -246,34 +349,22 @@ func RegisterNovelFetchIntegrations(root *http.ServeMux, middleware BridgeAuth, 
 		if maxTxt <= 0 {
 			maxTxt = 4000
 		}
-		created, duplicates, failed := integrationCreateDocuments(req.Context(), store, identity.Username, books, platformID, maxTxt)
-		queued := 0
-		if len(created) > 0 {
-			if queue == nil {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "status": "failed", "error": "Redis 任务队列未配置", "accepted": len(created)})
-				return
-			}
-			result, err := enqueueIntegrationDocuments(req.Context(), store, queue, identity.Username, created)
-			if err != nil {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "status": "failed", "error": err.Error(), "accepted": result.Queued, "failed": result.Failed})
-				return
-			}
-			queued = result.Queued
-			failed += result.Failed
-		}
-		skipped := duplicates + len(rawIDs) - len(books)
-		if skipped < 0 {
-			skipped = duplicates
-		}
+		result := processIntegrationBooks(req.Context(), store, queue, identity.Username, books, platformID, maxTxt)
+		result.skipped += len(rawIDs) - len(books)
 		novelFetchBookIDFetchStateStore.mu.Lock()
-		novelFetchBookIDFetchStateStore.lastStatus = "ok"
+		novelFetchBookIDFetchStateStore.lastStatus = result.status()
 		novelFetchBookIDFetchStateStore.lastError = ""
+		if result.failed > 0 {
+			novelFetchBookIDFetchStateStore.lastError = "部分或全部书籍尚未成功处理，可重试"
+		}
 		novelFetchBookIDFetchStateStore.lastFetched = len(rawIDs)
-		novelFetchBookIDFetchStateStore.lastAccepted = queued
-		novelFetchBookIDFetchStateStore.lastSkipped = skipped
-		novelFetchBookIDFetchStateStore.lastFailed = failed
+		novelFetchBookIDFetchStateStore.lastAccepted = result.accepted
+		novelFetchBookIDFetchStateStore.lastSkipped = result.skipped
+		novelFetchBookIDFetchStateStore.lastFailed = result.failed
 		novelFetchBookIDFetchStateStore.mu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "ok", "fetched": len(rawIDs), "unique": len(books), "accepted": queued, "skipped_duplicate": skipped, "failed": failed, "results": []any{}, "source": sourceURL})
+		payload := result.payload()
+		payload["fetched"], payload["unique"], payload["source"] = len(rawIDs), len(books), sourceURL
+		writeJSON(w, result.statusCode(), payload)
 	}))
 
 	statusHandler := middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {

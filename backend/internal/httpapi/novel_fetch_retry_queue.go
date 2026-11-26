@@ -55,6 +55,10 @@ func resetNovelFetchAutomationRetryState(document *novelfetchworkshop.Document) 
 // This function only persists work in the existing queue. Provider calls and
 // body processing belong to the worker, whose context outlives the HTTP call.
 func enqueueWorkshopRetries(ctx context.Context, store novelfetchworkshop.Store, queue novelfetchworkshop.ProcessQueue, owner string, ids []string, sensitiveAI bool) (workshopRetryQueueResult, error) {
+	return enqueueWorkshopRetriesWhere(ctx, store, queue, owner, ids, sensitiveAI, nil)
+}
+
+func enqueueWorkshopRetriesWhere(ctx context.Context, store novelfetchworkshop.Store, queue novelfetchworkshop.ProcessQueue, owner string, ids []string, sensitiveAI bool, eligible func(novelfetchworkshop.Document) bool) (workshopRetryQueueResult, error) {
 	result := workshopRetryQueueResult{Requested: len(ids), TaskIDs: []string{}, Jobs: []map[string]any{}, Errors: map[string]string{}, OK: true}
 	settings, err := store.GetConfig(ctx, owner)
 	if err != nil {
@@ -75,6 +79,10 @@ func enqueueWorkshopRetries(ctx context.Context, store novelfetchworkshop.Store,
 			result.Jobs = append(result.Jobs, active)
 			continue
 		}
+		if eligible != nil && !eligible(document) {
+			result.Skipped++
+			continue
+		}
 		job := novelFetchRecoveryJob(document, settings, owner, autoSubmit)
 		originalReady := strings.EqualFold(firstText(document.Meta["originalStatus"], document.Meta["original_status"]), "done")
 		aiStatus := strings.ToLower(firstText(document.Meta["aiStatus"], document.Meta["ai_status"]))
@@ -88,18 +96,20 @@ func enqueueWorkshopRetries(ctx context.Context, store novelfetchworkshop.Store,
 		if !queueReady {
 			return result, fmt.Errorf("重试队列未配置或不支持防重复入队，未执行生成，请检查 Redis 队列")
 		}
-		if resetNovelFetchAutomationRetryState(&document) {
-			if err := store.PutDocument(ctx, owner, document); err != nil {
-				result.Failed++
-				result.Errors[bookID] = "重置自动重试状态失败"
-				continue
+		if eligible == nil {
+			if resetNovelFetchAutomationRetryState(&document) {
+				if err := store.PutDocument(ctx, owner, document); err != nil {
+					result.Failed++
+					result.Errors[bookID] = "重置自动重试状态失败"
+					continue
+				}
 			}
-		}
-		if cancelled, ok := queue.(novelfetchworkshop.ProcessCancellationQueue); ok {
-			if err := cancelled.ClearCancelledBooks(ctx, owner, []string{bookID}); err != nil {
-				result.Failed++
-				result.Errors[bookID] = "清理取消状态失败"
-				continue
+			if cancelled, ok := queue.(novelfetchworkshop.ProcessCancellationQueue); ok {
+				if err := cancelled.ClearCancelledBooks(ctx, owner, []string{bookID}); err != nil {
+					result.Failed++
+					result.Errors[bookID] = "清理取消状态失败"
+					continue
+				}
 			}
 		}
 		job.ID = fmt.Sprintf("retry_%d", time.Now().UnixNano())
@@ -111,7 +121,13 @@ func enqueueWorkshopRetries(ctx context.Context, store novelfetchworkshop.Store,
 			job.SensitiveAIEnabled = true
 		}
 		batchID := job.BatchID
-		if err := novelFetchSnapshotBeforeQueue(ctx, store, job); err != nil {
+		snapshotStore := store
+		if eligible != nil {
+			// Integration retries must not overwrite a concurrent worker update
+			// or revive a book that was explicitly stopped.
+			snapshotStore = manualImportStore{Store: store}
+		}
+		if err := novelFetchSnapshotBeforeQueue(ctx, snapshotStore, job); err != nil {
 			result.Failed++
 			result.Errors[bookID] = "保存重试执行参数失败"
 			continue

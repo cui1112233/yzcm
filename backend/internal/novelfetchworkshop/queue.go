@@ -73,12 +73,13 @@ type ProcessBookConflictQueue interface {
 }
 
 type MemoryQueue struct {
-	mu        sync.Mutex
-	pending   chan ProcessJob
-	inflight  map[string]ProcessJob
-	cancelled map[string]bool
-	dedupe    map[string]string
-	changed   chan struct{}
+	admissionMu sync.Mutex
+	mu          sync.Mutex
+	pending     chan ProcessJob
+	inflight    map[string]ProcessJob
+	cancelled   map[string]bool
+	dedupe      map[string]string
+	changed     chan struct{}
 }
 
 func NewMemoryQueue() *MemoryQueue {
