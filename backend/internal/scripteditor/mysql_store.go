@@ -293,7 +293,7 @@ func (s *MySQLStore) createScriptTx(ctx context.Context, tx *sql.Tx, owner, work
 	chapters, _ := json.Marshal(input.SourceChapterIDs)
 	now := s.now().UTC()
 	row := Script{ID: s.newID("script"), WorkID: workID, OwnerUsername: owner, Episode: input.Episode, Version: version, Title: title, Content: input.Content, SourceChapterIDs: append([]string(nil), input.SourceChapterIDs...), GenerationSource: source, ModelID: input.ModelID, PromptID: input.PromptID, PromptRevision: input.PromptRevision, CreatedAt: now, UpdatedAt: now}
-	_, err := tx.ExecContext(ctx, `INSERT INTO script_editor_scripts (id,work_id,owner_username,episode,version,title,content,source_chapter_ids,preferred,generation_source,model_id,prompt_id,prompt_revision,revision,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, row.ID, workID, owner, row.Episode, row.Version, row.Title, row.Content, chapters, false, string(row.GenerationSource), row.ModelID, row.PromptID, row.PromptRevision, row.Revision, now, now)
+	_, err := tx.ExecContext(ctx, `INSERT INTO script_editor_scripts (id,work_id,owner_username,episode,version,title,content,source_chapter_ids,preferred,generation_source,model_id,prompt_id,prompt_revision,revision,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, row.ID, workID, owner, row.Episode, row.Version, row.Title, row.Content, string(chapters), false, string(row.GenerationSource), row.ModelID, row.PromptID, row.PromptRevision, row.Revision, now, now)
 	if err != nil {
 		return Script{}, mapWriteError(err)
 	}
