@@ -4121,7 +4121,7 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 				}
 				// 幂等：已经发布成功的书，在重新执行/误点执行时直接跳过，
 				// 避免在 N8 重复创建合集。强制重生成时才允许重新发布。
-				if !jobForceRegenerate && !frozenComicUpload(jobRunMode, entry) &&
+				if !jobForceRegenerate && !hasMultipleComicStyles(batchfactoryv11.ResolveSettings(batch.SettingsState.Patch, book.SettingsState.Patch)) && !hasFrozenComicStyles(entry) && !frozenComicUpload(jobRunMode, entry) &&
 					jobRunMode == "full_submit" &&
 					batchfactoryv11.EffectiveProductionMode(batch.SettingsState.Patch, book.SettingsState.Patch) == "comic" {
 					if record, collectionID, published := c.publishedComicRecord(ctx, owner, batchID, book.ID); published {
@@ -4133,11 +4133,12 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 						continue
 					}
 				}
-				frozenUpload := frozenComicUpload(jobRunMode, entry)
+				multiStyleRun := hasMultipleComicStyles(batchfactoryv11.ResolveSettings(batch.SettingsState.Patch, book.SettingsState.Patch)) || hasFrozenComicStyles(entry)
+				frozenUpload := !multiStyleRun && frozenComicUpload(jobRunMode, entry)
 				if frozenUpload && entry["stage"] == "waiting_submit" && c.automationSubmitDeferred(job) {
 					continue
 				}
-				if !frozenUpload && entryStatus == "scheduled" && entry["stage"] == "waiting_submit" {
+				if !multiStyleRun && !frozenUpload && entryStatus == "scheduled" && entry["stage"] == "waiting_submit" {
 					if c.automationSubmitDeferred(job) {
 						continue
 					}
@@ -4404,6 +4405,26 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 							appendAutomationBookLog(entry, c.now(), "ready_for_images", message)
 						}
 						entry["status"], entry["stage"], entry["message"], entry["updatedAt"] = "completed", "ready_for_images", message, c.now()
+						persist()
+						continue
+					}
+					if hasMultipleComicStyles(effective) || hasFrozenComicStyles(entry) {
+						result, styleErr := c.runComicStyleOutputs(ctx, owner, batchID, book, effective, entry, persist, jobRunMode == "full_submit", jobSubmitDeferred)
+						if styleErr != nil {
+							fail("comic_images", styleErr, fmt.Sprintf("%d/%d 种画风已完成，其余画风可续跑", result.Completed, result.Total))
+							continue
+						}
+						clearAutomationFailure(entry)
+						entry["status"], entry["stage"], entry["message"], entry["updatedAt"] = "completed", "ready_for_upload", fmt.Sprintf("%d 种画风合集已完成，等待上传", result.Total), c.now()
+						if jobRunMode == "full_submit" {
+							if jobSubmitDeferred {
+								entry["status"], entry["stage"], entry["message"] = "scheduled", "waiting_submit", "各画风合集已完成，等待定时上传"
+							} else {
+								entry["stage"], entry["message"] = "published", fmt.Sprintf("%d/%d 种画风合集已上传", result.Published, result.Total)
+							}
+						}
+						delete(entry, "retryRequested")
+						delete(entry, "retryAt")
 						persist()
 						continue
 					}

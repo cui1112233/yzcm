@@ -148,7 +148,10 @@ func BuildComicPromptContract(book Book, videos []Video, pageIndex int, snapshot
 		parts = append(parts, "本页必须生成一张完整"+aspectRatio+ImageAspectRatioOrientation(aspectRatio)+"漫画页，直接包含分格、角色、场景、动作、表情、旁白框、对话气泡及必须出现的中文文案。禁止后期拼图或另行叠字。")
 	}
 	parts = append(parts, "不得包含视频时长、运镜、镜头推进、音频、配音或视频生成指令。")
-	if style := strings.TrimSpace(config.Comic.Style.Body); style != "" {
+	if len(config.Comic.Styles) > 1 {
+		parts = append(parts, prompt.ComicSharedStyleStoryRule)
+	}
+	if style := strings.TrimSpace(config.Comic.Style.Body); style != "" && len(config.Comic.Styles) < 2 {
 		parts = append(parts, "本书画风预设：\n"+comicPromptTextForAspect(style, aspectRatio))
 	}
 	if prefix := strings.TrimSpace(config.Comic.ImagePromptPrefix); prefix != "" {

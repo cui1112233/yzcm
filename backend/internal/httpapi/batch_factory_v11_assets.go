@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -17,6 +18,9 @@ import (
 )
 
 func registerBookAssetRoutes(mux *http.ServeMux, production *BatchAutomationCoordinator, store batchfactoryv11.Store, files *localartifact.Store) {
+	handleStyledImage := func(pattern string, handler http.HandlerFunc) {
+		mux.HandleFunc(pattern, comicStyleHandler(store, handler))
+	}
 	const collection = "/api/batch-factory/v11/batches/{batchId}/books/{bookId}/assets"
 	const imageCollection = collection + "/{assetId}/images"
 	const imageUpload = imageCollection + "/upload"
@@ -81,7 +85,7 @@ func registerBookAssetRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"asset": asset})
 	})
-	mux.HandleFunc("GET "+imageCollection, func(w http.ResponseWriter, r *http.Request) {
+	handleStyledImage("GET "+imageCollection, func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -94,7 +98,7 @@ func registerBookAssetRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"images": bookAssetImageResponses(images, r.PathValue("batchId"), r.PathValue("bookId"), r.PathValue("assetId"))})
 	})
-	mux.HandleFunc("POST "+imageCollection, func(w http.ResponseWriter, r *http.Request) {
+	handleStyledImage("POST "+imageCollection, func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -115,7 +119,7 @@ func registerBookAssetRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"image": bookAssetImageResponse(image, r.PathValue("batchId"), r.PathValue("bookId"), r.PathValue("assetId"))})
 	})
-	mux.HandleFunc("POST "+imageUpload, func(w http.ResponseWriter, r *http.Request) {
+	handleStyledImage("POST "+imageUpload, func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -154,7 +158,7 @@ func registerBookAssetRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"image": bookAssetImageResponse(image, r.PathValue("batchId"), r.PathValue("bookId"), r.PathValue("assetId"))})
 	})
-	mux.HandleFunc("PUT "+imageCollection+"/{imageId}/primary", func(w http.ResponseWriter, r *http.Request) {
+	handleStyledImage("PUT "+imageCollection+"/{imageId}/primary", func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -177,7 +181,7 @@ func registerBookAssetRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "asset image storage is unavailable"})
 			return
 		}
-		images, err := store.ListBookAssetImages(r.Context(), owner, r.PathValue("batchId"), r.PathValue("bookId"), r.PathValue("assetId"))
+		images, err := bookAssetImageForRead(r.Context(), store, owner, r.PathValue("batchId"), r.PathValue("bookId"), r.PathValue("assetId"), r.PathValue("imageId"))
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -225,7 +229,7 @@ func handleBookAssetThumbnail(store batchfactoryv11.Store, files *localartifact.
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "asset image storage is unavailable"})
 			return
 		}
-		images, err := store.ListBookAssetImages(r.Context(), owner, r.PathValue("batchId"), r.PathValue("bookId"), r.PathValue("assetId"))
+		images, err := bookAssetImageForRead(r.Context(), store, owner, r.PathValue("batchId"), r.PathValue("bookId"), r.PathValue("assetId"), r.PathValue("imageId"))
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -315,4 +319,17 @@ func writeBookAssetImageStorageError(w http.ResponseWriter, err error) {
 	default:
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "image storage failed"})
 	}
+}
+
+func bookAssetImageForRead(ctx context.Context, store batchfactoryv11.Store, o, b, k, a, i string) ([]batchfactoryv11.BookAssetImage, error) {
+	if direct, ok := store.(interface {
+		GetBookAssetImage(context.Context, string, string, string, string, string) (batchfactoryv11.BookAssetImage, error)
+	}); ok {
+		image, err := direct.GetBookAssetImage(ctx, o, b, k, a, i)
+		if err != nil {
+			return nil, err
+		}
+		return []batchfactoryv11.BookAssetImage{image}, nil
+	}
+	return store.ListBookAssetImages(ctx, o, b, k, a)
 }

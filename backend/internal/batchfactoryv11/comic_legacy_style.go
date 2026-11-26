@@ -61,6 +61,17 @@ func (s *MySQLStore) AdoptLegacyComicStyle(ctx context.Context, owner, batchID, 
 	if err != nil {
 		return err
 	}
+	if err := ensureBookOwnership(ctx, s.db, owner, batchID, bookID); err != nil {
+		return err
+	}
+	var alreadyBound string
+	lookupErr := s.db.QueryRowContext(ctx, `SELECT style_id FROM batch_factory_v12_comic_style_outputs WHERE owner_username=? AND batch_id=? AND book_id=? AND is_legacy=TRUE LIMIT 1`, owner, batchID, bookID).Scan(&alreadyBound)
+	if lookupErr == nil {
+		return nil
+	}
+	if !errors.Is(lookupErr, sql.ErrNoRows) {
+		return lookupErr
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

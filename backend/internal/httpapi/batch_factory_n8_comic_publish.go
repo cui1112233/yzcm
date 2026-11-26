@@ -537,6 +537,9 @@ func registerN8ComicPublishRoutes(mux *http.ServeMux, publisher *BatchFactoryN8C
 	if mux == nil || publisher == nil {
 		return
 	}
+	handleComic := func(pattern string, handler http.HandlerFunc) {
+		mux.HandleFunc(pattern, comicStyleHandler(publisher.Store, handler))
+	}
 	mux.HandleFunc("GET /api/batch-factory/v12/comic-publish/status", func(w http.ResponseWriter, r *http.Request) {
 		// 这几个目录来自同一个 N8 后台，但不能串行读取。制作者账号目录
 		// 偶尔会慢到 20 秒以上；串行读取会让音频分类也跟着一直转圈。
@@ -625,7 +628,7 @@ func registerN8ComicPublishRoutes(mux *http.ServeMux, publisher *BatchFactoryN8C
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"works": works})
 	})
-	mux.HandleFunc("POST /api/batch-factory/v12/batches/{batchId}/books/{bookId}/comic-collections/{collectionId}/publish", func(w http.ResponseWriter, r *http.Request) {
+	handleComic("POST /api/batch-factory/v12/batches/{batchId}/books/{bookId}/comic-collections/{collectionId}/publish", func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -653,7 +656,7 @@ func registerN8ComicPublishRoutes(mux *http.ServeMux, publisher *BatchFactoryN8C
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"publish": record})
 	})
-	mux.HandleFunc("GET /api/batch-factory/v12/batches/{batchId}/books/{bookId}/comic-collections/{collectionId}/publish", func(w http.ResponseWriter, r *http.Request) {
+	handleComic("GET /api/batch-factory/v12/batches/{batchId}/books/{bookId}/comic-collections/{collectionId}/publish", func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -1011,7 +1014,7 @@ func (p *BatchFactoryN8ComicPublisher) Publish(ctx context.Context, owner, batch
 			}
 			out.Kind = req.Kind
 			out.ID = c.ID
-			out.Name, err = p.collectionName(r.Producer, book.Title)
+			out.Name, err = p.collectionName(r.Producer, comicStyleCollectionTitle(ctx, book.Title))
 			if err != nil {
 				return out, err
 			}

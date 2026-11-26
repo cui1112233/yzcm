@@ -3475,7 +3475,7 @@ func generateShuihuoAssetImagesWithRepair(ctx context.Context, store batchfactor
 			}
 			defer func() { <-sem }()
 			generationPrompt := item.prompt
-			repairKey := comicAssetRepairKey(batch.ID, batch.Books[0].ID, item.asset.ID)
+			repairKey := comicAssetRepairKey(batch.ID, batch.Books[0].ID, item.asset.ID, batchfactoryv11.ComicStyleStorageScopeID(ctx))
 			if cached, ok := shuihuoRepairedPrompts.Load(repairKey); ok {
 				if repaired, textOK := cached.(string); textOK && strings.TrimSpace(repaired) != "" {
 					generationPrompt = repaired
