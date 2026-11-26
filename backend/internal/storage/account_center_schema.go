@@ -40,8 +40,9 @@ func accountCenterStatements() []string {
   joined_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   ended_at DATETIME(6) NULL,
   active_username VARCHAR(32) GENERATED ALWAYS AS (CASE WHEN ended_at IS NULL THEN username END) STORED,
-  UNIQUE KEY uq_account_center_active_membership (team_id, active_username),
+  UNIQUE KEY uq_account_center_active_membership (active_username),
   KEY idx_account_center_memberships_user (username, ended_at, team_id),
+  KEY idx_account_center_memberships_team (team_id, ended_at, username),
   FOREIGN KEY (team_id) REFERENCES account_center_teams(id)
 ) ENGINE=InnoDB`,
 		`CREATE TABLE IF NOT EXISTS account_center_grants (

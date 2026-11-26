@@ -2,12 +2,12 @@ package accountcenter
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,6 +19,9 @@ const (
 	RoleDeveloper = "developer"
 	RoleManager   = "manager"
 	RoleMember    = "member"
+
+	GrantCapabilityTeamManage = "team:manage"
+	GrantScopeTeam            = "team"
 )
 
 var (
@@ -47,8 +50,9 @@ type Team struct {
 }
 
 type TeamFilter struct {
-	Username, ManagerUsername string
-	IncludeArchived           bool
+	Username        string // Matches an active membership.
+	ManagerUsername string
+	IncludeArchived bool
 }
 
 type TeamSummary struct {
@@ -139,24 +143,57 @@ func (s *MySQLStore) SetRole(ctx context.Context, actorUsername, username, role 
 	if role != RoleDeveloper && role != RoleManager && role != RoleMember {
 		return ErrForbidden
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE account_center_profiles target
-JOIN accounts target_account ON target_account.username = target.username
-JOIN account_center_profiles actor ON actor.username = ?
-JOIN accounts actor_account ON actor_account.username = actor.username
-SET target.role = ?
-WHERE target.username = ? AND target.role <> 'founder'
-  AND actor_account.active = TRUE AND actor.archived_at IS NULL
-  AND (actor.role = 'founder' OR (actor.role = 'developer' AND target.role <> 'developer' AND ? <> 'developer'))`, actorUsername, role, username, role)
-	if err := recordChanged(result, err); errors.Is(err, ErrNotFound) {
-		return ErrForbidden
-	} else {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
+	var actorRole string
+	var targetRole sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT actor.role, target.role
+FROM account_center_profiles actor JOIN accounts a ON a.username = actor.username
+LEFT JOIN accounts target_account ON target_account.username = ?
+LEFT JOIN account_center_profiles target ON target.username = target_account.username
+WHERE actor.username = ? AND a.active = TRUE AND actor.archived_at IS NULL FOR UPDATE`, username, actorUsername).Scan(&actorRole, &targetRole)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrForbidden
+	}
+	if err != nil {
+		return err
+	}
+	if actorRole != RoleFounder && (actorRole != RoleDeveloper || role == RoleDeveloper) {
+		return ErrForbidden
+	}
+	if !targetRole.Valid {
+		return ErrNotFound
+	}
+	if targetRole.String == RoleFounder || (actorRole != RoleFounder && targetRole.String == RoleDeveloper) {
+		return ErrForbidden
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE account_center_profiles SET role = ? WHERE username = ?`, role, username); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *MySQLStore) SetArchived(ctx context.Context, username string, archivedAt *time.Time) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE account_center_profiles SET archived_at = ? WHERE username = ? AND role <> 'founder'`, archivedAt, username)
-	return recordChanged(result, err)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var role string
+	err = tx.QueryRowContext(ctx, `SELECT p.role FROM account_center_profiles p JOIN accounts a ON a.username = p.username WHERE p.username = ? FOR UPDATE`, username).Scan(&role)
+	if err != nil {
+		return recordError(err)
+	}
+	if role == RoleFounder {
+		return ErrForbidden
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE account_center_profiles SET archived_at = ? WHERE username = ?`, archivedAt, username); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *MySQLStore) CreateTeam(ctx context.Context, team Team) error {
@@ -171,19 +208,24 @@ func (s *MySQLStore) CreateTeam(ctx context.Context, team Team) error {
 	if err := insertTeam(ctx, tx, team); err != nil {
 		return err
 	}
+	if err := insertTeamMembership(ctx, tx, team.ID, team.ManagerUsername); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
 func insertTeam(ctx context.Context, tx *sql.Tx, team Team) error {
 	result, err := tx.ExecContext(ctx, `INSERT INTO account_center_teams (id, name, manager_username, created_by, created_at, archived_at)
-SELECT ?, ?, username, ?, COALESCE(?, CURRENT_TIMESTAMP(6)), ? FROM accounts WHERE username = ?`,
-		team.ID, team.Name, team.CreatedBy, optionalTime(team.CreatedAt), team.ArchivedAt, team.ManagerUsername)
-	if err := recordChanged(result, err); err != nil {
-		return err
-	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO account_center_memberships (team_id, username, joined_at)
-SELECT id, manager_username, created_at FROM account_center_teams WHERE id = ?`, team.ID)
-	return recordError(err)
+SELECT ?, ?, username, ?, COALESCE(?, ?, CURRENT_TIMESTAMP(6)), ? FROM accounts WHERE username = ?`,
+		team.ID, team.Name, team.CreatedBy, optionalTime(team.CreatedAt), team.ArchivedAt, team.ArchivedAt, team.ManagerUsername)
+	return recordChanged(result, err)
+}
+
+func insertTeamMembership(ctx context.Context, tx *sql.Tx, teamID, username string) error {
+	result, err := tx.ExecContext(ctx, `INSERT INTO account_center_memberships (team_id, username, joined_at, ended_at)
+SELECT t.id, a.username, t.created_at, t.archived_at FROM account_center_teams t
+JOIN accounts a ON a.username = ? WHERE t.id = ?`, username, teamID)
+	return recordChanged(result, err)
 }
 
 func (s *MySQLStore) ListTeams(ctx context.Context, filter TeamFilter) ([]TeamSummary, error) {
@@ -288,10 +330,12 @@ func (s *MySQLStore) AppendAudit(ctx context.Context, event AuditEvent) error {
 	if event.ActorUsername == "" || event.SubjectUsername == "" || event.Action == "" {
 		return ErrInvalid
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO account_center_audit_events (actor_username, subject_username, team_id, impersonation_id, action, created_at)
-VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, COALESCE(?, CURRENT_TIMESTAMP(6)))`, event.ActorUsername, event.SubjectUsername, event.TeamID, event.ImpersonationID, event.Action, optionalTime(event.CreatedAt))
+	_, err := s.db.ExecContext(ctx, insertAuditSQL, event.ActorUsername, event.SubjectUsername, event.TeamID, event.ImpersonationID, event.Action, optionalTime(event.CreatedAt))
 	return err
 }
+
+const insertAuditSQL = `INSERT INTO account_center_audit_events (actor_username, subject_username, team_id, impersonation_id, action, created_at)
+VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, COALESCE(?, CURRENT_TIMESTAMP(6)))`
 
 func (s *MySQLStore) ListAudit(ctx context.Context, filter AuditFilter) ([]AuditEvent, error) {
 	limit := filter.Limit
@@ -408,6 +452,15 @@ ON DUPLICATE KEY UPDATE import_key = import_key`, legacyImportKey); err != nil {
 	if err := tx.QueryRowContext(ctx, `SELECT completed_at IS NOT NULL FROM account_center_imports WHERE import_key = ? FOR UPDATE`, legacyImportKey).Scan(&completed); err != nil || completed {
 		return err
 	}
+	systemDir = strings.TrimSpace(systemDir)
+	if systemDir == "" {
+		return errors.New("legacy account center source directory is empty")
+	}
+	source, err := os.OpenRoot(systemDir)
+	if err != nil {
+		return fmt.Errorf("open legacy account center source directory: %w", err)
+	}
+	defer source.Close()
 	accounts, err := legacyAccounts(ctx, tx)
 	if err != nil || len(accounts) == 0 {
 		return err
@@ -416,19 +469,17 @@ ON DUPLICATE KEY UPDATE import_key = import_key`, legacyImportKey); err != nil {
 	var archives []legacyArchive
 	var collaboration struct{ Teams []legacyTeam }
 	var grants []legacyGrant
-	if systemDir = strings.TrimSpace(systemDir); systemDir != "" {
-		for _, file := range []struct {
-			name string
-			dest any
-		}{
-			{"member-profiles.json", &profiles},
-			{"member-archives.json", &archives},
-			{"team-collaboration.json", &collaboration},
-			{"grants.json", &grants},
-		} {
-			if err := readLegacyFile(systemDir, file.name, file.dest); err != nil {
-				return err
-			}
+	for _, file := range []struct {
+		name string
+		dest any
+	}{
+		{"member-profiles.json", &profiles},
+		{"member-archives.json", &archives},
+		{"team-collaboration.json", &collaboration},
+		{"grants.json", &grants},
+	} {
+		if err := readLegacyFile(source, file.name, file.dest); err != nil {
+			return err
 		}
 	}
 	identities, err := importLegacyProfiles(ctx, tx, accounts, profiles, archives)
@@ -486,15 +537,15 @@ func legacyAccounts(ctx context.Context, tx *sql.Tx) ([]legacyAccount, error) {
 	return accounts, rows.Err()
 }
 
-func readLegacyFile(dir, name string, dest any) error {
-	data, err := os.ReadFile(filepath.Join(dir, name))
-	if errors.Is(err, os.ErrNotExist) && (name == "team-collaboration.json" || name == "grants.json") {
-		// The old team and grant readers try the default data path as well.
-		data, err = os.ReadFile(filepath.Join(dir, "..", "..", "..", "data", "system", name))
-	}
+func readLegacyFile(source *os.Root, name string, dest any) error {
+	_, err := source.Lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
+	if err != nil {
+		return fmt.Errorf("check legacy %s: %w", name, err)
+	}
+	data, err := source.ReadFile(name)
 	if err != nil {
 		return fmt.Errorf("read legacy %s: %w", name, err)
 	}
@@ -545,8 +596,9 @@ VALUES (?, ?, ?, ?, ?)`, identity.Username, identity.DisplayName, identity.Avata
 }
 
 func importLegacyTeams(ctx context.Context, tx *sql.Tx, identities map[string]Identity, teams []legacyTeam, profiles []legacyProfile) error {
-	primary := make(map[string]string)
-	archivedFallback := make(map[string]string)
+	primary := primaryLegacyTeamIDs(identities, teams)
+	ownedTeams := make(map[string][]string)
+	importedAt := time.Now().UTC()
 	for _, row := range teams {
 		manager := identities[row.ManagerUsername]
 		if !canOwnLegacyTeam(manager) || row.ID == "" {
@@ -562,21 +614,24 @@ func importLegacyTeams(ctx context.Context, tx *sql.Tx, identities map[string]Id
 		if !row.ArchivedAt.IsZero() {
 			team.ArchivedAt = &row.ArchivedAt
 		}
+		archiveDuplicate := team.ArchivedAt == nil && primary[manager.Username] != team.ID
+		if archiveDuplicate {
+			team.ArchivedAt = &importedAt
+		}
 		if err := insertTeam(ctx, tx, team); err != nil {
 			return fmt.Errorf("import legacy team: %w", err)
 		}
-		if team.ArchivedAt == nil && (primary[manager.Username] == "" || team.ID == "go-team-"+manager.Username) {
-			primary[manager.Username] = team.ID
+		if err := insertTeamMembership(ctx, tx, team.ID, manager.Username); err != nil {
+			return fmt.Errorf("import legacy team owner: %w", err)
 		}
-		if team.ArchivedAt != nil && team.ID == "go-team-"+manager.Username {
-			archivedFallback[manager.Username] = team.ID
-		}
-		for _, username := range row.CoManagers {
-			if canOwnLegacyTeam(identities[username]) {
-				if err := importLegacyMembership(ctx, tx, team.ID, username); err != nil {
-					return err
-				}
+		ownedTeams[manager.Username] = append(ownedTeams[manager.Username], team.ID)
+		if archiveDuplicate {
+			if _, err := tx.ExecContext(ctx, insertAuditSQL, "_legacy_import", manager.Username, team.ID, "", "legacy_import.team_archived_duplicate_owner", importedAt); err != nil {
+				return fmt.Errorf("audit duplicate legacy team archive: %w", err)
 			}
+		}
+		if err := importLegacyTeamGrants(ctx, tx, team, identities, row.CoManagers); err != nil {
+			return err
 		}
 	}
 	seen := make(map[string]bool, len(profiles))
@@ -589,31 +644,57 @@ func importLegacyTeams(ctx context.Context, tx *sql.Tx, identities map[string]Id
 		if identity.Role != RoleMember || !canOwnLegacyTeam(manager) {
 			continue
 		}
-		teamID := primary[manager.Username]
-		if teamID == "" {
-			teamID = archivedFallback[manager.Username]
-		}
-		if teamID == "" {
-			teamID = "go-team-" + manager.Username
-			team := Team{ID: teamID, Name: manager.DisplayName + "的团队", ManagerUsername: manager.Username, CreatedBy: manager.Username}
+		if len(ownedTeams[manager.Username]) == 0 {
+			team := Team{ID: "go-team-" + manager.Username, Name: manager.DisplayName + "的团队", ManagerUsername: manager.Username, CreatedBy: manager.Username}
 			if err := insertTeam(ctx, tx, team); err != nil {
 				return fmt.Errorf("import legacy member team: %w", err)
 			}
-			primary[manager.Username] = teamID
+			if err := insertTeamMembership(ctx, tx, team.ID, manager.Username); err != nil {
+				return fmt.Errorf("import legacy member team owner: %w", err)
+			}
+			ownedTeams[manager.Username] = []string{team.ID}
 		}
-		if err := importLegacyMembership(ctx, tx, teamID, identity.Username); err != nil {
-			return err
+		for _, teamID := range ownedTeams[manager.Username] {
+			if err := insertTeamMembership(ctx, tx, teamID, identity.Username); err != nil {
+				return fmt.Errorf("import legacy member team relationship: %w", err)
+			}
 		}
 	}
 	return nil
+}
+
+func primaryLegacyTeamIDs(identities map[string]Identity, teams []legacyTeam) map[string]string {
+	primary := make(map[string]string)
+	for _, row := range teams {
+		if row.ID == "" || !row.ArchivedAt.IsZero() || !canOwnLegacyTeam(identities[row.ManagerUsername]) {
+			continue
+		}
+		manager := row.ManagerUsername
+		if primary[manager] == "" || row.ID == "go-team-"+manager {
+			primary[manager] = row.ID
+		}
+	}
+	return primary
 }
 
 func canOwnLegacyTeam(identity Identity) bool {
 	return identity.Role == RoleFounder || identity.Role == RoleDeveloper || identity.Role == RoleManager
 }
 
-func importLegacyMembership(ctx context.Context, tx *sql.Tx, teamID, username string) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO account_center_memberships (team_id, username)
-VALUES (?, ?) ON DUPLICATE KEY UPDATE id = id`, teamID, username)
-	return err
+func importLegacyTeamGrants(ctx context.Context, tx *sql.Tx, team Team, identities map[string]Identity, coManagers []string) error {
+	seen := make(map[string]bool, len(coManagers))
+	for _, username := range coManagers {
+		if username == team.ManagerUsername || seen[username] || !canOwnLegacyTeam(identities[username]) {
+			continue
+		}
+		seen[username] = true
+		id := sha256.Sum256([]byte(team.ID + "\x00" + username))
+		_, err := tx.ExecContext(ctx, `INSERT INTO account_center_grants (id, username, capability, scope, team_id, granted_by, granted_at, revoked_at)
+SELECT ?, ?, ?, ?, id, manager_username, created_at, archived_at FROM account_center_teams WHERE id = ?`,
+			fmt.Sprintf("legacy-team-%x", id[:16]), username, GrantCapabilityTeamManage, GrantScopeTeam, team.ID)
+		if err != nil {
+			return fmt.Errorf("import legacy co-manager grant: %w", recordError(err))
+		}
+	}
+	return nil
 }

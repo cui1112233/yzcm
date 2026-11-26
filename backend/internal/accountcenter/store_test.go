@@ -121,32 +121,190 @@ func TestAccountCenterMySQLRejectsDuplicateFounder(t *testing.T) {
 	}
 }
 
-func TestAccountCenterMySQLRejectsOnlyDuplicateActiveMembership(t *testing.T) {
+func TestAccountCenterMySQLRejectsCrossTeamActiveMembership(t *testing.T) {
 	ctx := context.Background()
 	db := accountCenterDatabase(t)
 	store := accountcenter.NewMySQLStore(db)
 	if err := store.ImportLegacy(ctx, t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateTeam(ctx, accountcenter.Team{ID: "team", Name: "测试团队", ManagerUsername: "owner", CreatedBy: "owner"}); err != nil {
+	if err := store.CreateTeam(ctx, accountcenter.Team{ID: "first", Name: "测试团队一", ManagerUsername: "owner", CreatedBy: "owner"}); err != nil {
 		t.Fatal(err)
 	}
-	membership := accountcenter.Membership{TeamID: "team", Username: "worker"}
+	if err := store.CreateTeam(ctx, accountcenter.Team{ID: "second", Name: "测试团队二", ManagerUsername: "lead", CreatedBy: "owner"}); err != nil {
+		t.Fatal(err)
+	}
+	membership := accountcenter.Membership{TeamID: "first", Username: "worker"}
 	if err := store.AddMembership(ctx, membership); err != nil {
 		t.Fatal(err)
 	}
+	membership.TeamID = "second"
 	if err := store.AddMembership(ctx, membership); !errors.Is(err, accountcenter.ErrConflict) || !isDuplicateKey(err) {
-		t.Fatalf("duplicate membership error = %v, want typed and MySQL duplicate key errors", err)
+		t.Fatalf("cross-team membership error = %v, want typed and MySQL duplicate key errors", err)
 	}
-	if err := store.EndMembership(ctx, "team", "worker", time.Now().UTC()); err != nil {
+	if err := store.EndMembership(ctx, "first", "worker", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AddMembership(ctx, membership); err != nil {
-		t.Fatalf("rejoin after ending membership: %v", err)
+		t.Fatalf("join second team after ending first membership: %v", err)
 	}
-	memberships, err := store.ListMemberships(ctx, "team")
-	if err != nil || len(memberships) != 2 || memberships[0].Username != "owner" || memberships[1].Username != "worker" {
+	memberships, err := store.ListMemberships(ctx, "second")
+	if err != nil || len(memberships) != 2 || memberships[0].Username != "lead" || memberships[1].Username != "worker" {
 		t.Fatalf("active memberships = %+v, %v", memberships, err)
+	}
+}
+
+func TestAccountCenterCreateTeamRejectsOwnerWithActiveMembership(t *testing.T) {
+	ctx := context.Background()
+	db := accountCenterDatabase(t)
+	store := accountcenter.NewMySQLStore(db)
+	first := accountcenter.Team{ID: "first", Name: "测试团队一", ManagerUsername: "owner", CreatedBy: "owner"}
+	if err := store.CreateTeam(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	second := accountcenter.Team{ID: "second", Name: "测试团队二", ManagerUsername: "owner", CreatedBy: "owner"}
+	if err := store.CreateTeam(ctx, second); !errors.Is(err, accountcenter.ErrConflict) || !isDuplicateKey(err) {
+		t.Fatalf("team owner with active membership error = %v", err)
+	}
+	teams, err := store.ListTeams(ctx, accountcenter.TeamFilter{IncludeArchived: true})
+	if err != nil || len(teams) != 1 || teams[0].ID != first.ID {
+		t.Fatalf("team creation was not rolled back: %+v, %v", teams, err)
+	}
+	if err := store.EndMembership(ctx, "first", "owner", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateTeam(ctx, second); err != nil {
+		t.Fatalf("create second team after ending first membership: %v", err)
+	}
+}
+
+func TestAccountCenterLegacyImportPreservesSecondaryAndArchivedTeams(t *testing.T) {
+	ctx := context.Background()
+	db := accountCenterDatabase(t)
+	store := accountcenter.NewMySQLStore(db)
+	dir := t.TempDir()
+	writeLegacyFile(t, dir, "member-profiles.json", `[{"username":"lead","role":"manager"},{"username":"dev","role":"dev"},{"username":"worker","role":"member","boundTo":"lead"}]`)
+	writeLegacyFile(t, dir, "team-collaboration.json", `{"teams":[
+		{"id":"secondary","name":"额外团队","managerUsername":"lead"},
+		{"id":"dev-team","name":"开发团队","managerUsername":"dev","coManagers":["lead","lead"]},
+		{"id":"go-team-lead","name":"主团队","managerUsername":"lead"},
+		{"id":"historical","name":"历史团队","managerUsername":"lead","coManagers":["dev"],"archivedAt":"2026-11-25T00:00:00Z"}
+	]}`)
+	if err := store.ImportLegacy(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, username := range []string{"lead", "worker"} {
+		teams, err := store.ListTeams(ctx, accountcenter.TeamFilter{Username: username, IncludeArchived: true})
+		if err != nil || len(teams) != 1 || teams[0].ID != "go-team-lead" {
+			t.Fatalf("%s active teams = %+v, %v", username, teams, err)
+		}
+	}
+	grants, err := store.ListGrants(ctx, "lead")
+	if err != nil || len(grants) != 1 || grants[0].TeamID != "dev-team" || grants[0].Capability != "team:manage" || grants[0].Scope != "team" {
+		t.Fatalf("co-manager grants = %+v, %v", grants, err)
+	}
+	grants, err = store.ListGrants(ctx, "dev")
+	if err != nil || len(grants) != 0 {
+		t.Fatalf("archived team left active grants = %+v, %v", grants, err)
+	}
+	var historicalGrants int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM account_center_grants WHERE username = 'dev' AND team_id = 'historical' AND revoked_at IS NOT NULL`).Scan(&historicalGrants); err != nil || historicalGrants != 1 {
+		t.Fatalf("archived team preserved %d historical co-manager grants, %v", historicalGrants, err)
+	}
+	teams, err := store.ListTeams(ctx, accountcenter.TeamFilter{ManagerUsername: "lead", IncludeArchived: true})
+	if err != nil || len(teams) != 3 {
+		t.Fatalf("owned teams including history = %+v, %v", teams, err)
+	}
+	for _, team := range teams {
+		if team.ID == "go-team-lead" {
+			continue
+		}
+		if team.ArchivedAt == nil || team.MemberCount != 0 {
+			t.Fatalf("team history lost or active: %+v", team)
+		}
+		var oldMembers int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM account_center_memberships WHERE team_id = ? AND ended_at IS NOT NULL AND username IN ('lead', 'worker')`, team.ID).Scan(&oldMembers); err != nil || oldMembers != 2 {
+			t.Fatalf("team %s preserved %d historical memberships, %v", team.ID, oldMembers, err)
+		}
+		if team.ID == "historical" && !team.ArchivedAt.Equal(time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)) {
+			t.Fatalf("old archive time changed: %s", team.ArchivedAt)
+		}
+	}
+	audit, err := store.ListAudit(ctx, accountcenter.AuditFilter{TeamID: "secondary"})
+	if err != nil || len(audit) != 1 || audit[0].Action != "legacy_import.team_archived_duplicate_owner" || audit[0].SubjectUsername != "lead" {
+		t.Fatalf("secondary team archive audit = %+v, %v", audit, err)
+	}
+}
+
+func TestAccountCenterLegacyImportRetriesWhenSourceDirectoryReturns(t *testing.T) {
+	ctx := context.Background()
+	db := accountCenterDatabase(t)
+	store := accountcenter.NewMySQLStore(db)
+	dir := filepath.Join(t.TempDir(), "legacy-system")
+	for _, source := range []string{"", dir} {
+		if err := store.ImportLegacy(ctx, source); err == nil {
+			t.Fatalf("unavailable source %q was accepted", source)
+		}
+		var markers int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM account_center_imports`).Scan(&markers); err != nil || markers != 0 {
+			t.Fatalf("unavailable source left %d markers, %v", markers, err)
+		}
+	}
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeLegacyFile(t, dir, "member-profiles.json", `[{"username":"worker","role":"manager","displayName":"恢复的管理者"}]`)
+	if err := store.ImportLegacy(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := store.ResolveIdentity(ctx, "worker")
+	if err != nil || worker.Role != accountcenter.RoleManager || worker.DisplayName != "恢复的管理者" {
+		t.Fatalf("recovered worker = %+v, %v", worker, err)
+	}
+}
+
+func TestAccountCenterLegacyImportAcceptsExistingEmptyDirectory(t *testing.T) {
+	ctx := context.Background()
+	db := accountCenterDatabase(t)
+	store := accountcenter.NewMySQLStore(db)
+	if err := store.ImportLegacy(ctx, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	var imported bool
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM account_center_imports WHERE completed_at IS NOT NULL)`).Scan(&imported); err != nil || !imported {
+		t.Fatalf("empty source completion = %t, %v", imported, err)
+	}
+}
+
+func TestAccountCenterRoleAndArchiveSameValueRequestsAreIdempotent(t *testing.T) {
+	ctx := context.Background()
+	db := accountCenterDatabase(t)
+	store := accountcenter.NewMySQLStore(db)
+	if err := store.ImportLegacy(ctx, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := store.SetRole(ctx, "owner", "worker", accountcenter.RoleDeveloper); err != nil {
+			t.Fatalf("founder sets developer role: %v", err)
+		}
+	}
+	if err := store.SetRole(ctx, "worker", "worker", accountcenter.RoleDeveloper); !errors.Is(err, accountcenter.ErrForbidden) {
+		t.Fatalf("unauthorized same role update = %v", err)
+	}
+	if err := store.SetRole(ctx, "owner", "missing", accountcenter.RoleMember); !errors.Is(err, accountcenter.ErrNotFound) {
+		t.Fatalf("authorized role update with missing target = %v", err)
+	}
+	archivedAt := time.Date(2026, 11, 26, 1, 0, 0, 0, time.UTC)
+	for _, at := range []*time.Time{&archivedAt, &archivedAt, nil, nil} {
+		if err := store.SetArchived(ctx, "worker", at); err != nil {
+			t.Fatalf("update worker archive to %v: %v", at, err)
+		}
+	}
+	if err := store.SetArchived(ctx, "owner", nil); !errors.Is(err, accountcenter.ErrForbidden) {
+		t.Fatalf("change founder archive = %v", err)
+	}
+	if err := store.SetArchived(ctx, "missing", nil); !errors.Is(err, accountcenter.ErrNotFound) {
+		t.Fatalf("change missing archive = %v", err)
 	}
 }
 

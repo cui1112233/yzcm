@@ -15,7 +15,7 @@ func TestAccountCenterMigrationsContainAuthorizationBoundaries(t *testing.T) {
 		"account_center_profiles", "account_center_teams", "account_center_memberships",
 		"account_center_grants", "account_center_audit_events", "account_center_impersonations",
 		"unique key uq_account_center_founder (founder_slot)",
-		"unique key uq_account_center_active_membership (team_id, active_username)",
+		"unique key uq_account_center_active_membership (active_username)",
 		"key idx_account_center_audit_team_time (team_id, created_at, id)",
 	} {
 		if !strings.Contains(joined, want) {
