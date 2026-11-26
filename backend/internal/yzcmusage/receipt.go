@@ -2,6 +2,7 @@ package yzcmusage
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -24,8 +25,29 @@ type receipt struct {
 
 func (r receipt) valid() bool {
 	hash, err := hex.DecodeString(r.CredentialHash)
-	return err == nil && len(hash) == 32 && r.Request.ID != "" && len(r.Request.ID) <= 64 && r.Request.Owner != "" && len(r.Request.Owner) <= 32 && len(r.Request.Feature) <= 64 && !r.At.IsZero() && r.Status >= 100 && r.Status <= 599
+	return err == nil && len(hash) == 32 && r.Request.validIdentity() && len(r.Request.Feature) <= 64 && !r.At.IsZero() && r.Status >= 100 && r.Status <= 599
 }
+
+func receiptName(requestID string) string { return "receipt-" + Fingerprint(requestID) + ".json" }
+
+func readReceipt(path string) (receipt, bool) {
+	var r receipt
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return r, false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return r, false
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, 16385))
+	if err != nil || len(raw) > 16384 || json.Unmarshal(raw, &r) != nil {
+		return r, false
+	}
+	return r, r.valid() && filepath.Base(path) == receiptName(r.Request.ID)
+}
+
 func (t *Tracker) receiptDirectory(create bool) (string, error) {
 	if strings.TrimSpace(t.ReceiptDir) == "" {
 		return "", errors.New("usage receipt directory is not configured")
@@ -81,16 +103,31 @@ func (t *Tracker) saveReceipt(r receipt) error {
 		return closeErr
 	}
 	// Hard-link publication is atomic and never replaces an existing receipt.
-	// The first recorded actor therefore survives duplicate deliveries/restarts.
-	dest := filepath.Join(dir, "receipt-"+Fingerprint(r.Request.ID)+".json")
+	// The first attribution therefore survives duplicate deliveries and restarts.
+	dest := filepath.Join(dir, receiptName(r.Request.ID))
 	if err = os.Link(tmp, dest); err != nil && !os.IsExist(err) {
 		return err
 	}
 	return nil
 }
 func (t *Tracker) recordReceipt(ctx context.Context, r Request, hash string, status int, at time.Time) {
-	if err := t.Store.recordAt(ctx, r, hash, status, at); err != nil {
-		if spoolErr := t.saveReceipt(receipt{Request: r, CredentialHash: hash, Status: status, At: at}); spoolErr != nil {
+	// Serialize publication for the same request ID so a duplicate cannot
+	// overtake the first insertion while its disk receipt is being saved.
+	idHash := sha256.Sum256([]byte(r.ID))
+	lock := &t.receiptLocks[int(idHash[0])%len(t.receiptLocks)]
+	lock.Lock()
+	defer lock.Unlock()
+
+	snapshot := receipt{Request: r, CredentialHash: hash, Status: status, At: at}
+	// A later duplicate can reach us before the recovery worker. If the first
+	// receipt was already durable on disk, insert that snapshot into MySQL.
+	if dir, err := t.receiptDirectory(false); err == nil {
+		if saved, ok := readReceipt(filepath.Join(dir, receiptName(r.ID))); ok {
+			snapshot = saved
+		}
+	}
+	if err := t.Store.recordAt(ctx, snapshot.Request, snapshot.CredentialHash, snapshot.Status, snapshot.At); err != nil {
+		if spoolErr := t.saveReceipt(snapshot); spoolErr != nil {
 			log.Print("YZCM usage: request persistence and recovery receipt failed")
 		} else {
 			log.Print("YZCM usage: request deferred to durable recovery receipt")
@@ -123,17 +160,8 @@ func (t *Tracker) flushReceipts(parent context.Context) {
 			continue
 		}
 		path := filepath.Join(dir, name)
-		file, err := os.Open(path)
-		if err != nil {
-			continue
-		}
-		raw, readErr := io.ReadAll(io.LimitReader(file, 16385))
-		file.Close()
-		if readErr != nil || len(raw) > 16384 {
-			continue
-		}
-		var r receipt
-		if json.Unmarshal(raw, &r) != nil || !r.valid() || name != "receipt-"+Fingerprint(r.Request.ID)+".json" {
+		r, ok := readReceipt(path)
+		if !ok {
 			continue
 		}
 		if err = t.Store.recordAt(ctx, r.Request, r.CredentialHash, r.Status, r.At); err != nil {

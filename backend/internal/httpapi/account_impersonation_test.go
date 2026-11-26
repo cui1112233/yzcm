@@ -11,10 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/batchfactoryv11/external"
 	"qiantie/backend/internal/novelfetchworkshop"
+	"qiantie/backend/internal/yzcmusage"
 )
 
 type impersonationTestStore struct {
@@ -186,6 +188,56 @@ func TestImpersonationPermissions(t *testing.T) {
 				t.Fatal("a denied switch created a session")
 			}
 		})
+	}
+}
+
+func TestEnergyAttributionFromAuthenticatedAccountSwitch(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tracker := &yzcmusage.Tracker{Store: yzcmusage.Store{DB: db}, ReceiptDir: t.TempDir()}
+	const path = "/api/batch-factory/v11/energy-attribution-test"
+	requestID := "switch-receipt"
+	transport := tracker.Wrap(roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: http.Header{"X-Oneapi-Request-Id": []string{requestID}}}, nil
+	}))
+	router, store, _ := newImpersonationTestRouter(t, func(options *RouterOptions) {
+		options.RegisterV11 = func(mux *http.ServeMux) {
+			mux.HandleFunc("POST "+path, func(w http.ResponseWriter, r *http.Request) {
+				ctx := yzcmusage.WithIdentity(r.Context(), "credential-owner", "")
+				out, err := http.NewRequestWithContext(ctx, http.MethodPost, yzcmusage.Origin+"/v1/chat/completions", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out.Header.Set("Authorization", "Bearer fixture-key")
+				if _, err := transport.RoundTrip(out); err != nil {
+					t.Fatal(err)
+				}
+				w.WriteHeader(http.StatusNoContent)
+			})
+		}
+	})
+	member := store.identities["member"]
+	member.TeamID = "team-a"
+	store.identities[member.Username] = member
+	cookie := startImpersonationForTest(t, router, "founder", "member")
+	mock.ExpectExec("INSERT INTO yzcm_usage_requests").
+		WithArgs(requestID, "member", "team-a", "founder", "shuihuo-production", yzcmusage.Fingerprint("fixture-key"), sqlmock.AnyArg(), 200).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	if w := impersonationRequest(router, http.MethodPost, path, "founder", "", cookie); w.Code != http.StatusNoContent {
+		t.Fatalf("switched route returned %d: %s", w.Code, w.Body)
+	}
+	requestID = "regular-receipt"
+	mock.ExpectExec("INSERT INTO yzcm_usage_requests").
+		WithArgs(requestID, "member", "team-a", "member", "shuihuo-production", yzcmusage.Fingerprint("fixture-key"), sqlmock.AnyArg(), 200).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	if w := impersonationRequest(router, http.MethodPost, path, "member", "", nil); w.Code != http.StatusNoContent {
+		t.Fatalf("regular route returned %d: %s", w.Code, w.Body)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 

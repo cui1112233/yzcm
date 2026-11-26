@@ -42,7 +42,7 @@ func TestAccountCenterImportRunsAfterLegacyAccountCommit(t *testing.T) {
 	if err != nil || store == nil {
 		t.Fatalf("startup store = %v, error = %v", store, err)
 	}
-	mock.ExpectQuery(`SELECT a.username, COALESCE`).WithArgs("owner").WillReturnRows(sqlmock.NewRows([]string{"username", "display_name", "role", "active", "avatar_url", "archived_at"}).AddRow("owner", "Owner", "founder", true, "", nil))
+	mock.ExpectQuery(`SELECT a.username, COALESCE`).WithArgs("owner").WillReturnRows(sqlmock.NewRows([]string{"username", "display_name", "role", "active", "avatar_url", "archived_at", "team_id"}).AddRow("owner", "Owner", "founder", true, "", nil, ""))
 	identity, err := store.ResolveIdentity(ctx, "owner")
 	if err != nil || identity.Role != "founder" {
 		t.Fatalf("startup store resolved identity = %+v, error = %v", identity, err)

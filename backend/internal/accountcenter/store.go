@@ -41,6 +41,7 @@ type Identity struct {
 	Active                      bool
 	AvatarURL                   string
 	ArchivedAt                  *time.Time
+	TeamID                      string
 }
 
 type RequestIdentity struct {
@@ -127,9 +128,11 @@ func NewMySQLStore(db *sql.DB) *MySQLStore { return &MySQLStore{db: db} }
 func (s *MySQLStore) ResolveIdentity(ctx context.Context, username string) (Identity, error) {
 	var identity Identity
 	err := s.db.QueryRowContext(ctx, `SELECT a.username, COALESCE(p.display_name, a.username), COALESCE(p.role, 'member'),
-       a.active AND p.archived_at IS NULL, COALESCE(p.avatar_url, ''), p.archived_at
+       a.active AND p.archived_at IS NULL, COALESCE(p.avatar_url, ''), p.archived_at, COALESCE(t.id, '')
 FROM accounts a LEFT JOIN account_center_profiles p ON p.username = a.username
-WHERE a.username = ?`, username).Scan(&identity.Username, &identity.DisplayName, &identity.Role, &identity.Active, &identity.AvatarURL, &identity.ArchivedAt)
+LEFT JOIN account_center_memberships m ON m.active_username = a.username
+LEFT JOIN account_center_teams t ON t.id = m.team_id AND t.archived_at IS NULL
+WHERE a.username = ?`, username).Scan(&identity.Username, &identity.DisplayName, &identity.Role, &identity.Active, &identity.AvatarURL, &identity.ArchivedAt, &identity.TeamID)
 	return identity, recordError(err)
 }
 

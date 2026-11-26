@@ -51,14 +51,22 @@ func (s Store) Record(ctx context.Context, r Request, keyHash string, status int
 	return s.recordAt(ctx, r, keyHash, status, time.Now().UTC())
 }
 func (s Store) recordAt(ctx context.Context, r Request, keyHash string, status int, at time.Time) error {
-	if r.ID == "" || r.Owner == "" || len(r.ID) > 64 || len(r.Owner) > 32 {
+	if !r.validIdentity() {
 		return errors.New("invalid usage identity")
 	}
-	_, err := s.DB.ExecContext(ctx, `INSERT IGNORE INTO yzcm_usage_requests(request_id,owner,feature,credential_hash,created_at,http_status) VALUES(?,?,?,?,?,?)`, r.ID, r.Owner, r.Feature, keyHash, at.UTC(), status)
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO yzcm_usage_requests
+(request_id,owner,team_id,actor_username,feature,credential_hash,created_at,http_status)
+VALUES(?,?,NULLIF(?,''),NULLIF(?,''),?,?,?,?)
+ON DUPLICATE KEY UPDATE request_id = yzcm_usage_requests.request_id`, r.ID, r.Owner, r.TeamID, r.ActorUsername, r.Feature, keyHash, at.UTC(), status)
 	return err
 }
+
+func (r Request) validIdentity() bool {
+	return r.ID != "" && len(r.ID) <= 64 && r.Owner != "" && len(r.Owner) <= 32 && len(r.TeamID) <= 64 && len(r.ActorUsername) <= 32
+}
+
 func (s Store) Pending(ctx context.Context) ([]Pending, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT request_id,owner,feature,credential_hash FROM yzcm_usage_requests WHERE reconciled_at IS NULL AND created_at >= ? AND (retry_after IS NULL OR retry_after<=?) ORDER BY COALESCE(retry_after,created_at) LIMIT 100`, time.Now().UTC().Add(-31*24*time.Hour), time.Now().UTC())
+	rows, err := s.DB.QueryContext(ctx, `SELECT request_id,owner,COALESCE(team_id,''),COALESCE(actor_username,''),feature,credential_hash FROM yzcm_usage_requests WHERE reconciled_at IS NULL AND created_at >= ? AND (retry_after IS NULL OR retry_after<=?) ORDER BY COALESCE(retry_after,created_at) LIMIT 100`, time.Now().UTC().Add(-31*24*time.Hour), time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +74,7 @@ func (s Store) Pending(ctx context.Context) ([]Pending, error) {
 	result := []Pending{}
 	for rows.Next() {
 		var r Pending
-		if err := rows.Scan(&r.ID, &r.Owner, &r.Feature, &r.CredentialHash); err != nil {
+		if err := rows.Scan(&r.ID, &r.Owner, &r.TeamID, &r.ActorUsername, &r.Feature, &r.CredentialHash); err != nil {
 			return nil, err
 		}
 		result = append(result, r)
@@ -89,7 +97,7 @@ func (s Store) Pending(ctx context.Context) ([]Pending, error) {
 	return result, nil
 }
 func (s Store) Settle(ctx context.Context, e Entry) error {
-	_, err := s.DB.ExecContext(ctx, `UPDATE yzcm_usage_requests SET model=?,quota=?,input_tokens=?,output_tokens=?,actual_cost=?,cost_currency=?,reconciled_at=? WHERE request_id=? AND owner=?`, e.Model, e.Quota, e.InputTokens, e.OutputTokens, e.Cost, e.Currency, time.Now().UTC(), e.ID, e.Owner)
+	_, err := s.DB.ExecContext(ctx, `UPDATE yzcm_usage_requests SET model=?,quota=?,input_tokens=?,output_tokens=?,actual_cost=?,cost_currency=?,reconciled_at=? WHERE request_id=? AND owner=? AND reconciled_at IS NULL`, e.Model, e.Quota, e.InputTokens, e.OutputTokens, e.Cost, e.Currency, time.Now().UTC(), e.ID, e.Owner)
 	return err
 }
 

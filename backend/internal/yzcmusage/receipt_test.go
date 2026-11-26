@@ -3,14 +3,16 @@ package yzcmusage
 import (
 	"context"
 	"errors"
-	"github.com/DATA-DOG/go-sqlmock"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 func TestFailedReceiptSurvivesRestartWithoutKeyOrContent(t *testing.T) {
@@ -21,10 +23,10 @@ func TestFailedReceiptSurvivesRestartWithoutKeyOrContent(t *testing.T) {
 	defer db.Close()
 	dir := filepath.Join(t.TempDir(), "receipts")
 	at := time.Date(2026, 11, 24, 2, 0, 0, 0, time.UTC)
-	r := Request{ID: "request1", Owner: "alice", Feature: "image"}
+	r := Request{ID: "request1", Owner: "alice", Feature: "image", TeamID: "team-a", ActorUsername: "founder"}
 	hash := Fingerprint("secret-key")
 	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: dir}
-	m.ExpectExec("INSERT IGNORE INTO yzcm_usage_requests").WithArgs(r.ID, r.Owner, r.Feature, hash, at, 200).WillReturnError(errors.New("db temporarily unavailable"))
+	m.ExpectExec("INSERT INTO yzcm_usage_requests").WithArgs(r.ID, r.Owner, r.TeamID, r.ActorUsername, r.Feature, hash, at, 200).WillReturnError(errors.New("db temporarily unavailable"))
 	tracker.recordReceipt(context.Background(), r, hash, 200, at)
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) != 1 {
@@ -38,7 +40,7 @@ func TestFailedReceiptSurvivesRestartWithoutKeyOrContent(t *testing.T) {
 		t.Fatal("sensitive content persisted")
 	}
 	restart := &Tracker{Store: Store{DB: db}, ReceiptDir: dir}
-	m.ExpectExec("INSERT IGNORE INTO yzcm_usage_requests").WithArgs(r.ID, r.Owner, r.Feature, hash, at, 200).WillReturnResult(sqlmock.NewResult(0, 1))
+	m.ExpectExec("INSERT INTO yzcm_usage_requests").WithArgs(r.ID, r.Owner, r.TeamID, r.ActorUsername, r.Feature, hash, at, 200).WillReturnResult(sqlmock.NewResult(0, 1))
 	restart.flushReceipts(context.Background())
 	entries, _ = os.ReadDir(dir)
 	if len(entries) != 0 {
@@ -55,19 +57,19 @@ func TestReceiptDuplicateCannotMoveOwnerAndFailedFlushRetainsFile(t *testing.T) 
 	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: dir}
 	at := time.Now().UTC()
 	hash := Fingerprint("secret")
-	if err := tracker.saveReceipt(receipt{Request: Request{"same", "alice", "image"}, CredentialHash: hash, Status: 200, At: at}); err != nil {
+	if err := tracker.saveReceipt(receipt{Request: Request{ID: "same", Owner: "alice", Feature: "image"}, CredentialHash: hash, Status: 200, At: at}); err != nil {
 		t.Fatal(err)
 	}
-	if err := tracker.saveReceipt(receipt{Request: Request{"same", "bob", "image"}, CredentialHash: hash, Status: 200, At: at}); err != nil {
+	if err := tracker.saveReceipt(receipt{Request: Request{ID: "same", Owner: "bob", Feature: "image"}, CredentialHash: hash, Status: 200, At: at}); err != nil {
 		t.Fatal(err)
 	}
-	m.ExpectExec("INSERT IGNORE INTO yzcm_usage_requests").WithArgs("same", "alice", "image", hash, at, 200).WillReturnError(errors.New("still down"))
+	m.ExpectExec("INSERT INTO yzcm_usage_requests").WithArgs("same", "alice", "", "", "image", hash, at, 200).WillReturnError(errors.New("still down"))
 	tracker.flushReceipts(context.Background())
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 1 {
 		t.Fatal("uncommitted receipt deleted")
 	}
-	m.ExpectExec("INSERT IGNORE INTO yzcm_usage_requests").WithArgs("same", "alice", "image", hash, at, 200).WillReturnResult(sqlmock.NewResult(0, 0))
+	m.ExpectExec("INSERT INTO yzcm_usage_requests").WithArgs("same", "alice", "", "", "image", hash, at, 200).WillReturnResult(sqlmock.NewResult(0, 0))
 	tracker.flushReceipts(context.Background())
 	entries, _ = os.ReadDir(dir)
 	if len(entries) != 0 {
@@ -77,9 +79,63 @@ func TestReceiptDuplicateCannotMoveOwnerAndFailedFlushRetainsFile(t *testing.T) 
 		t.Fatal(err)
 	}
 }
+
+func TestDuplicateActorAndTeamUseOriginalSpooledReceiptAfterDatabaseRecovers(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: t.TempDir()}
+	at := time.Now().UTC()
+	original := Request{ID: "same", Owner: "member", TeamID: "team-a", ActorUsername: "founder", Feature: "script"}
+	hash := Fingerprint("fixture-key")
+	mock.ExpectExec("INSERT INTO yzcm_usage_requests").WithArgs(original.ID, original.Owner, original.TeamID, original.ActorUsername, original.Feature, hash, at, 200).
+		WillReturnError(errors.New("database unavailable"))
+	tracker.recordReceipt(context.Background(), original, hash, 200, at)
+	mock.ExpectExec("INSERT INTO yzcm_usage_requests").WithArgs(original.ID, original.Owner, original.TeamID, original.ActorUsername, original.Feature, hash, at, 200).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	tracker.recordReceipt(context.Background(), Request{ID: "same", Owner: "other", TeamID: "team-b", ActorUsername: "manager", Feature: "image"}, Fingerprint("another-key"), 201, at.Add(time.Minute))
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConcurrentDuplicateActorAndTeamWaitForFirstReceipt(t *testing.T) {
+	started := make(chan struct{})
+	var once sync.Once
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherFunc(func(expected, actual string) error {
+		once.Do(func() { close(started) })
+		return sqlmock.QueryMatcherRegexp.Match(expected, actual)
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: t.TempDir()}
+	at := time.Now().UTC()
+	original := Request{ID: "same", Owner: "member", TeamID: "team-a", ActorUsername: "founder", Feature: "script"}
+	hash := Fingerprint("fixture-key")
+	mock.ExpectExec("INSERT INTO yzcm_usage_requests").WithArgs(original.ID, original.Owner, original.TeamID, original.ActorUsername, original.Feature, hash, at, 200).
+		WillDelayFor(50 * time.Millisecond).WillReturnError(errors.New("database unavailable"))
+	mock.ExpectExec("INSERT INTO yzcm_usage_requests").WithArgs(original.ID, original.Owner, original.TeamID, original.ActorUsername, original.Feature, hash, at, 200).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tracker.recordReceipt(context.Background(), original, hash, 200, at)
+	}()
+	<-started
+	tracker.recordReceipt(context.Background(), Request{ID: "same", Owner: "other", TeamID: "team-b", ActorUsername: "manager", Feature: "image"}, Fingerprint("another-key"), 201, at.Add(time.Minute))
+	<-done
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReceiptRejectsUntrustedNamesAndDirectories(t *testing.T) {
 	tracker := &Tracker{ReceiptDir: filepath.Join(t.TempDir(), "r")}
-	if err := tracker.saveReceipt(receipt{Request: Request{"../escape", "alice", "image"}, CredentialHash: "invalid", At: time.Now()}); err == nil {
+	if err := tracker.saveReceipt(receipt{Request: Request{ID: "../escape", Owner: "alice", Feature: "image"}, CredentialHash: "invalid", At: time.Now()}); err == nil {
 		t.Fatal("invalid receipt accepted")
 	}
 	if _, err := os.Stat(tracker.ReceiptDir); !os.IsNotExist(err) {
@@ -91,7 +147,7 @@ func TestTrackerDatabaseFailureKeepsGenerationResponse(t *testing.T) {
 	defer db.Close()
 	dir := filepath.Join(t.TempDir(), "r")
 	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: dir}
-	m.ExpectExec("INSERT IGNORE INTO yzcm_usage_requests").WillReturnError(errors.New("db down"))
+	m.ExpectExec("INSERT INTO yzcm_usage_requests").WillReturnError(errors.New("db down"))
 	transport := tracker.Wrap(transportFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Header: http.Header{"X-Oneapi-Request-Id": []string{"actual-call"}}, Body: io.NopCloser(strings.NewReader("unchanged private generation"))}, nil
 	}))
@@ -123,10 +179,10 @@ func TestTrackerStartupFlushesOldReceipt(t *testing.T) {
 	tracker := &Tracker{Store: Store{DB: db}, ReceiptDir: filepath.Join(t.TempDir(), "r")}
 	at := time.Now().UTC()
 	hash := Fingerprint("key")
-	if err := tracker.saveReceipt(receipt{Request: Request{"old", "alice", "image"}, CredentialHash: hash, Status: 200, At: at}); err != nil {
+	if err := tracker.saveReceipt(receipt{Request: Request{ID: "old", Owner: "alice", Feature: "image"}, CredentialHash: hash, Status: 200, At: at}); err != nil {
 		t.Fatal(err)
 	}
-	m.ExpectExec("INSERT IGNORE INTO yzcm_usage_requests").WithArgs("old", "alice", "image", hash, at, 200).WillReturnResult(sqlmock.NewResult(0, 1))
+	m.ExpectExec("INSERT INTO yzcm_usage_requests").WithArgs("old", "alice", "", "", "image", hash, at, 200).WillReturnResult(sqlmock.NewResult(0, 1))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	tracker.Run(ctx)

@@ -177,9 +177,20 @@ func (a BridgeAuth) middleware(next http.Handler, requireAccountCenter bool) htt
 				return
 			}
 		}
-		ctx = yzcmusage.WithIdentity(ctx, identity.Username, usageFeature(req.URL.Path))
+		ctx = withBridgeUsageAttribution(ctx, identity.Username, usageFeature(req.URL.Path))
 		next.ServeHTTP(w, req.WithContext(ctx))
 	})
+}
+
+func withBridgeUsageAttribution(ctx context.Context, owner, feature string) context.Context {
+	if account, ok := AccountCenterIdentityFromContext(ctx); ok {
+		teamID := ""
+		if strings.EqualFold(account.Subject.Username, owner) {
+			owner, teamID = account.Subject.Username, account.Subject.TeamID
+		}
+		ctx = yzcmusage.WithAttribution(ctx, owner, teamID, account.Actor.Username)
+	}
+	return yzcmusage.WithIdentity(ctx, owner, feature)
 }
 
 func BridgeIdentityFromContext(ctx context.Context) (BridgeIdentity, bool) {

@@ -13,7 +13,7 @@ type transportFunc func(*http.Request) (*http.Response, error)
 
 func (f transportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 func TestMatchUsesDeductedQuotaAndExactOwner(t *testing.T) {
-	requests := []Request{{"a", "alice", "image"}, {"b", "bob", "image"}}
+	requests := []Request{{ID: "a", Owner: "alice", Feature: "image"}, {ID: "b", Owner: "bob", Feature: "image"}}
 	logs := []BillingLog{{RequestID: "a", Quota: 3356, InputTokens: 12, Type: 2}, {RequestID: "b", Quota: 9000, Type: 2}, {RequestID: "unknown", Quota: 9000, Type: 2}}
 	entries, err := Match("alice", requests, logs, Rates{500000, 7.3})
 	if err != nil || len(entries) != 1 {
@@ -23,14 +23,14 @@ func TestMatchUsesDeductedQuotaAndExactOwner(t *testing.T) {
 		t.Fatal(entries)
 	}
 	// Sharing the key cannot make Bob's charge part of Alice's usage.
-	requests = append(requests, Request{"a", "bob", "image"})
+	requests = append(requests, Request{ID: "a", Owner: "bob", Feature: "image"})
 	entries, err = Match("alice", requests, logs, Rates{500000, 7.3})
 	if err != nil || len(entries) != 0 {
 		t.Fatal(entries, err)
 	}
 }
 func TestZeroChargeIsKnownAndInvalidRatesFail(t *testing.T) {
-	entries, err := Match("alice", []Request{{"a", "alice", "text"}}, []BillingLog{{RequestID: "a", Type: 2}}, Rates{500000, 7.3})
+	entries, err := Match("alice", []Request{{ID: "a", Owner: "alice", Feature: "text"}}, []BillingLog{{RequestID: "a", Type: 2}}, Rates{500000, 7.3})
 	if err != nil || len(entries) != 1 || !entries[0].CostKnown || entries[0].Cost != 0 {
 		t.Fatal(entries, err)
 	}
@@ -47,7 +47,7 @@ func TestLogLookupNeverLeaksCredentialOrUnmatchedRows(t *testing.T) {
 		}
 		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"success":true,"data":[{"request_id":"a","quota":3356,"type":2},{"request_id":"other","quota":9000,"type":2}]}`))}, nil
 	})}}
-	logs, err := c.Logs(context.Background(), "private-key", []Request{{"a", "alice", "image"}})
+	logs, err := c.Logs(context.Background(), "private-key", []Request{{ID: "a", Owner: "alice", Feature: "image"}})
 	if err != nil || len(logs) != 1 || logs[0].RequestID != "a" {
 		t.Fatal(logs, err)
 	}

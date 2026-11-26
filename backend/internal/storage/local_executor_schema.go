@@ -130,5 +130,6 @@ func AppMigrations() []Migration {
 	out = append(out, ImageCapacityMigrations()...)
 	out = append(out, YZCMUsageMigrations()...)
 	out = append(out, AccountCenterMigrations()...)
+	out = append(out, AccountCenterEnergyMigrations()...)
 	return out
 }

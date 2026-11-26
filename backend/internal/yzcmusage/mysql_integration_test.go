@@ -1,13 +1,16 @@
-package yzcmusage
+package yzcmusage_test
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
-	"github.com/go-sql-driver/mysql"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
+	"qiantie/backend/internal/storage"
+	"qiantie/backend/internal/yzcmusage"
 )
 
 // This opt-in test is restricted to the existing isolated local review database.
@@ -32,26 +35,26 @@ func TestMySQLSharedKeyLedgerIsolation(t *testing.T) {
 	defer db.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	for _, ddl := range SchemaStatements() {
-		if _, err = db.ExecContext(ctx, ddl); err != nil {
-			t.Fatal(err)
-		}
+	migrations := append(storage.YZCMUsageMigrations(), storage.AccountCenterMigrations()...)
+	migrations = append(migrations, storage.AccountCenterEnergyMigrations()...)
+	if err = storage.RunMigrations(ctx, db, migrations); err != nil {
+		t.Fatal(err)
 	}
 	prefix := fmt.Sprintf("qa_usage_%d", time.Now().UnixNano())
 	a, b, pending := prefix+"a", prefix+"b", prefix+"p"
 	ownerA, ownerB := fmt.Sprintf("qa_a_%d", time.Now().UnixNano()), fmt.Sprintf("qa_b_%d", time.Now().UnixNano())
 	defer db.ExecContext(context.Background(), "DELETE FROM yzcm_usage_requests WHERE request_id IN (?,?,?)", a, b, pending)
-	store := Store{DB: db}
-	for _, r := range []Request{{a, ownerA, "image"}, {b, ownerB, "script"}, {pending, ownerA, "image"}} {
-		if err = store.Record(ctx, r, Fingerprint("shared-test-key"), 200); err != nil {
+	store := yzcmusage.Store{DB: db}
+	for _, r := range []yzcmusage.Request{{ID: a, Owner: ownerA, Feature: "image"}, {ID: b, Owner: ownerB, Feature: "script"}, {ID: pending, Owner: ownerA, Feature: "image"}} {
+		if err = store.Record(ctx, r, yzcmusage.Fingerprint("shared-test-key"), 200); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// A duplicate delivery cannot move an existing request to a different member.
-	if err = store.Record(ctx, Request{a, ownerB, "image"}, Fingerprint("shared-test-key"), 200); err != nil {
+	if err = store.Record(ctx, yzcmusage.Request{ID: a, Owner: ownerB, Feature: "image"}, yzcmusage.Fingerprint("shared-test-key"), 200); err != nil {
 		t.Fatal(err)
 	}
-	for _, e := range []Entry{{ID: a, Owner: ownerA, Model: "QA-FIXTURE", Quota: 3356, InputTokens: 12, OutputTokens: 8, Cost: .049, Currency: "CNY"}, {ID: b, Owner: ownerB, Model: "QA-FIXTURE", Quota: 1000, InputTokens: 40, OutputTokens: 20, Cost: .5, Currency: "CNY"}} {
+	for _, e := range []yzcmusage.Entry{{ID: a, Owner: ownerA, Model: "QA-FIXTURE", Quota: 3356, InputTokens: 12, OutputTokens: 8, Cost: .049, Currency: "CNY"}, {ID: b, Owner: ownerB, Model: "QA-FIXTURE", Quota: 1000, InputTokens: 40, OutputTokens: 20, Cost: .5, Currency: "CNY"}} {
 		if err = store.Settle(ctx, e); err != nil {
 			t.Fatal(err)
 		}

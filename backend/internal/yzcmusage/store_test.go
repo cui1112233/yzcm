@@ -2,11 +2,12 @@ package yzcmusage
 
 import (
 	"context"
-	"github.com/DATA-DOG/go-sqlmock"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 func TestTrackerPersistsOnlyAuthenticatedAttributionAndPreservesBody(t *testing.T) {
@@ -15,7 +16,7 @@ func TestTrackerPersistsOnlyAuthenticatedAttributionAndPreservesBody(t *testing.
 		t.Fatal(err)
 	}
 	defer db.Close()
-	mock.ExpectExec("INSERT IGNORE INTO yzcm_usage_requests").WithArgs("req-1", "alice", "image", Fingerprint("private-key"), sqlmock.AnyArg(), 200).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO yzcm_usage_requests").WithArgs("req-1", "alice", "", "", "image", Fingerprint("private-key"), sqlmock.AnyArg(), 200).WillReturnResult(sqlmock.NewResult(0, 1))
 	tracker := &Tracker{Store: Store{DB: db}}
 	transport := tracker.Wrap(transportFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Header: http.Header{"X-Oneapi-Request-Id": []string{"req-1"}}, Body: io.NopCloser(strings.NewReader("unchanged result"))}, nil
@@ -60,6 +61,34 @@ func TestPendingReceiptIsNotReportedAsFree(t *testing.T) {
 		t.Fatal(month)
 	}
 	if err = mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTrackerRecordsActorAndTeamSeparatelyFromChargedSubject(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectExec("INSERT INTO yzcm_usage_requests").
+		WithArgs("req-team", "member", "team-a", "founder", "script", Fingerprint("fixture-key"), sqlmock.AnyArg(), 200).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	tracker := &Tracker{Store: Store{DB: db}}
+	transport := tracker.Wrap(transportFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: http.Header{"X-Oneapi-Request-Id": []string{"req-team"}}}, nil
+	}))
+	ctx := WithAttribution(context.Background(), "member", "team-a", "founder")
+	ctx = WithIdentity(ctx, "credential-owner", "script")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, Origin+"/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer fixture-key")
+	if _, err := transport.RoundTrip(req); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -12,7 +12,15 @@ import (
 )
 
 type identityKey struct{}
-type identity struct{ Owner, Feature string }
+type identity struct{ Owner, Feature, TeamID, ActorUsername string }
+
+// WithAttribution snapshots the authoritative subject, team and actor before
+// executing a paid request. Legacy credential selection cannot replace them.
+func WithAttribution(ctx context.Context, owner, teamID, actorUsername string) context.Context {
+	previous, _ := ctx.Value(identityKey{}).(identity)
+	previous.Owner, previous.TeamID, previous.ActorUsername = owner, teamID, actorUsername
+	return context.WithValue(ctx, identityKey{}, previous)
+}
 
 func WithIdentity(ctx context.Context, owner, feature string) context.Context {
 	previous, _ := ctx.Value(identityKey{}).(identity)
@@ -38,6 +46,7 @@ type Tracker struct {
 	once              sync.Once
 	credentialMu      sync.Mutex
 	credentials       map[string]cachedCredential
+	receiptLocks      [64]sync.Mutex
 }
 
 type cachedCredential struct {
@@ -182,6 +191,7 @@ func (t *trackedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if r.URL.Hostname() != "newapi.yzcm.site" || !paid || i.Owner == "" {
 		return t.base.RoundTrip(r)
 	}
+	at := time.Now().UTC()
 	response, err := t.base.RoundTrip(r)
 	if err != nil {
 		return response, err
@@ -203,7 +213,7 @@ func (t *trackedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	t.t.remember(key)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	t.t.recordReceipt(ctx, Request{ID: id, Owner: i.Owner, Feature: feature}, Fingerprint(key), response.StatusCode, time.Now().UTC())
+	t.t.recordReceipt(ctx, Request{ID: id, Owner: i.Owner, TeamID: i.TeamID, ActorUsername: i.ActorUsername, Feature: feature}, Fingerprint(key), response.StatusCode, at)
 	cancel()
 	// A bounded worker, rather than a goroutine per response, performs lookups.
 	return response, nil

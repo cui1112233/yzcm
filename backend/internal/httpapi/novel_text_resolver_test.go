@@ -104,7 +104,7 @@ func TestNovelResolverBackgroundCallsKeepOriginalMemberBilling(t *testing.T) {
 		t.Fatal("catalog owner changed", got)
 	}
 	for attempt := 1; attempt <= 2; attempt++ {
-		mock.ExpectExec("INSERT IGNORE INTO yzcm_usage_requests").WithArgs(fmt.Sprintf("job-attempt-%d", attempt), "member", "novel-creation", yzcmusage.Fingerprint("fixture-key"), sqlmock.AnyArg(), 200).WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec("INSERT INTO yzcm_usage_requests").WithArgs(fmt.Sprintf("job-attempt-%d", attempt), "member", "", "", "novel-creation", yzcmusage.Fingerprint("fixture-key"), sqlmock.AnyArg(), 200).WillReturnResult(sqlmock.NewResult(0, 1))
 		if result, err := provider.Complete(context.Background(), batchfactoryv11.TextCompletionRequest{}); err != nil || result != "ok" {
 			t.Fatalf("background completion %q %v", result, err)
 		}

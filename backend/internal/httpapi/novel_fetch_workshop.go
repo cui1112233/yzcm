@@ -195,7 +195,9 @@ func (a NovelFetchBridgeAuth) Middleware(next http.Handler) http.Handler {
 				return
 			}
 		}
-		next.ServeHTTP(w, req.WithContext(context.WithValue(req.Context(), bridgeIdentityKey{}, identity)))
+		ctx := context.WithValue(req.Context(), bridgeIdentityKey{}, identity)
+		ctx = withBridgeUsageAttribution(ctx, identity.Username, usageFeature(req.URL.Path))
+		next.ServeHTTP(w, req.WithContext(ctx))
 	})
 }
 

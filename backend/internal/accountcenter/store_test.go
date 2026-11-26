@@ -140,6 +140,9 @@ func TestAccountCenterMySQLRejectsCrossTeamActiveMembership(t *testing.T) {
 	if err := store.AddMembership(ctx, membership); err != nil {
 		t.Fatal(err)
 	}
+	if worker, err := store.ResolveIdentity(ctx, "worker"); err != nil || worker.TeamID != "first" {
+		t.Fatalf("identity team = %q, err = %v", worker.TeamID, err)
+	}
 	membership.TeamID = "second"
 	if err := store.AddMembership(ctx, membership); !errors.Is(err, accountcenter.ErrConflict) || !isDuplicateKey(err) {
 		t.Fatalf("cross-team membership error = %v, want typed and MySQL duplicate key errors", err)
@@ -153,6 +156,15 @@ func TestAccountCenterMySQLRejectsCrossTeamActiveMembership(t *testing.T) {
 	memberships, err := store.ListMemberships(ctx, "second")
 	if err != nil || len(memberships) != 2 || memberships[0].Username != "lead" || memberships[1].Username != "worker" {
 		t.Fatalf("active memberships = %+v, %v", memberships, err)
+	}
+	if worker, err := store.ResolveIdentity(ctx, "worker"); err != nil || worker.TeamID != "second" {
+		t.Fatalf("identity team after transfer = %q, err = %v", worker.TeamID, err)
+	}
+	if _, err := db.Exec(`UPDATE account_center_teams SET archived_at=NOW(6) WHERE id='second'`); err != nil {
+		t.Fatal(err)
+	}
+	if worker, err := store.ResolveIdentity(ctx, "worker"); err != nil || worker.TeamID != "" {
+		t.Fatalf("identity team after archive = %q, err = %v", worker.TeamID, err)
 	}
 }
 
