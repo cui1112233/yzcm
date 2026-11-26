@@ -4,16 +4,97 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"testing"
 	"time"
 
+	"qiantie/backend/internal/mergeworker"
 	"qiantie/backend/internal/novelfetchworkshop"
 )
 
 const integrationRetryBook = "1234567890"
 const integrationOtherBook = "2234567890"
+const integrationThirdBook = "3234567890"
+
+func TestNovelFetchIntegrationRedisFirstRepeatAndMixedBatches(t *testing.T) {
+	url := os.Getenv("QIANTIE_TEST_INTEGRATION_REDIS_URL")
+	if url == "" {
+		t.Skip("set QIANTIE_TEST_INTEGRATION_REDIS_URL to run against a test Redis instance")
+	}
+	for _, route := range []struct {
+		name        string
+		bookIDFetch bool
+	}{{"workbench", false}, {"book-id", true}} {
+		t.Run(route.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+			defer cancel()
+			prefix := fmt.Sprintf("test:novel-fetch:integration:%s:%d", route.name, time.Now().UnixNano())
+			transport, err := mergeworker.NewRedisStore(url, prefix)
+			if err != nil {
+				t.Fatal("test Redis URL is invalid")
+			}
+			queue := novelfetchworkshop.NewRedisQueueWithDo(prefix, novelfetchworkshop.RedisDoFunc(transport.Do))
+			store := novelfetchworkshop.NewMemoryStore()
+			post := integrationRetryRoute(t, store, queue, route.bookIDFetch)
+			allBooks := []string{integrationRetryBook, integrationOtherBook, integrationThirdBook}
+			if got := post(integrationRetryBook); !got.OK || got.Created != 1 || got.Accepted != 1 || got.Skipped != 0 || got.Failed != 0 {
+				t.Errorf("first submission = %+v", got)
+			}
+			if got := post(integrationRetryBook); !got.OK || got.Created != 0 || got.Accepted != 0 || got.Skipped != 1 || got.Failed != 0 {
+				t.Errorf("repeat submission = %+v", got)
+			}
+			bookScope := novelfetchworkshop.ProcessJob{Owner: "reader", PlatformID: "2", BookIDs: allBooks}
+			conflicts, err := queue.ConflictingBookIDs(ctx, bookScope)
+			if err != nil || len(conflicts) != 1 || conflicts[integrationRetryBook] == "" {
+				t.Errorf("mixed queue lookup = %+v, %v", conflicts, err)
+			}
+			if t.Failed() {
+				return
+			}
+			if got := post(integrationOtherBook, integrationRetryBook, integrationThirdBook); !got.OK || got.Created != 2 || got.Accepted != 2 || got.Skipped != 1 || got.Failed != 0 {
+				t.Errorf("mixed batch = %+v", got)
+			}
+			conflicts, err = queue.ConflictingBookIDs(ctx, bookScope)
+			if err != nil || len(conflicts) != 3 {
+				t.Fatalf("final queue lookup = %+v, %v", conflicts, err)
+			}
+			if pending, err := transport.Do(ctx, "LLEN", prefix+":pending"); err != nil || pending != int64(3) {
+				t.Fatalf("pending queue length = %#v, %v", pending, err)
+			}
+			for _, bookID := range allBooks {
+				doc, err := store.GetDocument(ctx, "reader", bookID)
+				if err != nil || novelfetchworkshop.DeriveTaskStatus(doc) != novelfetchworkshop.TaskStatusQueued ||
+					conflicts[bookID] == "" || doc.Meta["currentProcessJobId"] != conflicts[bookID] {
+					t.Errorf("queue and document disagree for %s: %+v %v", bookID, doc, err)
+				}
+			}
+			claimed := map[string]bool{}
+			for range allBooks {
+				job, err := queue.Claim(ctx, time.Second)
+				if err != nil {
+					t.Fatalf("read actual queued job: %v", err)
+				}
+				switch {
+				case job.Owner != "reader" || len(job.BookIDs) != 1:
+					t.Errorf("unexpected job owner or books: %s %v", job.Owner, job.BookIDs)
+				case claimed[job.BookIDs[0]] || job.ID != conflicts[job.BookIDs[0]]:
+					t.Errorf("unexpected active job ID %s for book %s", job.ID, job.BookIDs[0])
+				default:
+					claimed[job.BookIDs[0]] = true
+				}
+				if err := queue.Ack(ctx, job); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(claimed) != len(allBooks) {
+				t.Errorf("expected one active job per book, got %v", claimed)
+			}
+		})
+	}
+}
 
 type integrationRetryQueue struct {
 	*novelfetchworkshop.MemoryQueue

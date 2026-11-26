@@ -333,7 +333,9 @@ func readRESP(reader *bufio.Reader) (any, error) {
 		items := make([]any, 0, count)
 		for i := 0; i < count; i++ {
 			item, err := readRESP(reader)
-			if err != nil {
+			// A null element belongs to the array. Only a null reply at
+			// the top level is reported to the caller as redis.Nil.
+			if err != nil && !IsRedisNil(err) {
 				return nil, err
 			}
 			items = append(items, item)
