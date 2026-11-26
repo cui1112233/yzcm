@@ -1,5 +1,9 @@
-import { Avatar } from 'antd';
+import { Alert, Avatar, Button, Input, Modal, message } from 'antd';
 import { ChartNoAxesCombined, ChevronLeft, Crown, ExternalLink, KeyRound, LogOut, ShieldCheck, UserRound, UsersRound } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { getAccountImpersonation, startAccountImpersonation, stopAccountImpersonation } from '../api/accountImpersonation.js';
+import { setEffectiveImpersonationAccount } from '../api/auth';
+import { getToken } from '../api/client';
 import { Link } from '../components/Link';
 import '../styles/profile-grey-glass.css';
 
@@ -9,7 +13,144 @@ function roleLabel(role) {
   return 'MEMBER';
 }
 
-export function AccountCenterLayout({ account, username, avatar, pathname, onReturn, onLogout, children }) {
+const switchChannel = 'qiantie:account-impersonation';
+
+function openSwitchChannel() {
+  try {
+    return typeof BroadcastChannel === 'function' ? new BroadcastChannel(switchChannel) : null;
+  } catch {
+    return null;
+  }
+}
+
+function reloadForAccountSwitch() {
+  const channel = openSwitchChannel();
+  channel?.postMessage('changed');
+  channel?.close();
+  window.location.reload();
+}
+
+export function useAccountImpersonation(enabled) {
+  const [status, setStatus] = useState(null);
+  useEffect(() => {
+    if (!enabled) {
+      setStatus(null);
+      return undefined;
+    }
+    const token = getToken();
+    if (!token) return undefined;
+    const channel = openSwitchChannel();
+    let currentRequest;
+    let currentId;
+    let timer;
+
+    function reload() {
+      window.location.reload();
+    }
+
+    function onSessionChange(event) {
+      if (currentId && event.key === 'auth_token' && event.oldValue === token) reload();
+    }
+
+    async function refresh() {
+      clearTimeout(timer);
+      currentRequest?.abort();
+      const request = new AbortController();
+      currentRequest = request;
+      try {
+        const next = await getAccountImpersonation(request.signal);
+        if (request.signal.aborted || getToken() !== token) return;
+        const nextId = next.impersonationId || '';
+        setEffectiveImpersonationAccount(next.active ? next.subject?.username : '', token);
+        if (currentId !== undefined && currentId !== nextId) {
+          reload();
+          return;
+        }
+        currentId = nextId;
+        setStatus(next);
+        if (next.active) timer = setTimeout(refresh, Math.min(30, next.expiresInSeconds || 1) * 1000);
+      } catch {
+        if (request.signal.aborted || getToken() !== token) return;
+        setStatus(previous => previous || {});
+        if (currentId) timer = setTimeout(refresh, 5000);
+      }
+    }
+
+    channel?.addEventListener('message', reload);
+    window.addEventListener('focus', refresh);
+    window.addEventListener('storage', onSessionChange);
+    void refresh();
+    return () => {
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener('storage', onSessionChange);
+      channel?.close();
+      clearTimeout(timer);
+      currentRequest?.abort();
+    };
+  }, [enabled]);
+  return enabled ? status : null;
+}
+
+export function AccountImpersonationBanner({ status }) {
+  const [busy, setBusy] = useState(false);
+  if (!status?.active || !status.subject?.username) return null;
+
+  async function exit() {
+    const token = getToken();
+    setBusy(true);
+    try {
+      await stopAccountImpersonation();
+      setEffectiveImpersonationAccount('', token);
+      reloadForAccountSwitch();
+    } catch (error) {
+      message.error(error.message || '退出账号切换失败');
+      setBusy(false);
+    }
+  }
+
+  return <div role="region" aria-label="账号切换状态" style={{ position: 'fixed', top: 8, left: '50%', transform: 'translateX(-50%)', zIndex: 1100, maxWidth: 'calc(100vw - 16px)' }}>
+    <Alert type="warning" showIcon message={`正在以 ${status.subject.username} 操作`} action={<Button size="small" loading={busy} onClick={exit}>退出切换</Button>} />
+  </div>;
+}
+
+function AccountSwitchEntry({ status }) {
+  const [open, setOpen] = useState(false);
+  const [target, setTarget] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  if (!status?.canSwitch || status.active) return null;
+
+  function openDialog() {
+    setTarget('');
+    setError('');
+    setOpen(true);
+  }
+
+  async function submit() {
+    if (busy || !target.trim()) return;
+    const token = getToken();
+    setBusy(true);
+    setError('');
+    try {
+      const next = await startAccountImpersonation(target.trim());
+      setEffectiveImpersonationAccount(next.subject?.username, token);
+      reloadForAccountSwitch();
+    } catch (failure) {
+      setError(failure.message || '账号切换失败');
+      setBusy(false);
+    }
+  }
+
+  return <>
+    <Button size="small" onClick={openDialog}>切换账号</Button>
+    <Modal title="切换账号" open={open} okText="切换" cancelText="取消" confirmLoading={busy} okButtonProps={{ disabled: !target.trim() }} onOk={submit} onCancel={() => { if (!busy) setOpen(false); }}>
+      <Input autoComplete="off" aria-label="目标账号" placeholder="输入目标账号用户名" maxLength={32} value={target} onChange={event => setTarget(event.target.value)} onPressEnter={submit} />
+      {error ? <Alert type="error" message={error} style={{ marginTop: 12 }} /> : null}
+    </Modal>
+  </>;
+}
+
+export function AccountCenterLayout({ account, username, avatar, pathname, onReturn, onLogout, impersonation, children }) {
   const canManage = ['dev', 'manager'].includes(account?.role);
   const canAccessAdmin = account?.role === 'dev';
 
@@ -28,8 +169,9 @@ export function AccountCenterLayout({ account, username, avatar, pathname, onRet
     return <div className="account-center-workspace profile-glass-workspace">
       <header className="pg-shell-header">
         <button type="button" className="pg-brand" onClick={onReturn} aria-label="一战晟铭，返回工作台"><b aria-hidden="true">Y</b><span>一战晟铭</span></button>
-        <div className="pg-shell-account"><Avatar size={32} src={account?.avatarUrl} style={{ backgroundColor: avatar?.background }}>{avatar?.emoji}</Avatar><span>{account?.displayName || username}</span><em>{roleLabel(account?.role)}</em></div>
+        <div className="pg-shell-account"><Avatar size={32} src={account?.avatarUrl} style={{ backgroundColor: avatar?.background }}>{avatar?.emoji}</Avatar><span>{account?.displayName || username}</span><em>{roleLabel(account?.role)}</em><AccountSwitchEntry status={impersonation} /></div>
       </header>
+      <AccountImpersonationBanner status={impersonation} />
       <nav className="pg-navigation" aria-label="个人中心导航">
         {entries.map(entry => entry.external
           ? <a key={entry.href} href={entry.href} target="_blank" rel="noreferrer" title="一战晟铭专属 API 控制台">{entry.label}<ExternalLink size={12} aria-hidden="true" /></a>
@@ -41,10 +183,12 @@ export function AccountCenterLayout({ account, username, avatar, pathname, onRet
   }
 
   return <div className="account-center-workspace">
+    <AccountImpersonationBanner status={impersonation} />
     <aside className="account-center-sidebar" aria-label="个人中心导航">
       <div className="account-center-sidebar-head">
         <button type="button" className="account-center-return" aria-label="返回工作台" onClick={onReturn}><ChevronLeft size={19} /><span>返回工作台</span></button>
         <strong>个人中心</strong>
+        <AccountSwitchEntry status={impersonation} />
       </div>
       <div className="account-center-sidebar-profile">
         <Avatar size={54} src={account?.avatarUrl} style={{ backgroundColor: avatar?.background }}>{avatar?.emoji}</Avatar>

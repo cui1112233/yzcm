@@ -7,6 +7,7 @@ import { getCurrentAccount, logout } from '../api/auth';
 import { updateMemberProfile } from '../api/member';
 import { createAntTheme, resolveSchemeId, resolveThemeId } from '../styles/theme';
 import { loadCachedTheme, persistCachedTheme, selectThemePreference } from '../styles/theme-preference.js';
+import { AccountImpersonationBanner, useAccountImpersonation } from './AccountCenterLayout';
 
 const navItems = [
   { href: '/admin', icon: '▦', label: '概览' },
@@ -35,6 +36,7 @@ export function AdminLayout({ children }) {
   const [accessState, setAccessState] = useState('checking');
   const [theme, setTheme] = useState(initialTheme);
   const [systemMode, setSystemMode] = useState(initialSystemMode);
+  const impersonation = useAccountImpersonation(Boolean(account));
   const pathname = window.location.pathname;
   const resolvedTheme = resolveThemeId(theme, systemMode);
   const themeScheme = resolveSchemeId(theme);
@@ -107,6 +109,7 @@ export function AdminLayout({ children }) {
 
   return (
     <ConfigProvider theme={createAntTheme(theme, systemMode)}>
+      <AccountImpersonationBanner status={impersonation} />
       <div className="admin-shell">
       <aside className="admin-sidebar">
         <div className="admin-brand"><BrandLogo className="admin-brand-logo" /><span>管理后台</span></div>

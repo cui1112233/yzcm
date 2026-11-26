@@ -100,6 +100,9 @@ func novelFetchSignature(secret, payload string) string {
 }
 
 func (a NovelFetchBridgeAuth) authenticate(req *http.Request) (BridgeIdentity, error) {
+	if identity, ok := switchedBridgeIdentity(req); ok {
+		return identity, nil
+	}
 	if token := bearerToken(req); token != "" && a.AuthStore != nil {
 		now := time.Now
 		if a.Now != nil {
@@ -185,7 +188,7 @@ func (a NovelFetchBridgeAuth) Middleware(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
 		}
-		if a.IdentityScope != nil {
+		if _, switched := switchedBridgeIdentity(req); a.IdentityScope != nil && !switched {
 			identity, err = a.IdentityScope(req.Context(), identity, req.Header.Get(HeaderNovelFetchAccount))
 			if err != nil {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})

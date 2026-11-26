@@ -54,7 +54,7 @@ func (a BridgeAuth) accountCenterContext(ctx context.Context, username string) (
 // unauthorized target.
 func authorizeAccountCenter(w http.ResponseWriter, r *http.Request, action accountcenter.Action, target accountcenter.PolicyTarget) bool {
 	identity, ok := AccountCenterIdentityFromContext(r.Context())
-	if !ok || !(accountcenter.Policy{}).Can(identity.Actor, action, target) {
+	if !ok || !(accountcenter.Policy{}).Can(identity.Subject, action, target) {
 		writeAccountCenterForbidden(w)
 		return false
 	}
@@ -278,6 +278,24 @@ func RegisterAuthRoutes(root *http.ServeMux, options AuthOptions) {
 	})
 
 	root.HandleFunc("GET /api/login/session", func(w http.ResponseWriter, r *http.Request) {
+		if _, switched := switchedBridgeIdentity(r); switched {
+			identity, _ := AccountCenterIdentityFromContext(r.Context())
+			subject := identity.Subject
+			payload := authAccountPayload(auth.Account{Username: subject.Username, Active: true}, options.Profiles)
+			payload["displayName"] = firstText(subject.DisplayName, subject.Username)
+			payload["avatarUrl"] = subject.AvatarURL
+			switch subject.Role {
+			case accountcenter.RoleDeveloper:
+				payload["role"] = "dev"
+			case accountcenter.RoleManager:
+				payload["role"] = "manager"
+			default:
+				payload["role"] = "member"
+			}
+			payload["impersonationId"] = identity.ImpersonationID
+			writeJSON(w, http.StatusOK, payload)
+			return
+		}
 		if options.Store == nil {
 			writeAuthError(w, http.StatusServiceUnavailable, "登录服务暂不可用")
 			return

@@ -471,6 +471,8 @@ func NewRouter(options RouterOptions) http.Handler {
 	// manifest, so a stale or mismatched release cannot show the wrong payload.
 	registerProductUpdateRoute(root, options.RuntimeManifestPath, releasenotes.Default())
 	auth := BridgeAuth{Secret: options.BridgeSecret, Now: options.Now, Users: options.Users, AuthStore: options.AuthStore, AccountCenterStore: options.AccountCenterStore, SessionResolver: options.SessionResolver}
+	impersonation := accountImpersonation{auth: auth}
+	impersonation.register(root)
 	novelScope := novelFetchAccountScopeResolver(options.AuthStore, options.MemberProfileStore)
 	novelCompatAuth := auth
 	novelCompatAuth.IdentityScope = novelScope
@@ -736,8 +738,19 @@ func NewRouter(options RouterOptions) http.Handler {
 		registerPluginToolRoutes(root, auth, options.TextProvider, newAgentTextCompletionExecutor(pluginTextModels))
 		registerScriptDirectorPipelineCompat(root, auth, options.TextProvider, options.PresetCatalog, options.PersonalPromptStore)
 	}
-	v11Root := auth.Middleware(adminBatchReadThrough(capabilityNotFoundHandler(v11), options.Store, options.MemberProfileStore, options.AuthStore))
-	v12Root := auth.Middleware(adminBatchReadThrough(capabilityNotFoundHandler(v12), options.Store, options.MemberProfileStore, options.AuthStore))
+	batchRoot := func(mux *http.ServeMux) http.Handler {
+		next := capabilityNotFoundHandler(mux)
+		legacyReadThrough := adminBatchReadThrough(next, options.Store, options.MemberProfileStore, options.AuthStore)
+		return auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, switched := switchedBridgeIdentity(r); switched {
+				next.ServeHTTP(w, r)
+				return
+			}
+			legacyReadThrough.ServeHTTP(w, r)
+		}))
+	}
+	v11Root := batchRoot(v11)
+	v12Root := batchRoot(v12)
 	if legacyV11Public() {
 		root.Handle("/api/batch-factory/v11/", v11Root)
 	}
@@ -1002,7 +1015,7 @@ func NewRouter(options RouterOptions) http.Handler {
 	// Compress JSON responses at the outermost layer so every registered route
 	// benefits without touching individual handlers. Non-JSON streams (images,
 	// ServeContent Range/304) are passed through untouched.
-	return withWorkshopSubmitQueue(withJSONCompression(withAICutTimelineScope(root, auth)), options.NovelFetchQueue)
+	return withWorkshopSubmitQueue(withJSONCompression(impersonation.middleware(root, withAICutTimelineScope(root, auth))), options.NovelFetchQueue)
 }
 
 // registerCanonicalNovelFetchWebSubmitAliases keeps the public workshop

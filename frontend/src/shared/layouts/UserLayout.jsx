@@ -18,7 +18,7 @@ import { loadCachedTheme, persistCachedTheme, selectThemePreference } from '../s
 import { applyWindowBackgroundMotion, effectiveWindowBackgroundMotion, normalizeWindowBackgroundId, readWindowBackgroundMotion, windowBackgroundStyle, windowVideoDefinition } from '../styles/window-background.js';
 import { getRouteAccessState, shouldPromptLoginForApiFailure } from './routeAccess.js';
 import { navigateToHomeLogin } from './loginNavigation.js';
-import { AccountCenterLayout } from './AccountCenterLayout';
+import { AccountCenterLayout, AccountImpersonationBanner, useAccountImpersonation } from './AccountCenterLayout';
 import WorkModeMenu from './WorkModeMenu';
 import { captureAccountCenterOrigin, isAccountCenterPath, normalizeAccountCenterReturnPath } from './accountCenterNavigation.js';
 import { shouldAutoCollapseAgentNavigation } from './agentNavigation.js';
@@ -98,6 +98,7 @@ export function UserLayout({ children }) {
   const pathname = window.location.pathname;
   const isAccountCenterRoute = isAccountCenterPath(pathname);
   const isLoggedIn = Boolean(username);
+  const impersonation = useAccountImpersonation(isLoggedIn);
   const isHome = pathname === '/';
   const isAgentRoute = pathname === '/agent' || pathname === '/agent/canvas' || pathname === '/agent/chat';
   const isAgentCanvasRoute = pathname === '/agent/canvas';
@@ -465,7 +466,8 @@ export function UserLayout({ children }) {
   }
 
   const showLoginCard = !isLoggedIn && isHome && loginDialogOpen;
-  const pageContent = routeAccess.canRenderPage ? content : null;
+  const identityReady = !isLoggedIn || impersonation !== null;
+  const pageContent = routeAccess.canRenderPage && identityReady ? content : null;
   const loginOverlay = showLoginCard ? (
     <div className="legacy-login-overlay nebula-login-overlay">
       <div className="login-modal nebula-login-modal" ref={loginCardRef} onPointerMove={updateLoginCardParallax} onPointerLeave={resetLoginCardParallax}>
@@ -501,7 +503,8 @@ export function UserLayout({ children }) {
     return (
       <ConfigProvider theme={createAntTheme(theme, systemMode)}>
         <div className={`home-shell${windowBackgroundId !== 'none' ? ' has-window-background' : ''}${windowBackgroundId === 'custom' ? ' is-custom-window-background' : ''}`} style={shellBackgroundStyle}>
-          {isValidElement(children) ? cloneElement(children, { theme, isLoggedIn, onOpenLogin: openLoginDialog }) : content}
+          <AccountImpersonationBanner status={impersonation} />
+          {identityReady ? (isValidElement(children) ? cloneElement(children, { theme, isLoggedIn, onOpenLogin: openLoginDialog }) : content) : null}
           {loginOverlay}
           <ProductUpdateModal enabled={isLoggedIn} />
         </div>
@@ -514,7 +517,7 @@ export function UserLayout({ children }) {
       <ConfigProvider theme={createAntTheme(theme, systemMode)}>
         <div className={`legacy-shell account-center-shell${windowBackgroundId !== 'none' ? ' has-window-background' : ''}${windowBackgroundId === 'custom' ? ' is-custom-window-background' : ''}${videoBackgroundClass}`} style={shellBackgroundStyle}>
           <WindowVideoBackground backgroundId={windowBackgroundId} />
-          <AccountCenterLayout account={account} username={username} avatar={displayAvatar} pathname={pathname} onReturn={returnToWorkbench} onLogout={handleLogout}>{pageContent}</AccountCenterLayout>
+          <AccountCenterLayout account={account} username={username} avatar={displayAvatar} pathname={pathname} onReturn={returnToWorkbench} onLogout={handleLogout} impersonation={impersonation}>{pageContent}</AccountCenterLayout>
         </div>
         {loginOverlay}
         <ProductUpdateModal enabled={isLoggedIn} />
@@ -525,6 +528,7 @@ export function UserLayout({ children }) {
   return (
     <ConfigProvider theme={createAntTheme(theme, systemMode)}>
       <div className={`legacy-shell${windowBackgroundId !== 'none' ? ' has-window-background' : ''}${windowBackgroundId === 'custom' ? ' is-custom-window-background' : ''}${videoBackgroundClass}`} style={shellBackgroundStyle}>
+      <AccountImpersonationBanner status={impersonation} />
       <WindowVideoBackground backgroundId={windowBackgroundId} />
       <aside className={`legacy-sidebar${effectiveSidebarCollapsed ? ' collapsed' : ''}`}>
         <div className="legacy-brand">
