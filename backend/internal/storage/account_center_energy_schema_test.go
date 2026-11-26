@@ -50,7 +50,7 @@ func TestEnergyReceiptBindingMigrationRegisteredOnce(t *testing.T) {
 	for _, migration := range AppMigrations() {
 		if migration.Version == 8800408 {
 			count++
-			if len(migration.SQL) != 1 || migration.SQL[0] != yzcmusage.ReceiptBindingStatement() {
+			if len(migration.SQL) != 1 || ChecksumFor(migration) != "96ae8e321ca41d3988cc0c4b29ac6211e3156f79555cc0afa28d4f379c9df4be" {
 				t.Fatalf("unexpected receipt-binding migration: %+v", migration)
 			}
 		}
@@ -105,7 +105,7 @@ func TestEnergyReceiptBindingMigrationMySQLRejectsIncompleteDDL(t *testing.T) {
 	if migration.Version == 0 {
 		t.Fatal("receipt-binding migration missing")
 	}
-	wrong := strings.Replace(migration.SQL[0], "filesystem_identity VARCHAR(224)", "filesystem_identity VARCHAR(64)", 1)
+	wrong := strings.Replace(migration.SQL[0], "store_id CHAR(32)", "store_id CHAR(31)", 1)
 	if _, err := db.ExecContext(ctx, wrong); err != nil {
 		t.Fatal(err)
 	}
