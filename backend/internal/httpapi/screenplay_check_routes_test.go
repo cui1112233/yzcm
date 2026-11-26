@@ -110,3 +110,54 @@ func jsonNumber(value int) string {
 	data, _ := json.Marshal(value)
 	return string(data)
 }
+
+func TestScreenplayRoutesStoryboardCheckSourceCoverageReadOnly(t *testing.T) {
+	now := time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+	store := screenplay.NewMemoryStore()
+	store.CreateProject(ctx, screenplay.Project{ID: "coverage", OwnerUsername: "alice", SourceText: "1. 整部作品\n2. 不应使用"})
+	authors := &screenplay.AuthoringService{Store: store, Repository: screenplay.NewMemoryAuthoringRepository()}
+	_, err := authors.Save(ctx, "alice", "coverage", screenplay.AuthoringState{Chapters: []screenplay.Chapter{{ID: "first", Title: "一", ScriptText: "1. 其他集"}, {ID: "second", Title: "二", ScriptText: "7. 本集开头\n8. 本集结尾"}}}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.SaveStoryboard(ctx, screenplay.Storyboard{ProjectID: "coverage", OwnerUsername: "alice", EpisodeNo: 2, Engine: screenplay.EngineXiaoluoV7, Shots: []screenplay.StoryboardShot{{ID: "s", Seq: 1, SourceElements: json.RawMessage(`["7"]`), VideoDesc: "画面"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	resolver := func(context.Context, string, string) (batchfactoryv11.DirectorProvider, error) {
+		calls++
+		t.Error("checking invoked model resolver")
+		return nil, nil
+	}
+	mux := http.NewServeMux()
+	RegisterScreenplayWorkflowRoutes(mux, BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}, store, resolver, func() time.Time { return now }, nil, authors)
+	base := "/api/comic-screenplays/projects/coverage/storyboards/xiaoluo_v7_15s/2/check"
+	checked := signedJSONRequest(t, mux, now, "alice", http.MethodPost, base, map[string]any{})
+	if checked.Code != 200 {
+		t.Fatalf("%d %s", checked.Code, checked.Body.String())
+	}
+	var body map[string]json.RawMessage
+	json.Unmarshal(checked.Body.Bytes(), &body)
+	var report map[string]json.RawMessage
+	json.Unmarshal(body["report"], &report)
+	var coverage struct {
+		Status, ChapterID string
+		Missing           []string
+	}
+	json.Unmarshal(report["source_coverage"], &coverage)
+	if !strings.Contains(string(report["source_coverage"]), `"chapter_id":"second"`) || coverage.Status != "incomplete" || strings.Join(coverage.Missing, ",") != "8" {
+		t.Fatalf("%s", checked.Body.String())
+	}
+	after, _ := store.GetStoryboard(ctx, "alice", "coverage", 2, screenplay.EngineXiaoluoV7)
+	b, _ := json.Marshal(before)
+	a, _ := json.Marshal(after)
+	if string(a) != string(b) || calls != 0 {
+		t.Fatalf("check mutated data or called model")
+	}
+	forbidden := signedJSONRequest(t, mux, now, "bob", http.MethodPost, base, map[string]any{})
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("foreign=%d %s", forbidden.Code, forbidden.Body.String())
+	}
+}

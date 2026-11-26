@@ -26,7 +26,7 @@ test('分镜检查弹窗出报告并逐条补齐缺失分镜', {skip:!browser},a
 import React from 'react';import{createRoot}from'react-dom/client';import Check from './ComicScreenplayStoryboardCheck.jsx';
 const tick=()=>new Promise(resolve=>setTimeout(resolve,140));const assert=(v,m)=>{if(!v)throw Error(m)};
 window.calls=[];
-const report={total:3,expected_total:4,min_seq:1,max_seq:4,missing:[3],extra:[],duplicates:[],invalid:[],passed:false};
+const report={total:3,expected_total:4,min_seq:1,max_seq:4,missing:[3],extra:[],duplicates:[],invalid:[],passed:false,source_coverage:{status:'incomplete',basis:'saved_script_element_ids',scope:'所选集当前保存的剧本元素编号；不代表小说情节完整',chapter_id:'c1',expected_total:4,covered_total:3,missing:['tail-8'],extra:['outside-99'],duplicates:['same-1'],reused:['split-2']}};
 window.fetch=async(input,opts={})=>{const url=String(input);const body=opts.body?JSON.parse(opts.body):{};window.calls.push({url,body});await new Promise(resolve=>setTimeout(resolve,20));
  if(url.endsWith('/check'))return new Response(JSON.stringify({report}),{status:200,headers:{'Content-Type':'application/json'}});
  if(url.endsWith('/check/fill'))return new Response(JSON.stringify({shot:{id:'new-'+body.seq,seq:body.seq,video_desc:'衔接镜头'},revision:9}),{status:200,headers:{'Content-Type':'application/json'}});
@@ -43,6 +43,10 @@ let changed=null;
  const checkCalls=window.calls.filter(call=>call.url.endsWith('/check'));
  assert(checkCalls.length===1&&checkCalls[0].url.includes('/storyboards/xiaoluo_v7_15s/1/check'),'check payload wrong: '+checkCalls[0]?.url);
  const stats=document.querySelector('.comic-sb-check-stats');assert(stats,'stats missing');
+ assert(document.body.textContent.includes('镜头序号')&&document.body.textContent.includes('原文来源覆盖'),'separate headings missing');
+ assert(document.body.textContent.includes('缺失来源: tail-8')&&document.body.textContent.includes('越界来源: outside-99')&&document.body.textContent.includes('同一镜头重复引用: same-1'),'source coverage details missing');
+ assert(!document.body.textContent.includes('原文覆盖通过'),'incomplete source shown as passed');
+ let downloaded;URL.createObjectURL=blob=>{downloaded=blob;return 'blob:check'};URL.revokeObjectURL=()=>{};button('下载报告storyboard_check_report.json').click();await tick();assert((await downloaded.text()).includes('source_coverage'),'download lost source coverage');
  assert(document.body.textContent.includes('【缺失的分镜】')&&document.body.textContent.includes('缺失编号: 3'),'missing section missing');
  assert(document.body.textContent.includes('发现 1 个缺失分镜'),'missing count copy missing');
  assert(!document.body.textContent.includes('【多余'),'extra section should not render: no original-text comparison in V88');
@@ -69,7 +73,7 @@ test('分镜检查弹窗未选模型或只读时禁止补齐', {skip:!browser},a
 import React from 'react';import{createRoot}from'react-dom/client';import Check from './ComicScreenplayStoryboardCheck.jsx';
 const tick=()=>new Promise(resolve=>setTimeout(resolve,140));const assert=(v,m)=>{if(!v)throw Error(m)};
 window.calls=[];
-const report={total:2,expected_total:3,min_seq:1,max_seq:3,missing:[2,3],extra:[],duplicates:[],invalid:[],passed:false};
+const report={total:2,expected_total:3,min_seq:1,max_seq:3,missing:[2,3],extra:[],duplicates:[],invalid:[],passed:false,source_coverage:{status:'incomplete',basis:'saved_script_element_ids',scope:'所选集当前保存的剧本元素编号；不代表小说情节完整',chapter_id:'c1',expected_total:4,covered_total:3,missing:['tail-8'],extra:['outside-99'],duplicates:['same-1'],reused:['split-2']}};
 window.fetch=async(input,opts={})=>{const url=String(input);window.calls.push({url,body:opts.body?JSON.parse(opts.body):{}});return new Response(JSON.stringify({report}),{status:200,headers:{'Content-Type':'application/json'}});};
 const button=(text,scope=document)=>[...scope.querySelectorAll('button')].find(el=>el.textContent.replace(/\\s/g,'')===text);
 (async()=>{
@@ -80,6 +84,32 @@ const button=(text,scope=document)=>[...scope.querySelectorAll('button')].find(e
  for(let i=0;i<120&&!document.querySelector('.comic-sb-check-report');i++)await tick();
  const fill=button('AI补齐缺失分镜');assert(fill,'fill button missing');
  assert(fill.disabled,'no model should block fill');
+ assert(document.body.textContent.includes('原文来源覆盖'),'source heading missing');
+ document.body.dataset.result='passed';
+})().catch(error=>{document.body.dataset.result='failed';document.body.dataset.error=error.message});
+`);
+});
+
+
+test('分镜序号通过仍显示来源未核验，来源通过只承诺本集编号覆盖', {skip:!browser},async()=>{
+ await runCheckCase('storyboard-source-status',`
+import React from 'react';import{createRoot}from'react-dom/client';import Check from './ComicScreenplayStoryboardCheck.jsx';
+const tick=()=>new Promise(resolve=>setTimeout(resolve,140));const assert=(v,m)=>{if(!v)throw Error(m)};
+const button=text=>[...document.querySelectorAll('button')].find(el=>el.textContent.replace(/\\s/g,'')===text);
+let verified=false;
+window.fetch=async()=>new Response(JSON.stringify({report:{total:1,expected_total:1,min_seq:1,max_seq:1,missing:[],duplicates:[],invalid:[],passed:true,...(verified?{source_coverage:{status:'passed',expected_total:2,covered_total:2,missing:[],extra:[],duplicates:[],scope:'所选集当前保存的剧本元素编号；不代表小说情节完整'}}:{})}}),{status:200,headers:{'Content-Type':'application/json'}});
+(async()=>{
+ createRoot(document.getElementById('root')).render(<Check projectId="p" boards={[{id:'b',episode_no:1,shots:[1]}]} episodes={[]} engine="xiaoluo_v7_15s" modelId="text-main" onClose={()=>{}}/>);
+ for(let i=0;i<40&&!button('开始检查');i++)await tick();button('开始检查').click();
+ for(let i=0;i<120&&!document.querySelector('.comic-sb-check-report');i++)await tick();
+ assert(document.body.textContent.includes('镜头序号检查通过'),'structure did not pass');
+ assert(document.body.textContent.includes('来源覆盖未核验'),'legacy result falsely verified source');
+ assert(!document.body.textContent.includes('来源编号覆盖通过'),'unverified source passed');
+ assert(!button('AI补齐缺失分镜'),'source gaps must not offer seq fill');
+ verified=true;button('重新检查').click();
+ for(let i=0;i<120&&!document.body.textContent.includes('来源编号覆盖通过');i++)await tick();
+ assert(document.body.textContent.includes('来源编号覆盖通过'),'verified source missing');
+ assert(document.body.textContent.includes('不代表小说情节完整'),'scope missing');
  document.body.dataset.result='passed';
 })().catch(error=>{document.body.dataset.result='failed';document.body.dataset.error=error.message});
 `);

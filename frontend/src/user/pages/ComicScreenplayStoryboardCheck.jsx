@@ -31,13 +31,13 @@ function formatReport(data) {
     duplicates: report.duplicates || [],
     invalid: report.invalid || [],
     passed: report.passed === true,
+    source_coverage: report.source_coverage || { status: 'unverified', reason: '没有已保存的来源核验结果' },
   };
 }
 
 // 分镜检查（洛水 storyboard_check 技能）：检查分镜序号的缺失 / 重复 / 异常ID，
 // 生成检查报告（可下载为 storyboard_check_report.json），缺失分镜逐条调用 AI 补齐插入。
-// 洛水按「原文序号行」对照出缺失与多余（越界）；本系统分镜由规划链生成、seq 即镜头序号，
-// 检查基准是「序号 1..最大序号 连续完整」，报告里的多余（extra）字段恒为空。
+// 镜头 seq 与来源编号独立核对；自动补齐只使用镜头 seq 的 missing。
 export default function ComicScreenplayStoryboardCheck({ projectId, boards, episodes, engine, modelId, readOnly, defaultEpisodeNo, onClose, onChanged }) {
   const options = useMemo(() => episodeOptions(boards, episodes), [boards, episodes]);
   const [episodeNo, setEpisodeNo] = useState(() => (options.some(item => item.value === defaultEpisodeNo) ? defaultEpisodeNo : options[0]?.value ?? null));
@@ -60,7 +60,7 @@ export default function ComicScreenplayStoryboardCheck({ projectId, boards, epis
       const next = formatReport(data);
       if (!next) throw Error(data?.message || '检查报告读取失败');
       setReport(next);
-      if (next.passed) message.success('检查通过：序号连续，无缺失、重复或异常');
+      if (next.passed) message.success('镜头序号检查通过：序号连续，无缺失、重复或异常');
     } catch (err) {
       setError(err.message || '分镜检查失败');
     } finally {
@@ -127,7 +127,7 @@ export default function ComicScreenplayStoryboardCheck({ projectId, boards, epis
       <Button type="primary" loading={checking} disabled={!projectId || !episodeNo || !engine || busy} onClick={runCheck}>{report ? '重新检查' : '开始检查'}</Button>
     </>}
   >
-    <p className="comic-sb-check-desc">检查本集分镜序号的缺失、重复与异常ID，生成检查报告；缺失分镜可由当前作品文本模型逐条补齐并插入。只改分镜列表，不动已生成的图片和视频。</p>
+    <p className="comic-sb-check-desc">分别核对镜头序号和本集已保存的来源编号。镜头跳号可由当前作品文本模型逐条补齐；来源缺口需对照本集正文处理。</p>
     <div className="comic-sb-check-controls">
       <label>
         <span>剧集</span>
@@ -140,6 +140,7 @@ export default function ComicScreenplayStoryboardCheck({ projectId, boards, epis
     {!modelId ? <Alert type="warning" showIcon message="还没有选择作品文本模型，在页头选好模型后再补齐缺失分镜。" /> : null}
     {error ? <Alert type={report ? 'warning' : 'error'} showIcon message={error} /> : null}
     {report ? <div className="comic-sb-check-report" aria-live="polite">
+      <h4>镜头序号</h4>
       <div className="comic-sb-check-stats">
         <div><b>{report.total}</b><span>个分镜</span></div>
         <div><b>{report.minSeq}-{report.maxSeq}</b><span>序号范围</span></div>
@@ -147,7 +148,7 @@ export default function ComicScreenplayStoryboardCheck({ projectId, boards, epis
         <div><b>{report.duplicates.length}</b><span>重复</span></div>
         <div><b>{report.invalid.length}</b><span>异常ID</span></div>
       </div>
-      {report.passed ? <Tag color="green">检查通过：序号连续，无缺失、重复或异常</Tag> : null}
+      {report.passed ? <Tag color="green">镜头序号检查通过：序号连续，无缺失、重复或异常</Tag> : null}
       {report.missing.length ? <div className="comic-sb-check-section is-missing">
         <div><b>【缺失的分镜】</b><span>序号范围内缺席</span></div>
         <div>缺失编号: {numberList(report.missing)}</div>
@@ -162,12 +163,23 @@ export default function ComicScreenplayStoryboardCheck({ projectId, boards, epis
         <div><b>【异常ID】</b><span>序号异常（小于等于 0）</span></div>
         <div>异常编号: {numberList(report.invalid)}</div>
       </div> : null}
+      <div className="comic-sb-check-source-coverage">
+        <h4>原文来源覆盖</h4>
+        <Tag color={report.source_coverage.status === 'passed' ? 'green' : 'orange'}>
+          {report.source_coverage.status === 'passed' ? '来源编号覆盖通过' : report.source_coverage.status === 'incomplete' ? '来源编号覆盖有缺口' : '来源覆盖未核验'}
+        </Tag>
+        {report.source_coverage.scope ? <p>{report.source_coverage.scope}</p> : null}
+        {report.source_coverage.reason ? <p>{report.source_coverage.reason}</p> : null}
+        {report.source_coverage.expected_total > 0 ? <div>已覆盖 {report.source_coverage.covered_total}/{report.source_coverage.expected_total} 个来源编号</div> : null}
+        {report.source_coverage.missing?.length ? <div>缺失来源: {numberList(report.source_coverage.missing)}</div> : null}
+        {report.source_coverage.extra?.length ? <div>越界来源: {numberList(report.source_coverage.extra)}</div> : null}
+        {report.source_coverage.duplicates?.length ? <div>同一镜头重复引用: {numberList(report.source_coverage.duplicates)}</div> : null}
+      </div>
     </div> : null}
     <div className="comic-sb-check-progress" aria-live="polite">
       {running ? <div className="comic-sb-check-loading"><Spin size="small" /> <span>正在补全缺失分镜：第 {progress.current + 1}/{progress.total} 条（序号 {report?.missing?.[progress.current]}）</span></div> : null}
       {summary && !running ? <Tag color={summary.failed ? 'orange' : 'green'}>分镜补全完成：已补全 {summary.filled}/{summary.total}{summary.failed ? `，失败 ${summary.failed}` : ''}</Tag> : null}
       {failures.length ? <ul className="comic-sb-check-failures">{failures.slice(0, 8).map(item => <li key={item.seq}>序号 {item.seq}：{item.error}</li>)}</ul> : null}
     </div>
-    <p className="comic-sb-check-hint">洛水的分镜检查按「原文序号行」对照 AI 结果，还包含「多余（越界）」项；本系统分镜由规划链生成、序号即镜头序号，因此按 1..最大序号的连续性检查，报告中的多余（extra）字段恒为空。</p>
   </Modal>;
 }

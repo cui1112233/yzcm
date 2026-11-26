@@ -1066,12 +1066,8 @@ func registerScreenplayRoutesWorkflow(mux *http.ServeMux, auth BridgeAuth, store
 		if !ok {
 			return
 		}
-		storyboard, err := store.GetStoryboard(req.Context(), owner, projectID, episode, engine)
-		if err != nil {
-			writeScreenplayError(w, err)
-			return
-		}
-		report, err := screenplay.CheckStoryboardShots(storyboard.Shots)
+		service := screenplay.StoryboardService{Store: store, Authoring: authors}
+		report, err := service.CheckStoryboard(req.Context(), owner, projectID, episode, engine)
 		if err != nil {
 			writeScreenplayError(w, err)
 			return
