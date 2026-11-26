@@ -14,15 +14,43 @@ type MemoryStore struct {
 	works    map[string]Work
 	chapters map[string]Chapter
 	scripts  map[string]Script
+	handoffs map[string]Handoff
 	now      func() time.Time
 	newID    func(string) string
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		works: map[string]Work{}, chapters: map[string]Chapter{}, scripts: map[string]Script{},
+		works: map[string]Work{}, chapters: map[string]Chapter{}, scripts: map[string]Script{}, handoffs: map[string]Handoff{},
 		now: time.Now, newID: randomID,
 	}
+}
+
+func (s *MemoryStore) GetHandoff(_ context.Context, owner, workID, requestKey string) (Handoff, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row, ok := s.handoffs[owner+"\x00"+workID+"\x00"+requestKey]
+	if !ok {
+		return Handoff{}, ErrNotFound
+	}
+	return row, nil
+}
+
+func (s *MemoryStore) CreateHandoff(_ context.Context, row Handoff) (Handoff, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := row.OwnerUsername + "\x00" + row.WorkID + "\x00" + row.RequestKey
+	if _, ok := s.handoffs[key]; ok {
+		return Handoff{}, ErrConflict
+	}
+	if row.ID == "" {
+		row.ID = s.newID("handoff")
+	}
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = s.now().UTC()
+	}
+	s.handoffs[key] = row
+	return row, nil
 }
 
 func (s *MemoryStore) activeWork(owner, id string) (Work, error) {

@@ -574,3 +574,26 @@ func mapWriteError(err error) error {
 	}
 	return err
 }
+
+func (s *MySQLStore) GetHandoff(ctx context.Context, owner, workID, requestKey string) (Handoff, error) {
+	var row Handoff
+	var episodes []byte
+	err := s.db.QueryRowContext(ctx, `SELECT id,owner_username,work_id,request_key,screenplay_project_id,episodes_json,created_at FROM script_editor_handoffs WHERE owner_username=? AND work_id=? AND request_key=?`, owner, workID, requestKey).
+		Scan(&row.ID, &row.OwnerUsername, &row.WorkID, &row.RequestKey, &row.ScreenplayProjectID, &episodes, &row.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Handoff{}, ErrNotFound
+	}
+	row.Episodes = append(row.Episodes[:0], episodes...)
+	return row, err
+}
+
+func (s *MySQLStore) CreateHandoff(ctx context.Context, row Handoff) (Handoff, error) {
+	if row.ID == "" {
+		row.ID = s.newID("handoff")
+	}
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = s.now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO script_editor_handoffs (id,owner_username,work_id,request_key,screenplay_project_id,episodes_json,created_at) VALUES (?,?,?,?,?,?,?)`, row.ID, row.OwnerUsername, row.WorkID, row.RequestKey, row.ScreenplayProjectID, string(row.Episodes), row.CreatedAt)
+	return row, mapWriteError(err)
+}

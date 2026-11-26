@@ -300,6 +300,18 @@ func RegisterScriptEditorRoutes(mux *http.ServeMux, auth BridgeAuth, service *sc
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(result.Content)
 	})
+	handle("POST /api/script-editor/works/{workID}/handoffs/comic-screenplay", func(w http.ResponseWriter, req *http.Request, owner string) {
+		var input scripteditor.HandoffInput
+		if !decode(w, req, &input) {
+			return
+		}
+		handoff, err := service.CreateComicHandoff(req.Context(), owner, req.PathValue("workID"), input)
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"handoff": handoff})
+	})
 }
 
 func queryRevision(req *http.Request) (int64, error) {

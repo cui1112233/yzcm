@@ -72,6 +72,8 @@ type Store interface {
 	DeleteScript(context.Context, string, string, string, int64) error
 	CopyScript(context.Context, string, string, string) (Script, error)
 	PreferScript(context.Context, string, string, string, int64) (Script, error)
+	GetHandoff(context.Context, string, string, string) (Handoff, error)
+	CreateHandoff(context.Context, Handoff) (Handoff, error)
 }
 
 func randomID(prefix string) string {

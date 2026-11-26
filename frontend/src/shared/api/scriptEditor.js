@@ -28,3 +28,4 @@ export function copyScriptEditorScript(workId, scriptId) { return apiRequest(`${
 export function preferScriptEditorScript(workId, scriptId, expectedRevision) { return apiRequest(`${root}/works/${id(workId)}/scripts/${id(scriptId)}/prefer`, { method: 'POST', body: JSON.stringify({ expectedRevision }) }); }
 export function generateScriptEditorScript(workId, input) { return apiRequest(`${root}/works/${id(workId)}/generate`, { method: 'POST', body: JSON.stringify(input), timeoutMs: 10 * 60 * 1000, suppressGlobalError: true }); }
 export function exportScriptEditorWork(workId, format) { return apiRequest(`${root}/works/${id(workId)}/export?format=${encodeURIComponent(format)}`, { responseType: 'blob', suppressGlobalError: true }); }
+export function handoffScriptEditorWork(workId, input) { return apiRequest(`${root}/works/${id(workId)}/handoffs/comic-screenplay`, { method: 'POST', body: JSON.stringify(input), suppressGlobalError: true }); }
