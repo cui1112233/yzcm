@@ -701,7 +701,7 @@ func NewRouter(options RouterOptions) http.Handler {
 	}
 	RegisterAICutPersonalTemplateRoutes(root, auth, personalTemplates)
 	registerScreenplayWorkflow(root, auth, options, runtimeTextProviderResolver, runtimeCatalogStore)
-	registerScriptEditor(root, auth, options)
+	registerScriptEditor(root, auth, options, runtimeTextProviderResolver)
 	RegisterNovelCreationRoutes(root, auth, options.NovelCreation, options.NovelCreationRunStarter)
 	RegisterProjectRetentionRoutes(root, auth, options.ProjectRetention)
 	RegisterAICutAssetRoutes(root, auth, options.AICut, options.AgentAssetObjects, options.Now)

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -8,12 +9,13 @@ import (
 	"strconv"
 	"strings"
 
+	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/scripteditor"
 )
 
 const scriptEditorJSONLimit = 24 << 20
 
-func RegisterScriptEditorRoutes(mux *http.ServeMux, auth BridgeAuth, service *scripteditor.Service) {
+func RegisterScriptEditorRoutes(mux *http.ServeMux, auth BridgeAuth, service *scripteditor.Service, resolvers ...func(context.Context, string, string) (batchfactoryv11.DirectorProvider, error)) {
 	if mux == nil || service == nil || service.Store == nil {
 		return
 	}
@@ -39,6 +41,10 @@ func RegisterScriptEditorRoutes(mux *http.ServeMux, auth BridgeAuth, service *sc
 			return false
 		}
 		return true
+	}
+	var resolver func(context.Context, string, string) (batchfactoryv11.DirectorProvider, error)
+	if len(resolvers) > 0 {
+		resolver = resolvers[0]
 	}
 
 	handle("GET /api/script-editor/works", func(w http.ResponseWriter, req *http.Request, owner string) {
@@ -259,6 +265,27 @@ func RegisterScriptEditorRoutes(mux *http.ServeMux, auth BridgeAuth, service *sc
 			return
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"work": detail})
+	})
+	handle("POST /api/script-editor/works/{workID}/generate", func(w http.ResponseWriter, req *http.Request, owner string) {
+		var input scripteditor.GenerateScriptInput
+		if !decode(w, req, &input) {
+			return
+		}
+		if resolver == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "请先配置文字模型"})
+			return
+		}
+		provider, err := resolver(req.Context(), owner, input.ModelID)
+		if err != nil || provider == nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "选择的文字模型不可用，请检查API配置"})
+			return
+		}
+		script, err := service.GenerateScript(req.Context(), owner, req.PathValue("workID"), input, scriptEditorGenerator{provider: provider})
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"script": script})
 	})
 }
 

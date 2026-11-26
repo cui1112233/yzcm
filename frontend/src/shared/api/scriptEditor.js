@@ -26,3 +26,4 @@ export function updateScriptEditorScript(workId, scriptId, input) { return apiRe
 export function deleteScriptEditorScript(workId, scriptId, revision) { return apiRequest(`${root}/works/${id(workId)}/scripts/${id(scriptId)}?expectedRevision=${Number(revision)}`, { method: 'DELETE' }); }
 export function copyScriptEditorScript(workId, scriptId) { return apiRequest(`${root}/works/${id(workId)}/scripts/${id(scriptId)}/copy`, { method: 'POST' }); }
 export function preferScriptEditorScript(workId, scriptId, expectedRevision) { return apiRequest(`${root}/works/${id(workId)}/scripts/${id(scriptId)}/prefer`, { method: 'POST', body: JSON.stringify({ expectedRevision }) }); }
+export function generateScriptEditorScript(workId, input) { return apiRequest(`${root}/works/${id(workId)}/generate`, { method: 'POST', body: JSON.stringify(input), timeoutMs: 10 * 60 * 1000, suppressGlobalError: true }); }
