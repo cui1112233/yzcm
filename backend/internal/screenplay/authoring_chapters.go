@@ -39,6 +39,9 @@ func ValidateChapterCollection(chapters []Chapter) error {
 	return nil
 }
 func PublishChapterCollection(ctx context.Context, s Store, o, p string, chapters []Chapter) (Document, error) {
+	if !ScriptCollectionReady(chapters) {
+		return Document{}, fmt.Errorf("%w: 分批章节尚未全部完成", ErrInvalidState)
+	}
 	content, err := chapterCollectionText(chapters)
 	if err != nil {
 		return Document{}, err

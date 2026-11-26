@@ -97,8 +97,8 @@ func TestRecoveredProtocolsKeepDistinctFieldsReportsAndDurations(t *testing.T) {
 		if p.ResponseMode != "json_with_report" || len(p.ReportMarkers) == 0 {
 			t.Fatal("script report lost", id)
 		}
-		if id == "293" && (p.Supported || len(p.ReportMarkers) != 2) {
-			t.Fatal("batch script incorrectly enabled")
+		if id == "293" && (!p.Supported || p.ParserVersion != "cm_script_293_durable_batch_v1" || len(p.ReportMarkers) != 2) {
+			t.Fatal("batch script durable adapter missing")
 		}
 	}
 	nine, _ := ResolveCreativePrompt("175", "storyboard")

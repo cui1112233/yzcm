@@ -13,6 +13,7 @@ import (
 var ErrAccessDenied = errors.New("没有此项目的操作权限")
 
 type Chapter struct {
+	ScriptGeneration               *ScriptGeneration       `json:"script_generation,omitempty"`
 	PlanningPromptID               string                  `json:"planning_prompt_id,omitempty"`
 	PlanningPromptDigest           string                  `json:"planning_prompt_digest,omitempty"`
 	PlanningConfigDigest           string                  `json:"planning_config_digest,omitempty"`
@@ -140,6 +141,7 @@ func (r *MemoryAuthoringRepository) List(_ context.Context) ([]AuthoringState, e
 }
 
 type AuthoringService struct {
+	Receipts         ScriptBatchReceipts
 	PlanningProgress PlanningProgressRepository
 	Store            Store
 	Repository       AuthoringRepository
@@ -154,11 +156,30 @@ func (s AuthoringService) Load(ctx context.Context, o, p string) (AuthoringState
 	if errors.Is(e, ErrNotFound) {
 		return AuthoringState{ProjectID: p, Owner: o, Chapters: []Chapter{}, Messages: []AssistantMessage{}, Proposals: []AssistantProposal{}, Members: []MemberGrant{}, Display: map[string]any{"editor_version": "studio", "active_tab": "source", "font_size": 14}}, nil
 	}
+	if e == nil {
+		for i := range st.Chapters {
+			g := st.Chapters[i].ScriptGeneration
+			if g != nil && g.Status == "running" && !time.Now().Before(g.Deadline) {
+				g.Status = "unknown"
+				g.Error = "请求已超过等待时间，结果不确定，不会自动重发"
+			}
+		}
+	}
 	return st, e
 }
 func (s AuthoringService) Save(ctx context.Context, o, p string, st AuthoringState, v int64) (AuthoringState, error) {
 	if _, e := s.Store.GetProject(ctx, o, p); e != nil {
 		return AuthoringState{}, e
+	}
+	old, err := s.Load(ctx, o, p)
+	if err != nil {
+		return AuthoringState{}, err
+	}
+	if old.Revision != v {
+		return AuthoringState{}, ErrRevisionConflict
+	}
+	if err := PreserveScriptGeneration(st.Chapters, old.Chapters); err != nil {
+		return AuthoringState{}, err
 	}
 	seen := map[string]bool{}
 	for _, c := range st.Chapters {
@@ -285,7 +306,12 @@ func (s AuthoringService) Apply(ctx context.Context, o, p, id string, v int64, c
 			found := false
 			for i, c := range st.Chapters {
 				if c.ID == a.Chapter.ID {
-					st.Chapters[i] = *a.Chapter
+					next := *a.Chapter
+					nextRows := []Chapter{next}
+					if e = PreserveScriptGeneration(nextRows, []Chapter{c}); e != nil {
+						return e
+					}
+					st.Chapters[i] = nextRows[0]
 					found = true
 				}
 			}
@@ -332,7 +358,7 @@ func (s AuthoringService) Apply(ctx context.Context, o, p, id string, v int64, c
 				return e
 			}
 		}
-		if a.Kind == "chapter" {
+		if a.Kind == "chapter" && ScriptCollectionReady(st.Chapters) {
 			for _, c := range st.Chapters {
 				if strings.TrimSpace(c.ScriptText) != "" {
 					if _, e = PublishChapterCollection(ctx, s.Store, o, p, st.Chapters); e != nil {

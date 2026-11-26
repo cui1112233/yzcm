@@ -3,12 +3,14 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"path/filepath"
 	"qiantie/backend/internal/agentworkspace"
 	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/mergeworker"
 	"qiantie/backend/internal/novelfetchworkshop"
 	"qiantie/backend/internal/screenplay"
 	"qiantie/backend/internal/subjectupload"
+	"strings"
 )
 
 func registerScreenplayWorkflow(root *http.ServeMux, auth BridgeAuth, options RouterOptions, resolver func(context.Context, string, string) (batchfactoryv11.DirectorProvider, error), catalog novelfetchworkshop.Store) {
@@ -23,7 +25,11 @@ func registerScreenplayWorkflow(root *http.ServeMux, auth BridgeAuth, options Ro
 	} else {
 		authoringRepo = screenplay.NewMemoryAuthoringRepository()
 	}
-	authoring := &screenplay.AuthoringService{Store: options.Screenplay, Repository: authoringRepo}
+	var receipts screenplay.ScriptBatchReceipts
+	if strings.TrimSpace(options.UserDataDir) != "" {
+		receipts = &screenplay.FileScriptBatchReceipts{Root: filepath.Join(options.UserDataDir, "screenplay", "script-batch-receipts")}
+	}
+	authoring := &screenplay.AuthoringService{Store: options.Screenplay, Repository: authoringRepo, Receipts: receipts}
 	productionRepo, _ := options.Screenplay.(screenplay.ProductionRepository)
 	mediaStore, _ := options.Screenplay.(screenplay.MediaStore)
 	references, _ := options.AgentAssetObjects.(agentworkspace.ReferenceURLProvider)
@@ -55,7 +61,7 @@ func registerScreenplayWorkflow(root *http.ServeMux, auth BridgeAuth, options Ro
 		authoring.PlanningProgress = &screenplay.RedisPlanningProgressRepository{Do: redis.Do}
 	}
 	RegisterScreenplayWorkflowRoutes(root, auth, options.Screenplay, resolver, options.Now, options.PresetCatalog, authoring, runner)
-	RegisterScreenplayAuthoringRoutes(root, auth, options.Screenplay, authoringRepo, resolver, mediaStore)
+	registerScreenplayAuthoringRoutesWithReceipts(root, auth, options.Screenplay, authoringRepo, resolver, receipts, mediaStore)
 	RegisterScreenplayStoryboardPreferenceRoutes(root, auth, options.Screenplay, authoring)
 	RegisterScreenplayStoryboardPlanRoutes(root, auth, authoring, resolver)
 	RegisterScreenplayStoryboardGenerationRoutes(root, auth, options.Screenplay, authoring)

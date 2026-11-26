@@ -71,9 +71,15 @@ func (s *ScreenplayService) GenerateA1(ctx context.Context, req A1Request) (Scre
 		return plan, nil
 	}
 	promptID := defaultString(req.PromptID, selectedScriptPrompt(project), "a1_novel_to_screenplay")
+	if promptID == ScriptBatchPromptID {
+		return ScreenplayResult{}, fmt.Errorf("%w: 专业剧本2需要章节分批续接，请前往章节生成", ErrInvalidArgument)
+	}
 	selected, resolveErr := ResolveProjectPrompt(project, promptID, "script")
 	if resolveErr != nil {
 		return ScreenplayResult{}, fmt.Errorf("%w: %v", ErrInvalidArgument, resolveErr)
+	}
+	if selected.ID == ScriptBatchPromptID || selected.OutputProtocol == "script_scene_batch_v1" || !selected.Supported {
+		return ScreenplayResult{}, fmt.Errorf("%w: 此模板需要受支持的章节续接入口", ErrInvalidArgument)
 	}
 	systemPrompt, renderErr := renderScriptLibrary(ctx, s.Store, req.Owner, req.ProjectID, selected.Body)
 	if renderErr != nil {
@@ -129,9 +135,15 @@ func (s *ScreenplayService) GenerateB(ctx context.Context, req BRequest) (Screen
 		return plan, nil
 	}
 	promptID := defaultString(req.PromptID, selectedScriptPrompt(project), "b_director_screenplay")
+	if promptID == ScriptBatchPromptID {
+		return ScreenplayResult{}, fmt.Errorf("%w: 专业剧本2需要章节分批续接，请前往章节生成", ErrInvalidArgument)
+	}
 	selected, resolveErr := ResolveProjectPrompt(project, promptID, "script")
 	if resolveErr != nil {
 		return ScreenplayResult{}, fmt.Errorf("%w: %v", ErrInvalidArgument, resolveErr)
+	}
+	if selected.ID == ScriptBatchPromptID || selected.OutputProtocol == "script_scene_batch_v1" || !selected.Supported {
+		return ScreenplayResult{}, fmt.Errorf("%w: 此模板需要受支持的章节续接入口", ErrInvalidArgument)
 	}
 	systemPrompt, renderErr := renderScriptLibrary(ctx, s.Store, req.Owner, req.ProjectID, selected.Body)
 	if renderErr != nil {

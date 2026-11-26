@@ -96,6 +96,10 @@ func ScreenplayProjectArchived(ctx context.Context, repo screenplay.AuthoringRep
 // mediaStore 为可选：作品助手用它生成链路能力清单（只读媒体状态）。
 // 用可变参数是为了兼容既有调用点（测试与 workflow 注册），未提供时媒体环节按未就绪展示。
 func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, store screenplay.Store, repo screenplay.AuthoringRepository, resolver func(context.Context, string, string) (batchfactoryv11.DirectorProvider, error), mediaStore ...screenplay.MediaStore) {
+	registerScreenplayAuthoringRoutesWithReceipts(mux, auth, store, repo, resolver, screenplay.NewMemoryScriptBatchReceipts(), mediaStore...)
+}
+
+func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth BridgeAuth, store screenplay.Store, repo screenplay.AuthoringRepository, resolver func(context.Context, string, string) (batchfactoryv11.DirectorProvider, error), receipts screenplay.ScriptBatchReceipts, mediaStore ...screenplay.MediaStore) {
 	var media screenplay.MediaStore
 	if len(mediaStore) > 0 {
 		media = mediaStore[0]
@@ -103,7 +107,7 @@ func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, stor
 	if mux == nil || store == nil || repo == nil {
 		return
 	}
-	svc := screenplay.AuthoringService{Store: store, Repository: repo}
+	svc := screenplay.AuthoringService{Store: store, Repository: repo, Receipts: receipts}
 	handle := func(pattern, right string, fn func(http.ResponseWriter, *http.Request, string, string)) {
 		mux.Handle(pattern, auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ident, ok := BridgeIdentityFromContext(r.Context())
@@ -186,6 +190,10 @@ func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, stor
 			}
 			switch path {
 			case "chapters":
+				if e = screenplay.PreserveScriptGeneration(in.Chapters, st.Chapters); e != nil {
+					authoringError(w, e)
+					return
+				}
 				st.Chapters = in.Chapters
 			case "display":
 				if e = validateAuthoringDisplay(in.Display); e != nil {
@@ -229,7 +237,7 @@ func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, stor
 				}
 			}
 			st, e = svc.Save(r.Context(), o, st.ProjectID, st, in.Expected)
-			if e == nil && path == "chapters" {
+			if e == nil && path == "chapters" && screenplay.ScriptCollectionReady(st.Chapters) {
 				for _, c := range st.Chapters {
 					if strings.TrimSpace(c.ScriptText) != "" {
 						_, e = screenplay.PublishChapterCollection(r.Context(), store, o, st.ProjectID, st.Chapters)
@@ -318,9 +326,59 @@ func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, stor
 				Expected    int64  `json:"expected_revision"`
 				Instruction string `json:"instruction"`
 				Message     string `json:"message"`
+				Action      string `json:"action"`
+				Confirmed   bool   `json:"confirmed"`
 			}
 			if !decode(w, r, &in) {
 				return
+			}
+			if path == "chapters/{chapter}/script" {
+				authoring, err := svc.Load(r.Context(), o, r.PathValue("id"))
+				if err != nil {
+					authoringError(w, err)
+					return
+				}
+				hasGeneration := false
+				for _, chapter := range authoring.Chapters {
+					if chapter.ID == r.PathValue("chapter") && chapter.ScriptGeneration != nil {
+						hasGeneration = true
+					}
+				}
+				if hasGeneration {
+					batchSvc := svc
+					batchSvc.Generator = screenplayTextGenerator{owner: o, resolver: resolver}
+					st, err := batchSvc.GenerateScriptBatch(r.Context(), o, r.PathValue("id"), r.PathValue("chapter"), in.Action, in.Instruction, in.Expected, in.Confirmed)
+					respond(w, st, err, a)
+					return
+				}
+				project, err := store.GetProject(r.Context(), o, r.PathValue("id"))
+				if err != nil {
+					authoringError(w, err)
+					return
+				}
+				id := project.PromptID
+				if project.CreativeConfig != nil && project.CreativeConfig.ScriptPromptID != "" {
+					id = project.CreativeConfig.ScriptPromptID
+				}
+				if id != "" {
+					selected, err := screenplay.ResolveProjectPrompt(project, id, "script")
+					if err != nil {
+						authoringError(w, err)
+						return
+					}
+					id = selected.ID
+				}
+				if id == screenplay.ScriptBatchPromptID {
+					batchSvc := svc
+					batchSvc.Generator = screenplayTextGenerator{owner: o, resolver: resolver}
+					st, err := batchSvc.GenerateScriptBatch(r.Context(), o, project.ID, r.PathValue("chapter"), in.Action, in.Instruction, in.Expected, in.Confirmed)
+					respond(w, st, err, a)
+					return
+				}
+				if in.Action != "" && in.Action != "start" {
+					authoringError(w, screenplay.ErrInvalidArgument)
+					return
+				}
 			}
 			var out screenplay.AuthoringState
 			e := svc.WithLock(r.Context(), o, r.PathValue("id"), func() error {
