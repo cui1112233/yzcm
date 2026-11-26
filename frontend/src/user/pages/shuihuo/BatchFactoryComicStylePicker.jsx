@@ -12,7 +12,7 @@ import {
   comicStyleShouldLoadPreview,
   comicStyleSelection,
   comicStyleWheelDirection,
-  normalizeComicReference,
+  normalizeComicReference, normalizeComicOutputStyles, selectComicOutputStyle, MAX_COMIC_OUTPUT_STYLES,
   wrapComicStyleIndex
 } from './batchFactoryComicStyle';
 
@@ -87,16 +87,25 @@ export function BatchFactoryComicStylePicker({ batchId, catalog, value, onChange
   const wheelTimer = useRef(null);
   const styles = useMemo(() => (Array.isArray(catalog) ? catalog : []).filter(item => item.slot === 'batch.comic-style'), [catalog]);
   const comic = value && typeof value === 'object' ? value : {};
-  const reference = normalizeComicReference(comic.globalReferenceImage);
+  const selectedStyles = normalizeComicOutputStyles(comic);
+  const focusedStyle = selectedStyles.find(item => item.presetId === styles[activeIndex]?.id) || selectedStyles[0];
+  const reference = normalizeComicReference(focusedStyle?.globalReferenceImage || comic.globalReferenceImage);
   const selectedId = String(comic.style?.presetId || '');
   const selectedIndex = styles.findIndex(item => item.id === selectedId);
   const selectedPreset = selectedIndex >= 0 ? styles[selectedIndex] : null;
   const activePreset = styles[activeIndex] || selectedPreset || null;
-  const patch = next => onChange?.({ ...comic, ...next, enabled: true });
+  const patch = next => {
+    const updated = { ...comic, ...next, enabled: true };
+    if (next.globalReferenceImage && selectedStyles.length) {
+      updated.styles = selectedStyles.map(item => item.presetId === focusedStyle?.presetId ? { ...item, globalReferenceImage: next.globalReferenceImage } : item);
+      updated.style = comicStyleSelection({ id: updated.styles[0].presetId, name: updated.styles[0].presetName });
+      updated.globalReferenceImage = updated.styles[0].globalReferenceImage;
+    }
+    onChange?.(updated);
+  };
   const selectStyle = preset => {
-    setLocalReferencePreview('');
-    onReferenceDataUrl?.('');
-    patch({ style: comicStyleSelection(preset), globalReferenceImage: comicReferenceForSelectedStyle(comic.globalReferenceImage, preset) });
+    try { onChange?.(selectComicOutputStyle(comic,preset)); setLocalReferencePreview(''); onReferenceDataUrl?.(''); }
+    catch (error) { message.info(error.message); }
   };
   const uploadReference = async file => {
     setUploading(true);
@@ -130,7 +139,7 @@ export function BatchFactoryComicStylePicker({ batchId, catalog, value, onChange
   }, [selectedIndex, styles.length]);
 
   useEffect(() => {
-    if (inherited || !selectedPreset || !comicReferenceNeedsStyleDefault(comic.globalReferenceImage, selectedPreset)) return;
+    if (selectedStyles.length > 1 || inherited || !selectedPreset || !comicReferenceNeedsStyleDefault(comic.globalReferenceImage, selectedPreset)) return;
     patch({ globalReferenceImage: comicReferenceForSelectedStyle(comic.globalReferenceImage, selectedPreset) });
   }, [inherited, selectedPreset?.id, comic.globalReferenceImage?.assetId, comic.globalReferenceImage?.source]);
 
@@ -142,7 +151,7 @@ export function BatchFactoryComicStylePicker({ batchId, catalog, value, onChange
     if (!styles.length || disabled) return;
     const nextIndex = wrapComicStyleIndex(index, styles.length);
     setActiveIndex(nextIndex);
-    selectStyle(styles[nextIndex]);
+    setLocalReferencePreview('');
   };
   const move = direction => selectIndex(activeIndex + direction);
   const handlePointerDown = event => {
@@ -181,10 +190,10 @@ export function BatchFactoryComicStylePicker({ batchId, catalog, value, onChange
   };
 
   return <div className="batch-factory-comic-style-picker">
-    <div className="batch-factory-comic-style-heading"><div><b>画风库</b><span>{selectedPreset ? `当前画风：${selectedPreset.name}` : (inherited ? '继承统一配置 · 尚未选择画风' : '尚未选择画风')}</span></div><small>居中的画风即为当前选择；画风库图片会默认作为参考图发给 AI。</small></div>
+    <div className="batch-factory-comic-style-heading"><div><b>画风库</b><span>已选 {selectedStyles.length}/5 种画风</span></div><small>每种画风独立出图、合成与上传。</small></div>
     {styles.length ? <div
       className="batch-factory-comic-coverflow"
-      role="radiogroup"
+      role="group"
       aria-label="漫画画风库"
       tabIndex={disabled ? -1 : 0}
       onKeyDown={handleKeyDown}
@@ -196,11 +205,11 @@ export function BatchFactoryComicStylePicker({ batchId, catalog, value, onChange
       <button type="button" className="batch-factory-comic-coverflow-nav is-previous" aria-label="上一画风" disabled={disabled} onClick={() => move(-1)}><ChevronLeft size={20} /></button>
       <div className="batch-factory-comic-coverflow-stage" onPointerDown={handlePointerDown} onPointerUp={finishDrag} onPointerCancel={cancelDrag}>
         {styles.map((preset, index) => {
-          const selected = selectedId === preset.id;
+          const selected = selectedStyles.some(item => item.presetId === preset.id);
           const offset = comicStyleRelativeOffset(index, activeIndex, styles.length);
           const loadPreview = comicStyleShouldLoadPreview(index, activeIndex, styles.length);
           return <article className={`batch-factory-comic-style-card${selected ? ' is-selected' : ''}`} style={comicStyleCoverFlowStyle(offset)} key={preset.id}>
-            <button type="button" role="radio" aria-checked={selected} disabled={disabled} onClick={() => { if (!dragged.current) selectIndex(index); }}>
+            <button type="button" aria-pressed={selected} disabled={disabled} onClick={() => { if (!dragged.current) selectIndex(index); }}>
               <span className="batch-factory-comic-style-image">{loadPreview ? <AuthenticatedPreview src={preset.previewUrl} alt={`${preset.name}预览`} /> : <span className="batch-factory-comic-preview-loading"><ImagePlus size={22} /></span>}</span>
               <span className="batch-factory-comic-style-copy"><b>{preset.name}</b><small>{preset.category || '漫画画风'}</small></span>
             </button>
@@ -210,7 +219,7 @@ export function BatchFactoryComicStylePicker({ batchId, catalog, value, onChange
       </div>
       <button type="button" className="batch-factory-comic-coverflow-nav is-next" aria-label="下一画风" disabled={disabled} onClick={() => move(1)}><ChevronRight size={20} /></button>
       <div className="batch-factory-comic-coverflow-caption" aria-live="polite">
-        <div><b>{activePreset?.name || '尚未选择画风'}</b><small>{activePreset?.description || '选择一个漫画画风'}</small></div>
+        <div><b>{activePreset?.name || '尚未选择画风'}</b><small>{activePreset?.description || ''}</small></div><Button disabled={disabled || (!selectedStyles.some(item => item.presetId === activePreset?.id) && selectedStyles.length >= MAX_COMIC_OUTPUT_STYLES)} onClick={() => selectStyle(activePreset)}>{selectedStyles.some(item => item.presetId === activePreset?.id) ? '取消此画风' : '加入输出'}</Button>
       </div>
     </div> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无已发布画风" />}
 
@@ -219,10 +228,10 @@ export function BatchFactoryComicStylePicker({ batchId, catalog, value, onChange
         {localReferencePreview || reference.previewUrl ? <AuthenticatedPreview src={localReferencePreview || reference.previewUrl} alt="漫画全局参考图" /> : <ImagePlus size={28} />}
       </div>
       <div className="batch-factory-comic-reference-controls">
-        <div className="batch-factory-comic-reference-title"><b>漫画全局参考图</b><small>默认使用当前画风库图片，也可以手动上传替换。</small></div>
+        <div className="batch-factory-comic-reference-title"><b>{focusedStyle?.presetName || '漫画'}参考图</b><small>默认使用当前画风库图片，也可以手动上传替换。</small></div>
         <div className="batch-factory-comic-reference-actions">
           <AntUpload accept="image/png,image/jpeg,image/webp" showUploadList={false} beforeUpload={uploadReference} disabled={disabled || uploading || (!batchId && !onReferenceDataUrl)}><Button icon={<Upload size={15} />} loading={uploading} title={!batchId && !onReferenceDataUrl ? '提交漫画任务后才能上传自定义参考图' : '上传参考图'}>上传参考图</Button></AntUpload>
-          {reference.source === 'manual-upload' ? <Button aria-label="恢复画风库参考图" icon={<Trash2 size={15} />} disabled={disabled} onClick={() => { setLocalReferencePreview(''); onReferenceDataUrl?.(''); patch({ globalReferenceImage: comicReferenceForSelectedStyle(null, selectedPreset) }); }} /> : null}
+          {reference.source === 'manual-upload' ? <Button aria-label="恢复画风库参考图" icon={<Trash2 size={15} />} disabled={disabled} onClick={() => { setLocalReferencePreview(''); onReferenceDataUrl?.(''); patch({ globalReferenceImage: comicReferenceForSelectedStyle(null, styles.find(item=>item.id===focusedStyle?.presetId)) }); }} /> : null}
         </div>
         <div className="batch-factory-comic-reference-switches">
           <label><span>启用参考图</span><Switch size="small" checked={reference.enabled && Boolean(reference.assetId)} disabled={disabled || !reference.assetId} onChange={enabled => patch({ globalReferenceImage: { ...reference, enabled } })} /></label>

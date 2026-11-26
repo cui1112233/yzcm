@@ -70,6 +70,20 @@ func registerRuntimeSummaryRoute(mux *http.ServeMux, auth BridgeAuth, store batc
 			}
 		}
 		comicStore, hasComicPages := store.(batchfactoryv11.ComicPageStore)
+		styleRuntime := map[string][]batchfactoryv11.ComicStyleRuntimeOutput{}
+		if reader, ok := store.(interface {
+			ComicStyleRuntimeBooks(context.Context, string, string, []string) (map[string][]batchfactoryv11.ComicStyleRuntimeOutput, error)
+		}); ok {
+			ids := make([]string, 0, len(batch.Books))
+			for _, book := range batch.Books {
+				ids = append(ids, book.ID)
+			}
+			if snapshots, readErr := reader.ComicStyleRuntimeBooks(r.Context(), owner, batch.ID, ids); readErr == nil {
+				styleRuntime = snapshots
+			} else {
+				result["comicStyleWarning"] = "分画风状态读取失败，请刷新重试"
+			}
+		}
 		// Stage availability is owner-level. Evaluate it once per request instead
 		// of reloading the owner settings for every book in the batch.
 		stageAvailability := stageService.Availability(r.Context(), owner)
@@ -98,7 +112,9 @@ func registerRuntimeSummaryRoute(mux *http.ServeMux, auth BridgeAuth, store batc
 			if summary.LastFailed != nil {
 				stageSummary["lastFailed"] = summary.LastFailed
 			}
-			if hasComicPages && len(book.Videos) > 0 {
+			if outputs := styleRuntime[book.ID]; len(outputs) > 0 {
+				addComicStyleRuntimeSummary(stageSummary, outputs, book.Videos)
+			} else if hasComicPages && len(book.Videos) > 0 {
 				pages, pagesErr := listComicPagesForView(r.Context(), comicStore, owner, batch.ID, book.ID, true)
 				if pagesErr == nil {
 					activity := comicPageActivityCounts(pages, time.Now())

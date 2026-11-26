@@ -5,6 +5,7 @@ package batchfactoryv11_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	_ "github.com/go-sql-driver/mysql"
 	"os"
@@ -33,14 +34,14 @@ func TestComicStyleMySQLIsolationAndUpgrade(t *testing.T) {
 	}
 	// Copy only empty schemas: replaying every historical migration is unrelated
 	// to this upgrade and is prohibitively slow on the Windows Docker filesystem.
-	for _, suffix := range []string{"batches", "batch_records", "books", "book_records", "videos", "video_records", "comic_pages", "comic_page_images", "comic_collections", "comic_collection_items", "book_assets", "book_asset_images"} {
+	for _, suffix := range []string{"batches", "batch_records", "books", "book_records", "videos", "video_records", "comic_pages", "comic_page_images", "comic_collections", "comic_collection_items", "book_assets", "book_asset_images", "settings_patches", "drafts"} {
 		table := "batch_factory_v12_" + suffix
 		if _, err = db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS "+table+" LIKE "+template+"."+table); err != nil {
 			t.Fatal(err)
 		}
 	}
 	store := bf.NewMySQLStore(db)
-	batch, err := store.CreateBatch(ctx, "alice", bf.CreateBatchInput{Title: "style-upgrade", Books: []bf.CreateBookInput{{Title: "book", Videos: []bf.CreateVideoInput{{Label: "one"}, {Label: "two"}}}}})
+	batch, err := store.CreateBatch(ctx, "alice", bf.CreateBatchInput{Title: "style-upgrade", InitialBatchSettings: bf.SettingsPatch{"aiPromptConfig": json.RawMessage(`{"comic":{"styles":[{"presetId":"A"},{"presetId":"B"}]}}`)}, Books: []bf.CreateBookInput{{Title: "book", Videos: []bf.CreateVideoInput{{Label: "one"}, {Label: "two"}}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,6 +141,18 @@ func TestComicStyleMySQLIsolationAndUpgrade(t *testing.T) {
 	}
 	if len(ca) != 1 || len(cb) != 1 || ca[0].StyleID != "A" || cb[0].StyleID != "B" || ca[0].Items[0].ComicPageID != pa[0].ID || cb[0].Items[0].ComicPageID != pb[0].ID {
 		t.Fatal("mixed collections")
+	}
+	runtime, err := store.ComicStyleRuntimeBooks(ctx, "alice", batch.ID, []string{book.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runtime[book.ID]) != 2 {
+		t.Fatal("missing runtime outputs")
+	}
+	for _, output := range runtime[book.ID] {
+		if len(output.Pages) != 2 || len(output.Collections) != 1 {
+			t.Fatalf("wrong runtime style counts %+v", output)
+		}
 	}
 	if err = storage.RunMigrations(ctx, db, storage.ComicStyleOutputMigrations()); err != nil {
 		t.Fatal(err)

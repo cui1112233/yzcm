@@ -1,3 +1,4 @@
+import {createMultiModeBatches} from '../../shared/api/batchFactoryMultiMode.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ConfigProvider, Modal, Spin, message } from 'antd';
 import { CommentaryWorkbench } from './shuihuo/CommentaryWorkbench';
@@ -218,6 +219,23 @@ export function ShuihuoProductionPage({ openBatchOnLoad = false, theme = 'dark' 
     }
   }
   async function handleCreateBatch(input) {
+    if(input?.multiModeRequest){
+      const result=await createMultiModeBatches(input.multiModeRequest);
+      const children=result?.batches || [];if(!children.length)throw Error('未返回创建的作品项目');
+      await refreshProjects();
+      const first=children[0];localStorage.setItem(BATCH_FACTORY_ACTIVE_BATCH_STORAGE_KEY,first.id);setActiveBatchProject(first);setView('batch-novels');
+      if(result.sourceWarning)message.warning(`项目已创建，部分原文待继续读取：${result.sourceWarning}`);
+      if(input.automationEnabled===true || input.multiModeAutomationRequested===true){
+        const outcomes=await Promise.allSettled((result.projects||[]).map(project=>{
+          const child=children.find(batch=>batch.id===project.batchId);
+          return startBatchAutomation(project.batchId,{presetId:project.presetId,runMode:project.executionMode,productionMode:child?.settingsState?.patch?.productionMode,settingsPatch:child?.settingsState?.patch||{},autoPublish:project.executionMode==='full_submit',scheduledAt:input.scheduledAt||'',scheduleMode:input.scheduleMode||'execute',concurrency:input.automationConcurrency});
+        }));
+        const failed=outcomes.filter(item=>item.status==='rejected');if(failed.length)message.warning(`${failed.length} 个项目暂未启动：${failed.map(item=>item.reason?.message||'请进入项目重试').join('；')}`);
+      }
+      message.success(`已创建 ${children.length} 个独立作品项目`);
+      return {...first,multiModeGroup:result};
+    }
+
     // 巨量素材弹窗已提前建好 intake（含 N 本占位书）：直接从 intake 建批量。
     // 旧路径 createManualIntake 的 Go 端 ManualIntakeInput 不认识 intakeId，会按空 InputText 解析报错。
     const created = input?.intakeId

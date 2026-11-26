@@ -76,23 +76,23 @@ test('lets a first-time batch owner save unified settings before creating the ba
 
 test('lets a first-time batch owner switch production mode beside the unified title', () => {
   assert.match(source, /BatchFactoryProductionModeControl/);
-  assert.match(source, /<span>新建批量 · 统一配置<\/span><BatchFactoryProductionModeControl/);
+  assert.match(source, /<span>新建批量 · 统一配置<\/span>\{multiCreation/);
   assert.match(source, /productionMode=\{initialBatchSettings\.productionMode\}/);
   assert.doesNotMatch(source, /key: 'media', label: '画面与视频'/);
 });
 
 test('shows comic analysis characters separately from the 4000-character capture limit', () => {
   assert.match(source, /initialBatchSettings\.productionMode === 'comic'/);
-  assert.match(source, /生产模式<Select value=\{initialBatchSettings\.productionMode \|\| 'video'\}/);
+  assert.match(source, /<BatchFactoryMultiModeCreationFields modes=\{creationModes\}/);
   assert.match(source, /漫画分析/);
   assert.match(source, /comicAnalysisCharacters/);
   assert.match(source, /contentCaptureCharacters/);
   assert.match(source, /comicAnalysisCharacters,/);
 });
 
-test('new batch mode menu shares the three options with unified settings and binds the text page target', () => {
-  assert.match(source, /生产模式<Select[^>]*options=\{PRODUCTION_MODE_OPTIONS\}/);
-  assert.match(source, /单页字数<InputNumber[^>]*value=\{initialBatchSettings\.textPageTarget\}/);
+test('new batch has four mode choices and retains the active text page target', () => {
+  assert.match(source, /BatchFactoryMultiModeCreationFields/);
+  assert.match(source, /单页(?:目标)?字数<InputNumber[^>]*value=\{initialBatchSettings\.textPageTarget\}/);
   const unified = fs.readFileSync(path.join(here, 'BatchFactoryUnifiedSettingsModal.jsx'), 'utf8');
   assert.match(unified, /selectedPreset = presetOptions\.find\(/);
 });
@@ -165,7 +165,7 @@ test('giant immediate execution opens the same automation-plan dialog as other b
 test('giant creation selects a versioned preset without requiring frozen metadata before dispatching reads', () => {
 	assert.match(source, /giantAutomationPlan:/);
 	assert.match(source, /expectedPresetVersion: selectedPreset\.version/);
-	assert.match(source, /automationPresetSnapshot\(automationPresets, automationPresetID\)/);
+	assert.match(source, /automationPresetSnapshot\(automationPresets, automationPresetID \|\| creationDrafts/);
 	assert.doesNotMatch(source, /saveBatchSettings/);
 	assert.doesNotMatch(source, /settingsState\?\.patch\?\.automationPresetSnapshot/);
 	assert.doesNotMatch(source, /巨量素材自动化预设未能随创建冻结/);

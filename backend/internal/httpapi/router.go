@@ -302,6 +302,11 @@ func NewRouter(options RouterOptions) http.Handler {
 	}
 	v11 := http.NewServeMux()
 	v12 := http.NewServeMux()
+	multiModeCoordinator := options.AutomationCoordinator
+	if multiModeCoordinator == nil {
+		multiModeCoordinator = &BatchAutomationCoordinator{store: options.Store, fetcher: options.NovelFetchFetcher, giantMaterialResolver: options.GiantMaterialResolver, classification: batchFetchClassification{AIGenderJudge: options.NovelFetchAIGenderJudge, AIGenderJudgeResolver: options.NovelFetchAIGenderJudgeResolver, RewriteProvider: options.NovelFetchRewrite, RewriteResolver: options.NovelFetchRewriteResolver}}
+	}
+	registerMultiModeCreationRoutes(v12, options.Store, options.PresetCatalog, multiModeCoordinator)
 	publish121Available := options.VideoManagementConnector != nil || (options.External != nil && options.External.Enabled[external.Provider121])
 	publishYadiAvailable := options.External != nil && options.External.Enabled[external.ProviderYadi]
 	// V12 is the public workbench namespace. Keep its capability contract on

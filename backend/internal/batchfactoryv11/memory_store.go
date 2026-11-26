@@ -19,6 +19,8 @@ type memoryOwned[T any] struct {
 	Value T
 }
 type MemoryStore struct {
+	multiModeMu           sync.Mutex
+	multiModeGroups       map[string]*memoryMultiModeGroup
 	mu                    sync.Mutex
 	seq                   int64
 	batches               map[string]memoryOwned[Batch]
@@ -638,7 +640,7 @@ func (s *MemoryStore) CreateBatch(_ context.Context, owner string, input CreateB
 	if b.Title == "" {
 		b.Title = "Untitled Batch"
 	}
-	for _, bi := range uniqueBatchBooks(input.Books, map[string]bool{}) {
+	for _, bi := range batchCreationBooks(input) {
 		if len(input.GiantAutomationPlan) > 0 {
 			bi.SourceMetadata = copySourceMetadataWithGiantPlan(bi.SourceMetadata, input.GiantAutomationPlan)
 		}
@@ -882,7 +884,10 @@ func (s *MemoryStore) deleteMemoryBookData(owner, batchID, bookID string) {
 		}
 	}
 }
-func (s *MemoryStore) SaveSettings(_ context.Context, owner string, ref ScopeRef, update SettingsUpdate) (SettingsResult, error) {
+func (s *MemoryStore) SaveSettings(ctx context.Context, owner string, ref ScopeRef, update SettingsUpdate) (SettingsResult, error) {
+	if err := freezeLegacyComicStylesBeforeSettings(ctx, s, owner, ref, update); err != nil {
+		return SettingsResult{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	owned, ok := s.batches[ref.BatchID]

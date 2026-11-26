@@ -42,6 +42,11 @@ func configuredComicStyleOutputs(settings batchfactoryv11.SettingsPatch) ([]batc
 	}
 	return batchfactoryv11.NormalizeComicStyleOutputs(config.Comic)
 }
+func hasScopedComicStyleOutputs(settings batchfactoryv11.SettingsPatch) bool {
+	var config batchfactoryv11.AIReasoningPromptConfig
+	_ = json.Unmarshal(settings["aiPromptConfig"], &config)
+	return config.Comic.Styles != nil
+}
 func hasMultipleComicStyles(settings batchfactoryv11.SettingsPatch) bool {
 	list, err := configuredComicStyleOutputs(settings)
 	return err == nil && len(list) > 1
@@ -70,7 +75,7 @@ func (c *BatchAutomationCoordinator) runComicStyleOutputs(ctx context.Context, o
 		if legacy, ok := c.store.(batchfactoryv11.ComicLegacyStyleStore); ok {
 			var config batchfactoryv11.AIReasoningPromptConfig
 			_ = json.Unmarshal(settings["aiPromptConfig"], &config)
-			if config.Comic.Style.ID != "" {
+			if config.Comic.Styles == nil && config.Comic.Style.ID != "" {
 				if err := legacy.AdoptLegacyComicStyle(ctx, owner, batchID, book.ID, batchfactoryv11.ComicStyleOutput{PresetSnapshot: config.Comic.Style, GlobalReferenceImage: config.Comic.GlobalReferenceImage}); err != nil {
 					return comicStyleRunResult{}, err
 				}

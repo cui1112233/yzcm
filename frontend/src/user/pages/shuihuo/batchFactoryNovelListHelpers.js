@@ -216,7 +216,7 @@ export async function waitForComicPageResult(batchId, bookId, videoId, options =
       throw stopped;
     }
     try {
-      const response = await listComicPages(batchId, bookId, { view: 'lite', silent: true, suppressGlobalError: true });
+      const response = await (options.listPages ? options.listPages({ view: 'lite', silent: true, suppressGlobalError: true }) : listComicPages(batchId, bookId, { view: 'lite', silent: true, suppressGlobalError: true }));
       const pages = resultData(response, 'pages') || [];
       const page = pages.find(item => item?.videoId === videoId);
       const primaryImage = page?.images?.find(image => image?.isPrimary) || page?.images?.[0];

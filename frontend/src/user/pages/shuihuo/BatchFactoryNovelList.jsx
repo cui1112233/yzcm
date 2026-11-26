@@ -1,3 +1,7 @@
+import ComicStyleOutputSelector from './ComicStyleOutputSelector.jsx';
+import { comicBookOutputStyles, comicMediaStyleSelection, comicStyleMediaKey } from './comicStyleMediaState.js';
+import { createComicStyleMediaAPI } from '../../../shared/api/comicStyleRequests.js';
+import { apiRequest, LONG_RUNNING_API_TIMEOUT_MS } from '../../../shared/api/client.js';
 import TextBatchPageStats from './TextBatchPageStats.jsx';
 import { resolveGiantMaterialForBatch } from '../giantMaterialExtractionClient.js';
 import { normalizeGiantMaterialId } from '../giantMaterialTest.js';
@@ -1927,7 +1931,19 @@ function InlineMediaLibrary({ book, productionStatus, mergeJob, aspectRatio = '1
   </div>;
 }
 
-function InlineComicLibrary({ batchId, book, selectedVideoId: controlledSelectedVideoId = '', onSelectedVideoChange, onManage, onChanged, refreshNonce = 0, followUntil = 0 }) {
+function InlineComicLibrary(props) {
+ const styles=comicBookOutputStyles(props.settings);
+ const [chosen,setChosen]=useState(styles[0]?.presetId || '');
+ const styleId=comicMediaStyleSelection(styles,props.selectedStyleId || chosen);
+ const chooseStyle=id=>{setChosen(id);props.onStyleChange?.(id)};
+ return <InlineComicStyleLibrary {...props} key={comicStyleMediaKey(props.batchId,props.book?.id,styleId)} styleId={styleId}
+  styleSelector={<ComicStyleOutputSelector styles={styles} value={styleId} onChange={chooseStyle}/>}
+  onManage={videoId=>props.onManage?.(videoId,styleId)}/>;
+}
+
+function InlineComicStyleLibrary({ styleId = '', styleSelector, batchId, book, selectedVideoId: controlledSelectedVideoId = '', onSelectedVideoChange, onManage, onChanged, refreshNonce = 0, followUntil = 0 }) {
+  const api=useMemo(()=>createComicStyleMediaAPI(apiRequest,batchId,book.id,styleId),[batchId,book.id,styleId]);
+  const listComicPages=(_batch,_book,options)=>api.listPages(options);
   const videos = book?.videos || [];
   const [pages, setPages] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -1971,14 +1987,16 @@ function InlineComicLibrary({ batchId, book, selectedVideoId: controlledSelected
   const pollDelay = resultPollDelay || (followActive ? 4000 : 0);
   useEffect(() => {
     if (!pollDelay || !batchId || !book?.id) return undefined;
+    let active=true;
     const timer = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return;
       listComicPages(batchId, book.id, inlineView).then(pageResponse => {
+        if(!active)return;
         setPages(resultData(pageResponse, 'pages') || []);
         setLoadError('');
       }).catch(() => {});
     }, pollDelay);
-    return () => clearInterval(timer);
+    return () => {active=false;clearInterval(timer);};
   }, [pollDelay, batchId, book?.id]);
   useEffect(() => {
     if (!videos.some(video => video.id === selectedVideoId) && videos[0]?.id) selectVideo(videos[0].id);
@@ -1986,7 +2004,7 @@ function InlineComicLibrary({ batchId, book, selectedVideoId: controlledSelected
   if (!selectedVideo) return <div className="batch-factory-cell-shell batch-factory-inline-media is-empty"><div className="batch-factory-cell-empty">提取漫画提示词后显示漫画页。</div></div>;
   const generatingPageCount = pages.filter(item => item?.generationState === 'generating').length;
   return <div className="batch-factory-cell-shell batch-factory-inline-comic">
-    <header className="batch-factory-cell-head"><div><b>漫画页 {String(selectedIndex + 1).padStart(2, '0')}</b><small>{presentation.statusText}</small>{generatingPageCount > 0 ? <small className="batch-factory-comic-stale batch-factory-comic-running"><CmLoader size={13} title="正在生成" />正在生成 {generatingPageCount} 页…</small> : (followActive ? <small className="batch-factory-comic-stale batch-factory-comic-running"><CmLoader size={13} tone="pending" title="等待开始" />已提交重试，等待开始…</small> : null)}{page?.configStale ? <small className="batch-factory-comic-stale">原文已变化，建议重新分析分页与提示词</small> : null}</div><span className={`batch-factory-cell-state${primary ? ' is-ready' : ''}`}>{presentation.stateText}</span></header>
+    {styleSelector}<header className="batch-factory-cell-head"><div><b>漫画页 {String(selectedIndex + 1).padStart(2, '0')}</b><small>{presentation.statusText}</small>{generatingPageCount > 0 ? <small className="batch-factory-comic-stale batch-factory-comic-running"><CmLoader size={13} title="正在生成" />正在生成 {generatingPageCount} 页…</small> : (followActive ? <small className="batch-factory-comic-stale batch-factory-comic-running"><CmLoader size={13} tone="pending" title="等待开始" />已提交重试，等待开始…</small> : null)}{page?.configStale ? <small className="batch-factory-comic-stale">原文已变化，建议重新分析分页与提示词</small> : null}</div><span className={`batch-factory-cell-state${primary ? ' is-ready' : ''}`}>{presentation.stateText}</span></header>
     <div className={`batch-factory-inline-comic-stage${generatingPageCount > 0 ? ' is-busy' : (followActive ? ' is-pending' : '')}`}>
       <button type="button" className="batch-factory-inline-comic-primary" onClick={() => (presentation.retry ? setReloadKey(key => key + 1) : onManage?.(selectedVideo.id))}>
         {primary?.url ? <AuthenticatedComicPageImage imageUrl={primary.url} thumbnailUrl={primary.thumbnailUrl} alt={`漫画页 ${selectedIndex + 1}`} lazy /> : <>{presentation.tone === 'busy' ? <CmLoader size={30} title="漫画页生成中" /> : <PictureOutlined />}<span>{presentation.placeholder}</span></>}
@@ -2001,7 +2019,27 @@ const COMIC_PAGE_GENERATION_LIMIT = 35;
 // 单本整本出图的页级并发；两本书同时运行时合计不超过上游 8 路的总上限。
 const COMIC_PAGE_CONCURRENCY = 4;
 
-function ComicMediaPanel({ batchId, book, comicPublishSettings = {}, initialVideoId = '', onSaved, onGeneratePage, generatingPage = false, refreshNonce = 0, onClose }) {
+function ComicMediaPanel(props) {
+ const styles=comicBookOutputStyles(props.settings);
+ const [chosen,setChosen]=useState(props.initialStyleId || styles[0]?.presetId || '');
+ const [videoId,setVideoId]=useState(props.initialVideoId || '');
+ const styleId=comicMediaStyleSelection(styles,chosen);
+ return <ComicStyleMediaPanel {...props} key={comicStyleMediaKey(props.batchId,props.book?.id,styleId)} initialVideoId={videoId}
+  styleId={styleId} onVideoSelected={setVideoId}
+  styleSelector={<ComicStyleOutputSelector styles={styles} value={styleId} onChange={setChosen}/>}/>;
+}
+
+function ComicStyleMediaPanel({ styleId = '', styleSelector, onVideoSelected, batchId, book, comicPublishSettings = {}, initialVideoId = '', onSaved, onGeneratePage, generatingPage = false, refreshNonce = 0, onClose }) {
+  const api=useMemo(()=>createComicStyleMediaAPI(apiRequest,batchId,book.id,styleId),[batchId,book.id,styleId]);
+  const listComicPages=(_b,_k,o)=>api.listPages(o);
+  const listComicCollections=(_b,_k,o)=>api.listCollections(o);
+  const getComicCollectionPublishRecord=(_b,_k,c,o)=>api.publishRecord(c,o);
+  const createComicCollection=(_b,_k,p)=>api.createCollection(p);
+  const publishComicCollection=(_b,_k,c,p)=>api.publish(c,p);
+  const downloadComicCollectionImageZip=(_b,_k,c)=>api.downloadCollection(c);
+  const setPrimaryComicPageImage=(_b,_k,p,i)=>api.primaryImage(p,i);
+  const setComicPageReferenceImages=(_b,_k,v,refs)=>api.references(v,refs);
+  const applyComicPageReferenceImages=(_b,_k,v)=>api.applyReferences(v);
   const videos = book?.videos || [];
   const [pages, setPages] = useState([]);
   // 403/404 时 pages 会是空数组；必须和「真的 0 页」区分开，
@@ -2057,12 +2095,16 @@ function ComicMediaPanel({ batchId, book, comicPublishSettings = {}, initialVide
       : readyComicPageCount
         ? `当前第 ${selectedIndex + 1} 页尚未完成，系统仍在继续生成；${readyComicPageSummary}`
         : '当前页尚未完成，系统会继续自动生成';
+  const mounted=useRef(true);
+  useEffect(()=>()=>{mounted.current=false;},[]);
+  useEffect(()=>{onVideoSelected?.(selectedVideoId);},[selectedVideoId]);
   async function load() {
     const [pageResponse, collectionResponse, sourceResponse] = await Promise.all([
       listComicPages(batchId, book.id),
       listComicCollections(batchId, book.id),
       getComicSourceSegments(batchId, book.id, { silent: true, suppressGlobalError: true }).catch(() => ({ segmentation: null }))
     ]);
+    if(!mounted.current)return [];
     // 先渲染分页、合集和原文分段；发布记录稍后补，不能阻塞首屏数据。
     const nextCollections = resultData(collectionResponse, 'collections') || [];
     const nextPages = resultData(pageResponse, 'pages') || [];
@@ -2076,7 +2118,7 @@ function ComicMediaPanel({ batchId, book, comicPublishSettings = {}, initialVide
       const record = publishRecords[index]?.publish;
       if (publishRecords[index]?.published === true && record) nextPublished[collection.id] = record;
     });
-    setPublishedByCollection(nextPublished);
+    if(mounted.current)setPublishedByCollection(nextPublished);
     return nextPages;
   }
 	useEffect(() => {
@@ -2243,7 +2285,7 @@ function ComicMediaPanel({ batchId, book, comicPublishSettings = {}, initialVide
 	async function regenerateCurrentPage() {
 		if (!selectedVideoId || !onGeneratePage) return;
 		const beforeImageIDs = new Set((selectedPage?.images || []).map(image => image.id));
-		await onGeneratePage?.(selectedVideoId, selectedVideo?.comicImagePrompt || selectedVideo?.comicPrompt || '');
+		await onGeneratePage?.(selectedVideoId, selectedVideo?.comicImagePrompt || selectedVideo?.comicPrompt || '',styleId);
 		const nextPages = await load();
 		const nextPage = (nextPages || []).find(page => page.videoId === selectedVideoId);
 		const newest = (nextPage?.images || [])
@@ -2374,7 +2416,7 @@ function ComicMediaPanel({ batchId, book, comicPublishSettings = {}, initialVide
 		<section className="batch-factory-comic-media-preview">{primary?.url ? <AuthenticatedComicPageImage imageUrl={primary.url} thumbnailUrl={primary.thumbnailUrl} alt="当前漫画主图" preview /> : <div className="batch-factory-comic-media-preview-empty"><PictureOutlined /><strong>{selectedPage ? '当前漫画页还没有主图' : '当前分镜还没有漫画候选图'}</strong><span>{selectedComicPageStatus}</span><small>{pageAccessMessage || `整体完成度 ${readyComicPageCount} / ${videos.length} 页（${comicCompletionPercent}%）`}</small></div>}{generatingPage ? <div className="batch-factory-comic-media-generating" role="status"><CmLoader size={30} title="漫画页生成中" /><strong>正在生成当前漫画页…</strong><span>完成后会自动切换为新主图</span></div> : null}</section>
 		<aside className="batch-factory-comic-media-tools">
 		<header className="batch-factory-comic-media-header"><div className="batch-factory-comic-media-title"><small>媒体库</small><b>{book?.title || '未命名作品'}</b><span>{selectedVideo ? `漫画页 ${String(selectedIndex + 1).padStart(2, '0')}` : '漫画页'} · {primary ? '主图已就绪' : '尚未选择主图'}</span>{selectedPage?.configStale ? <em>原文已变化，建议重新分析分页与提示词</em> : null}</div>{pageAccessMessage ? <div className="batch-factory-comic-media-completion" role="status" aria-label={pageAccessMessage}><span>完成度</span><b>无数据</b><i>—</i></div> : <div className="batch-factory-comic-media-completion" aria-label={`完成度 ${readyComicPageCount}/${videos.length} 页`}><span>完成度</span><b>{readyComicPageCount} / {videos.length} 页</b><i>{comicCompletionPercent}%</i><div className="batch-factory-comic-media-completion-track"><span style={{ width: `${comicCompletionPercent}%` }} /></div></div>}<Space><Tooltip title="让 AI 按剧情重新分析小说分段"><Button loading={busy === 'segmentation'} disabled={Boolean(busy)} onClick={resegmentSource}>重新分析分段</Button></Tooltip><Tooltip title={canMakeCollection ? `按当前选择的第 ${normalizedCollectionStart}-${normalizedCollectionEnd} 页生成漫画合集` : `所选页需要全部有主图，且合集必须为 2–35 页`}><Button type="primary" loading={busy === 'collection'} disabled={!canMakeCollection || Boolean(busy)} onClick={makeCollection}>生成漫画合集（所选页）</Button></Tooltip>{onClose ? <Button type="text" aria-label="关闭漫画媒体库" icon={<CloseOutlined />} onClick={onClose} /> : null}</Space></header>
-			<Tabs className="batch-factory-comic-media-tabs" activeKey={activeView} onChange={setActiveView} items={[{ key: 'pages', label: `漫画页 ${videos.length}` }, { key: 'collections', label: `漫画合集 ${collections.length}` }]} />
+			{styleSelector}<Tabs className="batch-factory-comic-media-tabs" activeKey={activeView} onChange={setActiveView} items={[{ key: 'pages', label: `漫画页 ${videos.length}` }, { key: 'collections', label: `漫画合集 ${collections.length}` }]} />
 			<div className="batch-factory-comic-media-scroll">{activeView === 'pages' ? pageTab : collectionTab}</div>
 			<footer className="batch-factory-comic-media-footer"><div><Button disabled={selectedIndex === 0} aria-label="上一页" icon={<LeftOutlined />} onClick={() => setSelectedVideoId(videos[selectedIndex - 1]?.id)} /><span><b>{String(selectedIndex + 1).padStart(2, '0')}</b> / {String(videos.length).padStart(2, '0')}</span><Button disabled={selectedIndex >= videos.length - 1} aria-label="下一页" icon={<RightOutlined />} onClick={() => setSelectedVideoId(videos[selectedIndex + 1]?.id)} /></div><Button icon={<ReloadOutlined />} loading={generatingPage} disabled={!selectedVideoId || Boolean(busy) || generatingPage || !onGeneratePage} onClick={regenerateCurrentPage}>{generatingPage ? '正在生成…' : '重新生成本页'}</Button></footer>
 		</aside>
@@ -3618,9 +3660,11 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
 	const [promptVideoId, setPromptVideoId] = useState('');
 	const [mediaBook, setMediaBook] = useState(null);
 	const [mediaVideoId, setMediaVideoId] = useState('');
+ const [mediaComicStyleId,setMediaComicStyleId]=useState('');
 	const [mediaStartTab, setMediaStartTab] = useState('clips');
 	const [pendingMediaPrompt, setPendingMediaPrompt] = useState(null);
 	const [rowStoryboardSelection, setRowStoryboardSelection] = useState({});
+ const [rowComicStyleSelection,setRowComicStyleSelection]=useState({});
   const [unifiedSettingsOpen, setUnifiedSettingsOpen] = useState(false);
   // 保存统一配置后关弹窗立刻返回；配音测量/提示词重编译在后台按“每本书自己的
   // 引擎配置”继续跑，进度与失败都回显在这里，不再阻塞弹窗。
@@ -4962,9 +5006,10 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
       message.success(book ? '当前小说的视频任务已提交。' : '批量视频任务已提交。');
     } catch (error) { message.error(error?.message || '提交视频任务失败'); } finally { setActionBusy(''); }
   }
-  async function generateBookComicPage(book, videoId, prompt = '') {
+  async function generateBookComicPage(book, videoId, prompt = '', styleId = '') {
     if (!batch?.id || !book?.id || !videoId) return;
-    const requestKey = `page:${book.id}:${videoId}`;
+    styleId=styleId || rowComicStyleSelection[book.id] || comicBookOutputStyles(effectiveBookSettings(batch,book))[0]?.presetId || '';
+    const requestKey = `page:${book.id}:${videoId}:${styleId}`;
     if (comicGenerationInFlightRef.current.has(requestKey)) return;
 	const settings = effectiveBookSettings(batch, book);
 	const page = book.videos?.find(video => video.id === videoId);
@@ -4974,8 +5019,10 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
     if (settings.productionMode !== 'comic') { message.error('生成漫画页失败：当前小说不是漫画生成模式。请先在统一配置中切换模式。'); return; }
     if (!payload.imagePrompt) { message.error('生成漫画页失败：当前分镜还没有图片提示词。请先生成分镜提示词。'); return; }
     if (!payload.modelId) { message.error('生成漫画页失败：还没有选择图片模型。请先在统一配置里选择图片模型。'); return; }
+    payload.styleId=styleId;
+    const styleAPI=createComicStyleMediaAPI(apiRequest,batch.id,book.id,styleId);
     comicGenerationInFlightRef.current.add(requestKey);
-    const busyKey = `comic-image-${book.id}-${videoId}`;
+    const busyKey = `comic-image-${book.id}-${videoId}-${styleId}`;
     markComicTask(busyKey, true);
     try {
       message.loading({ key: busyKey, content: '正在生成当前漫画页…（1 页）', duration: 0 });
@@ -4984,10 +5031,11 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
         message.info({ key: busyKey, content: '有 1 页正在生成中，已启动轮询…（1 页）', duration: 0 });
       }
       await finishComicPageGeneration({
-        waitForResult: () => waitForComicPageResult(batch.id, book.id, videoId),
+        waitForResult: () => waitForComicPageResult(batch.id, book.id, videoId,{listPages:o=>styleAPI.listPages(o)}),
         revealResult: () => {
           setComicPageRefreshNonce(value => value + 1);
           setMediaStartTab('comic');
+          setMediaComicStyleId(styleId);
           setMediaVideoId(videoId);
           setMediaBook(book);
           message.success({ key: busyKey, content: '已生成当前漫画页（1 页）；第一张已设为主图。' });
@@ -5022,6 +5070,14 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
   }
   async function generateBookComic(book) {
     if (!batch?.id || !book?.id) return;
+    const outputs=comicBookOutputStyles(effectiveBookSettings(batch,book));
+    if(outputs.length>1){
+      const key=`comic-multistyle-${book.id}`;
+      try{message.loading({key,content:`正在生成 ${outputs.length} 种画风…`,duration:0});
+        await createComicStyleMediaAPI(apiRequest,batch.id,book.id).generateBook({timeoutMs:LONG_RUNNING_API_TIMEOUT_MS});
+        await refreshBatch();setComicPageRefreshNonce(value=>value+1);message.success({key,content:'各画风合集已完成'});
+      }catch(error){message.error({key,content:error.message || '多画风生成失败，可继续补缺失页'});}return;
+    }
     const requestKey = `book:${book.id}`;
     if (comicGenerationInFlightRef.current.has(requestKey)) return;
     const settings = effectiveBookSettings(batch, book);
@@ -6338,6 +6394,9 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
                 {productionMode !== "text" ? <div className={`shuihuo-workbench-cell shuihuo-library-cell batch-factory-book-library-cell${automationActiveCell === 'comic' ? ' is-automation-cell' : ''}`}>
                   {productionMode === "comic" ? (
                     <DeferredInlineComicLibrary
+                      selectedStyleId={rowComicStyleSelection[book.id] || ''}
+                      onStyleChange={styleId=>setRowComicStyleSelection(current=>({...current,[book.id]:styleId}))}
+                      settings={effectiveBookSettings(batch,book)}
                       batchId={batch?.id}
                       book={book}
                       followUntil={comicFollowUntil}
@@ -6351,7 +6410,8 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
                           [book.id]: videoId,
                         }))
                       }
-                      onManage={(videoId) => {
+                      onManage={(videoId,styleId) => {
+                        setMediaComicStyleId(styleId || '');
                         setMediaVideoId(videoId || "");
                         setMediaStartTab("comic");
                         setMediaBook(book);
@@ -6957,7 +7017,7 @@ export function BatchFactoryNovelList({ batch, onBack, onBatchChanged, openAutom
       className={`batch-factory-media-library-modal${pageMediaMode ? ' is-' + mediaMode : ''}`}
       destroyOnClose
     >
-	  {mediaBook ? (mediaMode === 'comic' ? <ComicMediaPanel batchId={batch?.id} book={mediaBook} refreshNonce={comicPageRefreshNonce} comicPublishSettings={effectiveBookSettings(batch, mediaBook).comicPublishSettings || {}} initialVideoId={mediaVideoId} onSaved={refreshBatch} onGeneratePage={(videoId, prompt) => generateBookComicPage(mediaBook, videoId, prompt)} generatingPage={Array.from(comicTaskKeys).some(key => key.startsWith(`comic-image-${mediaBook.id}-`))} onClose={() => { setMediaBook(null); setMediaVideoId(''); setMediaStartTab('clips'); }} /> : <MediaVersionPanel
+	  {mediaBook ? (mediaMode === 'comic' ? <ComicMediaPanel settings={effectiveBookSettings(batch,mediaBook)} initialStyleId={mediaComicStyleId} batchId={batch?.id} book={mediaBook} refreshNonce={comicPageRefreshNonce} comicPublishSettings={effectiveBookSettings(batch, mediaBook).comicPublishSettings || {}} initialVideoId={mediaVideoId} onSaved={refreshBatch} onGeneratePage={(videoId, prompt,styleId) => generateBookComicPage(mediaBook, videoId, prompt,styleId)} generatingPage={Array.from(comicTaskKeys).some(key => key.startsWith(`comic-image-${mediaBook.id}-`))} onClose={() => { setMediaBook(null); setMediaVideoId(''); setMediaStartTab('clips'); }} /> : <MediaVersionPanel
         book={mediaBook}
         batchId={batch?.id}
         productionStatus={productionStatus}

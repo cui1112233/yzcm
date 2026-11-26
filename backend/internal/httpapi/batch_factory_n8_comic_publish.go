@@ -666,6 +666,10 @@ func registerN8ComicPublishRoutes(mux *http.ServeMux, publisher *BatchFactoryN8C
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "漫画发布记录存储尚未配置"})
 			return
 		}
+		if err := publisher.validateComicStyleCollection(r.Context(), owner, r.PathValue("batchId"), r.PathValue("bookId"), r.PathValue("collectionId")); err != nil {
+			writeStoreError(w, err)
+			return
+		}
 		record, found, err := publisher.collectionService().Status(r.Context(), collectionpublish.PublishRequest{Kind: collectionpublish.CollectionKindComic, Owner: owner, BatchID: r.PathValue("batchId"), BookID: r.PathValue("bookId"), CollectionID: r.PathValue("collectionId")})
 		if err != nil {
 			writeStoreError(w, err)
@@ -984,6 +988,9 @@ func (p *BatchFactoryN8ComicPublisher) Publish(ctx context.Context, owner, batch
 	if p == nil || p.Store == nil {
 		return N8ComicPublishRecord{}, fmt.Errorf("N8 漫画发布接口尚未配置")
 	}
+	if err := p.validateComicStyleCollection(ctx, owner, batchID, bookID, collectionID); err != nil {
+		return N8ComicPublishRecord{}, err
+	}
 	rec, err := p.collectionService().Publish(ctx, req, func(ctx context.Context, r *collectionpublish.PublishRequest) (collectionpublish.Collection, error) {
 		var out collectionpublish.Collection
 		if p.LocalFiles == nil || p.Client == nil || !p.Client.Configured() {
@@ -1080,4 +1087,25 @@ func n8ComicCollectionName(producer, title string, now time.Time) (string, error
 		titleRunes = titleRunes[:remaining]
 	}
 	return prefix + string(titleRunes), nil
+}
+
+// Validate the selected scope before the service can reuse a saved receipt.
+func (p *BatchFactoryN8ComicPublisher) validateComicStyleCollection(ctx context.Context, owner, batchID, bookID, collectionID string) error {
+	if batchfactoryv11.ComicStyleOutputID(ctx) == "" {
+		return nil
+	}
+	store, ok := p.Store.(batchfactoryv11.ComicPageStore)
+	if !ok {
+		return batchfactoryv11.ErrUnavailable
+	}
+	collections, err := store.ListComicCollections(ctx, owner, batchID, bookID)
+	if err != nil {
+		return err
+	}
+	for _, collection := range collections {
+		if collection.ID == collectionID {
+			return nil
+		}
+	}
+	return batchfactoryv11.ErrNotFound
 }

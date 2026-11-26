@@ -1,0 +1,7 @@
+.batch-factory-multimode-create { margin: 14px 0; padding: 12px; border: 1px solid var(--sh-border); border-radius: 10px; background: var(--sh-panel); }
+.batch-factory-multimode-create .ant-checkbox-group { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+.batch-factory-multimode-projects { margin-top: 12px; display: grid; gap: 8px; }
+.batch-factory-multimode-project { display: grid; grid-template-columns: 78px minmax(130px,1fr) 120px auto auto; gap: 8px; align-items: center; padding: 8px; border-radius: 8px; border: 1px solid var(--sh-border); }
+.batch-factory-multimode-project.is-active { border-color: var(--sh-accent); }
+.batch-factory-multimode-project strong { font-size: 12px; color: var(--sh-text); }
+@media(max-width:700px){.batch-factory-multimode-project{grid-template-columns:78px minmax(120px,1fr);}.batch-factory-multimode-project .ant-select{width:100%;}}

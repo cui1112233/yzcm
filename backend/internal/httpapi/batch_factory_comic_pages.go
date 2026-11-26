@@ -902,6 +902,9 @@ func (g comicPageGenerator) persistRepairedComicPrompt(ctx context.Context, comi
 	if err != nil {
 		return current, "", err
 	}
+	if batchfactoryv11.ComicStyleOutputID(ctx) != "" {
+		return updated, repairedRaw, nil
+	}
 	comicPromptRaw, _ := json.Marshal(input.ComicPrompt)
 	imagePromptRaw, _ := json.Marshal(repairedRaw)
 	if _, err := g.store.SaveSettings(ctx, owner, batchfactoryv11.ScopeRef{
@@ -1635,8 +1638,22 @@ func (g comicPageGenerator) generateBook(ctx context.Context, owner, batchID, bo
 				progress("comic_images", fmt.Sprintf("正在生成漫画第 %d/%d 张（已完成 %d/%d 张）", item.index+1, totalPages, completedPages, totalPages))
 				resultMu.Unlock()
 			}
+			comicPrompt, imagePrompt := item.page.ComicPrompt, item.page.ComicImagePrompt
+			if batchfactoryv11.ComicStyleOutputID(ctx) != "" {
+				for _, saved := range existingPages {
+					if saved.VideoID == item.page.ID {
+						if saved.ComicPrompt != "" {
+							comicPrompt = saved.ComicPrompt
+						}
+						if saved.ImagePrompt != "" {
+							imagePrompt = saved.ImagePrompt
+						}
+						break
+					}
+				}
+			}
 			_, _, generateErr := g.generatePage(generateCtx, owner, batchID, bookID, item.page.ID, batchfactoryv11.UpsertComicPageInput{
-				ComicPrompt: item.page.ComicPrompt, ImagePrompt: item.page.ComicImagePrompt, Provider: provider,
+				ComicPrompt: comicPrompt, ImagePrompt: imagePrompt, Provider: provider,
 				ModelID: modelID, AspectRatio: aspectRatio,
 			})
 			if generateErr != nil {
@@ -2608,6 +2625,12 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 					return
 				}
 				coordinator := &BatchAutomationCoordinator{store: store, now: time.Now, comicGenerate: generator.generateBook}
+				coordinator.stages = production.stages
+				book, readErr = coordinator.confirmComicSharedStory(r.Context(), owner, batch.ID, book, settings, false)
+				if readErr != nil {
+					writeStoreError(w, readErr)
+					return
+				}
 				result, runErr := coordinator.runComicStyleOutputs(r.Context(), owner, batch.ID, book, settings, map[string]any{}, func() {}, false, false)
 				if runErr != nil {
 					writeStoreError(w, runErr)
@@ -3287,7 +3310,7 @@ func planComicPromptZip(ctx context.Context, store batchfactoryv11.Store, comicS
 		pagesByVideo[page.VideoID] = page
 	}
 	effective := batchfactoryv11.ResolveSettings(batch.SettingsState.Patch, book.SettingsState.Patch)
-	effective, err = resolvePublishedComicStyleReference(effective, presetCatalog)
+	effective, err = resolveScopedPublishedComicStyleReference(ctx, effective, presetCatalog)
 	if err != nil {
 		return comicZipPlan{}, err
 	}

@@ -1,3 +1,5 @@
+import BatchFactoryMultiModeCreationFields from './BatchFactoryMultiModeCreationFields.jsx';
+import {CREATION_MODE_OPTIONS,modeCreationControls,modeCreationSettings,applyMultiModePreset,buildMultiModeCreationRequest} from './batchFactoryMultiModeCreation.js';
 import { Alert, Button, Input, InputNumber, Modal, Select, Space, Switch, Tabs, Tag, message } from 'antd';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { getWorkshopPlatforms } from '../../../shared/api/novelFetchWorkshop';
@@ -84,12 +86,44 @@ export function BatchFactoryCreateModal({ open, onCancel, onCreated, onBatchUpda
   const [executorHealth, setExecutorHealth] = useState(null);
   const [giantOriginalReadStrategy, setGiantOriginalReadStrategy] = useState('ocr_first');
   const [initialSettingsDraft, setInitialBatchSettings] = useState({});
+  const [creationModes,setCreationModes]=useState(['video']);
+  const [activeCreationMode,setActiveCreationMode]=useState('video');
+  const [modeDrafts,setModeDrafts]=useState({});
+  const multiModeRequestRef=useRef(globalThis.crypto?.randomUUID?.() || `modes-${Date.now()}-${Math.random()}`);
+  const multiCreation=creationModes.length>1 || creationModes[0]==='illustrated_text';
+
   const initialBatchSettings = batchCreationSettings(initialSettingsDraft, captureCharacters);
   const batchMode = batchFactoryProductionMode(initialBatchSettings.productionMode);
   const contentCaptureCharacters = batchMode === 'text' ? initialBatchSettings.contentRange : captureCharacters;
   const [initialSettingsOpen, setInitialSettingsOpen] = useState(false);
   const giantControllerRef = useRef(null);
   const customCopySessionRef = useRef('');
+  const creationDrafts={...modeDrafts,[activeCreationMode]:{...(modeDrafts[activeCreationMode]||{}),settings:{...initialBatchSettings,contentCaptureCharacters:contentCaptureCharacters,contentRange:contentCaptureCharacters,contentRangeLines,comicAnalysisCharacters},presetId:automationPresetID || modeDrafts[activeCreationMode]?.presetId || '',executionMode:modeDrafts[activeCreationMode]?.executionMode || automationRunMode}};
+  useEffect(()=>{if(!open)return;let alive=true;listAutomationPresets().then(result=>{if(alive)setAutomationPresets(result?.presets||[])}).catch(()=>{});return()=>{alive=false};},[open]);
+  function editCreationMode(mode,openSettings=false){
+    setModeDrafts(creationDrafts);
+    setActiveCreationMode(mode);
+    const next=creationDrafts[mode] || {};
+    setInitialBatchSettings(modeCreationSettings(mode,next.settings||{}));
+    restoreCreationControls(next.settings);
+    setAutomationPresetID(next.presetId||'');
+    if(openSettings)setInitialSettingsOpen(true);
+  }
+  function restoreCreationControls(settings){
+    const controls=modeCreationControls(settings);
+    setCaptureCharacters(controls.captureCharacters);
+    setContentRangeLines(controls.contentRangeLines);
+    setComicAnalysisCharacters(controls.comicAnalysisCharacters);
+  }
+  function selectCreationModes(modes){setCreationModes(modes);if(!modes.includes(activeCreationMode))editCreationMode(modes[0]);}
+  function selectCreationPreset(mode,id){
+    try{const next=applyMultiModePreset(creationDrafts,mode,automationPresets.find(p=>p.id===id));setModeDrafts(next);if(mode===activeCreationMode){setInitialBatchSettings(next[mode].settings);restoreCreationControls(next[mode].settings);setAutomationPresetID(id)}}catch(error){message.error(error.message)}
+  }
+  function multiRequest(manualInput,intakeId){
+    if(creationModes.some(mode=>!creationDrafts[mode]?.presetId))throw Error('请为每种生产模式选择预设');
+    return buildMultiModeCreationRequest({requestId:multiModeRequestRef.current,title,modes:creationModes,settingsByMode:creationDrafts,manualInput,intakeId});
+  }
+
 
   async function loadPlatforms() {
     setPlatformState('loading');
@@ -137,8 +171,8 @@ export function BatchFactoryCreateModal({ open, onCancel, onCreated, onBatchUpda
   const isCustomCopy = platformId === CUSTOM_COPY_OPTION.value;
   const isComicProduction = initialBatchSettings.productionMode === 'comic';
   function changeProductionMode(productionMode) {
-    setInitialBatchSettings(current => ({ ...current, productionMode }));
-    if (productionMode !== batchMode) setAutomationPresetID('');
+    if(!multiCreation)setCreationModes([productionMode]);
+    editCreationMode(productionMode);
   }
 
   function changeCaptureCharacters(value) {
@@ -182,6 +216,7 @@ export function BatchFactoryCreateModal({ open, onCancel, onCreated, onBatchUpda
     setGroups([]);
     setEditingPlatformId(null);
     setInitialBatchSettings({});
+    setCreationModes(['video']);setActiveCreationMode('video');setModeDrafts({});multiModeRequestRef.current=globalThis.crypto?.randomUUID?.() || `modes-${Date.now()}-${Math.random()}`;
     setInitialSettingsOpen(false);
   }
 
@@ -368,7 +403,7 @@ export function BatchFactoryCreateModal({ open, onCancel, onCreated, onBatchUpda
     const items = giantItems.filter(item => item.status === 'resolved');
     if (!items.length) return message.warning('请先点击“解析全部”并等待解析完成');
     if (scheduledRun && !scheduledAt) return message.warning('请选择北京时间自动启动时间');
-    if ((scheduledRun || automationRun) && !automationPresetID) return message.warning('请选择自动化预设');
+    if ((scheduledRun || automationRun) && !multiCreation && !automationPresetID) return message.warning('请选择自动化预设');
     const scheduledAtISO = scheduledRun ? parseBeijingDatetimeLocal(scheduledAt) : '';
     if (scheduledRun && (!scheduledAtISO || new Date(scheduledAtISO).getTime() <= Date.now())) return message.warning('北京时间自动启动时间需要晚于现在');
     if (giantOriginalReadStrategy !== 'direct_first' && executorHealth?.online !== true) return message.warning('巨量素材执行器未安装或未登录，请先在执行器配置页完成配对');
@@ -389,11 +424,11 @@ export function BatchFactoryCreateModal({ open, onCancel, onCreated, onBatchUpda
       const intakeResponse = await createNovelFetchIntake(intakePayload);
       const intake = intakeResponse?.intake || intakeResponse;
       if (!intake?.id) throw new Error('GIANT_MATERIAL_INTAKE_FAILED');
-      const selectedPreset = (scheduledRun || automationRun) ? automationPresetSnapshot(automationPresets, automationPresetID) : null;
+      const selectedPreset = (scheduledRun || automationRun) ? automationPresetSnapshot(automationPresets, automationPresetID || creationDrafts[creationModes[0]]?.presetId) : null;
       if ((scheduledRun || automationRun) && !selectedPreset) throw new Error('所选自动化预设不存在或没有可用配置，请重新选择。');
       if (selectedPreset) {
         const presetMode = automationPresetMode(selectedPreset);
-        if (presetMode && presetMode !== batchMode) throw new Error(`所选预设属于${automationPresetModeLabel(presetMode)}生产模式，不能用于当前${automationPresetModeLabel(batchMode)}批次，请换一个预设`);
+        if (!multiCreation && presetMode && presetMode !== batchMode) throw new Error(`所选预设属于${automationPresetModeLabel(presetMode)}生产模式，不能用于当前${automationPresetModeLabel(batchMode)}批次，请换一个预设`);
       }
       const giantAutomationPlan = (scheduledRun || automationRun) ? {
         scheduledAt: scheduledAtISO,
@@ -404,6 +439,7 @@ export function BatchFactoryCreateModal({ open, onCancel, onCreated, onBatchUpda
         concurrency: normalizeAutomationConcurrency(automationConcurrency)
       } : undefined;
       const batch = await onCreated?.({
+        ...(multiCreation ? {multiModeRequest:multiRequest(undefined,intake.id),multiModeAutomationRequested:scheduledRun||automationRun} : {}),
         intakeId: intake.id,
         title: title.trim(),
         scheduledAt: scheduledAtISO,
@@ -534,7 +570,7 @@ export function BatchFactoryCreateModal({ open, onCancel, onCreated, onBatchUpda
       }
       // 自动化只在整批素材的正文读取已全部派发后启动一次。引擎会把仍在直取或 OCR
       // 的书保持在“等待正文读取”，而不是把每条 ID 的成功回调都当成一条新生产任务。
-      if (giantAutomationPlan?.presetId && !hasDirectReadFailure) {
+      if (giantAutomationPlan?.presetId && !hasDirectReadFailure && !multiCreation) {
         try {
           await startBatchAutomation(batchId, giantAutomationPlan);
         } catch (automationError) {
@@ -623,7 +659,7 @@ export function BatchFactoryCreateModal({ open, onCancel, onCreated, onBatchUpda
 
     const automationEnabled = scheduledRun || automationRun;
     if (scheduledRun && !scheduledAt) return message.warning('请选择北京时间自动启动时间');
-    if (automationEnabled && !automationPresetID) return message.warning('请选择自动化预设');
+    if (automationEnabled && !multiCreation && !automationPresetID) return message.warning('请选择自动化预设');
     const scheduledAtISO = scheduledRun ? parseBeijingDatetimeLocal(scheduledAt) : '';
     if (scheduledRun && (!scheduledAtISO || new Date(scheduledAtISO).getTime() <= Date.now())) return message.warning('北京时间自动启动时间需要晚于现在');
 
@@ -683,7 +719,7 @@ export function BatchFactoryCreateModal({ open, onCancel, onCreated, onBatchUpda
 
       if (!validateDraft()) return;
 
-      await onCreated(buildManualBatchSubmission({
+      const submission=buildManualBatchSubmission({
         title: title.trim(),
         groups: groups.map(group => ({
           platformId: group.platformId,
@@ -707,7 +743,8 @@ export function BatchFactoryCreateModal({ open, onCancel, onCreated, onBatchUpda
         runMode: automationRunMode,
         automationConcurrency: normalizeAutomationConcurrency(automationConcurrency),
         initialBatchSettings: clone(initialBatchSettings)
-      }));
+      });
+      await onCreated(multiCreation ? {...submission,multiModeRequest:multiRequest(submission)} : submission);
       reset();
       if (failedPlatforms.length > 0) {
         message.warning(`${fetchedCount}/${totalCount} 本已抓到正文；以下书城抓取失败：${failedPlatforms.join('、')}。${failedReasons.join('；')}失败的书已在列表中标红，可单独重试`);
@@ -844,7 +881,10 @@ export function BatchFactoryCreateModal({ open, onCancel, onCreated, onBatchUpda
     ) : null}
 
     <div className="batch-factory-content-controls">
-      <label className="shuihuo-form-label">生产模式<Select value={initialBatchSettings.productionMode || 'video'} onChange={changeProductionMode} options={PRODUCTION_MODE_OPTIONS} /></label>
+      <BatchFactoryMultiModeCreationFields modes={creationModes} activeMode={activeCreationMode} drafts={creationDrafts} presets={automationPresets} disabled={busy}
+      onModesChange={selectCreationModes} onPresetChange={selectCreationPreset}
+      onExecutionChange={(mode,value)=>setModeDrafts(current=>({...creationDrafts,[mode]:{...creationDrafts[mode],executionMode:value}}))}
+      onConfigure={mode=>editCreationMode(mode,true)}/>
       {isComicProduction
         ? <label className="shuihuo-form-label">漫画分析<InputNumber min={100} max={100000} step={100} value={comicAnalysisCharacters} onChange={value => setComicAnalysisCharacters(Math.min(100000, Math.max(100, Number(value) || 2000)))} addonAfter="字" /> <small>预计约 {comicEstimatedPageRange(comicAnalysisCharacters).min}-{comicEstimatedPageRange(comicAnalysisCharacters).max} 张 · 最多 35 张</small></label>
         : batchMode === 'text'
@@ -854,7 +894,7 @@ export function BatchFactoryCreateModal({ open, onCancel, onCreated, onBatchUpda
     </div>
   </Modal>
   <Modal
-    title={<div className="batch-factory-unified-settings-title"><BatchFactoryAutomationPresetManager value={initialBatchSettings} productionMode={batchMode} onLoad={setInitialBatchSettings} /><span>新建批量 · 统一配置</span><BatchFactoryProductionModeControl value={initialBatchSettings.productionMode} onChange={changeProductionMode} /></div>}
+    title={<div className="batch-factory-unified-settings-title"><BatchFactoryAutomationPresetManager value={initialBatchSettings} productionMode={batchMode} onLoad={setInitialBatchSettings} /><span>新建批量 · 统一配置</span>{multiCreation ? <Tag>{CREATION_MODE_OPTIONS.find(item=>item.value===activeCreationMode)?.label}</Tag> : <BatchFactoryProductionModeControl value={initialBatchSettings.productionMode} onChange={changeProductionMode} />}</div>}
     open={initialSettingsOpen}
     onCancel={() => setInitialSettingsOpen(false)}
     onOk={() => setInitialSettingsOpen(false)}
@@ -884,6 +924,7 @@ export function BatchFactoryCreateModal({ open, onCancel, onCreated, onBatchUpda
     {automationDialogMode === 'scheduled' ? <><label className="shuihuo-form-label" htmlFor="batch-scheduled-at">自动启动时间（北京时间 UTC+8） <em>*</em></label>
     <Input id="batch-scheduled-at" type="datetime-local" value={scheduledAt} onChange={event => setScheduledAt(event.target.value)} />
     <small>{automationScheduleMode === 'submit' ? '提前完成生产和合成；到设定时间才上传或发布。' : '到设定时间才开始生产；生成、合成与上传按后续流程继续。'}</small></> : <Alert type="info" showIcon message={batchMode === 'text' ? '创建完成后立即生成文本合集' : '创建完成后立即启动自动生产'} description={batchMode === 'text' ? '创建后生成文本合集；只有开启上传模式，才会按发布统一配置上传。' : '不会直接提交；只有选择全自动模式且成片完成后，才会上传视频管理系统。'} />}
+    {multiCreation ? <div>{creationModes.map(mode=><Tag key={mode}>{CREATION_MODE_OPTIONS.find(item=>item.value===mode)?.label} · {creationDrafts[mode]?.presetId ? '已选预设' : '未选预设'}</Tag>)}</div> : <>
     <label className="shuihuo-form-label">自动化预设 <em>*</em></label>
     <Select value={automationPresetID || undefined} onChange={setAutomationPresetID} placeholder="选择已保存预设" options={automationPresetsForMode(automationPresets, batchMode).map(item => ({ value: item.id, label: `${item.name} · v${item.version} · ${automationPresetModeLabel(automationPresetMode(item))}` }))} />
     <label className="shuihuo-form-label">执行模式</label>
@@ -892,6 +933,7 @@ export function BatchFactoryCreateModal({ open, onCancel, onCreated, onBatchUpda
       : batchMode === 'comic'
         ? [{ value: 'storyboard_only', label: '只生成漫画分页与提示词' }, { value: 'video_no_submit', label: '生成漫画合集不上传' }, { value: 'full_submit', label: '全自动生成并提交' }]
         : [{ value: 'storyboard_only', label: '只生成分镜' }, { value: 'video_no_submit', label: '生成视频不提交' }, { value: 'full_submit', label: '全自动生成并提交（成片完成后上传）' }]} />
+    </>}
     {automationDialogMode === 'scheduled' ? <><label className="shuihuo-form-label">定时方式</label><Select value={automationScheduleMode} onChange={setAutomationScheduleMode} options={[{ value: 'execute', label: '定时执行（到点才开始生产）' }, { value: 'submit', label: '定时提交（提前生产，到点上传/发布）', disabled: automationRunMode !== 'full_submit' }]} /></> : null}
     <label className="shuihuo-form-label">同时处理书籍</label>
     <Select value={automationConcurrency} onChange={value => setAutomationConcurrency(normalizeAutomationConcurrency(value))} options={[1, 2, 4].map(value => ({ value, label: `${value} 本并行` }))} />

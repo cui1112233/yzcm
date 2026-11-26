@@ -147,7 +147,7 @@ func comicStyleHandler(store batchfactoryv11.Store, next http.HandlerFunc) http.
 			writeJSON(w, 400, map[string]string{"error": "当前书籍未选择该画风"})
 			return
 		}
-		if legacy, ok := store.(batchfactoryv11.ComicLegacyStyleStore); ok && config.Comic.Style.ID != "" {
+		if legacy, ok := store.(batchfactoryv11.ComicLegacyStyleStore); ok && config.Comic.Styles == nil && config.Comic.Style.ID != "" {
 			if err = legacy.AdoptLegacyComicStyle(r.Context(), owner, batchID, bookID, batchfactoryv11.ComicStyleOutput{PresetSnapshot: config.Comic.Style, GlobalReferenceImage: config.Comic.GlobalReferenceImage}); err != nil {
 				writeStoreError(w, err)
 				return

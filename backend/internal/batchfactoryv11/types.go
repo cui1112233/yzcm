@@ -152,6 +152,7 @@ type Batch struct {
 	ProjectCoverImageURL string `json:"-"`
 	// ProductionMode 是摘要索引里按设置推断出的项目类型（comic/video）。
 	ProductionMode string        `json:"-"`
+	OutputKind     string        `json:"-"`
 	Revision       int64         `json:"revision"`
 	SettingsState  SettingsState `json:"settingsState"`
 	Books          []Book        `json:"books"`
@@ -179,6 +180,7 @@ type CreateBookInput struct {
 	Videos         []CreateVideoInput `json:"videos,omitempty"`
 }
 type CreateBatchInput struct {
+	PreserveBookRows bool `json:"-"`
 	// Set only by the Shuihuo project's create and import handlers.
 	ShuihuoProject bool              `json:"-"`
 	Title          string            `json:"title"`
