@@ -8,9 +8,11 @@ import (
 )
 
 type Service struct {
-	Store          Store
-	ComicStore     screenplay.Store
-	ComicAuthoring screenplay.AuthoringRepository
+	Store             Store
+	ComicStore        screenplay.Store
+	ComicAuthoring    screenplay.AuthoringRepository
+	JobQueue          JobQueue
+	GeneratorResolver func(context.Context, string, string) (ScriptGenerator, error)
 }
 
 func NewService(store Store) *Service { return &Service{Store: store} }

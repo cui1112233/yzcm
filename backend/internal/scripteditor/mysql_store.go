@@ -597,3 +597,121 @@ func (s *MySQLStore) CreateHandoff(ctx context.Context, row Handoff) (Handoff, e
 	_, err := s.db.ExecContext(ctx, `INSERT INTO script_editor_handoffs (id,owner_username,work_id,request_key,screenplay_project_id,episodes_json,created_at) VALUES (?,?,?,?,?,?,?)`, row.ID, row.OwnerUsername, row.WorkID, row.RequestKey, row.ScreenplayProjectID, string(row.Episodes), row.CreatedAt)
 	return row, mapWriteError(err)
 }
+
+const jobSelect = `SELECT id,owner_username,work_id,job_type,status,request_key,input_json,result_json,progress_current,progress_total,error_code,error_message,lease_token,lease_until,revision,created_at,updated_at FROM script_editor_jobs`
+
+func scanJob(row scanner) (Job, error) {
+	var out Job
+	var status string
+	var input, result []byte
+	var lease sql.NullTime
+	err := row.Scan(&out.ID, &out.OwnerUsername, &out.WorkID, &out.Type, &status, &out.RequestKey, &input, &result, &out.ProgressCurrent, &out.ProgressTotal, &out.ErrorCode, &out.ErrorMessage, &out.LeaseToken, &lease, &out.Revision, &out.CreatedAt, &out.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Job{}, ErrNotFound
+	}
+	if err != nil {
+		return Job{}, err
+	}
+	out.Status, out.Input, out.Result = JobStatus(status), append(json.RawMessage(nil), input...), append(json.RawMessage(nil), result...)
+	if lease.Valid {
+		out.LeaseUntil = lease.Time
+	}
+	return out, nil
+}
+
+func (s *MySQLStore) CreateJob(ctx context.Context, row Job) (Job, error) {
+	if _, err := s.getWork(ctx, row.OwnerUsername, row.WorkID); err != nil {
+		return Job{}, err
+	}
+	if row.ID == "" {
+		row.ID = s.newID("job")
+	}
+	now := s.now().UTC()
+	row.CreatedAt, row.UpdatedAt = now, now
+	_, err := s.db.ExecContext(ctx, `INSERT INTO script_editor_jobs (id,owner_username,work_id,job_type,status,request_key,input_json,result_json,progress_current,progress_total,error_code,error_message,lease_token,lease_until,revision,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, row.ID, row.OwnerUsername, row.WorkID, row.Type, string(row.Status), row.RequestKey, string(row.Input), string(row.Result), row.ProgressCurrent, row.ProgressTotal, row.ErrorCode, row.ErrorMessage, row.LeaseToken, nil, row.Revision, now, now)
+	if errors.Is(mapWriteError(err), ErrConflict) {
+		return scanJob(s.db.QueryRowContext(ctx, jobSelect+` WHERE owner_username=? AND request_key=?`, row.OwnerUsername, row.RequestKey))
+	}
+	return row, err
+}
+
+func (s *MySQLStore) GetJob(ctx context.Context, owner, workID, id string) (Job, error) {
+	return scanJob(s.db.QueryRowContext(ctx, jobSelect+` WHERE id=? AND owner_username=? AND work_id=?`, id, owner, workID))
+}
+
+func (s *MySQLStore) ListJobs(ctx context.Context, owner, workID string) ([]Job, error) {
+	rows, err := s.db.QueryContext(ctx, jobSelect+` WHERE owner_username=? AND work_id=? ORDER BY created_at DESC`, owner, workID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Job{}
+	for rows.Next() {
+		row, e := scanJob(rows)
+		if e != nil {
+			return nil, e
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *MySQLStore) ListRunnableJobs(ctx context.Context, limit int) ([]Job, error) {
+	if limit <= 0 || limit > 128 {
+		limit = 32
+	}
+	rows, err := s.db.QueryContext(ctx, jobSelect+` WHERE status='queued' OR (status='running' AND (lease_until IS NULL OR lease_until<=?)) ORDER BY updated_at LIMIT ?`, s.now().UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Job{}
+	for rows.Next() {
+		row, e := scanJob(rows)
+		if e != nil {
+			return nil, e
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *MySQLStore) ClaimJob(ctx context.Context, owner, id, token string, until time.Time) (Job, error) {
+	now := s.now().UTC()
+	result, err := s.db.ExecContext(ctx, `UPDATE script_editor_jobs SET status='running',lease_token=?,lease_until=?,revision=revision+1,updated_at=? WHERE id=? AND owner_username=? AND (status='queued' OR (status='running' AND (lease_until IS NULL OR lease_until<=?)))`, token, until, now, id, owner, now)
+	if err != nil {
+		return Job{}, err
+	}
+	if err := requireAffected(result); err != nil {
+		return Job{}, err
+	}
+	return scanJob(s.db.QueryRowContext(ctx, jobSelect+` WHERE id=? AND owner_username=?`, id, owner))
+}
+
+func (s *MySQLStore) UpdateJob(ctx context.Context, row Job, expected int64) (Job, error) {
+	now := s.now().UTC()
+	var lease any
+	if !row.LeaseUntil.IsZero() {
+		lease = row.LeaseUntil
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE script_editor_jobs SET status=?,input_json=?,result_json=?,progress_current=?,progress_total=?,error_code=?,error_message=?,lease_token=?,lease_until=?,revision=revision+1,updated_at=? WHERE id=? AND owner_username=? AND work_id=? AND revision=?`, string(row.Status), string(row.Input), string(row.Result), row.ProgressCurrent, row.ProgressTotal, row.ErrorCode, row.ErrorMessage, row.LeaseToken, lease, now, row.ID, row.OwnerUsername, row.WorkID, expected)
+	if err != nil {
+		return Job{}, err
+	}
+	if err := requireAffected(result); err != nil {
+		return Job{}, err
+	}
+	row.Revision, row.UpdatedAt = expected+1, now
+	return row, nil
+}
+
+func (s *MySQLStore) CreateReview(ctx context.Context, row Review) (Review, error) {
+	if row.ID == "" {
+		row.ID = s.newID("review")
+	}
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = s.now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO script_editor_reviews (id,work_id,script_id,owner_username,review_type,result_json,model_id,prompt_id,created_at) VALUES (?,?,?,?,?,?,?,?,?)`, row.ID, row.WorkID, row.ScriptID, row.OwnerUsername, row.Type, string(row.Result), row.ModelID, row.PromptID, row.CreatedAt)
+	return row, mapWriteError(err)
+}

@@ -113,6 +113,34 @@ func TestScriptEditorRoutesManageChaptersAndScriptVersions(t *testing.T) {
 	}
 }
 
+func TestScriptEditorJobRoutesCreateListCancelAndRetry(t *testing.T) {
+	now := time.Unix(1800000000, 0).UTC()
+	api := newScriptEditorTestRouter(now)
+	created := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works", map[string]any{"title": "任务作品", "type": "novel"})
+	workID := scriptEditorID(t, created, "work")
+	chapter := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/chapters", map[string]any{"title": "第一章", "content": "开场冲突"})
+	chapterID := scriptEditorID(t, chapter, "chapter")
+	jobResponse := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/jobs/script-generation", map[string]any{
+		"requestKey": "route-job-1", "episodes": []int{1}, "chapterIds": []string{chapterID}, "modelId": "model-1",
+	})
+	if jobResponse.Code != http.StatusAccepted {
+		t.Fatalf("create job status=%d body=%s", jobResponse.Code, jobResponse.Body.String())
+	}
+	jobID := scriptEditorID(t, jobResponse, "job")
+	list := signedJSONRequest(t, api, now, "alice", http.MethodGet, "/api/script-editor/works/"+workID+"/jobs", nil)
+	if list.Code != http.StatusOK || !bytes.Contains(list.Body.Bytes(), []byte(jobID)) {
+		t.Fatalf("list status=%d body=%s", list.Code, list.Body.String())
+	}
+	cancelled := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/jobs/"+jobID+"/cancel", nil)
+	if cancelled.Code != http.StatusOK || !bytes.Contains(cancelled.Body.Bytes(), []byte(`"status":"cancelled"`)) {
+		t.Fatalf("cancel status=%d body=%s", cancelled.Code, cancelled.Body.String())
+	}
+	retried := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/jobs/"+jobID+"/retry", nil)
+	if retried.Code != http.StatusAccepted || !bytes.Contains(retried.Body.Bytes(), []byte(`"status":"queued"`)) {
+		t.Fatalf("retry status=%d body=%s", retried.Code, retried.Body.String())
+	}
+}
+
 func TestScriptEditorImportPreviewAndCommitAreSeparate(t *testing.T) {
 	now := time.Unix(1800000000, 0).UTC()
 	api := newScriptEditorTestRouter(now)

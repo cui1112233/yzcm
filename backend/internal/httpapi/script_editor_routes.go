@@ -288,6 +288,70 @@ func RegisterScriptEditorRoutes(mux *http.ServeMux, auth BridgeAuth, service *sc
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"script": script})
 	})
+	handle("POST /api/script-editor/works/{workID}/jobs/script-generation", func(w http.ResponseWriter, req *http.Request, owner string) {
+		var input scripteditor.CreateGenerationJobInput
+		if !decode(w, req, &input) {
+			return
+		}
+		job, err := service.CreateGenerationJob(req.Context(), owner, req.PathValue("workID"), input)
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{"job": job})
+	})
+	handle("POST /api/script-editor/works/{workID}/jobs/review", func(w http.ResponseWriter, req *http.Request, owner string) {
+		var input scripteditor.CreateReviewJobInput
+		if !decode(w, req, &input) {
+			return
+		}
+		job, err := service.CreateReviewJob(req.Context(), owner, req.PathValue("workID"), input)
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{"job": job})
+	})
+	handle("GET /api/script-editor/works/{workID}/jobs", func(w http.ResponseWriter, req *http.Request, owner string) {
+		jobs, err := service.ListJobs(req.Context(), owner, req.PathValue("workID"))
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs})
+	})
+	handle("GET /api/script-editor/works/{workID}/jobs/{jobID}", func(w http.ResponseWriter, req *http.Request, owner string) {
+		job, err := service.Store.GetJob(req.Context(), owner, req.PathValue("workID"), req.PathValue("jobID"))
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"job": job})
+	})
+	handle("POST /api/script-editor/works/{workID}/jobs/{jobID}/cancel", func(w http.ResponseWriter, req *http.Request, owner string) {
+		job, err := service.CancelJob(req.Context(), owner, req.PathValue("workID"), req.PathValue("jobID"))
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"job": job})
+	})
+	handle("POST /api/script-editor/works/{workID}/jobs/{jobID}/retry", func(w http.ResponseWriter, req *http.Request, owner string) {
+		job, err := service.RetryJob(req.Context(), owner, req.PathValue("workID"), req.PathValue("jobID"))
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{"job": job})
+	})
+	handle("POST /api/script-editor/works/{workID}/jobs/{jobID}/apply", func(w http.ResponseWriter, req *http.Request, owner string) {
+		script, err := service.ApplyJobResult(req.Context(), owner, req.PathValue("workID"), req.PathValue("jobID"))
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"script": script})
+	})
 	handle("GET /api/script-editor/works/{workID}/export", func(w http.ResponseWriter, req *http.Request, owner string) {
 		result, err := service.Export(req.Context(), owner, req.PathValue("workID"), scripteditor.ExportInput{Format: req.URL.Query().Get("format")})
 		if err != nil {

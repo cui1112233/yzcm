@@ -157,9 +157,38 @@ type Job struct {
 	ProgressTotal   int             `json:"progressTotal"`
 	ErrorCode       string          `json:"errorCode,omitempty"`
 	ErrorMessage    string          `json:"errorMessage,omitempty"`
+	LeaseToken      string          `json:"-"`
+	LeaseUntil      time.Time       `json:"-"`
 	Revision        int64           `json:"revision"`
 	CreatedAt       time.Time       `json:"createdAt"`
 	UpdatedAt       time.Time       `json:"updatedAt"`
+}
+
+type JobCallState string
+
+const (
+	JobCallMayHaveSent JobCallState = "may_have_sent"
+	JobCallSucceeded   JobCallState = "succeeded"
+	JobCallFailed      JobCallState = "failed"
+)
+
+type JobCall struct {
+	Fingerprint string       `json:"fingerprint"`
+	State       JobCallState `json:"state"`
+}
+
+type JobEpisodeFailure struct {
+	Episode int    `json:"episode"`
+	Error   string `json:"error"`
+}
+
+type JobResult struct {
+	CompletedEpisodes []int               `json:"completedEpisodes,omitempty"`
+	FailedEpisodes    []JobEpisodeFailure `json:"failedEpisodes,omitempty"`
+	ScriptIDs         []string            `json:"scriptIds,omitempty"`
+	ReviewID          string              `json:"reviewId,omitempty"`
+	Output            string              `json:"output,omitempty"`
+	Calls             map[string]JobCall  `json:"calls,omitempty"`
 }
 
 type Handoff struct {

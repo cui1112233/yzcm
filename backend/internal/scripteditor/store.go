@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -74,6 +75,14 @@ type Store interface {
 	PreferScript(context.Context, string, string, string, int64) (Script, error)
 	GetHandoff(context.Context, string, string, string) (Handoff, error)
 	CreateHandoff(context.Context, Handoff) (Handoff, error)
+
+	CreateJob(context.Context, Job) (Job, error)
+	GetJob(context.Context, string, string, string) (Job, error)
+	ListJobs(context.Context, string, string) ([]Job, error)
+	ListRunnableJobs(context.Context, int) ([]Job, error)
+	ClaimJob(context.Context, string, string, string, time.Time) (Job, error)
+	UpdateJob(context.Context, Job, int64) (Job, error)
+	CreateReview(context.Context, Review) (Review, error)
 }
 
 func randomID(prefix string) string {

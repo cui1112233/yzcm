@@ -2,6 +2,7 @@ package scripteditor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -15,13 +16,15 @@ type MemoryStore struct {
 	chapters map[string]Chapter
 	scripts  map[string]Script
 	handoffs map[string]Handoff
+	jobs     map[string]Job
+	reviews  map[string]Review
 	now      func() time.Time
 	newID    func(string) string
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		works: map[string]Work{}, chapters: map[string]Chapter{}, scripts: map[string]Script{}, handoffs: map[string]Handoff{},
+		works: map[string]Work{}, chapters: map[string]Chapter{}, scripts: map[string]Script{}, handoffs: map[string]Handoff{}, jobs: map[string]Job{}, reviews: map[string]Review{},
 		now: time.Now, newID: randomID,
 	}
 }
@@ -441,4 +444,119 @@ func sortScripts(rows []Script) {
 		}
 		return rows[i].CreatedAt.Before(rows[j].CreatedAt)
 	})
+}
+
+func (s *MemoryStore) CreateJob(_ context.Context, row Job) (Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.activeWork(row.OwnerUsername, row.WorkID); err != nil {
+		return Job{}, err
+	}
+	for _, existing := range s.jobs {
+		if existing.OwnerUsername == row.OwnerUsername && existing.RequestKey == row.RequestKey {
+			return cloneJob(existing), nil
+		}
+	}
+	now := s.now().UTC()
+	if row.ID == "" {
+		row.ID = s.newID("job")
+	}
+	row.CreatedAt, row.UpdatedAt = now, now
+	s.jobs[row.ID] = cloneJob(row)
+	return cloneJob(row), nil
+}
+
+func (s *MemoryStore) GetJob(_ context.Context, owner, workID, id string) (Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row, ok := s.jobs[id]
+	if !ok || row.OwnerUsername != owner || row.WorkID != workID {
+		return Job{}, ErrNotFound
+	}
+	return cloneJob(row), nil
+}
+
+func (s *MemoryStore) ListJobs(_ context.Context, owner, workID string) ([]Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows := []Job{}
+	for _, row := range s.jobs {
+		if row.OwnerUsername == owner && row.WorkID == workID {
+			rows = append(rows, cloneJob(row))
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].CreatedAt.After(rows[j].CreatedAt) })
+	return rows, nil
+}
+
+func (s *MemoryStore) ListRunnableJobs(_ context.Context, limit int) ([]Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now().UTC()
+	rows := []Job{}
+	for _, row := range s.jobs {
+		if row.Status == JobQueued || row.Status == JobRunning && !row.LeaseUntil.After(now) {
+			rows = append(rows, cloneJob(row))
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].UpdatedAt.Before(rows[j].UpdatedAt) })
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
+}
+
+func (s *MemoryStore) ClaimJob(_ context.Context, owner, id, token string, until time.Time) (Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row, ok := s.jobs[id]
+	now := s.now().UTC()
+	if !ok || row.OwnerUsername != owner {
+		return Job{}, ErrNotFound
+	}
+	if row.Status != JobQueued && !(row.Status == JobRunning && !row.LeaseUntil.After(now)) {
+		return Job{}, ErrConflict
+	}
+	row.Status, row.LeaseToken, row.LeaseUntil, row.UpdatedAt = JobRunning, token, until, now
+	row.Revision++
+	s.jobs[id] = cloneJob(row)
+	return cloneJob(row), nil
+}
+
+func (s *MemoryStore) UpdateJob(_ context.Context, row Job, expected int64) (Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.jobs[row.ID]
+	if !ok || current.OwnerUsername != row.OwnerUsername || current.WorkID != row.WorkID {
+		return Job{}, ErrNotFound
+	}
+	if current.Revision != expected {
+		return Job{}, ErrConflict
+	}
+	row.Revision, row.UpdatedAt = expected+1, s.now().UTC()
+	s.jobs[row.ID] = cloneJob(row)
+	return cloneJob(row), nil
+}
+
+func (s *MemoryStore) CreateReview(_ context.Context, row Review) (Review, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.scripts[row.ScriptID]; !ok {
+		return Review{}, ErrNotFound
+	}
+	if row.ID == "" {
+		row.ID = s.newID("review")
+	}
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = s.now().UTC()
+	}
+	row.Result = append(json.RawMessage(nil), row.Result...)
+	s.reviews[row.ID] = row
+	return row, nil
+}
+
+func cloneJob(row Job) Job {
+	row.Input = append(json.RawMessage(nil), row.Input...)
+	row.Result = append(json.RawMessage(nil), row.Result...)
+	return row
 }
