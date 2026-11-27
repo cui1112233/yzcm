@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"qiantie/backend/internal/agentworkspace"
 	"qiantie/backend/internal/screenplay"
 )
 
@@ -13,6 +14,7 @@ type Service struct {
 	ComicAuthoring    screenplay.AuthoringRepository
 	JobQueue          JobQueue
 	GeneratorResolver func(context.Context, string, string) (ScriptGenerator, error)
+	AgentWorkspace    agentworkspace.Store
 }
 
 func NewService(store Store) *Service { return &Service{Store: store} }

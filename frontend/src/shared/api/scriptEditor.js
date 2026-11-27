@@ -19,6 +19,9 @@ export function listScriptEditorAssets(workId, category = '', signal) { return a
 export function createScriptEditorAssetLink(workId, input) { return apiRequest(`${root}/works/${id(workId)}/assets`, { method: 'POST', body: JSON.stringify(input), suppressGlobalError: true }); }
 export function getScriptEditorStoryboard(workId, episode, signal) { return apiRequest(`${root}/works/${id(workId)}/storyboards/${Number(episode)}`, { signal, suppressGlobalError: true }); }
 export function saveScriptEditorStoryboard(workId, episode, input) { return apiRequest(`${root}/works/${id(workId)}/storyboards/${Number(episode)}`, { method: 'PUT', body: JSON.stringify(input), suppressGlobalError: true }); }
+export function ensureScriptEditorCanvas(workId) { return apiRequest(`${root}/works/${id(workId)}/canvas/ensure`, { method:'POST', suppressGlobalError:true }); }
+export function previewScriptEditorCanvasSync(workId, input) { return apiRequest(`${root}/works/${id(workId)}/canvas/sync/preview`, { method:'POST', body:JSON.stringify(input), suppressGlobalError:true }); }
+export function applyScriptEditorCanvasSync(workId, input) { return apiRequest(`${root}/works/${id(workId)}/canvas/sync/apply`, { method:'POST', body:JSON.stringify(input), suppressGlobalError:true }); }
 export function getScriptEditorBinding(workId, targetType, signal) { return apiRequest(`${root}/works/${id(workId)}/bindings/${id(targetType)}`, { signal, suppressGlobalError: true }); }
 export function putScriptEditorBinding(workId, targetType, input) { return apiRequest(`${root}/works/${id(workId)}/bindings/${id(targetType)}`, { method: 'PUT', body: JSON.stringify(input), suppressGlobalError: true }); }
 export function searchScriptEditorWork(workId, query, signal) { return apiRequest(`${root}/works/${id(workId)}/search?q=${encodeURIComponent(query)}`, { signal, suppressGlobalError: true }); }

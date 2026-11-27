@@ -286,6 +286,7 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	scriptEditorService := scripteditor.NewService(scripteditor.NewMySQLStore(db))
 	scriptEditorService.ComicStore = screenplayStore
 	scriptEditorService.ComicAuthoring = screenplayStore.AuthoringRepository()
+	scriptEditorService.AgentWorkspace = agentWorkspaceStore
 	if strings.TrimSpace(cfg.RedisURL) != "" {
 		if redisTransport, redisErr := mergeworker.NewRedisStore(cfg.RedisURL, "qiantie:script-editor"); redisErr == nil {
 			scriptEditorService.JobQueue = scripteditor.NewRedisJobQueue(redisTransport)

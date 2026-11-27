@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"qiantie/backend/internal/agentworkspace"
 	"qiantie/backend/internal/scripteditor"
 )
 
@@ -205,6 +206,30 @@ func TestScriptEditorAssetAndStoryboardRoutesPersist(t *testing.T) {
 	loaded := signedJSONRequest(t, api, now, "alice", http.MethodGet, "/api/script-editor/works/"+workID+"/storyboards/1", nil)
 	if loaded.Code != http.StatusOK || !bytes.Contains(loaded.Body.Bytes(), []byte(`"covered"`)) {
 		t.Fatalf("load status=%d body=%s", loaded.Code, loaded.Body.String())
+	}
+}
+
+func TestScriptEditorCanvasSyncRoutesUseRealAgentWorkspace(t *testing.T) {
+	now := time.Unix(1800000000, 0).UTC()
+	store := scripteditor.NewMemoryStore()
+	service := scripteditor.NewService(store)
+	service.AgentWorkspace = agentworkspace.NewMemoryStore()
+	api := NewRouter(RouterOptions{BridgeSecret: "secret", Now: func() time.Time { return now }, ScriptEditor: service, AgentWorkspace: service.AgentWorkspace})
+	created := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works", map[string]any{"title": "画布作品", "type": "script"})
+	workID := scriptEditorID(t, created, "work")
+	scriptResponse := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/scripts", map[string]any{"episode": 1, "title": "第一集", "content": "镜头内容"})
+	scriptID := scriptEditorID(t, scriptResponse, "script")
+	ensured := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/canvas/ensure", nil)
+	if ensured.Code != http.StatusOK || !bytes.Contains(ensured.Body.Bytes(), []byte(`"targetType":"cm_canvas"`)) {
+		t.Fatalf("ensure status=%d body=%s", ensured.Code, ensured.Body.String())
+	}
+	preview := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/canvas/sync/preview", map[string]any{"scriptIds": []string{scriptID}})
+	if preview.Code != http.StatusOK || !bytes.Contains(preview.Body.Bytes(), []byte(`"state":"create"`)) {
+		t.Fatalf("preview status=%d body=%s", preview.Code, preview.Body.String())
+	}
+	applied := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/canvas/sync/apply", map[string]any{"scriptIds": []string{scriptID}, "expectedCanvasRevision": 0})
+	if applied.Code != http.StatusOK || !bytes.Contains(applied.Body.Bytes(), []byte("镜头内容")) {
+		t.Fatalf("apply status=%d body=%s", applied.Code, applied.Body.String())
 	}
 }
 

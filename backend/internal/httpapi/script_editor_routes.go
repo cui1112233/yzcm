@@ -172,6 +172,38 @@ func RegisterScriptEditorRoutes(mux *http.ServeMux, auth BridgeAuth, service *sc
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"assets": rows})
 	})
+	handle("POST /api/script-editor/works/{workID}/canvas/ensure", func(w http.ResponseWriter, req *http.Request, owner string) {
+		row, err := service.EnsureCanvas(req.Context(), owner, req.PathValue("workID"))
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"binding": row})
+	})
+	handle("POST /api/script-editor/works/{workID}/canvas/sync/preview", func(w http.ResponseWriter, req *http.Request, owner string) {
+		var input scripteditor.CanvasSyncInput
+		if !decode(w, req, &input) {
+			return
+		}
+		preview, err := service.PreviewCanvasSync(req.Context(), owner, req.PathValue("workID"), input)
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"preview": preview})
+	})
+	handle("POST /api/script-editor/works/{workID}/canvas/sync/apply", func(w http.ResponseWriter, req *http.Request, owner string) {
+		var input scripteditor.CanvasSyncInput
+		if !decode(w, req, &input) {
+			return
+		}
+		canvas, err := service.ApplyCanvasSync(req.Context(), owner, req.PathValue("workID"), input)
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"canvas": canvas})
+	})
 	handle("POST /api/script-editor/works/{workID}/assets", func(w http.ResponseWriter, req *http.Request, owner string) {
 		if !hasBindingStore {
 			writeScriptEditorError(w, scripteditor.ErrValidation)
