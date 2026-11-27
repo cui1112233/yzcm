@@ -185,8 +185,19 @@ type ProductionService struct {
 	Model            FrozenVideoModel
 }
 
-func (s *ProductionService) resolveProvider(ctx context.Context, owner, provider string) (ProductionAdapter, FrozenVideoModel, error) {
+func (s *ProductionService) resolveProvider(ctx context.Context, owner, provider string, selections ...string) (ProductionAdapter, FrozenVideoModel, error) {
 	provider = normalizeVideoProvider(provider)
+	resolver, live := s.ProviderRegistry.(VideoModelResolver)
+	lookup := func() (VideoProviderConfig, error) {
+		if live {
+			selection := ""
+			if len(selections) > 0 {
+				selection = selections[0]
+			}
+			return resolver.ResolveModel(ctx, owner, provider, selection)
+		}
+		return s.ProviderRegistry.Resolve(ctx, owner, provider)
+	}
 	if provider == VideoProviderDoubaoLocal {
 		if s.LocalExecutor == nil || s.LocalExecutor.Client == nil {
 			return nil, FrozenVideoModel{}, fmt.Errorf("%w: Doubao local executor is offline", ErrUnavailable)
@@ -207,7 +218,7 @@ func (s *ProductionService) resolveProvider(ctx context.Context, owner, provider
 		if s.ProviderRegistry == nil {
 			return nil, FrozenVideoModel{}, wrapNotConfigured(fmt.Errorf("%w: AutoDL H3 provider registry is unavailable", ErrUnavailable))
 		}
-		cfg, err := s.ProviderRegistry.Resolve(ctx, owner, provider)
+		cfg, err := lookup()
 		if err != nil {
 			return nil, FrozenVideoModel{}, err
 		}
@@ -233,7 +244,7 @@ func (s *ProductionService) resolveProvider(ctx context.Context, owner, provider
 		if s.ProviderRegistry == nil {
 			return nil, FrozenVideoModel{}, wrapNotConfigured(fmt.Errorf("%w: YFAI Seedance provider registry is unavailable", ErrUnavailable))
 		}
-		cfg, err := s.ProviderRegistry.Resolve(ctx, owner, provider)
+		cfg, err := lookup()
 		if err != nil {
 			return nil, FrozenVideoModel{}, err
 		}
@@ -250,7 +261,7 @@ func (s *ProductionService) resolveProvider(ctx context.Context, owner, provider
 		return nil, FrozenVideoModel{}, fmt.Errorf("%w: unsupported video provider", ErrInvalid)
 	}
 	if s.ProviderRegistry != nil {
-		cfg, err := s.ProviderRegistry.Resolve(ctx, owner, provider)
+		cfg, err := lookup()
 		if err == nil {
 			model := s.Model
 			model.ID = cfg.Model
@@ -266,7 +277,7 @@ func (s *ProductionService) resolveProvider(ctx context.Context, owner, provider
 			}
 			return adapter, model, nil
 		}
-		if s.Adapter == nil {
+		if live || s.Adapter == nil {
 			return nil, FrozenVideoModel{}, err
 		}
 	}
@@ -525,7 +536,7 @@ func (s *ProductionService) SubmitBookProductionWithOptions(ctx context.Context,
 		}
 	}
 
-	adapter, model, providerErr := s.resolveProvider(ctx, owner, provider)
+	adapter, model, providerErr := s.resolveProvider(ctx, owner, provider, selectedModel)
 	if providerErr != nil {
 		return ProductionJob{}, providerErr
 	}
@@ -756,8 +767,16 @@ func (s *ProductionService) SubmitBookProductionWithOptions(ctx context.Context,
 		} else {
 			submitAdapter := adapter
 			submitModel := model
+			_, live := s.ProviderRegistry.(VideoModelResolver)
+			if live {
+				selection := strings.TrimSpace(rawString(prompt.EffectiveSettings.Values, "videoModelId", selectedModel))
+				submitAdapter, submitModel, submitErr = s.resolveProvider(ctx, owner, provider, selection)
+				if submitErr == nil && selection == selectedModel && submitModel.ID != model.ID {
+					submitErr = fmt.Errorf("%w: video model changed while preparing submission", ErrConflict)
+				}
+			}
 			// 梵客视频按书选的型号优先于账号目录里的默认型号；旧值（无后缀）继续用默认型号。
-			if provider == VideoProviderYFAISeedance && s.ProviderRegistry != nil {
+			if !live && provider == VideoProviderYFAISeedance && s.ProviderRegistry != nil {
 				if fanKeModel := FanKeModelFromSelection(rawString(prompt.EffectiveSettings.Values, "videoModelId", "")); fanKeModel != "" {
 					cfg, resolveErr := s.ProviderRegistry.Resolve(ctx, owner, provider)
 					if resolveErr != nil {

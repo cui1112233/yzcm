@@ -235,10 +235,17 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 		}
 		if configAuth.AccountCenterStore != nil {
 			ctx, _ := configAuth.accountCenterContext(req.Context(), identity.Username)
-			if !apiConfigPolicy(ctx, configAuth.AccountCenterStore).custom {
-				for i, model := range models {
-					models[i] = publicRuntimeModel(model)
+			access := apiConfigPolicy(ctx, configAuth.AccountCenterStore)
+			if !access.custom {
+				visible := models[:0]
+				for _, model := range models {
+					if access.identity.Subject.Role == accountcenter.RoleDeveloper && model["kind"] == "video" &&
+						model["catalogSource"] != managedYZCMSource && model["provider"] != "local_executor_video" {
+						continue
+					}
+					visible = append(visible, publicRuntimeModel(model))
 				}
+				models = visible
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"models": models})

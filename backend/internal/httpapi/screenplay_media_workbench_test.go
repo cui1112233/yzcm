@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"qiantie/backend/internal/agentworkspace"
 	"qiantie/backend/internal/aicut"
+	"qiantie/backend/internal/novelfetchworkshop"
 	"qiantie/backend/internal/screenplay"
 	"strings"
 	"testing"
@@ -260,7 +261,7 @@ func TestScreenplayMediaTTSUsesRoleVoiceAndIdempotency(t *testing.T) {
 	ctx := context.Background()
 	projects := screenplay.NewMemoryStore()
 	p, _ := projects.CreateProject(ctx, screenplay.Project{ID: "tts-p", OwnerUsername: "alice", Title: "片"})
-	s := &ScreenplayMediaWorkbench{Projects: projects, Media: screenplay.NewMediaMemoryStore(), Cut: aicut.NewMemoryStore(), Objects: agentworkspace.NewLocalAssetObjectStore(t.TempDir())}
+	s := &ScreenplayMediaWorkbench{Projects: projects, Media: screenplay.NewMediaMemoryStore(), Cut: aicut.NewMemoryStore(), Objects: agentworkspace.NewLocalAssetObjectStore(t.TempDir()), Catalog: novelfetchworkshop.NewMemoryStore()}
 	_, e := s.action(ctx, p, screenplayMediaAction{Action: "voice", TargetID: "narrator", VoiceID: "voice-own"})
 	if e != nil {
 		t.Fatal(e)

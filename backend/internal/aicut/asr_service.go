@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"qiantie/backend/internal/yzcmusage"
 )
 
 type ASRSubmit struct {
@@ -183,7 +185,7 @@ func (s *ASRService) ProcessNext(ctx context.Context) error {
 	}
 	job = job.WithState(ASRRunning, 20, "", s.now())
 	_ = s.store.UpdateASRJob(jobCtx, job)
-	cues, err := provider.Transcribe(jobCtx, ASRInput{Filename: asset.Name, ContentType: asset.ContentType, Language: job.Language, Body: body})
+	cues, err := provider.Transcribe(yzcmusage.WithIdentity(jobCtx, job.Owner, "aicut-asr"), ASRInput{Filename: asset.Name, ContentType: asset.ContentType, Language: job.Language, Body: body})
 	if err != nil {
 		return fail(err)
 	}

@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,7 +40,6 @@ import (
 	"qiantie/backend/internal/prompt"
 	novelprompt "qiantie/backend/internal/prompt/novelcreation"
 	"qiantie/backend/internal/safehttp"
-	"qiantie/backend/internal/safepath"
 	"qiantie/backend/internal/screenplay"
 	"qiantie/backend/internal/scripteditor"
 	"qiantie/backend/internal/storage"
@@ -139,6 +137,9 @@ func configuredTextProvider(settings map[string]any, selected string) (*batchfac
 		if selected != "" && id != selected && modelID != selected {
 			continue
 		}
+		if model["credentialStatus"] == "needs_reentry" || novelfetchworkshop.ModelConfigText(model, "credential") == "" {
+			return nil, errors.New("文本模型需要在 API 配置中重新填写 Key")
+		}
 		endpoint := strings.TrimRight(strings.TrimSpace(fmt.Sprint(model["baseUrl"])), "/")
 		if !strings.HasSuffix(endpoint, "/chat/completions") {
 			endpoint += "/chat/completions"
@@ -146,7 +147,7 @@ func configuredTextProvider(settings map[string]any, selected string) (*batchfac
 		provider := &batchfactoryv11.OpenAICompatibleProvider{
 			Metadata: batchfactoryv11.NewTextModelMetadata(modelID, id, endpoint, model),
 			Endpoint: endpoint,
-			APIKey:   strings.TrimSpace(fmt.Sprint(model["credential"])),
+			APIKey:   novelfetchworkshop.ModelConfigText(model, "credential"),
 			Model:    modelID,
 		}
 		if err := provider.Validate(); err != nil {
@@ -194,6 +195,14 @@ func firstConfiguredString(settings map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func loadSubjectModelConfig(ctx context.Context, accounts accountcenter.Store, catalog novelfetchworkshop.Store, subject string) (map[string]any, error) {
+	owner, err := httpapi.ResolveAPIConfigOwner(ctx, accounts, subject)
+	if err != nil {
+		return nil, err
+	}
+	return catalog.GetConfig(ctx, owner)
 }
 
 func textGenderJudge(provider *batchfactoryv11.OpenAICompatibleProvider) novelfetchworkshop.AIGenderJudge {
@@ -359,30 +368,6 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 		if providerErr != nil {
 			return nil, providerErr
 		}
-		// Keep the Go runtime aligned with the visible API Config page even
-		// when MySQL contains an older redacted/empty catalog row. The legacy
-		// file is local runtime configuration, not a second request path.
-		// Explicit per-task selections must never be swapped for the legacy
-		// account model: a bad selection has to fail visibly instead.
-		if provider == nil && strings.TrimSpace(selection) == "" && strings.TrimSpace(cfg.ScriptHistoryDir) != "" {
-			legacyPath, pathErr := safepath.UserPath(cfg.ScriptHistoryDir, owner, "api-config.json")
-			if pathErr != nil {
-				return nil, pathErr
-			}
-			raw, readErr := os.ReadFile(legacyPath)
-			if readErr == nil {
-				var legacy map[string]any
-				if json.Unmarshal(raw, &legacy) == nil {
-					if catalog, ok := legacy["modelCatalog"]; ok {
-						settings["modelCatalog"] = catalog
-					}
-					provider, providerErr = resolveNovelFetchTextProvider(settings, "")
-					if providerErr != nil {
-						return nil, providerErr
-					}
-				}
-			}
-		}
 		if provider != nil {
 			provider.UsageOwner = owner
 		}
@@ -465,11 +450,7 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 		novelFetchQueue = novelfetchworkshop.NewRedisQueueWithDo("qiantie:novel-fetch", novelfetchworkshop.RedisDoFunc(redisTransport.Do))
 	}
 	compiler := &batchfactoryv11.PromptCompilerService{Store: store}
-	// Explicit video provider settings are persisted in the owner config document
-	// so a restart keeps the last saved provider; catalog-driven sync stays in
-	// memory because the model catalog is already durable.
-	videoRegistry := batchfactoryv11.NewPersistentVideoProviderRegistry(novelFetchStore)
-	videoRegistry.Warm(ctx)
+	videoRegistry := httpapi.NewCatalogVideoProviderRegistry(accountCenterStore, novelFetchStore)
 	localExecutorService := localexecutor.NewService(localexecutor.NewMySQLStore(db), nil)
 	giantMaterialExecutorService := giantmaterialexecutor.NewService(giantmaterialexecutor.NewMySQLStore(db), nil)
 	if _, err := giantMaterialExecutorService.ConsolidateExecutors(ctx); err != nil {
@@ -523,7 +504,7 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 				return agentAssetObjects.Open(ctx, agentworkspace.Asset{ID: asset.ID, ProjectID: asset.ProjectID, Kind: asset.Kind, Name: asset.Name, ContentType: asset.ContentType, ObjectKey: asset.ObjectKey, ByteSize: asset.ByteSize, CreatedAt: asset.CreatedAt})
 			},
 			ResolveProvider: func(ctx context.Context, owner, modelID string) (aicut.ASRProvider, error) {
-				settings, err := novelFetchStore.GetConfig(ctx, owner)
+				settings, err := loadSubjectModelConfig(ctx, accountCenterStore, novelFetchStore, owner)
 				if err != nil {
 					return nil, err
 				}
@@ -554,7 +535,7 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 			return httpapi.RunAICutAnalyzeSilence(ctx, aiCutStore, agentAssetObjects, owner, projectID, assetID, options)
 		},
 		ListASRModels: func(ctx context.Context, owner string) ([]aicut.AgentASRModel, error) {
-			settings, err := novelFetchStore.GetConfig(ctx, owner)
+			settings, err := loadSubjectModelConfig(ctx, accountCenterStore, novelFetchStore, owner)
 			if err != nil {
 				return nil, err
 			}

@@ -188,7 +188,7 @@ func containsConfigField(input any, included func(string) bool) bool {
 
 func isManagedModelField(key string) bool {
 	switch apiConfigField(key) {
-	case "modelcatalog", "modelcatalogversion", "modelcatalogsecretversion", "modelcataloglegacyscrubpending", "credentialref":
+	case "modelcatalog", "modelcatalogversion", "modelcatalogsecretversion", "modelcataloglegacyscrubpending", "modelcataloglegacyscrubdone", "videoproviders", "videoproviderlegacymigrated", "credentialref":
 		return true
 	}
 	return false
@@ -211,7 +211,8 @@ func redactAPIConfig(v any) any {
 		for key, item := range value {
 			_, boolValue := item.(bool)
 			configuredFlag := boolValue && strings.Contains(apiConfigField(key), "hasapikey")
-			if (!apiSecretField(key) || configuredFlag) && key != "modelCatalogSecretVersion" && key != "modelCatalogLegacyScrubPending" {
+			if (!apiSecretField(key) || configuredFlag) && key != "modelCatalogSecretVersion" && key != "modelCatalogLegacyScrubPending" &&
+				key != "modelCatalogLegacyScrubDone" && key != "videoProviders" && key != "videoProviderLegacyMigrated" {
 				out[key] = redactAPIConfig(item)
 			}
 		}
@@ -295,7 +296,7 @@ func redactCompatibilityConfig(value any, access apiConfigAccess) any {
 			case "modelcatalog":
 				out[key] = compatibilityModels(child, access)
 				continue
-			case "modelcatalogsecretversion", "modelcataloglegacyscrubpending", "importedsensitiverepairbackup", "importedknowledgerepairbackup":
+			case "modelcatalogsecretversion", "modelcataloglegacyscrubpending", "modelcataloglegacyscrubdone", "videoproviders", "videoproviderlegacymigrated", "importedsensitiverepairbackup", "importedknowledgerepairbackup":
 				continue
 			case "baseurl", "endpoint", "apiformat", "provider", "tasksendpoint", "resultendpoint", "requesttemplate", "responsemapping", "voiceclonerequesttemplate", "voicecloneresponsemapping", "adapterkind", "credentialref", "parameterschema", "workflowid", "routing", "customchannels", "apiintegrations":
 				if !access.custom {

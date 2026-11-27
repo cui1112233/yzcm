@@ -614,7 +614,7 @@ func shuihuoModelKindConfigured(config map[string]any, kind string) bool {
 const shuihuoDefaultTTSServiceURL = "http://tts3.121w.com/v1/audio/speech"
 
 func shuihuoAudioModelConfigured(config map[string]any) bool {
-	return shuihuoModelKindConfigured(config, "audio") || strings.TrimSpace(shuihuoDefaultTTSServiceURL) != ""
+	return resolveTTSConfig(config, "").err() == nil
 }
 
 // registerShuihuoProjectCompatRoutes keeps the legacy shared-work library
@@ -672,7 +672,7 @@ func registerShuihuoProjectCompatRoutes(root *http.ServeMux, auth BridgeAuth, st
 		if configOwner != "" && (ownerConfig != nil && shuihuoModelKindConfigured(ownerConfig, "image") || shuihuoImageChannelReady(r.Context(), userConfig, configOwner)) {
 			enabledKinds = append(enabledKinds, "image")
 		}
-		if shuihuoAudioModelConfigured(ownerConfig) {
+		if configOwner != "" && shuihuoAudioModelConfigured(ownerConfig) {
 			enabledKinds = append(enabledKinds, "audio")
 		}
 		redisReady, redisReason := shuihuoRedisHealth(r.Context(), redisURL)
@@ -3014,6 +3014,9 @@ func safeShuihuoConfigForResponse(config map[string]any) map[string]any {
 }
 
 func syncShuihuoVideoModel(ctx context.Context, registry batchfactoryv11.VideoProviderRegistry, owner string, model map[string]any) error {
+	if _, live := registry.(batchfactoryv11.VideoModelResolver); live {
+		return nil
+	}
 	modelID, _ := model["modelId"].(string)
 	if strings.TrimSpace(modelID) == "" && strings.EqualFold(modelString(model, "id"), batchfactoryv11.AutoDLH3Model) {
 		modelID = batchfactoryv11.AutoDLH3Model
@@ -3039,6 +3042,9 @@ func syncShuihuoVideoModel(ctx context.Context, registry batchfactoryv11.VideoPr
 }
 
 func syncShuihuoConfiguredVideoModels(ctx context.Context, store batchfactoryv11.Store, registry batchfactoryv11.VideoProviderRegistry, owner string, catalogStores ...novelfetchworkshop.Store) error {
+	if _, live := registry.(batchfactoryv11.VideoModelResolver); live {
+		return nil
+	}
 	config, err := loadShuihuoOwnerConfig(ctx, store, owner, catalogStores...)
 	if err != nil {
 		return err
@@ -5597,45 +5603,14 @@ func generateShuihuoSegmentAudio(ctx context.Context, store batchfactoryv11.Stor
 	if text == "" {
 		return nil, fmt.Errorf("%w: segment not found or empty", batchfactoryv11.ErrNotFound)
 	}
+	var catalog novelfetchworkshop.Store
+	if len(catalogStores) > 0 {
+		catalog = catalogStores[0]
+	}
 	input := ttsRequest{Input: text, Voice: "zh-CN-XiaoxiaoNeural", Speed: 1.8, Pitch: "10", Style: "general"}
-	var payload []byte
-	var mediaType string
-	var err error
-	if len(catalogStores) > 0 && catalogStores[0] != nil {
-		model, found, configErr := configuredTTSModel(ctx, catalogStores[0], owner)
-		if configErr != nil {
-			return nil, configErr
-		}
-		if found {
-			payload, mediaType, err = requestConfiguredTTSBytes(ctx, input, model)
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-	if payload == nil {
-		body, _ := json.Marshal(map[string]any{"input": text, "voice": input.Voice, "speed": input.Speed, "pitch": input.Pitch, "style": input.Style})
-		req, requestErr := http.NewRequestWithContext(ctx, http.MethodPost, shuihuoDefaultTTSServiceURL, bytes.NewReader(body))
-		if requestErr != nil {
-			return nil, fmt.Errorf("%w: TTS request failed", batchfactoryv11.ErrUpstream)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Host", "tts3.121w.com")
-		req.Header.Set("Referer", "http://tts3.121w.com/")
-		req.Header.Set("Origin", "http://tts3.121w.com")
-		response, requestErr := safehttp.NewClientWithTimeout(120 * time.Second).Do(req)
-		if requestErr != nil {
-			return nil, fmt.Errorf("%w: TTS request failed: %v", batchfactoryv11.ErrUpstream, requestErr)
-		}
-		defer response.Body.Close()
-		payload, err = io.ReadAll(io.LimitReader(response.Body, 32<<20))
-		if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 || len(payload) == 0 {
-			return nil, fmt.Errorf("%w: TTS provider returned HTTP %d", batchfactoryv11.ErrUpstream, response.StatusCode)
-		}
-		mediaType = strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0])
-	}
+	payload, mediaType, err := requestTTSBytes(ctx, owner, input, catalog)
 	if err != nil {
-		return nil, fmt.Errorf("%w: TTS request failed: %v", batchfactoryv11.ErrUpstream, err)
+		return nil, fmt.Errorf("%w: 配音生成失败：%v", batchfactoryv11.ErrUpstream, err)
 	}
 	if mediaType == "" || !strings.HasPrefix(mediaType, "audio/") {
 		mediaType = "audio/mpeg"

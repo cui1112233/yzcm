@@ -3,9 +3,12 @@ package batchfactoryv11
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"qiantie/backend/internal/safehttp"
 )
 
 type recordingProductionAdapter struct {
@@ -446,6 +449,44 @@ func TestProductionErrorTruncatesOnRuneBoundary(t *testing.T) {
 // and refuses to resolve it, so the test never reaches a real provider host.
 type recordingVideoProviderRegistry struct {
 	requested []string
+}
+
+type expiringVideoModelRegistry struct {
+	recordingVideoProviderRegistry
+	checks int
+}
+
+func (r *expiringVideoModelRegistry) ResolveModel(_ context.Context, _ string, provider, _ string) (VideoProviderConfig, error) {
+	r.checks++
+	if r.checks > 1 {
+		return VideoProviderConfig{}, ErrUnavailable
+	}
+	return NormalizeVideoProviderConfig(VideoProviderConfig{Provider: provider, Model: DefaultPersonalVideoModel, APIKey: "test-only-key"})
+}
+
+func TestProductionRechecksVideoModelBeforeOutgoingRequest(t *testing.T) {
+	ctx := context.Background()
+	store, batch, book, _ := seedCompiledVideo(t)
+	registry := &expiringVideoModelRegistry{}
+	var outgoing int
+	restore := safehttp.SetOutboundDecorator(func(http.RoundTripper) http.RoundTripper {
+		return durationProbeRoundTripper(func(*http.Request) (*http.Response, error) {
+			outgoing++
+			return nil, errors.New("test transport does not dial")
+		})
+	})
+	defer restore()
+	service := &ProductionService{Store: store, Compiler: &PromptCompilerService{Store: store},
+		ProviderRegistry: registry, Enabled: true, Model: FrozenVideoModel{MaxDuration: 15}}
+	job, err := service.SubmitBookProductionWithProvider(ctx, "alice", batch.ID, book.ID, "scope-recheck", VideoProviderPersonalAPI)
+	if err != nil || registry.checks < 2 || len(job.Tasks) == 0 || outgoing != 0 {
+		t.Fatalf("checks=%d tasks=%d transport calls=%d error=%v", registry.checks, len(job.Tasks), outgoing, err)
+	}
+	for _, task := range job.Tasks {
+		if task.Status != ProductionFailed || task.ProviderTaskID != "" {
+			t.Fatal("expired model should fail before provider submission")
+		}
+	}
 }
 
 func (r *recordingVideoProviderRegistry) Put(context.Context, string, VideoProviderConfig) error {

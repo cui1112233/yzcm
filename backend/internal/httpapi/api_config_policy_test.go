@@ -214,6 +214,7 @@ func TestAPIConfigPolicyWorkshopProjectionAndPreferenceEcho(t *testing.T) {
 }
 
 func TestAPIConfigPolicyMySQLGrantEncryptionAndRuntime(t *testing.T) {
+	t.Setenv("QIANTIE_ENABLE_LEGACY_V11", "1")
 	ctx := context.Background()
 	db, _ := novelAttributionDatabase(t)
 	migrations := append(storage.AuthMigrations(), storage.AccountCenterMigrations()...)
@@ -254,7 +255,10 @@ func TestAPIConfigPolicyMySQLGrantEncryptionAndRuntime(t *testing.T) {
 	})); err != nil {
 		t.Fatal(err)
 	}
+	batchStore := batchfactoryv11.NewMemoryStore()
+	liveVideo := NewCatalogVideoProviderRegistry(center, workshop)
 	h := NewRouter(RouterOptions{AuthStore: accounts, AccountCenterStore: center, NovelFetchStore: workshop, UserConfigStore: settings, YZCMModelCatalog: saved,
+		Slice: 4, Store: batchStore, Production: &batchfactoryv11.ProductionService{Store: batchStore, ProviderRegistry: liveVideo, Enabled: true},
 		SessionResolver: func(ctx context.Context, token string) (BridgeIdentity, error) {
 			username, _, _ := strings.Cut(token, ":")
 			identity, err := center.ResolveIdentity(ctx, username)
@@ -285,12 +289,22 @@ func TestAPIConfigPolicyMySQLGrantEncryptionAndRuntime(t *testing.T) {
 	request("founder", "POST", developerGrant+"grant_custom_api", "{}", 200)
 	custom := `{"id":"custom","kind":"text","modelId":"custom-model","baseUrl":"https://trusted-fixture.invalid/v1","credential":"fixture-dev-custom","enabled":true}`
 	request("dev", "POST", catalog, custom, 201)
+	for _, version := range []string{"v11", "v12"} {
+		request("dev", "PUT", "/api/batch-factory/"+version+"/video-provider/config",
+			`{"provider":"personal_api","model":"native-fixture","apiKey":"fixture-dev-video","createUrl":"https://video.example.test/create"}`, 200)
+	}
+	if value, err := liveVideo.ResolveModel(ctx, "dev", "personal_api", "legacy-video:personal_api"); err != nil || value.APIKey != "fixture-dev-video" {
+		t.Fatal("granted developer could not resolve the configured video row")
+	}
 	beforeDev := rawConfig("dev")
 	const workshopCompat = "/api/novel-fetch-workshop/config"
 	if response := request("dev", "GET", workshopCompat, "", 200); !bytes.Contains(response, []byte("custom-model")) {
 		t.Fatal("granted developer compatibility view omitted own custom model")
 	}
 	request("founder", "POST", developerGrant+"revoke_custom_api", "{}", 200)
+	if _, err := liveVideo.ResolveModel(ctx, "dev", "personal_api", "legacy-video:personal_api"); err == nil {
+		t.Fatal("revoked developer retained the custom video key in runtime")
+	}
 	request("dev", "PATCH", catalog+"/custom", `{"baseUrl":"https://forged.invalid"}`, 403)
 	if response := request("dev", "GET", workshopCompat, "", 200); bytes.Contains(response, []byte("custom-model")) {
 		t.Fatal("revoked developer retained custom model in compatibility view")

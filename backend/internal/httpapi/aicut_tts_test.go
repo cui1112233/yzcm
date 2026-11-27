@@ -12,6 +12,7 @@ import (
 
 	"qiantie/backend/internal/agentworkspace"
 	"qiantie/backend/internal/aicut"
+	"qiantie/backend/internal/novelfetchworkshop"
 )
 
 func TestAICutTTSRouteCreatesDurableProjectAudioAsset(t *testing.T) {
@@ -40,7 +41,7 @@ func TestAICutTTSRouteCreatesDurableProjectAudioAsset(t *testing.T) {
 	}
 	objects := agentworkspace.NewLocalAssetObjectStore(t.TempDir())
 	mux := http.NewServeMux()
-	RegisterAICutTTSRoutes(mux, BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}, store, objects, nil, func() time.Time { return now })
+	RegisterAICutTTSRoutes(mux, BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}, store, objects, novelfetchworkshop.NewMemoryStore(), func() time.Time { return now })
 
 	response := signedJSONRequest(t, mux, now, "alice", http.MethodPost, "/api/ai-cut/projects/cut-tts/tts", map[string]any{
 		"text": "这是需要生成的旁白", "name": "第一段旁白", "voice": "zh-CN-YunxiNeural", "speed": 1.2, "pitch": 4, "style": "friendly",

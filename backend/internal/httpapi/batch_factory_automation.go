@@ -3468,10 +3468,11 @@ func (c *BatchAutomationCoordinator) ensureAudioPlan(ctx context.Context, owner,
 	if len(lines) == 0 {
 		return "", 0, fmt.Errorf("正文没有可测量的生产行")
 	}
-	model, ok, err := configuredTTSModel(ctx, c.ttsStore, owner)
-	if err != nil {
+	resolved := resolveTTS(ctx, c.ttsStore, owner, batchFactoryAudioSettingString(book.SettingsState.Patch["ttsModelId"]))
+	if err := resolved.err(); err != nil {
 		return "", 0, err
 	}
+	model, ok := resolved.model, resolved.state == ttsCustom
 	semanticHash := automationTTSSemanticHash(lines, model, ok)
 	if hasReusableAudioPlan(book) {
 		var artifactID string

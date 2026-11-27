@@ -80,6 +80,16 @@ VALUES (?,?,NOW(6),NOW(6))`, owner, settings); err != nil {
 		t.Fatal("failed file replacement changed the original")
 	}
 	restarted := makeStore()
+	disconnected := path + ".offline"
+	if err := os.Rename(path, disconnected); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.ResumeLegacyModelCleanup(ctx); err == nil || !bytes.Equal(before, raw()) {
+		t.Fatal("a temporarily missing legacy file must retain its pending cleanup")
+	}
+	if err := os.Rename(disconnected, path); err != nil {
+		t.Fatal(err)
+	}
 	if err := restarted.ResumeLegacyModelCleanup(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -107,6 +117,38 @@ VALUES (?,?,NOW(6),NOW(6))`, owner, settings); err != nil {
 	scrubbed, err := os.ReadFile(path)
 	if err != nil || bytes.Contains(scrubbed, []byte("fixture-")) || !bytes.Contains(scrubbed, []byte("soundEnabled")) || !bytes.Contains(scrubbed, []byte("removeEmptyLines")) {
 		t.Fatal("legacy file cleanup kept credentials or removed unrelated preferences")
+	}
+}
+
+func TestAPIConfigPolicyMySQLMigratesLegacyVideoSettings(t *testing.T) {
+	ctx := context.Background()
+	db, _ := novelAttributionDatabase(t)
+	if err := storage.RunMigrations(ctx, db, storage.NovelFetchWorkshopMigrations()); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"modelCatalogSecretVersion":"bound-v3","modelCatalog":[],"workflow":{"keep":true},
+	"videoProviders":{"personal_api":{"apiKey":"old-fixture-video-key","model":"test-video","createUrl":"https://video.example.test/create",
+	"tasksUrl":"https://video.example.test/jobs","resultUrl":"https://video.example.test/results/{id}"}}}`
+	if _, err := db.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_configs(owner_username, settings_json, created_at, updated_at) VALUES ('fixture',?,NOW(6),NOW(6))`, old); err != nil {
+		t.Fatal(err)
+	}
+	store := novelfetchworkshop.NewMySQLStore(db)
+	store.ModelSecrets = NewUserConfigStore(t.TempDir()).ModelConfigSecrets()
+	if err := store.ResumeLegacyModelCleanup(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var raw []byte
+	if err := db.QueryRowContext(ctx, `SELECT settings_json FROM novel_fetch_workshop_configs WHERE owner_username='fixture'`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("old-fixture-video-key")) || bytes.Contains(raw, []byte("\"videoProviders\"")) || !bytes.Contains(raw, []byte("enc:v2:")) {
+		t.Fatal("historical video configuration was not replaced with a bound row")
+	}
+	config, err := store.GetConfig(ctx, "fixture")
+	rows := modelCatalog(config)
+	if err != nil || len(rows) != 1 || rows[0]["id"] != "legacy-video:personal_api" || rows[0]["credential"] != "old-fixture-video-key" ||
+		rows[0]["tasksEndpoint"] != "https://video.example.test/jobs" || config["workflow"].(map[string]any)["keep"] != true {
+		t.Fatal("video migration lost the established model, scope or preferences")
 	}
 }
 

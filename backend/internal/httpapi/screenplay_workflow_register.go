@@ -43,7 +43,7 @@ func registerScreenplayWorkflow(root *http.ServeMux, auth BridgeAuth, options Ro
 	if options.UserConfigStore != nil {
 		configs := runtimeUserConfig{accounts: options.AccountCenterStore, prefs: options.UserConfigStore, catalog: options.NovelFetchStore}
 		videoResolver := func(ctx context.Context, owner, modelKey string) (batchfactoryv11.VideoProviderConfig, error) {
-			config, err := configs.GetConfig(ctx, owner)
+			config, err := currentVideoRuntimeSettings(ctx, options.AccountCenterStore, options.NovelFetchStore, owner)
 			if err != nil {
 				return batchfactoryv11.VideoProviderConfig{}, err
 			}

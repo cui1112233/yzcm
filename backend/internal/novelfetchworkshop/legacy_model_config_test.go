@@ -34,3 +34,24 @@ func TestLegacyModelIDFallbackRequiresUniqueCandidate(t *testing.T) {
 		t.Fatal("an ambiguous historical row was selected")
 	}
 }
+
+func TestLegacyModelKeyRequiresUniqueClaimAcrossTheBatch(t *testing.T) {
+	makeRow := func(id, model string) map[string]any {
+		return map[string]any{"id": id, "modelId": model, "kind": "text", "baseUrl": "https://catalog.example.test/v1"}
+	}
+	first, second := makeRow("one", "shared"), makeRow("two", "shared")
+	historical := makeRow("", "shared")
+	historical["credential"] = "synthetic-key"
+	mergeLegacyModelKeys([]any{first, second}, []any{historical})
+	for _, row := range []map[string]any{first, second} {
+		if ModelConfigText(row, "credential") != "" || row["credentialStatus"] != "needs_reentry" {
+			t.Fatal("a historical row with two claims must stay unconfigured")
+		}
+	}
+	replaced := makeRow("one", "changed")
+	historical["id"] = "one"
+	mergeLegacyModelKeys([]any{replaced}, []any{historical})
+	if ModelConfigText(replaced, "credential") != "" || replaced["credentialStatus"] != "needs_reentry" {
+		t.Fatal("a reused row ID cannot carry a previous upstream model's key")
+	}
+}

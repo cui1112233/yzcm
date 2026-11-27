@@ -18,12 +18,13 @@ import (
 const aicutTTSMaxRunes = 5000
 
 type aicutTTSRequest struct {
-	Text  string  `json:"text"`
-	Name  string  `json:"name,omitempty"`
-	Voice string  `json:"voice,omitempty"`
-	Speed float64 `json:"speed,omitempty"`
-	Pitch float64 `json:"pitch,omitempty"`
-	Style string  `json:"style,omitempty"`
+	Text    string  `json:"text"`
+	ModelID string  `json:"modelId,omitempty"`
+	Name    string  `json:"name,omitempty"`
+	Voice   string  `json:"voice,omitempty"`
+	Speed   float64 `json:"speed,omitempty"`
+	Pitch   float64 `json:"pitch,omitempty"`
+	Style   string  `json:"style,omitempty"`
 }
 
 // RegisterAICutTTSRoutes turns TTS output into a durable AI-CUT project asset.
@@ -83,8 +84,8 @@ func RegisterAICutTTSRoutes(mux *http.ServeMux, auth BridgeAuth, store aicut.Sto
 			input.Style = "general"
 		}
 
-		ttsInput := ttsRequest{Input: text, Voice: strings.TrimSpace(input.Voice), Speed: input.Speed, Pitch: input.Pitch, Style: strings.TrimSpace(input.Style)}
-		payload, contentType, err := requestAICutTTSBytes(req.Context(), owner, ttsInput, catalog)
+		ttsInput := ttsRequest{Input: text, ModelID: input.ModelID, Voice: strings.TrimSpace(input.Voice), Speed: input.Speed, Pitch: input.Pitch, Style: strings.TrimSpace(input.Style)}
+		payload, contentType, err := requestTTSBytes(req.Context(), owner, ttsInput, catalog)
 		if err != nil {
 			if req.Context().Err() != nil || err == context.Canceled || err == context.DeadlineExceeded {
 				writeJSON(w, http.StatusRequestTimeout, map[string]string{"error": "配音生成已取消"})
@@ -127,19 +128,6 @@ func RegisterAICutTTSRoutes(mux *http.ServeMux, auth BridgeAuth, store aicut.Sto
 		asset.URL = aicutSignedAssetContentURL(auth, owner, projectID, asset.ID, "content", now())
 		writeJSON(w, http.StatusCreated, map[string]any{"asset": asset})
 	})))
-}
-
-func requestAICutTTSBytes(ctx context.Context, owner string, input ttsRequest, catalog novelfetchworkshop.Store) ([]byte, string, error) {
-	if catalog != nil {
-		model, found, err := configuredTTSModel(ctx, catalog, owner)
-		if err != nil {
-			return nil, "", err
-		}
-		if found {
-			return requestConfiguredTTSBytes(ctx, input, model)
-		}
-	}
-	return requestDefaultTTSBytes(ctx, input)
 }
 
 func aicutTTSExtension(contentType string) string {

@@ -56,6 +56,15 @@ type VideoProviderRegistry interface {
 	View(context.Context, string, string) (VideoProviderConfigView, error)
 }
 
+// VideoModelResolver resolves a concrete account catalog entry on demand.
+type VideoModelResolver interface {
+	ResolveModel(context.Context, string, string, string) (VideoProviderConfig, error)
+}
+
+func NormalizeVideoProviderConfig(cfg VideoProviderConfig) (VideoProviderConfig, error) {
+	return normalizeVideoProviderConfig(cfg)
+}
+
 type VideoProviderConfigView struct {
 	Provider   string `json:"provider"`
 	Model      string `json:"model"`
@@ -348,54 +357,4 @@ func catalogIDForProvider(provider string) string {
 	default:
 		return ""
 	}
-}
-
-// ResolveVideoProviderSetting derives the effective provider setting from an
-// account config document using the same priority as the runtime registry:
-// explicitly saved videoProviders > managed model catalog > legacy video keys.
-// It is read-only and never exposes credentials.
-func ResolveVideoProviderSetting(config map[string]any, rawProvider string) VideoProviderConfig {
-	provider := normalizeVideoProvider(rawProvider)
-	cfg := VideoProviderConfig{Provider: provider, Model: DefaultVideoModelFor(provider)}
-	if config == nil {
-		return cfg
-	}
-	if providers, ok := config["videoProviders"].(map[string]any); ok {
-		if entry, ok := providers[provider].(map[string]any); ok {
-			cfg.APIKey = configString(entry, "apiKey")
-			if model := configString(entry, "model"); model != "" {
-				cfg.Model = model
-			}
-			return cfg
-		}
-	}
-	catalogVersion := configNumber(config["modelCatalogVersion"])
-	if catalogID := catalogIDForProvider(provider); catalogID != "" && catalogVersion >= 1 {
-		models, _ := config["modelCatalog"].([]any)
-		for _, item := range models {
-			entry, ok := item.(map[string]any)
-			if !ok || configString(entry, "id") != catalogID {
-				continue
-			}
-			cfg.APIKey = configString(entry, "credential")
-			if model := configString(entry, "modelId"); model != "" {
-				cfg.Model = model
-			}
-			return cfg
-		}
-	}
-	video, _ := config["video"].(map[string]any)
-	switch provider {
-	case VideoProviderPersonalAPI:
-		cfg.APIKey = configString(video, "ydApiKey")
-		if cfg.APIKey == "" {
-			cfg.APIKey = configString(video, "apiKey")
-		}
-	case VideoProviderAutoDLH3:
-		cfg.APIKey = configString(video, "h3ApiKey")
-		if cfg.APIKey == "" {
-			cfg.APIKey = configString(video, "apiKey")
-		}
-	}
-	return cfg
 }

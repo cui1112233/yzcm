@@ -26,6 +26,9 @@ func accountCenterBusinessWrite(r *http.Request) bool {
 	if executorLifecycleWrite(r.Method, apiPath) {
 		return false
 	}
+	if apiPath == "batch-factory/v11/video-provider/config" || apiPath == "batch-factory/v12/video-provider/config" {
+		return false
+	}
 	// Merge media links are short-lived access to existing artifacts.
 	if namespace == "batch-factory" && r.Method == http.MethodPost {
 		parts := strings.Split(apiPath, "/")

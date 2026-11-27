@@ -10,11 +10,50 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 
+	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/safepath"
 )
 
 const modelLegacyScrubPendingKey = "modelCatalogLegacyScrubPending"
+const modelLegacyScrubDoneKey = "modelCatalogLegacyScrubDone"
+const legacyVideoMigratedKey = "videoProviderLegacyMigrated"
+
+func hasLegacyVideoProviders(document map[string]any) bool {
+	for _, container := range legacyCatalogContainers(document) {
+		if _, exists := container["videoProviders"]; exists {
+			return true
+		}
+	}
+	return false
+}
+
+func legacyVideoProviderRows(container map[string]any) []any {
+	providers, _ := container["videoProviders"].(map[string]any)
+	names := make([]string, 0, len(providers))
+	for name := range providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	rows := make([]any, 0, len(names))
+	for _, name := range names {
+		fields, _ := providers[name].(map[string]any)
+		provider := batchfactoryv11.NormalizeVideoProviderForHTTP(name)
+		candidate := batchfactoryv11.VideoProviderConfig{Provider: provider, Model: ModelConfigText(fields, "model"),
+			APIKey: ModelConfigText(fields, "apiKey"), CreateURL: ModelConfigText(fields, "createUrl"),
+			TasksURL: ModelConfigText(fields, "tasksUrl"), ResultURL: ModelConfigText(fields, "resultUrl"), WorkflowID: ModelConfigText(fields, "workflowId")}
+		row, err := batchfactoryv11.NormalizeVideoProviderConfig(candidate)
+		model := map[string]any{"id": "legacy-video:" + provider, "kind": "video", "modelId": row.Model,
+			"displayName": row.Model, "provider": provider, "endpoint": row.CreateURL, "tasksEndpoint": row.TasksURL,
+			"resultEndpoint": row.ResultURL, "workflowId": row.WorkflowID, "credential": row.APIKey, "enabled": true}
+		if err != nil {
+			markLegacyKeyReentry(model, "legacy_video_configuration_unusable")
+		}
+		rows = append(rows, model)
+	}
+	return rows
+}
 
 func legacyCatalogContainers(document map[string]any) []map[string]any {
 	nested, _ := document["settings"].(map[string]any)
@@ -27,6 +66,7 @@ func legacyCatalogRows(document map[string]any) []any {
 	var rows []any
 	for _, container := range legacyCatalogContainers(document) {
 		catalog, _ := container["modelCatalog"].([]any)
+		catalog = append(append([]any(nil), catalog...), legacyVideoProviderRows(container)...)
 		for _, item := range catalog {
 			duplicate := false
 			for _, previous := range rows {
@@ -44,7 +84,7 @@ func legacyCatalogRows(document map[string]any) []any {
 }
 
 func legacyCatalogSecretDigest(document map[string]any) string {
-	var hasSecret bool
+	hasSecret := hasLegacyVideoProviders(document)
 	for _, item := range legacyCatalogRows(document) {
 		model, _ := item.(map[string]any)
 		for _, field := range []string{"credential", "apiKey", "credentialRef"} {
@@ -56,9 +96,26 @@ func legacyCatalogSecretDigest(document map[string]any) string {
 	if !hasSecret {
 		return ""
 	}
-	rows, _ := json.Marshal(legacyCatalogRows(document))
+	if !hasLegacyVideoProviders(document) {
+		rows, _ := json.Marshal(legacyCatalogRows(document))
+		sum := sha256.Sum256(rows)
+		return hex.EncodeToString(sum[:])
+	}
+	parts := []any{legacyCatalogRows(document)}
+	for _, container := range legacyCatalogContainers(document) {
+		parts = append(parts, container["videoProviders"])
+	}
+	rows, _ := json.Marshal(parts)
 	sum := sha256.Sum256(rows)
 	return hex.EncodeToString(sum[:])
+}
+
+func priorLegacyModelDigest(document map[string]any) string {
+	copy := cloneMap(document)
+	for _, container := range legacyCatalogContainers(copy) {
+		delete(container, "videoProviders")
+	}
+	return legacyCatalogSecretDigest(copy)
 }
 
 func (s *MySQLStore) legacyModelFilePath(owner string) (string, error) {
@@ -106,11 +163,15 @@ func (s *MySQLStore) scrubLegacyModelFile(ctx context.Context, owner, expected s
 	if err != nil {
 		return err
 	}
+	if document == nil {
+		return fmt.Errorf("legacy model file is unavailable during credential cleanup")
+	}
 	if current := legacyCatalogSecretDigest(document); current != "" {
 		if current != expected {
 			return fmt.Errorf("legacy model file changed before credential cleanup")
 		}
 		for _, container := range legacyCatalogContainers(document) {
+			delete(container, "videoProviders")
 			models, _ := container["modelCatalog"].([]any)
 			for _, item := range models {
 				model, ok := item.(map[string]any)
@@ -129,6 +190,7 @@ func (s *MySQLStore) scrubLegacyModelFile(ctx context.Context, owner, expected s
 				}
 			}
 		}
+		document[modelLegacyScrubDoneKey] = expected
 		replace := s.ReplaceLegacyConfig
 		if replace == nil {
 			replace = replaceLegacyModelDocument
@@ -136,6 +198,8 @@ func (s *MySQLStore) scrubLegacyModelFile(ctx context.Context, owner, expected s
 		if err := replace(path, document); err != nil {
 			return err
 		}
+	} else if ModelConfigText(document, modelLegacyScrubDoneKey) != expected {
+		return fmt.Errorf("legacy credential cleanup has no matching completion record")
 	}
 	_, err = s.DB.ExecContext(ctx, `UPDATE novel_fetch_workshop_configs
 SET settings_json=JSON_REMOVE(settings_json, '$.modelCatalogLegacyScrubPending')
@@ -164,7 +228,8 @@ func replaceLegacyModelDocument(path string, document map[string]any) error {
 // ResumeLegacyModelCleanup retries previously committed file cleanup after a restart.
 func (s *MySQLStore) ResumeLegacyModelCleanup(ctx context.Context) error {
 	rows, err := s.DB.QueryContext(ctx, `SELECT owner_username
-FROM novel_fetch_workshop_configs WHERE JSON_CONTAINS_PATH(settings_json, 'one', '$.modelCatalogLegacyScrubPending')`)
+FROM novel_fetch_workshop_configs WHERE JSON_CONTAINS_PATH(settings_json, 'one', '$.modelCatalogLegacyScrubPending',
+'$.videoProviders', '$.settings.videoProviders', '$.appConfig.videoProviders', '$.settings.appConfig.videoProviders')`)
 	if err != nil {
 		return err
 	}
@@ -195,54 +260,102 @@ func sameLegacyModelScope(left, right map[string]any) bool {
 }
 
 func legacyModelCredentialCandidate(current map[string]any, legacy []any) map[string]any {
+	indices, compatible := legacyModelCredentialCandidates(current, legacy)
+	if !compatible || len(indices) != 1 {
+		return nil
+	}
+	result, _ := legacy[indices[0]].(map[string]any)
+	return result
+}
+
+func legacyModelCredentialCandidates(current map[string]any, legacy []any) ([]int, bool) {
 	id := ModelConfigText(current, "id")
 	modelID := ModelConfigText(current, "modelId")
-	var match map[string]any
+	var matches []int
+	compatible := true
 	if id != "" {
-		for _, item := range legacy {
+		for i, item := range legacy {
 			candidate, _ := item.(map[string]any)
 			if ModelConfigText(candidate, "id") != id {
 				continue
 			}
-			if match != nil || !sameLegacyModelScope(current, candidate) {
-				return nil
-			}
-			match = candidate
+			matches = append(matches, i)
+			compatible = compatible && sameLegacyModelScope(current, candidate) && modelID != "" && modelID == ModelConfigText(candidate, "modelId")
 		}
-		if match != nil {
-			return match
+		if len(matches) != 0 {
+			return matches, compatible
 		}
 	}
-	for _, item := range legacy {
+	for i, item := range legacy {
 		candidate, _ := item.(map[string]any)
 		candidateID := ModelConfigText(candidate, "id")
 		if !sameLegacyModelScope(current, candidate) || modelID == "" || modelID != ModelConfigText(candidate, "modelId") {
 			continue
 		}
-		if match != nil || id != "" && candidateID != "" {
-			return nil
-		}
-		match = candidate
+		matches = append(matches, i)
+		compatible = compatible && (id == "" || candidateID == "")
 	}
-	return match
+	return matches, compatible
 }
 
 func mergeLegacyModelKeys(current, legacy []any) {
+	type claim struct {
+		model      map[string]any
+		candidates []int
+		compatible bool
+	}
+	claims := make([]claim, 0, len(current))
+	claimed := make([]int, len(legacy))
 	for _, item := range current {
 		model, ok := item.(map[string]any)
-		if !ok || ModelConfigText(model, "credential") != "" || ModelConfigText(model, "apiKey") != "" {
+		if !ok {
 			continue
 		}
-		match := legacyModelCredentialCandidate(model, legacy)
+		candidates, compatible := legacyModelCredentialCandidates(model, legacy)
+		for _, candidate := range candidates {
+			claimed[candidate]++
+		}
+		claims = append(claims, claim{model, candidates, compatible})
+	}
+	for _, claim := range claims {
+		model := claim.model
+		if len(claim.candidates) == 0 {
+			if ModelConfigText(model, "credential") == "" && ModelConfigText(model, "apiKey") == "" {
+				markLegacyKeyReentry(model, "legacy_missing")
+			}
+			continue
+		}
+		if !claim.compatible || len(claim.candidates) != 1 || claimed[claim.candidates[0]] != 1 {
+			markLegacyKeyReentry(model, "legacy_scope_or_mapping_conflict")
+			continue
+		}
+		match, _ := legacy[claim.candidates[0]].(map[string]any)
+		keys := map[string]struct{}{}
+		for _, row := range []map[string]any{model, match} {
+			for _, key := range []string{"credential", "apiKey"} {
+				if value := ModelConfigText(row, key); value != "" {
+					keys[value] = struct{}{}
+				}
+			}
+		}
+		if len(keys) != 1 {
+			markLegacyKeyReentry(model, "legacy_credential_conflict")
+			continue
+		}
 		for _, key := range []string{"credential", "apiKey"} {
 			if value := ModelConfigText(match, key); value != "" {
 				model[key] = value
 			}
 		}
-		if ModelConfigText(model, "credential") == "" && ModelConfigText(model, "apiKey") == "" {
-			model["credentialStatus"] = "needs_reentry"
-		}
 	}
+}
+
+func markLegacyKeyReentry(model map[string]any, reason string) {
+	delete(model, "credential")
+	delete(model, "apiKey")
+	delete(model, "credentialRef")
+	model["credentialStatus"] = "needs_reentry"
+	model["credentialRecoveryReason"] = reason
 }
 
 func normalizeLegacyModelRows(rows []any) []any {
@@ -261,10 +374,7 @@ func normalizeLegacyModelRows(rows []any) []any {
 			model["id"] = id
 		}
 		if prior := byID[id]; prior != nil {
-			delete(prior, "credential")
-			delete(prior, "apiKey")
-			delete(prior, "credentialRef")
-			prior["credentialStatus"] = "needs_reentry"
+			markLegacyKeyReentry(prior, "legacy_duplicate_row")
 			continue
 		}
 		byID[id] = model

@@ -760,7 +760,7 @@ func (s *ScreenplayMediaWorkbench) generate(ctx context.Context, p screenplay.Pr
 			} else {
 				var raw []byte
 				var ct string
-				raw, ct, runErr = requestAICutTTSBytes(ctx, p.OwnerUsername, ttsRequest{Input: in.Text, Voice: voice, Speed: speed, Style: "general"}, s.Catalog)
+				raw, ct, runErr = requestTTSBytes(ctx, p.OwnerUsername, ttsRequest{Input: in.Text, Voice: voice, Speed: speed, Style: "general"}, s.Catalog)
 				if runErr == nil {
 					if !strings.HasPrefix(ct, "audio/") || len(raw) == 0 {
 						runErr = fmt.Errorf("配音服务没有返回音频")

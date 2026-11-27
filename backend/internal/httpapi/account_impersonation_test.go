@@ -530,12 +530,14 @@ func TestImpersonationRejectsBlankOrMalformedExpectationHeaders(t *testing.T) {
 }
 
 func TestImpersonationBlocksV11AndV12CredentialWrites(t *testing.T) {
-	registry := batchfactoryv11.NewMemoryVideoProviderRegistry()
+	catalog := novelfetchworkshop.NewMemoryStore()
 	credentials := external.NewMemoryStore()
 	publish := &external.Service{Credentials: credentials, Enabled: map[external.Provider]bool{external.Provider121: true}, Key: bytes.Repeat([]byte{4}, 32)}
 	router, _, _ := newImpersonationTestRouter(t, func(options *RouterOptions) {
 		options.Slice = 6
-		options.Production = &batchfactoryv11.ProductionService{ProviderRegistry: registry}
+		options.NovelFetchStore = catalog
+		options.YZCMModelCatalog = yzcmCatalogReaderFixture(videoCatalogFixture)
+		options.Production = &batchfactoryv11.ProductionService{ProviderRegistry: batchfactoryv11.NewMemoryVideoProviderRegistry()}
 		options.External = publish
 	})
 	cookie := startImpersonationForTest(t, router, "founder", "manager")
@@ -544,7 +546,7 @@ func TestImpersonationBlocksV11AndV12CredentialWrites(t *testing.T) {
 			ctx := context.Background()
 			prefix := "/api/batch-factory/" + version
 			for _, write := range []struct{ path, original, replacement string }{
-				{prefix + "/video-provider/config", `{"provider":"personal_api","apiKey":"previous-test-key"}`, `{"provider":"personal_api","apiKey":"replacement-test-key"}`},
+				{prefix + "/video-provider/config", `{"modelId":"fixture-video","credential":"previous-test-key"}`, `{"modelId":"fixture-video","credential":"replacement-test-key"}`},
 				{prefix + "/publish/121/credential", `{"name":"previous","secret":"previous-test-secret"}`, `{"name":"replacement","secret":"replacement-test-secret"}`},
 			} {
 				if w := impersonationRequest(router, http.MethodPut, write.path, "manager", write.original, nil); w.Code != http.StatusOK {
@@ -554,8 +556,9 @@ func TestImpersonationBlocksV11AndV12CredentialWrites(t *testing.T) {
 					t.Errorf("switched credential write at %s = %d %s", write.path, w.Code, w.Body)
 				}
 			}
-			config, err := registry.Resolve(ctx, "manager", batchfactoryv11.VideoProviderPersonalAPI)
-			if err != nil || config.APIKey != "previous-test-key" {
+			config, err := catalog.GetConfig(ctx, "manager")
+			rows := modelCatalog(config)
+			if err != nil || len(rows) != 1 || rows[0]["credential"] != "previous-test-key" {
 				t.Error("existing video provider key was not preserved")
 			}
 			stored, err := credentials.GetCredential(ctx, "manager", external.Provider121)

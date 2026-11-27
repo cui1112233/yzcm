@@ -429,7 +429,7 @@ func NewRouter(options RouterOptions) http.Handler {
 		registerMergeStatusRoute(v12, mergeStatus, "v12")
 	}
 	if batchProduction != nil && options.Slice >= 4 {
-		registerProductionRoutes(v11, batchProduction, runtimeCatalogStore)
+		registerProductionRoutes(v11, batchProduction, options.AccountCenterStore, options.NovelFetchStore, options.YZCMModelCatalog, runtimeCatalogStore)
 		if output, ok := options.MergeOutput.(interface {
 			PutUploadedMP4(context.Context, string, string) (string, error)
 		}); ok {
@@ -538,7 +538,11 @@ func NewRouter(options RouterOptions) http.Handler {
 	if batchProduction != nil {
 		videoProviderRegistry = batchProduction.ProviderRegistry
 	}
-	registerVideoProviderStatusRoute(v12, auth, options.UserConfigStore, videoProviderRegistry, options.Store, "v12", runtimeCatalogStore)
+	if videoProviderRegistry == nil && options.AccountCenterStore != nil {
+		videoProviderRegistry = NewCatalogVideoProviderRegistry(options.AccountCenterStore, options.NovelFetchStore)
+	}
+	registerVideoProviderStatusRoute(v11, auth, videoProviderRegistry, "v11")
+	registerVideoProviderStatusRoute(v12, auth, videoProviderRegistry, "v12")
 	if options.Store != nil {
 		runtimeStageService := &batchfactoryv11.BookStageService{Store: options.Store, Director: options.Director, Production: batchProduction, ImageReady: shuihuoImageReadyChecker(options.Store, runtimeCatalogStore, options.UserConfigStore, resolveRuntimeModelOwner), VideoReady: shuihuoVideoReadyChecker(options.Store, runtimeCatalogStore, batchProduction)}
 		registerRuntimeSummaryRoute(v12, auth, options.Store, runtimeStageService, batchProduction, mergeStatus, options.AutomationStatusReader, "v12", options.TextRepository)
@@ -669,7 +673,7 @@ func NewRouter(options RouterOptions) http.Handler {
 				references, _ = options.AgentAssetObjects.(agentworkspace.ReferenceURLProvider)
 			}
 			videoResolver := func(ctx context.Context, owner, modelKey string) (batchfactoryv11.VideoProviderConfig, error) {
-				config, err := loadShuihuoOwnerConfig(ctx, options.Store, owner, runtimeCatalogStore)
+				config, err := currentVideoRuntimeSettings(ctx, options.AccountCenterStore, options.NovelFetchStore, owner)
 				if err != nil {
 					return batchfactoryv11.VideoProviderConfig{}, err
 				}
@@ -792,7 +796,7 @@ func NewRouter(options RouterOptions) http.Handler {
 	RegisterLocalExecutorArtifactRoutes(root, auth, options.LocalExecutors, options.LocalArtifacts)
 	if options.NovelFetchStore != nil {
 		RegisterScriptVideoRoutes(root, auth, options.LocalExecutors, func(ctx context.Context, owner, modelKey string) (batchfactoryv11.VideoProviderConfig, error) {
-			config, err := loadShuihuoOwnerConfig(ctx, options.Store, owner, runtimeCatalogStore)
+			config, err := currentVideoRuntimeSettings(ctx, options.AccountCenterStore, options.NovelFetchStore, owner)
 			if err != nil {
 				return batchfactoryv11.VideoProviderConfig{}, err
 			}
