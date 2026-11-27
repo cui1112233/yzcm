@@ -22,34 +22,36 @@ Files: create `backend/internal/httpapi/novel_fetch_job_projection.go` and its t
 
 Interface: `verifiedWorkshopJobView(ctx context.Context, store novelfetchworkshop.Store, queue novelfetchworkshop.ProcessQueue, owner string, view map[string]any) map[string]any`.
 
-- [ ] Add regression cases for queue_, go-workshop-, and go-schedule- historical queued/running jobs absent from the queue; require failed with queue_missing reason, immutable history and no enqueue.
-- [ ] Verify existing jobs stay active, Redis errors remain unverified rather than missing, completed runs remain terminal, queue-less callers retain behavior.
-- [ ] Run failing focused Go tests before implementing the helper.
-- [ ] Apply projection to latest, individual job, and realtime/automation endpoints. Preserve existing manual stop projection.
-- [ ] Run focused queue, schedule, workflow and HTTP regression tests.
+- [x] Add regression cases for queue_, go-workshop-, and go-schedule- historical queued/running jobs absent from the queue; require failed with queue_missing reason, immutable history and no enqueue.
+- [x] Verify existing jobs stay active, Redis errors remain unverified rather than missing, completed runs remain terminal, queue-less callers retain behavior.
+- [x] Run failing focused Go tests before implementing the helper.
+- [x] Apply projection to latest, individual job, and realtime/automation endpoints. Preserve existing manual stop projection.
+- [x] Run focused queue, schedule, workflow and HTTP regression tests.
 
 ### Task 2: Frontend state
 
 Files: `frontend/src/user/pages/novel-fetch-progress.js`, its test, `NovelFetchPage.jsx`.
 
-- [ ] Add behavioral tests that interrupted/error projections and unavailable queue checks never render historical waiting/progress as current work.
-- [ ] Clear processJob when latest is empty; retain transient polling failures.
-- [ ] Give current and history empty tables accurate wording; avoid inventing historical batches.
-- [ ] Run Node focused tests and React build.
+- [x] Add behavioral tests that interrupted/error projections and unavailable queue checks never render historical waiting/progress as current work.
+- [x] Clear processJob when latest is empty; retain transient polling failures.
+- [x] Give current and history empty tables accurate wording; avoid inventing historical batches.
+- [x] Run Node focused tests and React build.
 
 ### Task 3: Guarded single-book recovery
 
 Files: task-owned archive recovery script and evidence manifest.
 
-- [ ] Verify exported SHA256 matches each existing DB body. Save before snapshot.
-- [ ] Open transaction, lock document identity and body rows, require all expected versions and hashes, reject non-recovery existing document.
-- [ ] Insert minimal recovery document with real recovery time and explicit unknown original task date; preserve existing body revisions/content and reset only release/expiry lifecycle.
-- [ ] Keep automatic generation/submission disabled for recovered task; preserve all old runs and unrelated bodies.
-- [ ] Commit transaction, verify hashes and counts; idempotent rerun must not mutate the recovered record.
+- [x] Verify exported SHA256 matches each existing DB body. Save before snapshot.
+- [x] Open transaction, lock document identity and body rows, require all expected versions and hashes, reject non-recovery existing document.
+- [x] Insert minimal recovery document with real recovery time and explicit unknown original task date; preserve existing body revisions/content and reset only release/expiry lifecycle.
+- [x] Keep automatic generation/submission disabled for recovered task; preserve all old runs and unrelated bodies.
+- [x] Commit transaction, verify hashes and counts; idempotent rerun must not mutate the recovered record.
 
 ### Task 4: Local delivery
 
-- [ ] Review and commit only this task's source/docs/test changes to v88.
+- [x] Review and commit only this task's source/docs/test changes to v88.
 - [ ] Build frontend and Go embedded binary from current source with traceable manifest. Confirm current listener and no active generation before restart; preserve runtime environment.
 - [ ] Verify /health and /api/runtime-build-info, then logged-in browser task list, body versions and queue logs.
 - [ ] Record actual runtime SHA, test evidence, restored body hashes and limitations; no external upload or generation.
+
+Current checkpoint: frontend and Windows embedded Go candidate built; data and browser body acceptance passed; actual 4001 still c33aa9d3 because another 25-book comic batch has 24 running books and one queued. Do not restart it without a safe idle window or user direction. Details: docs/acceptance/2026-11-27-batch-book-recovery.md.
