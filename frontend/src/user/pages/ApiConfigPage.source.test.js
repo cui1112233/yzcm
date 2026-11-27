@@ -45,9 +45,20 @@ test('restricted Key writes never send enabled or address fields', () => {
   assert.doesNotMatch(source, /restrictedCredentialPatch\([^\n]+enabled/);
 });
 
+test('restricted Key saving and errors are keyed per model while full mode keeps its existing scalar state', () => {
+  const settingsSource = fs.readFileSync(path.join(here, 'ApiIntegrationSettings.jsx'), 'utf8');
+  const restricted = settingsSource.slice(settingsSource.indexOf('function RestrictedApiIntegrationSettings'), settingsSource.indexOf('export default function ApiIntegrationSettings'));
+  const full = settingsSource.slice(settingsSource.indexOf('function FullApiIntegrationSettings'));
+  assert.match(restricted, /keyRequests\[model\.id\]/);
+  assert.match(restricted, /setCatalogKeyRequestState\(current, model\.id/);
+  assert.match(restricted, /role="alert"/);
+  assert.doesNotMatch(restricted, /catalogModelSavingId === model\.id/);
+  assert.match(full, /catalogModelSavingId === model\.id/);
+});
+
 test('restricted selection saves only display selection or kind and model id', () => {
-  assert.match(source, /buildYZCMSelectionOperations\(/);
-  assert.match(source, /operation\.type === 'create'/);
-  assert.match(source, /updateManagedModel\(operation\.id, operation\.patch\)/);
+  assert.match(source, /executeYZCMSelectionOperations\(/);
+  assert.match(source, /create: createManagedModel/);
+  assert.match(source, /update: updateManagedModel/);
   assert.doesNotMatch(source, /deleteManagedModel/);
 });

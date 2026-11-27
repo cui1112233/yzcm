@@ -35,17 +35,23 @@ export function buildPresetSelectionPayload(channelSelection, groupId, ids) {
 const YZCM_MODEL_KINDS = new Set(['text', 'image', 'video', 'audio', 'asr']);
 
 export function yzcmModelSelectionId(model) {
-  const explicit = String(model?.id ?? '').trim();
-  if (explicit.startsWith('yzcm:')) return explicit;
   const kind = String(model?.kind ?? '').trim().toLowerCase();
   const modelId = String(model?.modelId ?? '').trim();
-  return YZCM_MODEL_KINDS.has(kind) && modelId ? `yzcm:${kind}:${modelId}` : '';
+  if (!YZCM_MODEL_KINDS.has(kind) || !modelId) return '';
+  const canonical = `yzcm:${kind}:${modelId}`;
+  const explicit = String(model?.id ?? '').trim();
+  return !explicit || explicit === canonical ? canonical : '';
+}
+
+function yzcmServerRowId(model) {
+  const canonical = yzcmModelSelectionId(model);
+  return canonical && String(model?.id ?? '').trim() === canonical ? canonical : '';
 }
 
 export function mergeYZCMSelectionModels(current, searchRows) {
   const byId = new Map();
   for (const model of Array.isArray(current) ? current : []) {
-    const id = yzcmModelSelectionId(model);
+    const id = yzcmServerRowId(model);
     if (id) byId.set(id, { ...model, id });
   }
   for (const row of Array.isArray(searchRows) ? searchRows : []) {
@@ -62,7 +68,7 @@ export function mergeYZCMSelectionModels(current, searchRows) {
 export function buildYZCMSelectionOperations(existingModels, selectedModels) {
   const existing = new Map();
   for (const model of Array.isArray(existingModels) ? existingModels : []) {
-    const id = yzcmModelSelectionId(model);
+    const id = yzcmServerRowId(model);
     if (id) existing.set(id, model);
   }
   const selected = new Map();
@@ -83,6 +89,48 @@ export function buildYZCMSelectionOperations(existingModels, selectedModels) {
   return operations;
 }
 
+export function applyYZCMSelectionOperation(models, operation) {
+  const rows = Array.isArray(models) ? models : [];
+  if (operation?.type === 'create') {
+    const id = yzcmModelSelectionId(operation.payload);
+    return id ? [...rows, { ...operation.payload, id, selectedForConfigPage: true }] : rows;
+  }
+  if (operation?.type === 'update') {
+    return rows.map(model => model.id === operation.id ? { ...model, ...operation.patch } : model);
+  }
+  return rows;
+}
+
+export async function executeYZCMSelectionOperations({
+  existingModels, selectedModels, create, update, refresh, onModels
+}) {
+  let localModels = Array.isArray(existingModels) ? existingModels : [];
+  let operationError = null;
+  try {
+    for (const operation of buildYZCMSelectionOperations(localModels, selectedModels)) {
+      if (operation.type === 'create') await create(operation.payload);
+      else await update(operation.id, operation.patch);
+      localModels = applyYZCMSelectionOperation(localModels, operation);
+      onModels?.(localModels);
+    }
+  } catch (error) {
+    operationError = error;
+  }
+  let refreshError = null;
+  try {
+    const refreshed = await refresh();
+    if (Array.isArray(refreshed)) {
+      localModels = refreshed;
+      onModels?.(localModels);
+    }
+  } catch (error) {
+    refreshError = error;
+  }
+  if (operationError) throw operationError;
+  if (refreshError) throw refreshError;
+  return localModels;
+}
+
 export function restrictedCredentialPatch(value, clear) {
   if (clear) return { clearCredential: true };
   const credential = String(value ?? '').trim();
@@ -94,4 +142,9 @@ export function settleCatalogKeyDraft(drafts, modelId, submitted, focused) {
   const current = drafts || {};
   if (focused || String(current[modelId] ?? '').trim() !== String(submitted ?? '').trim()) return current;
   return { ...current, [modelId]: '' };
+}
+
+export function setCatalogKeyRequestState(states, modelId, patch) {
+  const current = states || {};
+  return { ...current, [modelId]: { ...(current[modelId] || {}), ...(patch || {}) } };
 }

@@ -9,7 +9,7 @@ import { PageHeader, Panel, RoleBadge } from './accountCenterShared';
 import { getPresetCardState } from './api-config-preset-state';
 import { loadApiConfigPage, refreshApiConfigModels } from './api-config-initial-load.js';
 import { projectApiConfigCapabilities } from './api-config-role-policy.js';
-import { buildYZCMSelectionOperations, restrictedCredentialPatch } from './apiPresetSelection.js';
+import { executeYZCMSelectionOperations, restrictedCredentialPatch } from './apiPresetSelection.js';
 import { isCatalogModelAvailable, modelNeedsNoCredential } from './apiConfigCatalogMerge';
 import ApiIntegrationSettings from './ApiIntegrationSettings';
 
@@ -103,6 +103,7 @@ export default function ApiConfigPage() {
   }, [canManageApi]);
 
   const applyModels = useCallback(nextModels => {
+    modelsRef.current = nextModels;
     setModels(nextModels);
     const h3 = nextModels.find(model => model.id === 'minimax-h3-video');
     if (h3 && !dirtyRef.current['minimax-h3-video']) setPresetWorkflowIds(current => ({ ...current, 'minimax-h3-video': h3.workflowId || DEFAULT_H3_WORKFLOW_ID }));
@@ -263,12 +264,18 @@ export default function ApiConfigPage() {
 
   async function saveYZCMSelection(selectedModels) {
     if (policy.mode !== 'restricted') throw new Error('当前账号不能修改 YZCM 展示选择');
-    const operations = buildYZCMSelectionOperations(modelsRef.current, selectedModels);
-    for (const operation of operations) {
-      if (operation.type === 'create') await createManagedModel(operation.payload);
-      else await updateManagedModel(operation.id, operation.patch);
-    }
-    await refreshModels();
+    await executeYZCMSelectionOperations({
+      existingModels: modelsRef.current,
+      selectedModels,
+      create: createManagedModel,
+      update: updateManagedModel,
+      refresh: async () => {
+        const nextModels = await listManagedModels();
+        applyModels(nextModels);
+        return nextModels;
+      },
+      onModels: applyModels
+    });
   }
 
   // 用户自建目录模型的唯一编辑入口：与自定义渠道共用同一张表单，

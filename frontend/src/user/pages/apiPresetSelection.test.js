@@ -4,12 +4,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  applyYZCMSelectionOperation,
   buildPresetSelectionPayload,
   buildYZCMSelectionOperations,
+  executeYZCMSelectionOperations,
   explicitPresetIds,
   filterPresetsBySelection,
   mergeYZCMSelectionModels,
   restrictedCredentialPatch,
+  setCatalogKeyRequestState,
   settleCatalogKeyDraft,
   yzcmModelSelectionId,
   selectedPresetIds
@@ -73,7 +76,7 @@ test('取消操作：纯函数不修改入参，取消后原选择保持不变',
 });
 
 test('YZCM selection identity is stable across display-name changes and search pages', () => {
-  const selected = [{ kind: 'text', modelId: 'deepseek-chat', displayName: '旧名称', hasCredential: true }];
+  const selected = [{ id: 'yzcm:text:deepseek-chat', kind: 'text', modelId: 'deepseek-chat', displayName: '旧名称', hasCredential: true }];
   const next = mergeYZCMSelectionModels(selected, [
     { kind: 'text', modelId: 'deepseek-chat', displayName: '新名称', adapted: true, allowed: true },
     { kind: 'image', modelId: 'seedream', displayName: 'Seedream', adapted: true, allowed: true }
@@ -82,6 +85,16 @@ test('YZCM selection identity is stable across display-name changes and search p
   assert.deepEqual(next.map(item => item.displayName), ['新名称', 'Seedream']);
   assert.equal(next[0].hasCredential, true);
   assert.equal(new Set(next.map(yzcmModelSelectionId)).size, 2);
+});
+
+test('YZCM identity rejects forged ids, unknown kinds and empty model ids', () => {
+  assert.equal(yzcmModelSelectionId({ id: 'yzcm:text:alpha', kind: 'video', modelId: 'gamma' }), '');
+  assert.equal(yzcmModelSelectionId({ id: 'yzcm:other:alpha', kind: 'other', modelId: 'alpha' }), '');
+  assert.equal(yzcmModelSelectionId({ id: 'yzcm:text:alpha', kind: 'text', modelId: '' }), '');
+  assert.equal(yzcmModelSelectionId({ kind: 'text', modelId: 'alpha', displayName: 'renamed' }), 'yzcm:text:alpha');
+  assert.deepEqual(mergeYZCMSelectionModels([], [{
+    id: 'yzcm:text:alpha', kind: 'video', modelId: 'gamma', adapted: true, allowed: true
+  }]), []);
 });
 
 test('YZCM search merge rejects unknown kinds, denied rows and external providers', () => {
@@ -119,4 +132,41 @@ test('restricted credential payload and draft settlement are isolated by model i
   assert.deepEqual(settleCatalogKeyDraft(drafts, 'a', 'secret-a', false), { a: '', b: 'secret-b' });
   assert.deepEqual(settleCatalogKeyDraft(drafts, 'a', 'secret-a', true), drafts);
   assert.deepEqual(settleCatalogKeyDraft({ ...drafts, a: 'newer' }, 'a', 'secret-a', false), { ...drafts, a: 'newer' });
+});
+
+test('partial selection save refreshes rows and retry resumes after successful creates', async () => {
+  const selected = [{ kind: 'text', modelId: 'alpha' }, { kind: 'text', modelId: 'beta' }];
+  let clientRows = [];
+  const serverRows = [];
+  let failBeta = true;
+  const create = async payload => {
+    const id = `yzcm:${payload.kind}:${payload.modelId}`;
+    if (serverRows.some(row => row.id === id)) throw new Error('409 duplicate');
+    if (failBeta && payload.modelId === 'beta') throw new Error('network failure');
+    serverRows.push({ ...payload, id, selectedForConfigPage: true });
+  };
+  const refresh = async () => serverRows.map(row => ({ ...row }));
+  await assert.rejects(executeYZCMSelectionOperations({
+    existingModels: clientRows, selectedModels: selected, create, update: async () => {}, refresh,
+    onModels: rows => { clientRows = rows; }
+  }), /network failure/);
+  assert.deepEqual(clientRows.map(row => row.modelId), ['alpha']);
+  failBeta = false;
+  await executeYZCMSelectionOperations({
+    existingModels: clientRows, selectedModels: selected, create, update: async () => {}, refresh,
+    onModels: rows => { clientRows = rows; }
+  });
+  assert.deepEqual(clientRows.map(row => row.modelId), ['alpha', 'beta']);
+});
+
+test('selection operation and Key request state update only their model id', () => {
+  const rows = applyYZCMSelectionOperation([], { type: 'create', payload: { kind: 'text', modelId: 'alpha' } });
+  assert.equal(rows[0].id, 'yzcm:text:alpha');
+  let state = setCatalogKeyRequestState({}, 'alpha', { saving: true, error: '' });
+  state = setCatalogKeyRequestState(state, 'beta', { saving: true, error: '' });
+  state = setCatalogKeyRequestState(state, 'alpha', { saving: false, error: 'A failed' });
+  assert.deepEqual(state, {
+    alpha: { saving: false, error: 'A failed' },
+    beta: { saving: true, error: '' }
+  });
 });

@@ -5,7 +5,7 @@ import ApiCustomModelModal from './ApiCustomModelModal';
 import ApiPresetSelectionModal from './ApiPresetSelectionModal';
 import { API_CHANNEL_PRESETS, API_INTEGRATION_GROUPS } from './apiIntegrationSchema';
 import { channelEdits, mergeChannelEdit } from './apiIntegrationChannelEdits';
-import { buildPresetSelectionPayload, filterPresetsBySelection, selectedPresetIds, settleCatalogKeyDraft } from './apiPresetSelection';
+import { buildPresetSelectionPayload, filterPresetsBySelection, selectedPresetIds, setCatalogKeyRequestState, settleCatalogKeyDraft } from './apiPresetSelection';
 import { createRevisionTracker, sameText } from './hydrationGuard';
 import { isCatalogModelVisibleForManagement, isUserManagedCatalogModel, mergeGroupEntries, modelIdentity } from './apiConfigCatalogMerge';
 import { getApiIntegrations, revealApiIntegration, saveApiIntegrations } from '../../shared/api/apiIntegrations';
@@ -182,12 +182,12 @@ function RestrictedApiIntegrationSettings({
   onSearchYZCMModels,
   onSaveYZCMSelection,
   onRefreshQuotas,
-  quotaLoading = false,
-  catalogModelSavingId = ''
+  quotaLoading = false
 }) {
   const [presetOpen, setPresetOpen] = useState(false);
   const [presetSaving, setPresetSaving] = useState(false);
   const [drafts, setDrafts] = useState({});
+  const [keyRequests, setKeyRequests] = useState({});
   const touchedRef = useRef(new Set());
   const focusedRef = useRef(new Set());
   const selected = useMemo(
@@ -211,12 +211,18 @@ function RestrictedApiIntegrationSettings({
       touchedRef.current.delete(model.id);
       return;
     }
+    setKeyRequests(current => setCatalogKeyRequestState(current, model.id, { saving: true, error: '' }));
     try {
       await onSaveCatalogCredential(model, value, !value);
       setDrafts(current => settleCatalogKeyDraft(current, model.id, submitted, focusedRef.current.has(model.id)));
       touchedRef.current.delete(model.id);
-    } catch {
-      // 上层显示错误；草稿按模型 ID 保留，方便原地重试。
+    } catch (error) {
+      setKeyRequests(current => setCatalogKeyRequestState(current, model.id, {
+        error: error?.message || '模型 Key 保存失败'
+      }));
+      // 草稿按模型 ID 保留，方便原地重试。
+    } finally {
+      setKeyRequests(current => setCatalogKeyRequestState(current, model.id, { saving: false }));
     }
   }
 
@@ -256,7 +262,8 @@ function RestrictedApiIntegrationSettings({
               </div>
               <div className="api-group-body">
                 {rows.length ? <div className="api-channel-cards">{rows.map(model => {
-                  const saving = catalogModelSavingId === model.id;
+                  const requestState = keyRequests[model.id] || {};
+                  const saving = requestState.saving === true;
                   const quota = quotaByModelId.get(model.id) || quotaByModelId.get(model.modelId);
                   return (
                     <div className="api-channel-card is-catalog" key={model.id}>
@@ -286,6 +293,7 @@ function RestrictedApiIntegrationSettings({
                           }}
                         />
                       </label>
+                      {requestState.error ? <p className="api-preset-picker-error" role="alert">{requestState.error}</p> : null}
                     </div>
                   );
                 })}</div> : <p className="api-preset-picker-empty">这一类还没有展示模型，请点击“自定义预设”从 YZCM 目录选择。</p>}
