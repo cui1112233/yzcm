@@ -1398,7 +1398,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
     try {
       const result = await retryWorkshopTasks(selectedTaskKeys);
       await Promise.all([loadTasks(), loadCurrentBatch(), loadQueueStatus(), loadRealtimeJob()]);
-      message.success(`重试已处理：${novelFetchBatchResultSummary(result)}`);
+      const notice = novelFetchActionNotice(result, `重试请求：${novelFetchBatchResultSummary(result)}`); message[notice.type](notice.message);
     } catch (error) { message.error(error.message || '批量重试失败'); } finally { setTaskActionBusy(''); }
   }
   async function handleDeleteTasks() {
@@ -1731,7 +1731,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
     const failed = source.filter(task => novelFetchTaskStatus(task).status === 'failed').map(task => task.bookId || task.book_id).filter(Boolean);
     if (!failed.length) return message.info('当前没有失败任务');
     setTaskActionBusy('retry-failed');
-    try { const result = await retryWorkshopTasks(failed); await Promise.all([loadTasks(), loadCurrentBatch()]); message[result.failed ? 'warning' : 'success'](`重试已处理：${novelFetchBatchResultSummary(result)}`); } catch (error) { message.error(error.message || '重试失败任务失败'); } finally { setTaskActionBusy(''); }
+    try { const result = await retryWorkshopTasks(failed); await Promise.all([loadTasks(), loadCurrentBatch()]); const notice = novelFetchActionNotice(result, `重试请求：${novelFetchBatchResultSummary(result)}`); message[notice.type](notice.message); } catch (error) { message.error(error.message || '重试失败任务失败'); } finally { setTaskActionBusy(''); }
   }
   async function retryAllFailedTasks() {
     const failed = tasks
@@ -1740,7 +1740,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
       .filter(Boolean);
     if (!failed.length) return message.info('当前批次没有失败任务');
     setTaskActionBusy('retry-all-failed');
-    try { const result = await retryWorkshopTasks(failed); await Promise.all([loadTasks(), loadCurrentBatch()]); message[result.failed ? 'warning' : 'success'](`重试已处理：${novelFetchBatchResultSummary(result)}`); } catch (error) { message.error(error.message || '重试当前批次失败任务失败'); } finally { setTaskActionBusy(''); }
+    try { const result = await retryWorkshopTasks(failed); await Promise.all([loadTasks(), loadCurrentBatch()]); const notice = novelFetchActionNotice(result, `重试请求：${novelFetchBatchResultSummary(result)}`); message[notice.type](notice.message); } catch (error) { message.error(error.message || '重试当前批次失败任务失败'); } finally { setTaskActionBusy(''); }
   }
   function selectAllTasks() { setSelectedTaskKeys(visibleTasks.map(task => task.bookId || task.book_id).filter(Boolean)); }
   function shiftTaskDate(days) {

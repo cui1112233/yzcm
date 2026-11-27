@@ -2,6 +2,22 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { novelFetchLatestJob, novelFetchProgressLines, novelFetchJobFinished, novelFetchActionNotice } from './novel-fetch-progress.js';
 
+test('failed retry admission exposes the reason and never reports success', () => {
+  const notice = novelFetchActionNotice({ requested: 1, queued: 0, updated: 0, failed: 1, ok: false, errors: { '7705784637234105369': 'redis nil' } }, '重试请求：成功 0，失败 1');
+  assert.equal(notice.type, 'error');
+  assert.match(notice.message, /redis nil/);
+  const partial = novelFetchActionNotice({ queued: 1, failed: 1, errors: { other: '任务信息已变化' } }, '重试请求');
+  assert.equal(partial.type, 'warning');
+  assert.match(partial.message, /任务信息已变化/);
+});
+
+test('numeric retry admission is queued rather than completed', () => {
+  const notice = novelFetchActionNotice({ queued: 1, updated: 1, failed: 0, ok: true }, '处理完成');
+  assert.equal(notice.type, 'info');
+  assert.match(notice.message, /队列/);
+  assert.doesNotMatch(notice.message, /完成/);
+});
+
 test('stopped and cancelled jobs end waiting without pretending completion', () => {
   for (const status of ['done', 'failed', 'stopped', 'cancelled', 'canceled', 'completed', ' STOPPED ', 'waiting_retry', 'waiting_classification', 'waiting_configuration', 'waiting_login', 'pending_confirmation', 'manual_only']) {
     assert.equal(novelFetchJobFinished({ status }), true, status);

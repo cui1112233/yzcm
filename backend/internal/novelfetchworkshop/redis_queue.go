@@ -167,7 +167,7 @@ func (q *RedisQueue) ClearCancelledBooks(ctx context.Context, owner string, book
 }
 
 func (q *RedisQueue) IsBookCancelled(ctx context.Context, owner, bookID string) (bool, error) {
-	value, err := q.command(ctx, "GET", q.cancelKey(owner, bookID))
+	value, err := q.leaseCommand(ctx, "GET", q.cancelKey(owner, bookID))
 	return value != nil && strings.TrimSpace(fmt.Sprint(value)) != "", err
 }
 

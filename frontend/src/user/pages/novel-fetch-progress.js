@@ -19,7 +19,16 @@ export function novelFetchJobFinished(job) {
 }
 
 export function novelFetchActionNotice(result, fallbackText) {
+  const queuedCount = typeof result?.queued === 'number' ? Math.max(0, result.queued) : 0;
+  if (result?.ok === false || Number(result?.failed) > 0) {
+    const reason = Object.values(result?.errors || {}).find(value => typeof value === 'string' && value.trim()) || result?.error;
+    return {
+      type: queuedCount > 0 || Number(result?.updated) > 0 ? 'warning' : 'error',
+      message: [result?.message || fallbackText || '操作未成功，请查看失败原因', reason].filter(Boolean).join('；')
+    };
+  }
   if (result?.queued === true) return { type: 'info', message: result.message || '已进入后台生成队列' };
+  if (queuedCount > 0) return { type: 'info', message: result.message || `已进入后台处理队列（${queuedCount} 本）` };
   return { type: 'success', message: result?.message || fallbackText };
 }
 

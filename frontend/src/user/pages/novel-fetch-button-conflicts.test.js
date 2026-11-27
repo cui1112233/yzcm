@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { novelFetchActionNotice } from './novel-fetch-progress.js';
 
 const page = fs.readFileSync(new URL('./NovelFetchPage.jsx', import.meta.url), 'utf8');
 function handler(name, context) {
@@ -9,7 +10,7 @@ function handler(name, context) {
   if (start < 0) start = page.indexOf(`  function ${name}(`);
   assert.ok(start >= 0, name);
   const end = page.indexOf('\n  }', start) + 4;
-  return vm.runInNewContext(`(${page.slice(start, end)})`, context);
+  return vm.runInNewContext(`(${page.slice(start, end)})`, { novelFetchActionNotice, ...context });
 }
 
 test('batch deletion never includes other batches and empty batch never means all', async () => {
