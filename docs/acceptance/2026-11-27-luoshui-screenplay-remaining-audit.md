@@ -1,16 +1,18 @@
 # 洛水漫剧创作：执行后遗漏复核
 
-日期：2026-11-27。源码v88核对点6eb3fcd9；本地4001实际运行db2ee863，manifest一致。本次只查代码和资料，没有调用付费模型或上线。
+日期：2026-11-27。初次核查源码为6eb3fcd9；以下工具表已按本轮执行更新。当前本地4001运行955e68ed，运行SHA与manifest一致，health200；没有本任务远端发布或付费生成。
 
 ## 结论
 
-原件创作40条、编辑38条，共72个去重工具名。当前其中9个读取工具已接，3个资产修改工具只接update分支，剩余60个名称尚未接入作品助手工具调度。另有本系统原有storyboard_failures。这个数量只统计工具名，不是产品功能完成率；手动页面已有能力不算缺失，也不能算助手已经能调用。
+原件创作40条、编辑38条，共72个去重工具名。当前已接24个名称，含部分分支接入；剩余48个名称尚未接入作品助手工具调度。另有本系统原有storyboard_failures。这个数量只统计工具名，不是产品功能完成率；手动页面已有能力不算缺失，也不能算助手已经能调用。
+
+最新完成：三类资产增删改、镜头直接文字修改、镜头新增删除与资产绑定，以及读取范围/确认/重复保护。D01整体仍未完成，D02会话和D03工作流等保持待办。镜头生图仍需手选参考图；手动删除资产入口沿用原行为，不把助手的引用拦截说成全系统已统一。
 
 ## 仍未完成的工作
 
 | 项目 | 当前真实状态 | 需要补的内容 |
 |---|---|---|
-| D01 助手工具 | 读取与三类资产更新已接，确认/重复保护已测 | 创建删除、镜头绑定/增删改、台词/情绪审核修正、生成、拆图及导出工具逐一接现有服务 |
+| D01 助手工具 | 读取、资产增删改、镜头直接文字/增删/绑定已接，相关确认保护已测 | 未接的AI审核修正、生成、拆图、导出及Skills调度；已接工具尚缺的原件分支继续补齐 |
 | D02 会话工作区 | 当前仍为作品内单份消息和方案面板 | 多会话/子会话、文件附件、@引用、Skill选择及权限范围，不能把批次session_id当会话界面完成 |
 | D03 自定工作流 | state.go仍为固定九步 | 步骤选择排序、依赖检查、全局/项目保存、后台执行与断点 |
 | D04 来源检查 | 显式来源编号检查及本地验收完成 | 普通未编号原文的语义遗漏/衔接核对尚未实现；当前明确返回未核验，不猜映射 |
@@ -53,17 +55,17 @@
 | 创作 | `run_voice_agent` | 未接入作品助手工具调度 |
 | 创作 | `run_all_agents` | 未接入作品助手工具调度 |
 | 创作 | `regenerate_character_info` | 未接入作品助手工具调度 |
-| 创作 | `modify_character` | 仅update已接入，add/delete未接 |
-| 创作 | `modify_scene` | 仅update已接入，add/delete未接 |
-| 创作 | `modify_storyboard` | 未接入作品助手工具调度 |
-| 创作 | `modify_prop` | 仅update已接入，add/delete未接 |
+| 创作 | `modify_character` | 已接add/update/delete待确认，保留原字段并核对引用 |
+| 创作 | `modify_scene` | 已接add/update/delete待确认，保留原字段并核对引用 |
+| 创作 | `modify_storyboard` | 已接add/update/delete；仅现有直接消费字段，部分原件参数未兼容 |
+| 创作 | `modify_prop` | 已接add/update/delete待确认，保留原字段并核对引用 |
 | 创作 | `run_director_agent` | 未接入作品助手工具调度 |
-| 创作 | `analyze_screenplay` | 读取已接入，筛选参数有差异 |
-| 创作 | `get_current_screenplay` | 读取已接入，筛选参数有差异 |
-| 创作 | `get_shot_numbers` | 读取已接入，筛选参数有差异 |
+| 创作 | `analyze_screenplay` | 已接当前作品只读；按本系统真实ID及集/引擎筛选 |
+| 创作 | `get_current_screenplay` | 已接当前作品只读；按本系统真实ID及集/引擎筛选 |
+| 创作 | `get_shot_numbers` | 已接当前作品只读；按本系统真实ID及集/引擎筛选 |
 | 创作 | `fix_shot_numbers` | 未接入作品助手工具调度 |
 | 创作 | `review_video_prompts` | 未接入作品助手工具调度 |
-| 创作 | `modify_video_prompt` | 未接入作品助手工具调度 |
+| 创作 | `modify_video_prompt` | 已接replace/append；AI改写/去违规等分支未接 |
 | 创作 | `run_character_parse_agent` | 未接入作品助手工具调度 |
 | 创作 | `run_scene_parse_agent` | 未接入作品助手工具调度 |
 | 创作 | `run_prop_parse_agent` | 未接入作品助手工具调度 |
@@ -85,30 +87,30 @@
 | 创作 | `split_all_shots_image` | 未接入作品助手工具调度 |
 | 创作 | `open_asset_manager` | 未接入作品助手工具调度 |
 | 编辑 | `review_image_prompts` | 未接入作品助手工具调度 |
-| 编辑 | `modify_image_prompt` | 未接入作品助手工具调度 |
+| 编辑 | `modify_image_prompt` | 已接replace/append；AI改写等分支未接 |
 | 编辑 | `batch_optimize_image_prompts` | 未接入作品助手工具调度 |
 | 编辑 | `review_video_prompts` | 未接入作品助手工具调度 |
-| 编辑 | `modify_video_prompt` | 未接入作品助手工具调度 |
+| 编辑 | `modify_video_prompt` | 已接replace/append；AI改写/去违规等分支未接 |
 | 编辑 | `review_asset_bindings` | 未接入作品助手工具调度 |
 | 编辑 | `fix_asset_binding` | 未接入作品助手工具调度 |
 | 编辑 | `auto_fix_all_bindings` | 未接入作品助手工具调度 |
 | 编辑 | `director_review` | 未接入作品助手工具调度 |
 | 编辑 | `modify_voice_text` | 未接入作品助手工具调度 |
-| 编辑 | `get_editor_status` | 读取已接入，筛选参数有差异 |
+| 编辑 | `get_editor_status` | 已接当前作品只读；按本系统真实ID及集/引擎筛选 |
 | 编辑 | `optimize_shot_prompts` | 未接入作品助手工具调度 |
 | 编辑 | `modify_script_text` | 未接入作品助手工具调度 |
-| 编辑 | `get_shot_detail` | 读取已接入，筛选参数有差异 |
+| 编辑 | `get_shot_detail` | 已接当前作品只读；按本系统真实ID及集/引擎筛选 |
 | 编辑 | `split_shot_image_cell` | 未接入作品助手工具调度 |
-| 编辑 | `add_character` | 未接入作品助手工具调度 |
-| 编辑 | `modify_character` | 仅update已接入，add/delete未接 |
-| 编辑 | `delete_character` | 未接入作品助手工具调度 |
-| 编辑 | `add_scene` | 未接入作品助手工具调度 |
-| 编辑 | `modify_scene` | 仅update已接入，add/delete未接 |
-| 编辑 | `delete_scene` | 未接入作品助手工具调度 |
-| 编辑 | `add_prop` | 未接入作品助手工具调度 |
-| 编辑 | `modify_prop` | 仅update已接入，add/delete未接 |
-| 编辑 | `delete_prop` | 未接入作品助手工具调度 |
-| 编辑 | `get_all_shots_voicetext` | 读取已接入，筛选参数有差异 |
+| 编辑 | `add_character` | 已接三类资产增删别名，待确认且防重复 |
+| 编辑 | `modify_character` | 已接add/update/delete待确认，保留原字段并核对引用 |
+| 编辑 | `delete_character` | 已接三类资产增删别名，待确认且防重复 |
+| 编辑 | `add_scene` | 已接三类资产增删别名，待确认且防重复 |
+| 编辑 | `modify_scene` | 已接add/update/delete待确认，保留原字段并核对引用 |
+| 编辑 | `delete_scene` | 已接三类资产增删别名，待确认且防重复 |
+| 编辑 | `add_prop` | 已接三类资产增删别名，待确认且防重复 |
+| 编辑 | `modify_prop` | 已接add/update/delete待确认，保留原字段并核对引用 |
+| 编辑 | `delete_prop` | 已接三类资产增删别名，待确认且防重复 |
+| 编辑 | `get_all_shots_voicetext` | 已接当前作品只读；按本系统真实ID及集/引擎筛选 |
 | 编辑 | `compare_original_vs_voicetext` | 未接入作品助手工具调度 |
 | 编辑 | `auto_generate_missing_shots` | 未接入作品助手工具调度 |
 | 编辑 | `review_dialogue_supplements` | 未接入作品助手工具调度 |
@@ -116,12 +118,12 @@
 | 编辑 | `split_long_shots` | 未接入作品助手工具调度 |
 | 编辑 | `review_voice_emotions` | 未接入作品助手工具调度 |
 | 编辑 | `fix_voice_emotions` | 未接入作品助手工具调度 |
-| 编辑 | `read_shot_video_prompts` | 读取已接入，筛选参数有差异 |
-| 编辑 | `read_shot_image_prompts` | 读取已接入，筛选参数有差异 |
-| 编辑 | `read_assets` | 读取已接入，筛选参数有差异 |
-| 编辑 | `add_shot` | 未接入作品助手工具调度 |
-| 编辑 | `delete_shots` | 未接入作品助手工具调度 |
-| 编辑 | `bind_shot_assets` | 未接入作品助手工具调度 |
+| 编辑 | `read_shot_video_prompts` | 已接当前作品只读；按本系统真实ID及集/引擎筛选 |
+| 编辑 | `read_shot_image_prompts` | 已接当前作品只读；按本系统真实ID及集/引擎筛选 |
+| 编辑 | `read_assets` | 已接当前作品只读；按本系统真实ID及集/引擎筛选 |
+| 编辑 | `add_shot` | 已接已有分镜稿中的新增；来源/绑定不伪造，绑定另用专用工具 |
+| 编辑 | `delete_shots` | 已接有界ID/序号删除、重排及空稿，保留素材文件 |
+| 编辑 | `bind_shot_assets` | 已接真实资产merge/replace；保留来源并接通两种视频消费 |
 
 ## 本次执行后的增量（不覆盖上面的审计快照）
 
@@ -131,3 +133,7 @@
 
 - 96530f05补三种镜头文字工具的直接更新分支，真实4001确认/重复/保留字段/恢复已验收；未接助手名称由54减到51。modify_script_text、AI重写、镜头新增删除仍未接，不把部分工具算全分支完成。
 - 本地最终运行4a276374，包含上述成果和历史迁移校验修复。详细证据及不支持分支见第一轮交付报告最新章节；不是整体对标完成或线上验收。
+
+## 本轮本地交付证据
+
+740ca1ba镜头新增删除、c3932619资产绑定、09d62055来源场景兼容、955e68ed字段容量边界均已独立复查。最终4001实际955e68ed。真实MySQL验收插入/删除后原镜头恢复，绑定/解绑后临时人物可删除，重复确认409，无共享权限403；测试作品仍归档。完整证据和不支持项见第一轮交付报告最新章节。

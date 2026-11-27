@@ -77,3 +77,16 @@
 - 最终从干净精确4a276374测试业务/prompt/storage/yzcmusage及相关HTTP，重新构建React与Go embed；4001实际SHA/manifest均4a276374、health200。旧1e22c0f7程序保留，可回退；新列兼容旧字段写入。
 - 真实归档样例只改自建镜头视频提示词：准备无变化，确认后差异仅video_desc，镜头ID稳定，重复确认409，再恢复原文本。证据assistant-shot-edit-runtime.json；原408 checksum未变、411登记、9列已存在见migration-408-forward-runtime.json。验收未调用模型，没有本任务远端推送或上线。
 - 剩余原件未接助手名称51个（不表示51个手动功能缺失），已接名称也有上述未支持分支。D02等大工作包保持待办。
+
+## 11月27日：镜头增删、资产绑定及实际视频消费
+
+- 740ca1ba接add_shot/delete_shots及modify_storyboard add/delete，服务器生成ID，不伪造来源或绑定。完整稿快照、作者/board双版本及同版变化保护，内容/计数/版本/applied同事务；seq先移至独立区间再写最终序号，幸存镜头只改seq，不重写协议或删媒体。支持删空后新增；相关Go/HTTP和真实Chrome9项通过，独立审查通过。
+- 740ca1ba实际4001/MySQL验证：首镜后插入两次、精确删除两次，序号连续、原ID/内容保留，重复409、未共享403，原单镜头恢复，样例仍归档。证据assistant-shot-structure-runtime.json。新增仅接new_data内现有文字/duration字段，原件独立script_text与直接附带绑定尚未等价；绑定由专用工具完成。
+- c3932619接bind_shot_assets，按真实资产ID或完整名称，merge保序去重、显式空不清；replace仅改提供类型，显式空解绑。新asset_bindings保存ID，与名称同步，保留来源scene_id和未知协议。单场景merge遇不同目标拒绝。确认时对受影响资产归属/类型/名称/版本重新加锁核对，复用现有原子镜头提交；旧失效绑定可replace修复。
+- 修复纯legacy character_ids/scene_id/prop_ids漏过助手引用删除检查的问题，覆盖准备及MySQL确认。普通视频参考与主体视频实际消费接新绑定，失效显式绑定报错，不静默退为无参考。镜头生图仍是手选referenceItemIds；手动DELETE资产入口未改，不能称全系统统一删除保护。
+- 独立复查发现旧文字来源scene_id会阻断主体/Sora替换；09d62055依据生成端真实_cm_contract（模板ID/摘要/解析器/输出协议）确认九宫格来源，并在实际挂Subjects的runner中验证三种来源×两模式六个最终请求。新namespace优先；无可信来源且旧ID失效时要求重绑，不猜测。复查通过。
+- 955e68ed按MySQL字符容量校验人物/道具512、场景191（含分隔符），准备和旧pending确认都复核，超限拒绝而不截断，未提供类型不检查。Unicode边界先红后绿，独立六组复验通过。
+- 绑定业务全包、定向HTTP及两种最终视频请求（受控生成器）、MySQL事务模拟和真实Chrome均通过；不是付费供应商出片或真实数据库故障注入。清洁提交构建React/Go embed，后两项Go-only修复复用同一已构建前端。
+- 最终4001实际SHA/manifest955e68ed，health200，前端/assets/user-BIPAnHzG.js。启动前只读核对142条迁移记录，没有未知checksum漂移或待执行迁移，沿用框架明确登记的两项LegacyChecksums，未改ledger。
+- 最终真实MySQL/API：创建无媒体临时人物，merge绑定后名称/ID一致；准备不改镜头，确认后生效；仍引用时助手删除400；replace恢复原人物后无残留临时ID，再删除临时人物成功；重复确认409，来源与其他字段保留。样例仍归档。证据assistant-shot-binding-runtime.json、migration-preflight-runtime.json、runtime-switch.json。验收没有模型调用，没有本任务远端推送或公网部署。
+- 此轮未接原件工具名由51减至48，但已接名称仍有未支持分支；D01未整体完成，D02等工作包仍待办。当前状态以remaining-audit最新表为准，前述旧数字保留历史证据。
