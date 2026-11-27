@@ -212,6 +212,11 @@ func (s *MySQLStore) TryPatchBoundTextCredential(ctx context.Context, owner, id 
 		delete(updated, "credentialStatus")
 		delete(updated, "credentialRecoveryReason")
 	}
+	// SealModelConfig mutates this row into a storage envelope. Return the
+	// committed readable view, like GetConfig, for the API's public redactor.
+	readable := cloneMap(updated)
+	delete(readable, "hasCredential")
+	delete(readable, "available")
 	if err := s.ModelSecrets.SealModelConfig(owner, opened, previous); err != nil {
 		return nil, true, err
 	}
@@ -243,5 +248,5 @@ func (s *MySQLStore) TryPatchBoundTextCredential(ctx context.Context, owner, id 
 	if err := tx.Commit(); err != nil {
 		return nil, true, err
 	}
-	return updated, true, nil
+	return readable, true, nil
 }

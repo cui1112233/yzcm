@@ -835,12 +835,15 @@ func readModelCatalog(req *http.Request, store novelfetchworkshop.Store, userCon
 	if kind != "" && !modelKinds[kind] {
 		return nil, errors.New("模型类型无效")
 	}
-	settings, err := store.GetConfig(req.Context(), owner)
+	settings, err := novelfetchworkshop.ReadRuntimeConfig(req.Context(), store, owner)
 	if err != nil {
 		return nil, err
 	}
 	result := make([]map[string]any, 0)
 	for _, model := range modelCatalog(settings) {
+		if model["runtimeReason"] == "legacy_video_migration_pending" {
+			continue
+		}
 		if kind != "" && model["kind"] != kind {
 			continue
 		}

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,9 +17,124 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/apisecrets"
 	"qiantie/backend/internal/novelfetchworkshop"
 )
+
+func TestBoundTextCredentialRealCryptoHTTPResponseAndRuntimeRead(t *testing.T) {
+	secrets, raw, _ := textRepairCipherFixture(t, "founder")
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := novelfetchworkshop.NewMySQLStore(db)
+	store.ModelSecrets = secrets
+	center := newModelOwnerTestCenter()
+	center.identities["founder"] = accountcenter.Identity{Username: "founder", Role: accountcenter.RoleFounder, Active: true}
+	h := NewRouter(RouterOptions{AccountCenterStore: center, NovelFetchStore: store, SessionResolver: func(context.Context, string) (BridgeIdentity, error) {
+		return BridgeIdentity{Username: "founder", IsOwner: true}, nil
+	}})
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT settings_json FROM novel_fetch_workshop_configs WHERE owner_username=?")).WithArgs("founder").WillReturnRows(sqlmock.NewRows([]string{"settings_json"}).AddRow(raw))
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT settings_json FROM novel_fetch_workshop_configs WHERE owner_username=? FOR UPDATE")).WithArgs("founder").WillReturnRows(sqlmock.NewRows([]string{"settings_json"}).AddRow(raw))
+	capture := &boundCipherArgument{}
+	mock.ExpectExec("UPDATE novel_fetch_workshop_configs SET settings_json=JSON_SET").WithArgs("$.modelCatalog[0].apiKey", "$.modelCatalog[0].credentialStatus", "$.modelCatalog[0].credentialRecoveryReason", "$.modelCatalog[0].credential", capture, "8", "founder", "7").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	response := impersonationRequest(h, "PATCH", "/api/config/models/text-main", "founder", `{"credential":"new-fixture-only","enabled":true}`, nil)
+	if response.Code != 200 {
+		t.Fatalf("credential repair HTTP status=%d", response.Code)
+	}
+	var body struct {
+		Model map[string]any `json:"model"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Model["hasCredential"] != true || body.Model["available"] != true {
+		t.Fatal("committed real encrypted key was reported as unconfigured/unavailable")
+	}
+	if strings.Contains(response.Body.String(), "new-fixture-only") || strings.Contains(response.Body.String(), capture.value) {
+		t.Fatal("credential response exposed plaintext or ciphertext")
+	}
+	// Reproduce the committed leaf update for subsequent read-only queries.
+	var stored map[string]any
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatal(err)
+	}
+	model := modelCatalog(stored)[0]
+	model["credential"] = capture.value
+	delete(model, "credentialStatus")
+	stored["configRevision"] = "8"
+	storedRaw, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectQuery("SELECT c.settings_json,EXISTS").WithArgs("founder", "founder").WillReturnRows(sqlmock.NewRows([]string{"settings_json", "pending"}).AddRow(storedRaw, true))
+	get := impersonationRequest(h, "GET", "/api/config/models?kind=text", "founder", "", nil)
+	var listed struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(get.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if get.Code != 200 || len(listed.Models) != 1 || listed.Models[0]["hasCredential"] != true || listed.Models[0]["available"] != true {
+		t.Fatal("pending migration hid a repaired formal text model")
+	}
+	if strings.Contains(get.Body.String(), "new-fixture-only") || strings.Contains(get.Body.String(), capture.value) {
+		t.Fatal("management GET exposed plaintext or ciphertext")
+	}
+	mock.ExpectQuery("SELECT c.settings_json,EXISTS").WithArgs("founder", "founder").WillReturnRows(sqlmock.NewRows([]string{"settings_json", "pending"}).AddRow(storedRaw, true))
+	available := impersonationRequest(h, "GET", "/api/models?kind=text", "founder", "", nil)
+	if err := json.Unmarshal(available.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if available.Code != 200 || len(listed.Models) != 1 || listed.Models[0]["id"] != "text-main" || listed.Models[0]["available"] != true {
+		t.Fatal("repaired text missing from the actual available-model dropdown")
+	}
+	if strings.Contains(available.Body.String(), "new-fixture-only") || strings.Contains(available.Body.String(), capture.value) {
+		t.Fatal("available-model GET exposed plaintext or ciphertext")
+	}
+	mock.ExpectQuery("SELECT c.settings_json,EXISTS").WithArgs("founder", "founder").WillReturnRows(sqlmock.NewRows([]string{"settings_json", "pending"}).AddRow(storedRaw, true))
+	video := impersonationRequest(h, "GET", "/api/models?kind=video", "founder", "", nil)
+	if err := json.Unmarshal(video.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if video.Code != 200 || len(listed.Models) != 0 {
+		t.Fatal("pending video entered the available-model dropdown")
+	}
+	mock.ExpectQuery("SELECT c.settings_json,EXISTS").WithArgs("founder", "founder").WillReturnRows(sqlmock.NewRows([]string{"settings_json", "pending"}).AddRow(storedRaw, true))
+	provider, err := resolveAgentTextModel(context.Background(), runtimeModelCatalogStore(store, func(owner string) string { return owner }), nil, "founder", "text-main")
+	if err != nil || provider == nil {
+		t.Fatal("repaired formal text model could not be resolved without cleanup", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAvailableModelCatalogStorageFailureIsNotEmptySuccess(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := novelfetchworkshop.NewMySQLStore(db)
+	center := newModelOwnerTestCenter()
+	center.identities["founder"] = accountcenter.Identity{Username: "founder", Role: accountcenter.RoleFounder, Active: true}
+	h := NewRouter(RouterOptions{AccountCenterStore: center, NovelFetchStore: store, SessionResolver: func(context.Context, string) (BridgeIdentity, error) {
+		return BridgeIdentity{Username: "founder", IsOwner: true}, nil
+	}})
+	mock.ExpectQuery("SELECT c.settings_json,EXISTS").WithArgs("founder", "founder").WillReturnError(errors.New("fixture catalog read failed"))
+	response := impersonationRequest(h, "GET", "/api/models?kind=text", "founder", "", nil)
+	if response.Code == 200 {
+		t.Fatal("database failure became an empty successful model list")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func textRepairCipherFixture(t *testing.T, owner string) (*configSecretProvider, []byte, string) {
 	t.Helper()
@@ -102,12 +218,17 @@ func TestBoundTextRepairUsesRealOwnerModelDestinationCipher(t *testing.T) {
 	if err != nil || !handled || capture.value == "" {
 		t.Fatalf("real cipher repair failed: %v", err)
 	}
-	verified := map[string]any{novelfetchworkshop.ModelSecretVersionKey: novelfetchworkshop.ModelSecretVersion, "modelCatalog": []any{cloneAnyMap(model)}}
+	if public := publicManagedModel(model); public["hasCredential"] != true || public["available"] != true {
+		t.Fatal("readable repair result reported no credential")
+	}
+	sealedModel := cloneAnyMap(model)
+	sealedModel["credential"] = capture.value
+	verified := map[string]any{novelfetchworkshop.ModelSecretVersionKey: novelfetchworkshop.ModelSecretVersion, "modelCatalog": []any{cloneAnyMap(sealedModel)}}
 	if err := secrets.OpenModelConfig("alice", verified); err != nil || modelCatalog(verified)[0]["credential"] != "new-fixture-only" {
 		t.Fatal("new credential was not bound to original owner/model/target", err)
 	}
 	for _, tamper := range []string{"owner", "model", "destination"} {
-		altered := cloneAnyMap(model)
+		altered := cloneAnyMap(sealedModel)
 		owner := "alice"
 		switch tamper {
 		case "owner":
