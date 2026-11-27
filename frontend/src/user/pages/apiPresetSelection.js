@@ -31,3 +31,67 @@ export function buildPresetSelectionPayload(channelSelection, groupId, ids) {
     [groupId]: { enabled: Array.from(new Set((Array.isArray(ids) ? ids : []).map(id => String(id ?? '').trim()).filter(Boolean))) }
   };
 }
+
+const YZCM_MODEL_KINDS = new Set(['text', 'image', 'video', 'audio', 'asr']);
+
+export function yzcmModelSelectionId(model) {
+  const explicit = String(model?.id ?? '').trim();
+  if (explicit.startsWith('yzcm:')) return explicit;
+  const kind = String(model?.kind ?? '').trim().toLowerCase();
+  const modelId = String(model?.modelId ?? '').trim();
+  return YZCM_MODEL_KINDS.has(kind) && modelId ? `yzcm:${kind}:${modelId}` : '';
+}
+
+export function mergeYZCMSelectionModels(current, searchRows) {
+  const byId = new Map();
+  for (const model of Array.isArray(current) ? current : []) {
+    const id = yzcmModelSelectionId(model);
+    if (id) byId.set(id, { ...model, id });
+  }
+  for (const row of Array.isArray(searchRows) ? searchRows : []) {
+    if (row?.adapted !== true || row?.allowed !== true) continue;
+    if (row?.provider && row.provider !== 'yzcm') continue;
+    if (row?.catalogSource && row.catalogSource !== 'yzcm_saved') continue;
+    const id = yzcmModelSelectionId(row);
+    if (!id) continue;
+    byId.set(id, { ...(byId.get(id) || {}), ...row, id });
+  }
+  return [...byId.values()];
+}
+
+export function buildYZCMSelectionOperations(existingModels, selectedModels) {
+  const existing = new Map();
+  for (const model of Array.isArray(existingModels) ? existingModels : []) {
+    const id = yzcmModelSelectionId(model);
+    if (id) existing.set(id, model);
+  }
+  const selected = new Map();
+  for (const model of Array.isArray(selectedModels) ? selectedModels : []) {
+    const id = yzcmModelSelectionId(model);
+    if (id) selected.set(id, model);
+  }
+  const operations = [];
+  for (const [id, model] of existing) {
+    const before = model.selectedForConfigPage !== false;
+    const after = selected.has(id);
+    if (before !== after) operations.push({ type: 'update', id, patch: { selectedForConfigPage: after } });
+  }
+  for (const [id, model] of selected) {
+    if (existing.has(id)) continue;
+    operations.push({ type: 'create', payload: { kind: String(model.kind), modelId: String(model.modelId) } });
+  }
+  return operations;
+}
+
+export function restrictedCredentialPatch(value, clear) {
+  if (clear) return { clearCredential: true };
+  const credential = String(value ?? '').trim();
+  if (!credential) throw new TypeError('请输入 API Key');
+  return { credential };
+}
+
+export function settleCatalogKeyDraft(drafts, modelId, submitted, focused) {
+  const current = drafts || {};
+  if (focused || String(current[modelId] ?? '').trim() !== String(submitted ?? '').trim()) return current;
+  return { ...current, [modelId]: '' };
+}

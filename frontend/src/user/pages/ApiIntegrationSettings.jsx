@@ -1,11 +1,11 @@
 import { Button, Input, InputNumber, Select, Skeleton, Switch, message } from 'antd';
-import { ChevronDown, Eye, EyeOff, HelpCircle, KeyRound, Plus, ShieldCheck, Trash2 } from 'lucide-react';
+import { ChevronDown, Eye, EyeOff, HelpCircle, KeyRound, Plus, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ApiCustomModelModal from './ApiCustomModelModal';
 import ApiPresetSelectionModal from './ApiPresetSelectionModal';
 import { API_CHANNEL_PRESETS, API_INTEGRATION_GROUPS } from './apiIntegrationSchema';
 import { channelEdits, mergeChannelEdit } from './apiIntegrationChannelEdits';
-import { buildPresetSelectionPayload, filterPresetsBySelection, selectedPresetIds } from './apiPresetSelection';
+import { buildPresetSelectionPayload, filterPresetsBySelection, selectedPresetIds, settleCatalogKeyDraft } from './apiPresetSelection';
 import { createRevisionTracker, sameText } from './hydrationGuard';
 import { isCatalogModelVisibleForManagement, isUserManagedCatalogModel, mergeGroupEntries, modelIdentity } from './apiConfigCatalogMerge';
 import { getApiIntegrations, revealApiIntegration, saveApiIntegrations } from '../../shared/api/apiIntegrations';
@@ -167,7 +167,153 @@ function legacyChannelGroup(channelId, channelSelection) {
   return '';
 }
 
-export default function ApiIntegrationSettings({
+const RESTRICTED_KIND_META = [
+  ['text', '文本模型'],
+  ['image', '图片模型'],
+  ['video', '视频模型'],
+  ['audio', '配音模型'],
+  ['asr', '语音识别模型']
+];
+
+function RestrictedApiIntegrationSettings({
+  models = [],
+  quotas = [],
+  onSaveCatalogCredential,
+  onSearchYZCMModels,
+  onSaveYZCMSelection,
+  onRefreshQuotas,
+  quotaLoading = false,
+  catalogModelSavingId = ''
+}) {
+  const [presetOpen, setPresetOpen] = useState(false);
+  const [presetSaving, setPresetSaving] = useState(false);
+  const [drafts, setDrafts] = useState({});
+  const touchedRef = useRef(new Set());
+  const focusedRef = useRef(new Set());
+  const selected = useMemo(
+    () => (Array.isArray(models) ? models : []).filter(model => model?.selectedForConfigPage !== false),
+    [models]
+  );
+  const quotaByModelId = useMemo(() => {
+    const map = new Map();
+    for (const quota of Array.isArray(quotas) ? quotas : []) {
+      if (quota?.modelId) map.set(quota.modelId, quota);
+      if (quota?.id) map.set(quota.id, quota);
+    }
+    return map;
+  }, [quotas]);
+
+  async function commitKey(model) {
+    if (!touchedRef.current.has(model.id) || !onSaveCatalogCredential) return;
+    const submitted = String(drafts[model.id] || '');
+    const value = submitted.trim();
+    if (!value && model.hasCredential !== true) {
+      touchedRef.current.delete(model.id);
+      return;
+    }
+    try {
+      await onSaveCatalogCredential(model, value, !value);
+      setDrafts(current => settleCatalogKeyDraft(current, model.id, submitted, focusedRef.current.has(model.id)));
+      touchedRef.current.delete(model.id);
+    } catch {
+      // 上层显示错误；草稿按模型 ID 保留，方便原地重试。
+    }
+  }
+
+  async function confirmSelection(nextSelected) {
+    if (!onSaveYZCMSelection) return;
+    setPresetSaving(true);
+    try {
+      await onSaveYZCMSelection(nextSelected);
+      setPresetOpen(false);
+      message.success('展示模型已更新；已有 Key 和业务可用状态保持不变');
+    } catch (error) {
+      message.error(error?.message || '模型选择保存失败');
+    } finally {
+      setPresetSaving(false);
+    }
+  }
+
+  return (
+    <section className="settings-section settings-api-section" aria-labelledby="settings-api-title" id="api-integrations">
+      <div>
+        <h2 id="settings-api-title">YZCM API 模型</h2>
+        <p>这里只显示 YZCM 已保存目录。选择模型后分别填写 Key；隐藏卡片不会删除 Key，也不会改变业务下拉中的可用状态。</p>
+      </div>
+      <div className="api-integration-toolbar">
+        <span className="api-integration-count"><ShieldCheck size={14} aria-hidden="true" />已展示 {selected.length} 个模型</span>
+        <Button className="api-channel-open api-preset-open" size="small" onClick={() => setPresetOpen(true)}>自定义预设</Button>
+        <Button size="small" icon={<RefreshCw size={14} />} loading={quotaLoading} onClick={onRefreshQuotas}>刷新额度</Button>
+      </div>
+      <div className="api-integration-groups">
+        {RESTRICTED_KIND_META.map(([kind, title]) => {
+          const rows = selected.filter(model => model.kind === kind);
+          return (
+            <section className="api-group" key={kind}>
+              <div className="api-group-head" aria-label={title}>
+                <span className="api-group-badge is-violet">{title}</span>
+                <span className="api-group-meta">已选 {rows.length}</span>
+              </div>
+              <div className="api-group-body">
+                {rows.length ? <div className="api-channel-cards">{rows.map(model => {
+                  const saving = catalogModelSavingId === model.id;
+                  const quota = quotaByModelId.get(model.id) || quotaByModelId.get(model.modelId);
+                  return (
+                    <div className="api-channel-card is-catalog" key={model.id}>
+                      <div className="api-channel-card-head">
+                        <strong>{model.displayName || model.modelId || model.id}</strong>
+                        <span className="api-channel-tag is-catalog">YZCM</span>
+                        {model.hasCredential ? <span className="api-channel-tag is-on">已配置 Key</span> : <span className="api-channel-tag">未填 Key</span>}
+                        <span className={`api-channel-tag${model.available ? ' is-on' : ''}`}>{model.available ? '业务可用' : '等待 Key'}</span>
+                      </div>
+                      <p className="api-channel-preset-meta">模型 <code>{model.modelId || model.id}</code>{quota?.status ? ` · 额度状态 ${quota.status}` : ''}</p>
+                      <label className="api-channel-preset-line api-catalog-credential">
+                        <span>模型 Key</span>
+                        <Input.Password
+                          value={drafts[model.id] || ''}
+                          prefix={<KeyRound size={15} />}
+                          disabled={saving}
+                          placeholder={model.hasCredential ? '已保存；输入新 Key 覆盖，清空后离开即停用' : '填写这个模型自己的 API Key'}
+                          aria-label={`${model.displayName || model.id} API Key`}
+                          onChange={event => {
+                            touchedRef.current.add(model.id);
+                            setDrafts(current => ({ ...current, [model.id]: event.target.value }));
+                          }}
+                          onFocus={() => focusedRef.current.add(model.id)}
+                          onBlur={() => {
+                            focusedRef.current.delete(model.id);
+                            void commitKey(model);
+                          }}
+                        />
+                      </label>
+                    </div>
+                  );
+                })}</div> : <p className="api-preset-picker-empty">这一类还没有展示模型，请点击“自定义预设”从 YZCM 目录选择。</p>}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+      <ApiPresetSelectionModal
+        mode="restricted"
+        open={presetOpen}
+        selectedModels={selected}
+        saving={presetSaving}
+        onSearch={onSearchYZCMModels}
+        onCancel={() => setPresetOpen(false)}
+        onConfirm={confirmSelection}
+      />
+    </section>
+  );
+}
+
+export default function ApiIntegrationSettings(props) {
+  if (props.mode === 'restricted') return <RestrictedApiIntegrationSettings {...props} />;
+  if (props.mode !== 'full') return null;
+  return <FullApiIntegrationSettings {...props} />;
+}
+
+function FullApiIntegrationSettings({
   visibleGroupIds = null,
   models = [],
   quotas = [],

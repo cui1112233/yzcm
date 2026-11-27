@@ -5,8 +5,13 @@ import assert from 'node:assert/strict';
 
 import {
   buildPresetSelectionPayload,
+  buildYZCMSelectionOperations,
   explicitPresetIds,
   filterPresetsBySelection,
+  mergeYZCMSelectionModels,
+  restrictedCredentialPatch,
+  settleCatalogKeyDraft,
+  yzcmModelSelectionId,
   selectedPresetIds
 } from './apiPresetSelection.js';
 
@@ -65,4 +70,53 @@ test('取消操作：纯函数不修改入参，取消后原选择保持不变',
   assert.deepEqual(selectedPresetIds(original, 'text', ALL), ['deepseek']);
   // 取消（不调用 onConfirm）时没有任何写入，原对象仍是旧勾选
   assert.equal(JSON.stringify(original), snapshot);
+});
+
+test('YZCM selection identity is stable across display-name changes and search pages', () => {
+  const selected = [{ kind: 'text', modelId: 'deepseek-chat', displayName: '旧名称', hasCredential: true }];
+  const next = mergeYZCMSelectionModels(selected, [
+    { kind: 'text', modelId: 'deepseek-chat', displayName: '新名称', adapted: true, allowed: true },
+    { kind: 'image', modelId: 'seedream', displayName: 'Seedream', adapted: true, allowed: true }
+  ]);
+  assert.equal(yzcmModelSelectionId(selected[0]), 'yzcm:text:deepseek-chat');
+  assert.deepEqual(next.map(item => item.displayName), ['新名称', 'Seedream']);
+  assert.equal(next[0].hasCredential, true);
+  assert.equal(new Set(next.map(yzcmModelSelectionId)).size, 2);
+});
+
+test('YZCM search merge rejects unknown kinds, denied rows and external providers', () => {
+  const merged = mergeYZCMSelectionModels([], [
+    { kind: 'text', modelId: 'ok', displayName: '允许', adapted: true, allowed: true },
+    { kind: 'unknown', modelId: 'wrong-kind', adapted: true, allowed: true },
+    { kind: 'image', modelId: 'not-adapted', adapted: false, allowed: true },
+    { kind: 'video', modelId: 'denied', adapted: true, allowed: false },
+    { kind: 'audio', modelId: 'external', provider: 'external', adapted: true, allowed: true },
+    { kind: 'asr', modelId: 'custom-source', catalogSource: 'custom', adapted: true, allowed: true }
+  ]);
+  assert.deepEqual(merged.map(model => model.modelId), ['ok']);
+});
+
+test('YZCM selection operations hide, restore and create without deleting or clearing credentials', () => {
+  const existing = [
+    { id: 'yzcm:text:alpha', kind: 'text', modelId: 'alpha', selectedForConfigPage: true, hasCredential: true },
+    { id: 'yzcm:image:beta', kind: 'image', modelId: 'beta', selectedForConfigPage: false, hasCredential: true }
+  ];
+  const selected = [
+    { kind: 'image', modelId: 'beta' },
+    { kind: 'video', modelId: 'gamma' }
+  ];
+  assert.deepEqual(buildYZCMSelectionOperations(existing, selected), [
+    { type: 'update', id: 'yzcm:text:alpha', patch: { selectedForConfigPage: false } },
+    { type: 'update', id: 'yzcm:image:beta', patch: { selectedForConfigPage: true } },
+    { type: 'create', payload: { kind: 'video', modelId: 'gamma' } }
+  ]);
+});
+
+test('restricted credential payload and draft settlement are isolated by model id', () => {
+  assert.deepEqual(restrictedCredentialPatch('  secret-a  ', false), { credential: 'secret-a' });
+  assert.deepEqual(restrictedCredentialPatch('', true), { clearCredential: true });
+  const drafts = { a: 'secret-a', b: 'secret-b' };
+  assert.deepEqual(settleCatalogKeyDraft(drafts, 'a', 'secret-a', false), { a: '', b: 'secret-b' });
+  assert.deepEqual(settleCatalogKeyDraft(drafts, 'a', 'secret-a', true), drafts);
+  assert.deepEqual(settleCatalogKeyDraft({ ...drafts, a: 'newer' }, 'a', 'secret-a', false), { ...drafts, a: 'newer' });
 });

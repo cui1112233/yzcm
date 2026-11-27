@@ -29,8 +29,6 @@
 - Modify: `backend/internal/storage/local_executor_schema.go`
 - Modify: `backend/internal/httpapi/model_catalog.go`
 - Modify: `backend/internal/httpapi/model_catalog_test.go`
-- Modify: `backend/internal/httpapi/api_config_policy.go`
-- Modify: `backend/internal/httpapi/api_config_policy_test.go`
 
 **Interfaces:**
 - Migration version `8800406` creates `yzcm_model_catalog` and `yzcm_model_sync_runs`.
@@ -76,6 +74,8 @@ git commit -m "feat(models): enforce role-aware API configuration"
 **Files:**
 - Modify: `backend/internal/httpapi/model_catalog.go`
 - Modify: `backend/internal/httpapi/model_catalog_test.go`
+- Modify: `backend/internal/httpapi/api_config_policy.go`
+- Modify: `backend/internal/httpapi/api_config_policy_test.go`
 - Modify: `frontend/src/user/pages/ApiConfigPage.jsx`
 - Modify: `frontend/src/user/pages/ApiIntegrationSettings.jsx`
 - Modify: `frontend/src/user/pages/ApiPresetSelectionModal.jsx`

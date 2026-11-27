@@ -1,13 +1,15 @@
 import { Alert, Button, Input, Select, Skeleton, Space, Tag, message } from 'antd';
 import { Cpu, KeyRound, RefreshCw, ShieldCheck, Video } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { canManageModelCatalog, getConfig } from '../../shared/api/config';
-import { createManagedModel, getManagedModelQuotas, invalidateAvailableModelCatalog, listManagedModels, updateManagedModel } from '../../shared/api/modelCatalog';
+import { getConfig } from '../../shared/api/config';
+import { createManagedModel, getManagedModelQuotas, invalidateAvailableModelCatalog, listManagedModels, searchSavedYZCMModels, updateManagedModel } from '../../shared/api/modelCatalog';
 import { getMemberCenter } from '../../shared/api/member';
 import { FANKE_VIDEO_MODELS } from './shuihuo/providerModelBinding';
 import { PageHeader, Panel, RoleBadge } from './accountCenterShared';
 import { getPresetCardState } from './api-config-preset-state';
 import { loadApiConfigPage, refreshApiConfigModels } from './api-config-initial-load.js';
+import { projectApiConfigCapabilities } from './api-config-role-policy.js';
+import { buildYZCMSelectionOperations, restrictedCredentialPatch } from './apiPresetSelection.js';
 import { isCatalogModelAvailable, modelNeedsNoCredential } from './apiConfigCatalogMerge';
 import ApiIntegrationSettings from './ApiIntegrationSettings';
 
@@ -61,7 +63,8 @@ export default function ApiConfigPage() {
   const [quotaError, setQuotaError] = useState('');
   const [quotaLoading, setQuotaLoading] = useState(false);
   const [catalogModelSavingId, setCatalogModelSavingId] = useState('');
-  const canManageApi = canManageModelCatalog(config);
+  const policy = projectApiConfigCapabilities(config);
+  const canManageApi = policy.mode !== 'none';
   const member = center?.member;
 
   // 自动保存需要的“最新值”引用：定时器里不能依赖闭包里的旧 state。
@@ -121,7 +124,7 @@ export default function ApiConfigPage() {
     let alive = true;
     const whileAlive = callback => (...args) => { if (alive) callback(...args); };
     void loadApiConfigPage({
-      getConfig, getMemberCenter, canManage: canManageModelCatalog,
+      getConfig, getMemberCenter, canManage: value => projectApiConfigCapabilities(value).mode !== 'none',
       listModels: listManagedModels, getQuotas: getManagedModelQuotas
     }, {
       config: whileAlive(setConfig),
@@ -243,7 +246,10 @@ export default function ApiConfigPage() {
     if (!clear && !trimmed) throw new Error('请输入 API Key');
     setCatalogModelSavingId(model.id);
     try {
-      await updateManagedModel(model.id, clear ? { clearCredential: true } : { credential: trimmed, enabled: true });
+      const patch = policy.mode === 'restricted'
+        ? restrictedCredentialPatch(trimmed, clear)
+        : (clear ? { clearCredential: true } : { credential: trimmed, enabled: true });
+      await updateManagedModel(model.id, patch);
       invalidateAvailableModelCatalog();
       await refreshModels();
       message.success(clear ? '已清除目录 Key，该模型不再出现在下拉里' : '目录 Key 已保存，立即生效');
@@ -253,6 +259,16 @@ export default function ApiConfigPage() {
     } finally {
       setCatalogModelSavingId('');
     }
+  }
+
+  async function saveYZCMSelection(selectedModels) {
+    if (policy.mode !== 'restricted') throw new Error('当前账号不能修改 YZCM 展示选择');
+    const operations = buildYZCMSelectionOperations(modelsRef.current, selectedModels);
+    for (const operation of operations) {
+      if (operation.type === 'create') await createManagedModel(operation.payload);
+      else await updateManagedModel(operation.id, operation.patch);
+    }
+    await refreshModels();
   }
 
   // 用户自建目录模型的唯一编辑入口：与自定义渠道共用同一张表单，
@@ -287,11 +303,11 @@ export default function ApiConfigPage() {
   return <div className="account-center-page api-config-page">
     <PageHeader title="API 配置" subtitle="统一管理平台预设模型与各渠道 API 接口；业务页面按凭证自动读取可用模型。" />
     {memberError ? <Alert type="warning" showIcon message={memberError} /> : null}
-    {!canManageApi ? <div className="ac-managed-api-card">
+    {policy.mode === 'none' ? <div className="ac-managed-api-card">
       <span><ShieldCheck size={28} /></span>
       <div><div><h2>模型服务由团队托管</h2>{member ? <RoleBadge canonicalRole={member.canonicalRole} /> : null}</div><p>你可在获授权的业务下拉框中选择管理员已配置凭证的模型；不会显示 API Key。</p></div>
       <Tag color={config?.managedBy ? 'green' : 'gold'}>{config?.managedBy ? `托管账号 @${config.managedBy}` : '等待绑定管理者'}</Tag>
-    </div> : <Panel title="平台预设模型" eyebrow="PLATFORM PRESETS" className="ac-form-panel" action={<Space size={12}>
+    </div> : policy.mode === 'full' ? <Panel title="平台预设模型" eyebrow="PLATFORM PRESETS" className="ac-form-panel" action={<Space size={12}>
         <span className="ac-muted-copy" role="status" aria-live="polite">{SAVE_STATUS_TEXT[saveStatus]}</span>
         <Button icon={<RefreshCw size={15} />} loading={quotaLoading} onClick={refreshQuotaState}>刷新额度</Button>
       </Space>}>
@@ -330,14 +346,20 @@ export default function ApiConfigPage() {
             <div className="ac-platform-preset-state"><small>始终可用</small></div>
           </div>
         ))}
-      </Panel>}
-    <ApiIntegrationSettings
+      </Panel> : null}
+    {policy.mode !== 'none' ? <ApiIntegrationSettings
+      mode={policy.mode}
+      policy={policy}
       models={models}
       quotas={quotas}
       platformPresetIds={PLATFORM_PRESET_IDS}
       onSaveCatalogCredential={canManageApi ? saveCatalogCredential : null}
-      onUpdateCatalogModel={canManageApi ? saveCatalogModel : null}
+      onUpdateCatalogModel={policy.mode === 'full' ? saveCatalogModel : null}
+      onSearchYZCMModels={policy.mode === 'restricted' ? searchSavedYZCMModels : null}
+      onSaveYZCMSelection={policy.mode === 'restricted' ? saveYZCMSelection : null}
+      onRefreshQuotas={refreshQuotaState}
+      quotaLoading={quotaLoading}
       catalogModelSavingId={catalogModelSavingId}
-    />
+    /> : null}
   </div>;
 }

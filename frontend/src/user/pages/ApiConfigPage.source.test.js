@@ -32,3 +32,22 @@ test('文案明确说明清空 Key 等于停用，不依赖额外开关', () => 
 test('目录模型不再向三组传启用回调', () => {
   assert.doesNotMatch(source, /onToggleModelEnabled|modelTogglingId/);
 });
+
+test('role-aware page keeps full controls separate from restricted and member modes', () => {
+  assert.match(source, /projectApiConfigCapabilities\(config\)/);
+  assert.match(source, /policy\.mode === 'full'/);
+  assert.match(source, /policy\.mode === 'restricted'/);
+  assert.match(source, /policy\.mode !== 'none'\s*\?/);
+});
+
+test('restricted Key writes never send enabled or address fields', () => {
+  assert.match(source, /restrictedCredentialPatch\(/);
+  assert.doesNotMatch(source, /restrictedCredentialPatch\([^\n]+enabled/);
+});
+
+test('restricted selection saves only display selection or kind and model id', () => {
+  assert.match(source, /buildYZCMSelectionOperations\(/);
+  assert.match(source, /operation\.type === 'create'/);
+  assert.match(source, /updateManagedModel\(operation\.id, operation\.patch\)/);
+  assert.doesNotMatch(source, /deleteManagedModel/);
+});
