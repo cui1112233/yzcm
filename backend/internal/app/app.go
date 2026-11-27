@@ -202,7 +202,7 @@ func loadSubjectModelConfig(ctx context.Context, accounts accountcenter.Store, c
 	if err != nil {
 		return nil, err
 	}
-	return catalog.GetConfig(ctx, owner)
+	return novelfetchworkshop.ReadRuntimeConfig(ctx, catalog, owner)
 }
 
 func textGenderJudge(provider *batchfactoryv11.OpenAICompatibleProvider) novelfetchworkshop.AIGenderJudge {
@@ -360,7 +360,7 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 		if err != nil {
 			return nil, err
 		}
-		settings, err := novelFetchStore.GetConfig(ctx, owner)
+		settings, err := novelfetchworkshop.ReadRuntimeConfig(ctx, novelFetchStore, owner)
 		if err != nil {
 			return nil, err
 		}

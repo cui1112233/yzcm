@@ -309,7 +309,7 @@ func (s *MySQLStore) GetWorkflowConfig(ctx context.Context, owner string) (map[s
  '$.videoProviders', '$.settings.videoProviders', '$.appConfig.videoProviders', '$.settings.appConfig.videoProviders')
 FROM novel_fetch_workshop_configs WHERE owner_username=?`, owner).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return EnsureWorkshopDefaults(nil), nil
+		return workflowPreferencesForWrite(nil), nil
 	}
 	if err != nil {
 		return nil, err
@@ -321,7 +321,7 @@ FROM novel_fetch_workshop_configs WHERE owner_username=?`, owner).Scan(&raw)
 	if hasLegacyVideoProviders(settings) || ModelConfigText(settings, modelLegacyScrubPendingKey) != "" {
 		return nil, ErrConfigConflict
 	}
-	return EnsureWorkshopDefaults(settings), nil
+	return workflowPreferencesForWrite(settings), nil
 }
 
 // ReadBoundModelConfig compares a read-only form echo without triggering an

@@ -446,7 +446,7 @@ func formalCompatibilityCatalog(r *http.Request, store novelfetchworkshop.Store,
 		return []any{}
 	}
 	if effective != owner {
-		initial, err = store.GetConfig(r.Context(), effective)
+		initial, err = novelfetchworkshop.ReadRuntimeConfig(r.Context(), store, effective)
 		if err != nil {
 			return []any{}
 		}

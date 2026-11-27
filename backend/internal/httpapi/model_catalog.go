@@ -139,7 +139,7 @@ func (s runtimeUserConfig) GetConfig(ctx context.Context, subject string) (map[s
 	}
 	delete(config, "modelCatalog")
 	if s.catalog != nil {
-		models, err := s.catalog.GetConfig(ctx, owner)
+		models, err := novelfetchworkshop.ReadRuntimeConfig(ctx, s.catalog, owner)
 		if err != nil {
 			return nil, err
 		}
@@ -164,20 +164,13 @@ func (s resolvedOwnerModelCatalogStore) GetConfig(ctx context.Context, owner str
 		return nil, accountcenter.ErrForbidden
 	}
 	if resolvedOwner == owner {
-		return s.Store.GetConfig(ctx, owner)
+		return novelfetchworkshop.ReadRuntimeConfig(ctx, s.Store, owner)
 	}
-	managed, err := s.Store.GetConfig(ctx, resolvedOwner)
+	managed, err := novelfetchworkshop.ReadRuntimeConfig(ctx, s.Store, resolvedOwner)
 	if err != nil {
 		return nil, err
 	}
-	var config map[string]any
-	if workflow, ok := s.Store.(interface {
-		GetWorkflowConfig(context.Context, string) (map[string]any, error)
-	}); ok {
-		config, err = workflow.GetWorkflowConfig(ctx, owner)
-	} else {
-		config, err = s.Store.GetConfig(ctx, owner)
-	}
+	config, err := novelfetchworkshop.ReadWorkflowConfig(ctx, s.Store, owner)
 	if err != nil {
 		return nil, err
 	}
