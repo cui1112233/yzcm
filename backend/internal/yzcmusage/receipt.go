@@ -272,7 +272,7 @@ func unverifiedReceipt(b receiptBinding, r receipt, cause error) error {
 	// review evidence here. This directory is never scanned for automatic replay.
 	parent, parentErr := readReceiptObject(filepath.Dir(b.dir), true, "")
 	anchor, anchorErr := readReceiptObject(b.anchor, false, b.id)
-	if parentErr == nil && anchorErr == nil && parent == b.objects.parent && anchor == b.objects.anchor {
+	if parentErr == nil && anchorErr == nil && parent.same(b.objects.parent) && anchor.same(b.objects.anchor) {
 		review := b.anchor + ".unverified"
 		if err := makeReceiptDirectory(review); err != nil {
 			return errors.Join(ErrReceiptPersistenceUnavailable, cause, err)

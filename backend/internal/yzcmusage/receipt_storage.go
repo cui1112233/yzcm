@@ -335,20 +335,40 @@ func (t *Tracker) bindReceiptDirectory(parent context.Context) (receiptBinding, 
 	default:
 		return b, errReceiptDirectoryChanged
 	}
+	if filesystemIdentity == "" {
+		// Bindings from before 8800411 have no saved object identity to verify.
+		return b, errReceiptLegacyBindingUnverified
+	}
 	b.info, err = visibleReceiptDirectory(dir)
 	if err != nil {
 		return b, errors.Join(errReceiptDirectoryChanged, err)
 	}
 	b.objects, err = b.filesystemObjects()
-	if err != nil || b.objects.encode() != filesystemIdentity {
+	if err != nil {
 		return b, errors.Join(errReceiptDirectoryChanged, err)
+	}
+	fingerprint := b.objects.encode()
+	if filesystemIdentity != fingerprint {
+		legacy := b.objects.legacyEncoding()
+		if legacy == "" || filesystemIdentity != legacy {
+			if strings.HasPrefix(filesystemIdentity, receiptLegacyIdentityPlatform+":") {
+				return b, errors.Join(errReceiptDirectoryChanged, errReceiptLegacyBindingUnverified)
+			}
+			return b, errReceiptDirectoryChanged
+		}
+		if err := b.verifyVisible(); err != nil {
+			return b, err
+		}
+		if err := t.Store.upgradeReceiptBinding(ctx, row, legacy, fingerprint, b.objects); err != nil {
+			return b, err
+		}
 	}
 	if err := b.verifyVisible(); err != nil {
 		return b, err
 	}
 	t.receiptBindingMu.Lock()
 	defer t.receiptBindingMu.Unlock()
-	if t.receiptBound != nil && (t.receiptBound.id != b.id || t.receiptBound.objects != b.objects || !os.SameFile(t.receiptBound.info, b.info)) {
+	if t.receiptBound != nil && (t.receiptBound.id != b.id || !t.receiptBound.objects.same(b.objects) || !os.SameFile(t.receiptBound.info, b.info)) {
 		return b, errReceiptDirectoryChanged
 	}
 	t.receiptBound = &b
@@ -361,7 +381,7 @@ func (b receiptBinding) verify() error {
 		return errors.Join(errReceiptDirectoryChanged, dirErr)
 	}
 	actual, err := b.filesystemObjects()
-	if err != nil || actual != b.objects {
+	if err != nil || !actual.same(b.objects) {
 		return errors.Join(errReceiptDirectoryChanged, err)
 	}
 	return nil

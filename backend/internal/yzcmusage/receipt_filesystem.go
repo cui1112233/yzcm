@@ -2,28 +2,36 @@ package yzcmusage
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 var errReceiptStableIdentityUnavailable = errors.New("usage receipt filesystem does not provide a stable object identity")
 
-// Keep this layout compatible with Windows FILE_ID_INFO. Unix inode numbers
-// occupy the last 64 bits. The first field identifies the volume or device.
-type receiptObjectID struct {
+const receiptIdentityV2Prefix = "fs2:"
+
+// The previous format is used only to verify an existing v1 MySQL binding.
+// Its layout matches Windows FILE_ID_INFO; Linux stored its inode in file[8:].
+type receiptLegacyObjectID struct {
 	volume uint64
 	file   [16]byte
 }
 
-func (id receiptObjectID) checked() (receiptObjectID, error) {
-	if id.volume == 0 || id.file == ([16]byte{}) {
-		return receiptObjectID{}, errReceiptStableIdentityUnavailable
-	}
-	return id, nil
+type receiptObjectID struct {
+	receiptLegacyObjectID
+	proof            [sha256.Size]byte
+	birth            time.Time
+	birthUncertainty time.Duration
+}
+
+func (id receiptObjectID) same(other receiptObjectID) bool {
+	return id.proof != ([sha256.Size]byte{}) && id.proof == other.proof
 }
 
 type receiptFilesystemObjects struct {
@@ -31,9 +39,27 @@ type receiptFilesystemObjects struct {
 }
 
 func (objects receiptFilesystemObjects) encode() string {
+	var proofs [4 * sha256.Size]byte
+	copy(proofs[0*sha256.Size:], objects.parent.proof[:])
+	copy(proofs[1*sha256.Size:], objects.directory.proof[:])
+	copy(proofs[2*sha256.Size:], objects.marker.proof[:])
+	copy(proofs[3*sha256.Size:], objects.anchor.proof[:])
+	digest := sha256.Sum256(proofs[:])
+	return receiptIdentityV2Prefix + hex.EncodeToString(digest[:])
+}
+
+func (objects receiptFilesystemObjects) same(other receiptFilesystemObjects) bool {
+	return objects.parent.same(other.parent) && objects.directory.same(other.directory) &&
+		objects.marker.same(other.marker) && objects.anchor.same(other.anchor)
+}
+
+func (objects receiptFilesystemObjects) legacyEncoding() string {
 	var encoded strings.Builder
-	encoded.WriteString(receiptIdentityPlatform)
+	encoded.WriteString(receiptLegacyIdentityPlatform)
 	for _, id := range []receiptObjectID{objects.parent, objects.directory, objects.marker, objects.anchor} {
+		if id.volume == 0 || id.file == ([16]byte{}) {
+			return ""
+		}
 		fmt.Fprintf(&encoded, ":%016x%s", id.volume, hex.EncodeToString(id.file[:]))
 	}
 	return encoded.String()
@@ -130,7 +156,7 @@ func (b receiptBinding) syncPendingFilesystem(ctx context.Context, parentLevels 
 		defer f.Close()
 		if expected != (receiptObjectID{}) {
 			actual, err := receiptObjectIdentity(f)
-			if err != nil || actual != expected {
+			if err != nil || !actual.same(expected) {
 				return errors.Join(errReceiptDirectoryChanged, err)
 			}
 		}
