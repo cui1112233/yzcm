@@ -8,7 +8,7 @@ import '../shared/styles/global.css';
 import '../shared/styles/v88-tokens.css';
 import '../shared/styles/theme-schemes.css';
 import '../shared/styles/v88-ui.css';
-import '../shared/styles/account-center-visual-rebuild.css';
+import '../shared/styles/account-center-pixel-parity.css';
 import { createAntTheme, parseThemeId } from '../shared/styles/theme';
 import { SettingsPage } from './pages/SettingsPage';
 import ApiConfigPage from './pages/ApiConfigPage';

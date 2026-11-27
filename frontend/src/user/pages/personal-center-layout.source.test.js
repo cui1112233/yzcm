@@ -10,8 +10,9 @@ const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
 test('all personal-center routes use one shared energy-glass shell', () => {
   const layout = read('shared/layouts/AccountCenterLayout.jsx');
   assert.match(layout, /RoleEnergyIcon/);
-  assert.match(layout, /account-center-energy-scene/);
-  assert.match(layout, /account-center-topbar/);
+  assert.match(layout, /<EnergyScene/);
+  assert.match(layout, /pc-topbar/);
+  assert.match(layout, /pc-sidebar/);
   assert.doesNotMatch(layout, /if\s*\(pathname === ['"]\/profile['"]\)/);
   assert.doesNotMatch(layout, /profile-glass-workspace/);
 });
@@ -24,8 +25,8 @@ test('profile and security pages do not show a fabricated security score', () =>
 });
 
 test('the visual system provides glass energy motion and reduced-motion fallback', () => {
-  const css = read('shared/styles/account-center-visual-rebuild.css');
-  assert.match(css, /\.account-center-energy-scene/);
+  const css = read('shared/styles/account-center-pixel-parity.css');
+  assert.match(css, /\.pc-energy-scene/);
   assert.match(css, /\.role-energy-icon/);
   assert.match(css, /backdrop-filter:\s*blur/);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);

@@ -5,12 +5,14 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const sourcePath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'AccountCenterLayout.jsx');
-const cssPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'styles', 'account-center-visual-rebuild.css');
+const cssPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'styles', 'account-center-pixel-parity.css');
+const mainPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'user', 'main.jsx');
 
 test('renders an integrated personal-center shell with a return action', () => {
   const source = fs.readFileSync(sourcePath, 'utf8');
 
-  assert.match(source, /className="account-center-workspace"/);
+  assert.match(source, /className="pc-shell"/);
+  assert.match(source, /<EnergyScene/);
   assert.match(source, /aria-label="返回工作台"/);
   assert.match(source, /onClick=\{onReturn\}/);
   assert.doesNotMatch(source, /legacy-sidebar/);
@@ -43,10 +45,14 @@ test('exposes the YZCM API console entry in the sidebar', () => {
   assert.match(source, /YZCM API/);
 });
 
-test('integrated CSS does not retain the fixed overlay or second content offset', () => {
+test('pixel-parity shell is the only account-center visual authority', () => {
   const css = fs.readFileSync(cssPath, 'utf8');
+  const main = fs.readFileSync(mainPath, 'utf8');
 
   assert.doesNotMatch(css, /\.account-center-popover\s*\{\s*position:\s*fixed/);
   assert.doesNotMatch(css, /account-center-drawer-open .legacy-main[\s\S]*margin-left:\s*284px/);
-  assert.match(css, /\.account-center-workspace\s*\{/);
+  assert.match(css, /\.pc-shell\s*\{/);
+  assert.match(css, /grid-template-columns:\s*220px minmax\(0, 1fr\)/);
+  assert.match(main, /account-center-pixel-parity\.css/);
+  assert.doesNotMatch(main, /account-center-visual-rebuild\.css/);
 });

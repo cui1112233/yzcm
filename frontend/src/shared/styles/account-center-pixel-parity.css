@@ -13,6 +13,79 @@
   --pc-line: rgba(132, 202, 255, .42);
 }
 
+.pc-shell {
+  position: relative;
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-rows: 58px minmax(0, 1fr);
+  grid-template-areas: "topbar topbar" "sidebar main";
+  width: 100%;
+  min-height: 100vh;
+  overflow: hidden;
+  color: var(--pc-text);
+  background: var(--pc-night);
+  font-family: "HarmonyOS Sans SC", "Source Han Sans SC", "Microsoft YaHei", sans-serif;
+}
+
+.pc-topbar { position: relative; z-index: 5; grid-area: topbar; display: flex; align-items: center; min-width: 0; padding: 0 24px 0 34px; border-bottom: 1px solid rgba(128, 190, 255, .34); background: rgba(5, 13, 38, .7); box-shadow: 0 6px 24px rgba(0, 5, 24, .18); backdrop-filter: blur(18px) saturate(1.2); }
+.pc-brand { display: inline-flex; align-items: center; gap: 11px; padding: 0; border: 0; color: #fff; background: transparent; cursor: pointer; }
+.pc-brand img { width: 42px; height: 30px; object-fit: contain; filter: drop-shadow(0 0 10px rgba(77, 220, 255, .42)); }
+.pc-brand strong { font-size: 19px; letter-spacing: .08em; }
+.pc-breadcrumb { display: flex; align-items: center; gap: 12px; margin-left: 25px; padding-left: 25px; border-left: 1px solid rgba(132, 202, 255, .24); color: var(--pc-muted); }
+.pc-breadcrumb b { color: rgba(184, 200, 230, .42); }
+.pc-breadcrumb strong { color: var(--pc-text); font-weight: 520; }
+.pc-top-account { display: flex; align-items: center; gap: 9px; min-width: 0; margin-left: auto; }
+.pc-top-account > strong { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-top-account > em { padding: 4px 11px; border: 1px solid rgba(246, 212, 139, .58); border-radius: 999px; color: var(--pc-gold); background: rgba(246, 212, 139, .08); font-size: 12px; font-style: normal; box-shadow: inset 0 0 12px rgba(246, 212, 139, .05), 0 0 14px rgba(246, 212, 139, .08); }
+.pc-online { display: inline-flex; align-items: center; gap: 8px; margin-left: 8px; padding-left: 17px; border-left: 1px solid rgba(132, 202, 255, .25); color: var(--pc-muted); font-size: 12px; }
+.pc-online i { width: 7px; height: 7px; border-radius: 50%; background: var(--pc-success); box-shadow: 0 0 10px rgba(88, 230, 169, .7); }
+.pc-top-account .ant-btn { color: var(--pc-text); border-color: rgba(132, 202, 255, .44); background: rgba(24, 48, 98, .6); }
+
+.pc-sidebar { position: relative; z-index: 4; grid-area: sidebar; display: flex; min-height: 0; flex-direction: column; padding: 18px 10px 12px; border-right: 1px solid rgba(132, 202, 255, .34); border-radius: 0 0 22px 0; background: linear-gradient(180deg, rgba(18, 38, 82, .72), rgba(10, 25, 61, .66)); box-shadow: inset -1px 0 rgba(255,255,255,.08), 10px 0 30px rgba(0, 5, 26, .18); backdrop-filter: blur(22px) saturate(1.2); }
+.pc-sidebar-profile { display: grid; justify-items: center; gap: 12px; padding: 5px 8px 18px; }
+.pc-sidebar-profile .ant-avatar { box-shadow: 0 0 0 2px rgba(204, 232, 255, .74), 0 0 30px rgba(77, 220, 255, .2); }
+.pc-sidebar-profile > div { display: grid; justify-items: center; gap: 4px; min-width: 0; }
+.pc-sidebar-name { display: flex; align-items: center; gap: 7px; max-width: 180px; }
+.pc-sidebar-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-sidebar-profile small { color: var(--pc-muted); }
+.pc-sidebar-profile em { padding: 4px 12px; border: 1px solid rgba(246, 212, 139, .5); border-radius: 999px; color: var(--pc-gold); background: rgba(246, 212, 139, .07); font-size: 11px; font-style: normal; }
+.pc-sidebar-nav { display: grid; gap: 2px; min-height: 0; overflow: auto; }
+.pc-sidebar-group { display: grid; gap: 4px; padding: 9px 0; border-top: 1px solid rgba(132, 202, 255, .15); }
+.pc-sidebar-group > span { padding: 5px 14px 2px; color: rgba(184, 200, 230, .64); font-size: 10px; font-weight: 700; letter-spacing: .12em; }
+.pc-sidebar a,
+.pc-sidebar-actions button { position: relative; display: flex; align-items: center; gap: 12px; min-height: 42px; padding: 9px 14px; border: 1px solid transparent; border-radius: 12px; color: #d6e2f7; background: transparent; cursor: pointer; font: inherit; font-size: 14px; text-align: left; text-decoration: none; }
+.pc-sidebar a:hover,
+.pc-sidebar-actions button:hover { color: #fff; border-color: rgba(77, 220, 255, .22); background: rgba(77, 220, 255, .08); }
+.pc-sidebar a.active { color: #fff; border-color: rgba(112, 226, 255, .78); background: linear-gradient(90deg, rgba(47, 188, 255, .58), rgba(91, 101, 238, .28)); box-shadow: inset 0 0 18px rgba(107, 231, 255, .18), 0 0 22px rgba(77, 220, 255, .2); }
+.pc-sidebar a.active::before { content: ''; position: absolute; left: -1px; top: 9px; bottom: 9px; width: 3px; border-radius: 5px; background: #e7fbff; box-shadow: 0 0 10px var(--pc-cyan); }
+.pc-sidebar-developer a { color: #ecdcae; }
+.pc-sidebar-actions { display: grid; gap: 7px; margin-top: auto; padding-top: 12px; }
+.pc-sidebar-actions button { justify-content: center; border-color: rgba(132, 202, 255, .3); background: rgba(27, 51, 103, .44); }
+.pc-sidebar-actions .pc-logout { color: #f5f8ff; }
+
+.pc-main { position: relative; z-index: 2; grid-area: main; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; }
+.pc-main > .account-center-page,
+.pc-main > .api-config-page { width: 100%; min-height: 100%; padding: 24px 28px 46px; }
+.pc-main .ac-page-header { display: flex; align-items: center; gap: 24px; margin-bottom: 20px; }
+.pc-main .ac-page-header h1 { margin: 0; color: var(--pc-text); font-size: 30px; letter-spacing: .05em; }
+.pc-main .ac-page-header p { margin: 0; padding-left: 22px; border-left: 1px solid rgba(132, 202, 255, .28); color: var(--pc-muted); }
+.pc-main .ac-panel,
+.pc-main .ac-metric-card,
+.pc-main .pg-information-section,
+.pc-main .api-config-section,
+.pc-main .account-role-team-card { border: 1px solid var(--pc-line); border-radius: 18px; color: var(--pc-text); background: linear-gradient(145deg, rgba(37, 67, 129, .68), rgba(10, 25, 62, .64)); box-shadow: inset 0 1px rgba(255,255,255,.16), 0 16px 38px rgba(0,4,24,.24), 0 0 18px rgba(77,220,255,.07); backdrop-filter: blur(22px) saturate(1.2); }
+.pc-main .ant-table,
+.pc-main .ant-table-container,
+.pc-main .ant-table-cell,
+.pc-main .ant-table-thead > tr > th,
+.pc-main .ant-table-tbody > tr > td { color: var(--pc-text); border-color: rgba(132, 202, 255, .2) !important; background: transparent !important; }
+.pc-main .ant-input,
+.pc-main .ant-input-affix-wrapper,
+.pc-main .ant-select-selector,
+.pc-main .ant-input-number { color: var(--pc-text) !important; border-color: rgba(132, 202, 255, .38) !important; background: rgba(8, 25, 61, .58) !important; }
+.pc-main .ant-btn-primary { color: #051226; border-color: #81e9ff; background: linear-gradient(135deg, #6fe6ff, #7198ff); box-shadow: 0 0 18px rgba(77, 220, 255, .28); }
+.pc-main * { scrollbar-color: rgba(105, 173, 224, .62) rgba(3, 12, 35, .46); }
+
 .pc-energy-scene { position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; }
 .pc-energy-scene-space { width: 100%; height: 100%; object-fit: cover; opacity: .86; animation: pc-space-drift 28s ease-in-out infinite alternate; }
 .pc-energy-scene-mark { position: absolute; width: min(52vw, 900px); top: 4vh; right: -8vw; opacity: .28; filter: saturate(1.2) drop-shadow(0 0 30px rgba(77, 220, 255, .22)); animation: pc-mark-float 16s ease-in-out infinite; }
@@ -61,6 +134,32 @@
 @keyframes pc-mark-float { 50% { transform: translate3d(-2%, 2.5%, 0) scale(1.025); opacity: .36; } }
 @keyframes pc-particle { 50% { transform: translateY(-14px) scale(1.4); opacity: .5; } }
 @keyframes pc-role-breathe { 50% { transform: scale(1.055); filter: brightness(1.14) saturate(1.08); } }
+
+@media (max-width: 1180px) {
+  .pc-shell { grid-template-columns: 190px minmax(0, 1fr); }
+  .pc-online { display: none; }
+  .pc-top-account > em { display: none; }
+  .pc-main > .account-center-page,
+  .pc-main > .api-config-page { padding-inline: 20px; }
+}
+
+@media (max-width: 760px) {
+  .pc-shell { grid-template-columns: 72px minmax(0, 1fr); }
+  .pc-topbar { padding-inline: 14px; }
+  .pc-brand strong,
+  .pc-breadcrumb,
+  .pc-top-account > strong,
+  .pc-sidebar-profile > div,
+  .pc-sidebar-group > span,
+  .pc-sidebar a { font-size: 0; }
+  .pc-brand img { width: 36px; }
+  .pc-sidebar { padding-inline: 7px; }
+  .pc-sidebar-profile .ant-avatar { width: 48px !important; height: 48px !important; line-height: 48px !important; }
+  .pc-sidebar a,
+  .pc-sidebar-actions button { justify-content: center; padding-inline: 0; }
+  .pc-main > .account-center-page,
+  .pc-main > .api-config-page { padding: 18px 12px 38px; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   .pc-energy-scene-space,
