@@ -285,7 +285,7 @@ func (s *MySQLStore) GetConfig(ctx context.Context, owner string) (map[string]an
 	if s.ModelSecrets != nil {
 		return s.openConfig(ctx, owner, settings)
 	}
-	if hasLegacyVideoProviders(settings) {
+	if hasLegacyVideoProviders(settings) || settings[legacyVideoPendingKey] != nil {
 		return nil, fmt.Errorf("legacy video credentials require model configuration encryption")
 	}
 	return EnsureWorkshopDefaults(settings), nil
@@ -297,7 +297,7 @@ func (s *MySQLStore) GetWorkflowConfig(ctx context.Context, owner string) (map[s
 	var raw []byte
 	err := s.DB.QueryRowContext(ctx, `SELECT JSON_REMOVE(settings_json,
  '$.modelCatalog', '$.settings.modelCatalog', '$.appConfig.modelCatalog', '$.settings.appConfig.modelCatalog', '$.modelCatalogSecretVersion', '$.modelCatalogLegacyScrubPending',
- '$.modelCatalogLegacyScrubEntries', '$.modelCatalogLegacyMigrationVersion',
+ '$.modelCatalogLegacyScrubEntries', '$.modelCatalogLegacyMigrationVersion', '$.modelCatalogLegacyVideoPending',
  '$.videoProviders', '$.settings.videoProviders', '$.appConfig.videoProviders', '$.settings.appConfig.videoProviders')
 FROM novel_fetch_workshop_configs WHERE owner_username=?`, owner).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -337,12 +337,13 @@ func (s *MySQLStore) ReadBoundModelConfig(ctx context.Context, owner string) (ma
 	if s.ModelSecrets == nil || settings[ModelSecretVersionKey] != ModelSecretVersion {
 		return nil, ErrConfigConflict
 	}
+	delete(settings, legacyVideoPendingKey)
 	return settings, s.ModelSecrets.OpenModelConfig(owner, settings)
 }
 
 func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[string]any) (map[string]any, error) {
 	currentVersion := settings[ModelSecretVersionKey] == ModelSecretVersion
-	checkFile := s.LegacyConfigDir != "" && settings[legacyModelMigrationVersionKey] != legacyModelMigrationVersion
+	checkFile := s.LegacyConfigDir != "" && (settings[legacyModelMigrationVersionKey] != legacyModelMigrationVersion || settings[legacyVideoPendingKey] != nil)
 	needsDBMigration := !currentVersion || hasLegacyVideoProviders(settings) || hasNestedLegacyModels(settings)
 	if needsDBMigration || checkFile {
 		path, err := s.legacyModelFilePath(owner)
@@ -384,6 +385,11 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 			if !previouslyBound && len(rows) > 0 {
 				mergeLegacyModelKeys(rows, legacyCatalogRows(legacy))
 			}
+			waiting := !fileChecked && (checkFile || settings[legacyVideoPendingKey] != nil)
+			rows, err = s.preparePendingVideos(owner, settings, rows, boundRows, migration, waiting)
+			if err != nil {
+				return nil, err
+			}
 			rows, migration.file = prepareLegacyModelEntries(rows, legacy, collectLegacySources(legacy), previouslyBound)
 			reconcileLegacyVideoCredentials(rows, boundRows, migration.database, migration.file)
 			digest := legacyCatalogSecretDigest(legacy)
@@ -406,6 +412,7 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 			return s.GetConfig(ctx, owner)
 		}
 	}
+	delete(settings, legacyVideoPendingKey)
 	if err := s.ModelSecrets.OpenModelConfig(owner, settings); err != nil {
 		return nil, err
 	}
@@ -453,6 +460,15 @@ func (s *MySQLStore) putConfig(ctx context.Context, owner string, settings map[s
 		return err
 	}
 	updated := cloneMap(settings)
+	if migration == nil {
+		delete(updated, legacyVideoPendingKey)
+		if pending, exists := previous[legacyVideoPendingKey]; exists {
+			if s.ModelSecrets == nil {
+				return ErrConfigConflict
+			}
+			updated[legacyVideoPendingKey] = pending
+		}
+	}
 	if s.ModelSecrets != nil {
 		if migration == nil && (hasLegacyVideoProviders(previous) || hasNestedLegacyModels(previous) || ModelConfigText(previous, modelLegacyScrubPendingKey) != "") {
 			return ErrConfigConflict

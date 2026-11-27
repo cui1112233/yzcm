@@ -718,8 +718,12 @@ JSON_OBJECT('personal_api',JSON_OBJECT('apiKey',?,'model','fixture-video'))) WHE
 		owner, fileKey, runtime string
 		existing                map[string]any
 		faults                  bool
+		delayed                 bool
 	}{
 		{owner: "mixed-conflict", fileKey: second, faults: true},
+		{owner: "delayed-conflict", fileKey: second, delayed: true},
+		{owner: "delayed-write-failure", fileKey: second, delayed: true, faults: true},
+		{owner: "delayed-identical", fileKey: first, runtime: first, delayed: true},
 		{owner: "mixed-identical", fileKey: first, runtime: first},
 		{owner: "mixed-established", fileKey: second, runtime: established, existing: official(map[string]any{"credential": established})},
 		{owner: "mixed-blank", fileKey: second, existing: official(map[string]any{"credentialStatus": "needs_reentry"})},
@@ -738,6 +742,39 @@ JSON_OBJECT('personal_api',JSON_OBJECT('apiKey',?,'model','fixture-video'))) WHE
 			path := writeSources(t, tc.owner, tc.fileKey, tc.existing)
 			store.LegacyConfigDir = dir
 			textCipher, videoCipher := cipherAt(t, tc.owner, 0), cipherAt(t, tc.owner, 1)
+			coldStore := func() *novelfetchworkshop.MySQLStore {
+				fresh := novelfetchworkshop.NewMySQLStore(db)
+				fresh.ModelSecrets = NewUserConfigStore(dir).ModelConfigSecrets()
+				fresh.LegacyConfigDir = dir
+				return fresh
+			}
+			if tc.delayed {
+				if err := os.Rename(path, path+".offline"); err != nil {
+					t.Fatal(err)
+				}
+				public, err := store.GetConfig(ctx, tc.owner)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if raw := rawConfig(t, tc.owner); strings.Contains(raw, first) || strings.Contains(raw, "entry-v2") {
+					t.Error("unchecked database source was stored in plaintext or marked complete")
+				}
+				if _, exposed := public["modelCatalogLegacyVideoPending"]; exposed {
+					t.Error("internal video provenance reached the returned configuration")
+				}
+				public["layoutDensity"] = "compact"
+				if err := store.PutConfig(ctx, tc.owner, public); err != nil {
+					t.Fatal(err)
+				}
+				pending, err := NewCatalogVideoProviderRegistry(center, coldStore()).ResolveExactVideoModel(ctx, tc.owner, model)
+				if err == nil || pending.APIKey != "" {
+					t.Errorf("unchecked video resolved before file returned (database fixture selected=%t)", pending.APIKey == first)
+				}
+				if err := os.Rename(path+".offline", path); err != nil {
+					t.Fatal(err)
+				}
+				store = coldStore()
+			}
 			wantConflicts := 2
 			if tc.fileKey == first {
 				wantConflicts = 0
@@ -789,6 +826,9 @@ JSON_OBJECT('personal_api',JSON_OBJECT('apiKey',?,'model','fixture-video'))) WHE
 			}
 			video := NewCatalogVideoProviderRegistry(center, store)
 			chosen, err := video.ResolveExactVideoModel(ctx, tc.owner, model)
+			if tc.delayed && tc.runtime == "" && (err == nil || chosen.APIKey != "") {
+				t.Errorf("disputed video resolved after restart (database fixture selected=%t)", chosen.APIKey == first)
+			}
 			if tc.runtime == "" {
 				rows := modelCatalog(result)
 				if err == nil || len(rows) != 2 || rows[1]["credentialStatus"] != "needs_reentry" || firstText(rows[1]["credential"]) != "" {
@@ -798,10 +838,18 @@ JSON_OBJECT('personal_api',JSON_OBJECT('apiKey',?,'model','fixture-video'))) WHE
 				t.Fatalf("runtime failed to preserve the one proven key: %v", err)
 			}
 			wantState(t)
+			if tc.delayed {
+				store = coldStore()
+				restored, err := NewCatalogVideoProviderRegistry(center, store).ResolveExactVideoModel(ctx, tc.owner, model)
+				if (err == nil) != (tc.runtime != "") || restored.APIKey != tc.runtime {
+					t.Fatal("another restart changed the reconciled video")
+				}
+				wantState(t)
+			}
 			file, err := os.ReadFile(path)
 			raw := rawConfig(t, tc.owner)
 			if err != nil || bytes.Contains(file, []byte(tc.fileKey)) || !bytes.Contains(file, []byte("compact")) ||
-				strings.Contains(raw, first) || strings.Contains(raw, "modelCatalogLegacyScrubPending") || strings.Contains(raw, "videoProviders") {
+				strings.Contains(raw, first) || strings.Contains(raw, "modelCatalogLegacyScrubPending") || strings.Contains(raw, "modelCatalogLegacyVideoPending") || strings.Contains(raw, "videoProviders") {
 				t.Fatal("successful migration did not scrub and acknowledge both sources")
 			}
 			if wantConflicts == 0 {
@@ -814,6 +862,11 @@ JSON_OBJECT('personal_api',JSON_OBJECT('apiKey',?,'model','fixture-video'))) WHE
 			h := NewRouter(RouterOptions{AuthStore: login, AccountCenterStore: center, NovelFetchStore: store, UserConfigStore: config, Now: func() time.Time { return now }})
 			origins := map[string]string{}
 			for _, item := range records {
+				var sealed string
+				if err := db.QueryRowContext(ctx, "SELECT ciphertext FROM novel_fetch_legacy_model_conflicts WHERE owner_username=? AND id=?", tc.owner, item.ID).Scan(&sealed); err != nil ||
+					!strings.HasPrefix(sealed, "enc:v2:") || strings.Contains(sealed, first) || strings.Contains(sealed, second) {
+					t.Fatal("conflict evidence is not encrypted")
+				}
 				got := impersonationRequest(h, "POST", "/api/config/model-conflicts/"+item.ID+"/reveal", tc.owner, "", nil)
 				var found struct{ Value string }
 				if got.Code != http.StatusOK || json.Unmarshal(got.Body.Bytes(), &found) != nil {
