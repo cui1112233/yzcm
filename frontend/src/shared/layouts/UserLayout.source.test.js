@@ -36,16 +36,16 @@ test('账号信息异步更新不会卸载正在使用的业务工作台', () =>
   assert.match(source, /<Fragment>\s*<main className="legacy-main">/s);
 });
 
-test('avatar enters profile through the client route without opening the menu first', () => {
+test('avatar enters the account overview through the client route without opening the menu first', () => {
   const avatarButton = source.slice(
     source.indexOf('className="legacy-sidebar-avatar"'),
     source.indexOf('</button>', source.indexOf('className="legacy-sidebar-avatar"'))
   );
 
-  assert.match(avatarButton, /window\.history\.pushState\(\{\}, '', '\/profile'\)/);
+  assert.match(avatarButton, /window\.history\.pushState\(\{\}, '', '\/account'\)/);
   assert.match(avatarButton, /window\.dispatchEvent\(new PopStateEvent\('popstate'\)\)/);
   assert.doesNotMatch(avatarButton, /setAccountCenterOpen\(true\)/);
-  assert.doesNotMatch(avatarButton, /window\.location\.assign\('\/profile'\)/);
+  assert.doesNotMatch(avatarButton, /window\.location\.assign\('\/account'\)/);
 });
 
 test('routes account-center pages through the dedicated layout while the avatar records a business origin', () => {

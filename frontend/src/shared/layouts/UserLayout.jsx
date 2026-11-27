@@ -580,7 +580,7 @@ export function UserLayout({ children }) {
                 if (!isAccountCenterRoute) {
                   enterAccountCenter();
                 }
-                window.history.pushState({}, '', '/profile');
+                window.history.pushState({}, '', '/account');
                 window.dispatchEvent(new PopStateEvent('popstate'));
               }}
             >

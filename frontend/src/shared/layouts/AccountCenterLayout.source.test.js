@@ -27,17 +27,18 @@ test('shows the server role and gates navigation with server capabilities', () =
   assert.doesNotMatch(source, /account\?\.role/);
 });
 
-test('keeps profile, member, and security navigation available on every center page', () => {
+test('keeps account overview, profile, billing, and security navigation available on every center page', () => {
   const source = fs.readFileSync(sourcePath, 'utf8');
 
   assert.doesNotMatch(source, /const profileOpen/);
   assert.doesNotMatch(source, /profileOpen \?/);
+  for (const label of ['账户总览', '个人资料', '能量与账单', '账号安全']) assert.match(source, new RegExp(label));
 });
 
 test('exposes the YZCM API console entry in the sidebar', () => {
   const source = fs.readFileSync(sourcePath, 'utf8');
 
-  assert.match(source, /href="http:\/\/newapi\.yzcm\.site\/"/);
+  assert.match(source, /href=\{ENERGY_CONSOLE_URL\}/);
   assert.match(source, /target="_blank"/);
   assert.match(source, /YZCM API/);
 });

@@ -1,7 +1,8 @@
 import { Alert, Avatar, Button, Input, Modal, Spin, message } from 'antd';
-import { ChartNoAxesCombined, ChevronLeft, Crown, ExternalLink, KeyRound, LogOut, ShieldCheck, UserRound, UsersRound } from 'lucide-react';
+import { ChartNoAxesCombined, ChevronLeft, ExternalLink, House, KeyRound, LogOut, ShieldCheck, UserRound, UsersRound } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { getAccountImpersonation, startAccountImpersonation, stopAccountImpersonation } from '../api/accountImpersonation.js';
+import { ENERGY_CONSOLE_URL } from '../api/accountCenterEnergy.js';
 import { getPageIdentityGeneration } from '../api/accountImpersonationState.js';
 import { setEffectiveImpersonationAccount } from '../api/auth';
 import { getToken } from '../api/client';
@@ -177,12 +178,12 @@ export function AccountCenterLayout({ account, username, avatar, pathname, onRet
   // Roll out the new shell only to Profile; other account pages keep their layout.
   if (pathname === '/profile') {
     const entries = [
+      { href: '/account', label: '账户总览' },
       { href: '/profile', label: '个人资料' },
-      { href: '/member', label: '会员中心' },
+      { href: '/usage', label: '能量与账单' },
       { href: '/security', label: '账号安全' },
       ...(canManage ? [{ href: '/advanced-team-admin', label: '联合治理' }, { href: '/api-config', label: 'API 配置' }] : []),
-      { href: 'http://newapi.yzcm.site/', label: 'YZCM API', external: true },
-      { href: '/usage', label: '用量与制作' },
+      { href: ENERGY_CONSOLE_URL, label: 'YZCM API', external: true },
       ...(canManage ? [{ href: '/team', label: '组员管理' }] : []),
       ...(canGovernAccounts ? [{ href: '/accounts', label: '账号与角色' }] : []),
       ...(canAccessAdmin ? [{ href: '/admin/presets', label: '管理后台', reload: true }] : [])
@@ -217,10 +218,12 @@ export function AccountCenterLayout({ account, username, avatar, pathname, onRet
       </div>
       <nav className="account-center-sidebar-nav">
         <div className="account-center-sidebar-group">
+          <Link href="/account" className={pathname === '/account' ? 'active' : ''} aria-current={pathname === '/account' ? 'page' : undefined}><House size={18} />账户总览</Link>
           <Link href="/profile" className={pathname === '/profile' ? 'active' : ''} aria-current={pathname === '/profile' ? 'page' : undefined}><UserRound size={18} />个人资料</Link>
-          <div className="account-center-sidebar-submenu"><Link href="/member" className={pathname === '/member' ? 'active' : ''} aria-current={pathname === '/member' ? 'page' : undefined}><Crown size={17} />会员中心</Link><Link href="/security" className={pathname === '/security' ? 'active' : ''} aria-current={pathname === '/security' ? 'page' : undefined}><ShieldCheck size={17} />账号安全</Link>{canManage ? <Link href="/advanced-team-admin" className={pathname === '/advanced-team-admin' ? 'active' : ''} aria-current={pathname === '/advanced-team-admin' ? 'page' : undefined}><UsersRound size={17} />联合治理</Link> : null}</div>
+          <Link href="/usage" className={pathname === '/usage' ? 'active' : ''} aria-current={pathname === '/usage' ? 'page' : undefined}><ChartNoAxesCombined size={17} />能量与账单</Link>
+          <div className="account-center-sidebar-submenu"><Link href="/security" className={pathname === '/security' ? 'active' : ''} aria-current={pathname === '/security' ? 'page' : undefined}><ShieldCheck size={17} />账号安全</Link>{canManage ? <Link href="/advanced-team-admin" className={pathname === '/advanced-team-admin' ? 'active' : ''} aria-current={pathname === '/advanced-team-admin' ? 'page' : undefined}><UsersRound size={17} />联合治理</Link> : null}</div>
         </div>
-        <div className="account-center-sidebar-group">{canManage ? <Link href="/api-config" className={pathname === '/api-config' ? 'active' : ''} aria-current={pathname === '/api-config' ? 'page' : undefined}><KeyRound size={17} />API 配置</Link> : null}<a href="http://newapi.yzcm.site/" target="_blank" rel="noreferrer" title="一战晟铭专属 API 控制台"><ExternalLink size={17} />YZCM API</a><Link href="/usage" className={pathname === '/usage' ? 'active' : ''} aria-current={pathname === '/usage' ? 'page' : undefined}><ChartNoAxesCombined size={17} />用量与制作</Link>{canManage ? <Link href="/team" className={pathname === '/team' ? 'active' : ''} aria-current={pathname === '/team' ? 'page' : undefined}><UsersRound size={17} />组员管理</Link> : null}</div>
+        <div className="account-center-sidebar-group">{canManage ? <Link href="/api-config" className={pathname === '/api-config' ? 'active' : ''} aria-current={pathname === '/api-config' ? 'page' : undefined}><KeyRound size={17} />API 配置</Link> : null}<a href={ENERGY_CONSOLE_URL} target="_blank" rel="noreferrer" title="一战晟铭专属 API 控制台"><ExternalLink size={17} />YZCM API</a>{canManage ? <Link href="/team" className={pathname === '/team' ? 'active' : ''} aria-current={pathname === '/team' ? 'page' : undefined}><UsersRound size={17} />组员管理</Link> : null}</div>
         {canGovernAccounts || canAccessAdmin ? <div className="account-center-sidebar-group account-center-sidebar-developer">
           <span>开发者工具</span>
           {canGovernAccounts && <Link href="/accounts" className={pathname === '/accounts' ? 'active' : ''} aria-current={pathname === '/accounts' ? 'page' : undefined}><UsersRound size={17} />账号与角色</Link>}

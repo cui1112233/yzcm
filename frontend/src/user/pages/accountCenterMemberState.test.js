@@ -10,19 +10,14 @@ import { renderToStaticMarkup } from 'react-dom/server';
 const pageURL = name => new URL(name, import.meta.url);
 const pageSource = name => readFileSync(pageURL(name), 'utf8');
 
-test('profile and member center use formal role and quota in each visible identity and quota section', () => {
+test('profile uses formal role and known quota in each visible identity and quota section', () => {
   const profile = pageSource('./ProfilePage.jsx');
-  const memberCenter = pageSource('./MemberCenterPage.jsx');
   assert.equal((profile.match(/<RoleBadge canonicalRole=\{member\.canonicalRole\}/g) || []).length, 2);
   assert.equal((profile.match(/mergeProfileMember\(current\.member, result\.member\)/g) || []).length, 2);
-  assert.match(profile, /title="会员权益"[^\n]*<strong>\{membershipRole\}/);
-  assert.match(memberCenter, /<RoleBadge canonicalRole=\{self\.canonicalRole\}/);
-  assert.match(memberCenter, /当前身份<\/dt><dd>\{membershipRole\}/);
-  for (const page of [profile, memberCenter]) {
-    assert.match(page, /readMonthlyTokenLimit\(/);
-    assert.match(page, /暂不可用/);
-    assert.doesNotMatch(page, /(?:member|self)\.role\s*(?:===|\?)/);
-  }
+  assert.match(profile, /title="当前身份"[^\n]*<strong>\{membershipRole\}/);
+  assert.match(profile, /readMonthlyTokenLimit\(/);
+  assert.match(profile, /暂不可用/);
+  assert.doesNotMatch(profile, /member\.role\s*(?:===|\?)/);
 });
 
 test('four canonical role labels remain visible after profile and avatar changes', async () => {

@@ -1,4 +1,5 @@
 export const ACCOUNT_CENTER_ROUTES = [
+  '/account',
   '/member',
   '/profile',
   '/security',
