@@ -2447,8 +2447,20 @@ func (c *BatchAutomationCoordinator) launchRun(owner, batchID, jobID string, job
 	if c.runEpochs == nil {
 		c.runEpochs = map[string]int64{}
 	}
-	c.runEpochs[jobID]++
-	epoch := c.runEpochs[jobID]
+	// A restarted coordinator has an empty in-memory counter, while book
+	// claims still contain the previous process's epochs. Never reuse one:
+	// the priority dispatcher would mistake that stale claim for this run.
+	lastEpoch := c.runEpochs[jobID]
+	if entries, ok := runJob["books"].(map[string]any); ok {
+		for _, raw := range entries {
+			entry, _ := raw.(map[string]any)
+			if claimed := int64(automationNumberValue(entry[automationBookClaimEpochField], 0)); claimed > lastEpoch {
+				lastEpoch = claimed
+			}
+		}
+	}
+	epoch := lastEpoch + 1
+	c.runEpochs[jobID] = epoch
 	c.runCancels[jobID] = cancel
 	c.controlMu.Unlock()
 	go func(job map[string]any) {
