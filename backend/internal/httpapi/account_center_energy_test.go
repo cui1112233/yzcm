@@ -63,6 +63,7 @@ func TestAccountCenterEnergyMySQLScopesAndPrecision(t *testing.T) {
 	const peerAt = "2026-12-07 08:00:00"
 	const rankAt = "2026-12-08 08:00:00"
 	const pendingAt = "2026-12-09 08:00:00"
+	const compatibilityModel = " \uFEFF　⁺\u0301样本,\"原文\""
 	for _, row := range []struct {
 		id, owner, team, model, at string
 		cost, settled              any
@@ -73,7 +74,7 @@ func TestAccountCenterEnergyMySQLScopesAndPrecision(t *testing.T) {
 		{"own-pending", "member-a", "team-a", "pending", at, nil, nil},
 		{"foreign-charge", "member-b", "team-b", "fixture", at, "2.0000000000", at},
 		{"outside-window", "member-a", "team-a", "fixture", "2026-10-05 00:00:00", "500.0000000000", at},
-		{"peer-aggregate", "peer-a", "team-a", "fixture", peerAt, "1.2500000000", peerAt},
+		{"peer-aggregate", "peer-a", "team-a", compatibilityModel, peerAt, "1.2500000000", peerAt},
 		{"peer-rank", "peer-a", "team-a", "fixture", rankAt, "0.5000000001", rankAt},
 		{"peer-negative-anomaly", "peer-a", "team-a", "fixture", rankAt, "-2.0000000000", rankAt},
 		{"peer-pending", "peer-a", "team-a", "fixture", rankAt, nil, nil},
@@ -206,6 +207,11 @@ VALUES(?,?,?,'founder',?,'fixture',?, ?,200,?,'CNY',?)`, row.id, row.owner, row.
 	if export := get("lead-a", "energy/ledger?format=csv&member=member-a&from=2026-11-06&to=2026-11-07", nil, http.StatusOK); !strings.Contains(export, "'=fixture") || strings.Contains(export, "other-charge") {
 		t.Fatalf("CSV export changed scope or allowed a formula: %s", export)
 	}
+	compatibilityCSV := get("lead-a", "energy/ledger?format=csv&member=peer-a&from=2026-12-07&to=2026-12-08", nil, http.StatusOK)
+	records, err := csv.NewReader(strings.NewReader(compatibilityCSV)).ReadAll()
+	if err != nil || len(records) != 2 || len(records[1]) != 8 || records[1][4] != "'"+compatibilityModel || records[1][6] != "1.2500000000" {
+		t.Errorf("HTTP CSV did not preserve and protect the model text or decimal: %q (%v)", records, err)
+	}
 	const csvPagePath = "/api/account-center/energy/ledger?format=csv&limit=1"
 	csvPage := impersonationRequest(api, http.MethodGet, csvPagePath, "member-a", "", nil)
 	if csvPage.Code != http.StatusOK || csvPage.Header().Get("X-Energy-Page-Limit") != "1" || csvPage.Header().Get("X-Energy-Has-More") != "true" ||
@@ -246,8 +252,11 @@ func TestAccountCenterEnergyCSVRoundTripProtectsEveryTextColumn(t *testing.T) {
 		{"=样本", true}, {"+样本", true}, {"-样本", true}, {"@样本", true},
 		{"＝样本", true}, {"＋样本", true}, {"－样本", true}, {"＠样本", true},
 		{"﹦样本", true}, {"﹢样本", true}, {"﹣样本", true}, {"﹫样本", true}, {"−样本", true},
+		{"⁺", true}, {"⁼", true}, {"₊", true}, {"₌", true}, {"﬩", true},
 		{"  \ufeff　＠样本,\"引号\"", true}, {"  \t样本", true}, {" \ufeff\r样本", true}, {" \n样本", true},
+		{" \ufeff\u2003\u00a0₌\u0338样本", true}, {"=\u0338样本", true}, {strings.Repeat("　", 254) + "⁺", true},
 		{"普通中文,\"引号\"", false}, {"  普通中文", false},
+		{"Cafe\u0301 and 中文 ①", false}, {"\ufeff\u2003", false}, {"", false},
 	} {
 		t.Run(test.input, func(t *testing.T) {
 			response := httptest.NewRecorder()

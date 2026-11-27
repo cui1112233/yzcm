@@ -9,7 +9,9 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
+	"golang.org/x/text/unicode/norm"
 	"qiantie/backend/internal/accountcenter"
 )
 
@@ -144,18 +146,31 @@ func writeAccountEnergyCSV(w http.ResponseWriter, value accountcenter.EnergyLedg
 }
 
 func energyCSVText(value string) string {
-	for _, leading := range value {
-		if unicode.IsControl(leading) {
-			return "'" + value
-		}
-		if leading == '\uFEFF' || unicode.IsSpace(leading) {
-			continue
-		}
-		// Include fullwidth and other compatible forms of formula prefixes.
-		if strings.ContainsRune("=+-@＝＋－＠﹦﹢﹣﹫−", leading) {
-			return "'" + value
-		}
-		break
+	candidate := strings.TrimLeftFunc(value, func(r rune) bool {
+		// Keep whitespace controls in the candidate so they are still escaped.
+		return r == '\uFEFF' || unicode.IsSpace(r) && !unicode.IsControl(r)
+	})
+	first, width := utf8.DecodeRuneInString(candidate)
+	if width == 0 {
+		return value
+	}
+	if unicode.IsControl(first) {
+		return "'" + value
+	}
+	const formulaStarts = "=+-@−\t\r\n"
+	// Also check the first source character alone. A following accent can
+	// compose with a trigger, while the original still starts with that trigger.
+	leading, _ := utf8.DecodeRuneInString(norm.NFKC.String(candidate[:width]))
+	if strings.ContainsRune(formulaStarts, leading) {
+		return "'" + value
+	}
+	// The export writes the original text. Inspect just its first normalized
+	// segment so a long tail never requires a normalized copy of the field.
+	var prefix norm.Iter
+	prefix.InitString(norm.NFKC, candidate)
+	leading, _ = utf8.DecodeRune(prefix.Next())
+	if strings.ContainsRune(formulaStarts, leading) {
+		return "'" + value
 	}
 	return value
 }
