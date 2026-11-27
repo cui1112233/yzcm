@@ -1,4 +1,4 @@
-import { Button, Form, Input, Modal, Progress, Skeleton, Tag, message } from 'antd';
+import { Button, Form, Input, Modal, Skeleton, Tag, message } from 'antd';
 import { Copy, Fingerprint, KeyRound, Laptop, LockKeyhole, LogOut, Mail, RotateCcwKey, ShieldCheck, Smartphone, TimerReset, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -177,7 +177,6 @@ export default function SecurityPage() {
   const sessionCount = useMemo(() => (security?.sessions?.length || 0) + (security?.persistentSessions?.length || 0), [security]);
   const mfaEnabled = Boolean(security?.mfa?.enabled);
   const hasPasskey = passkeys.length > 0;
-  const score = security ? Math.min(100, 66 + (security.otherSessionCount === 0 ? 10 : 4) + (mfaEnabled ? 14 : 0) + (hasPasskey ? 10 : 0)) : 0;
 
   if (loading) return <div className="account-center-page"><Skeleton active paragraph={{ rows: 9 }} /></div>;
 
@@ -186,9 +185,9 @@ export default function SecurityPage() {
 
     <div className="ac-security-grid">
       <Panel title="安全总览" className="ac-security-overview">
-        <div className="ac-security-score">
-          <Progress type="circle" percent={score} size={150} strokeWidth={6} format={value => <><strong>{value}</strong><small>安全评分</small></>} />
-          <div><Tag color={mfaEnabled || hasPasskey ? 'green' : 'gold'}>{mfaEnabled || hasPasskey ? '强认证已配置' : '建议开启强认证'}</Tag><p>Passkey 使用设备安全密钥验签；MFA 恢复码每个只能使用一次。</p></div>
+        <div className="ac-security-status">
+          <span className="ac-security-status-icon"><ShieldCheck size={34} /></span>
+          <div><Tag color={mfaEnabled || hasPasskey ? 'green' : 'gold'}>{mfaEnabled || hasPasskey ? '强认证已配置' : '建议开启强认证'}</Tag><h3>{mfaEnabled || hasPasskey ? '账号已启用强登录保护' : '完成一项强认证即可提升保护'}</h3><p>Passkey 使用设备安全密钥验签；MFA 恢复码每个只能使用一次。</p></div>
         </div>
         <div className="ac-check-list security-checks">
           <div><ShieldCheck size={16} className="done" /><span>账号状态</span><b>正常</b></div>

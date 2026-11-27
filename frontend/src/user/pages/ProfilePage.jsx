@@ -141,7 +141,11 @@ export default function ProfilePage() {
   const limitText = isLimited ? quota.limit.toLocaleString('zh-CN') : quotaLabel;
   const remainingTokens = isLimited ? Math.max(0, quota.limit - monthTokens).toLocaleString('zh-CN') : quotaLabel;
   const membershipRole = canonicalRoleLabel(member.canonicalRole);
-  const securityScore = Math.min(100, 65 + (emailStatus?.verified ? 15 : 0) + (member.mfaEnabled ? 20 : 0));
+  const protectionSummary = emailStatus?.verified && member.mfaEnabled
+    ? '邮箱与 MFA 已启用'
+    : emailStatus?.verified || member.mfaEnabled
+      ? '已启用一项强保护'
+      : '建议完善安全设置';
   const isGovernanceEnabled = member.capabilities?.includes('team_governance');
 
   return <div className="account-center-page profile-page">
@@ -167,12 +171,12 @@ export default function ProfilePage() {
           <div><span>本月 Token 使用</span><strong>{monthTokens.toLocaleString('zh-CN')}</strong><small>额度上限 {limitText}</small></div>
           <div><span>Token 配额剩余</span><strong>{remainingTokens}</strong>{isLimited && <small>Tokens</small>}</div>
           <div><span>资料完整度</span><strong>{completion}%</strong><small>可在编辑资料中补充</small></div>
-          <div><span>安全评分</span><strong>{securityScore}</strong><small>{emailStatus?.verified ? '邮箱已验证' : '建议验证邮箱'}</small></div>
+          <div><span>安全状态</span><strong>{emailStatus?.verified || member.mfaEnabled ? '已保护' : '待完善'}</strong><small>{protectionSummary}</small></div>
         </div>
       </Panel>
     <div className="ac-profile-cards-grid">
       <Panel title="当前身份" className="ac-profile-summary-card"><div className="ac-profile-card-title"><Crown size={23} /><div><strong>{membershipRole}</strong></div></div><Link href="/account" className="ac-profile-card-link">查看账户总览 <span>›</span></Link></Panel>
-      <Panel title="安全状态" className="ac-profile-summary-card"><div className="ac-profile-security-score"><span><ShieldCheck size={25} /></span><div><small>安全评分</small><strong>{securityScore}<i>/100</i></strong><b>{securityScore >= 90 ? '优秀' : '建议完善'}</b></div></div><div className="ac-profile-checks"><span><CheckCircle2 size={15} />登录保护</span><span><CheckCircle2 size={15} />邮箱验证 {emailStatus?.verified ? '已验证' : '待验证'}</span><span><CheckCircle2 size={15} />MFA {member.mfaEnabled ? '已启用' : '未启用'}</span></div>{member.email && !emailStatus?.verified ? <Button type="link" loading={mailing} disabled={!emailStatus?.deliveryConfigured} onClick={sendVerification}>发送邮箱验证</Button> : <Link href="/security" className="ac-profile-card-link">查看安全详情 <span>›</span></Link>}</Panel>
+      <Panel title="安全状态" className="ac-profile-summary-card"><div className="ac-profile-security-score"><span><ShieldCheck size={25} /></span><div><small>账号保护</small><strong>{emailStatus?.verified || member.mfaEnabled ? '已开启' : '待完善'}</strong><b>{protectionSummary}</b></div></div><div className="ac-profile-checks"><span><CheckCircle2 size={15} />登录密码已设置</span><span><CheckCircle2 size={15} />邮箱验证 {emailStatus?.verified ? '已验证' : '待验证'}</span><span><CheckCircle2 size={15} />MFA {member.mfaEnabled ? '已启用' : '未启用'}</span></div>{member.email && !emailStatus?.verified ? <Button type="link" loading={mailing} disabled={!emailStatus?.deliveryConfigured} onClick={sendVerification}>发送邮箱验证</Button> : <Link href="/security" className="ac-profile-card-link">查看安全详情 <span>›</span></Link>}</Panel>
       <Panel title="联合治理权限" className="ac-profile-summary-card"><div className="ac-profile-governance"><UsersRound size={26} /><div><strong>{isGovernanceEnabled ? '已开启联合治理' : '由所属团队管理者治理'}</strong></div></div>{isGovernanceEnabled && <Link href="/advanced-team-admin" className="ac-profile-card-link">前往联合治理中心 <span>›</span></Link>}</Panel>
     </div>
     <input ref={fileRef} className="member-hidden-file" type="file" accept="image/png,image/jpeg,image/webp" onChange={upload} />

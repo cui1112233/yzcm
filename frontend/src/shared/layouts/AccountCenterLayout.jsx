@@ -7,6 +7,7 @@ import { getPageIdentityGeneration } from '../api/accountImpersonationState.js';
 import { setEffectiveImpersonationAccount } from '../api/auth';
 import { getToken } from '../api/client';
 import { Link } from '../components/Link';
+import RoleEnergyIcon from '../../user/components/RoleEnergyIcon.jsx';
 import '../styles/profile-grey-glass.css';
 
 const switchChannel = 'qiantie:account-impersonation';
@@ -175,37 +176,14 @@ export function AccountCenterLayout({ account, username, avatar, pathname, onRet
     ? <AccountImpersonationPending error={impersonationError} onRetry={onRetryImpersonation} />
     : children;
 
-  // Roll out the new shell only to Profile; other account pages keep their layout.
-  if (pathname === '/profile') {
-    const entries = [
-      { href: '/account', label: '账户总览' },
-      { href: '/profile', label: '个人资料' },
-      { href: '/usage', label: '能量与账单' },
-      { href: '/security', label: '账号安全' },
-      ...(canManage ? [{ href: '/advanced-team-admin', label: '联合治理' }, { href: '/api-config', label: 'API 配置' }] : []),
-      { href: ENERGY_CONSOLE_URL, label: 'YZCM API', external: true },
-      ...(canManage ? [{ href: '/team', label: '组员管理' }] : []),
-      ...(canGovernAccounts ? [{ href: '/accounts', label: '账号与角色' }] : []),
-      ...(canAccessAdmin ? [{ href: '/admin/presets', label: '管理后台', reload: true }] : [])
-    ];
-    return <div className="account-center-workspace profile-glass-workspace">
-      <header className="pg-shell-header">
-        <button type="button" className="pg-brand" onClick={onReturn} aria-label="一战晟铭，返回工作台"><b aria-hidden="true">Y</b><span>一战晟铭</span></button>
-        <div className="pg-shell-account"><Avatar size={32} src={account?.avatarUrl} style={{ backgroundColor: avatar?.background }}>{avatar?.emoji}</Avatar><span>{account?.displayName || username}</span><em>{account?.canonicalRole}</em><AccountSwitchEntry status={impersonation} /></div>
-      </header>
-      <AccountImpersonationBanner status={impersonation} />
-      <nav className="pg-navigation" aria-label="个人中心导航">
-        {entries.map(entry => entry.external
-          ? <a key={entry.href} href={entry.href} target="_blank" rel="noreferrer" title="一战晟铭专属 API 控制台">{entry.label}<ExternalLink size={12} aria-hidden="true" /></a>
-          : <Link key={entry.href} href={entry.href} reload={entry.reload} aria-current={pathname === entry.href ? 'page' : undefined} className={pathname === entry.href ? 'active' : ''}>{entry.label}</Link>)}
-      </nav>
-      <main className="account-center-main pg-main">{content}</main>
-      <footer className="pg-shell-footer"><button type="button" onClick={onReturn} aria-label="返回工作台"><ChevronLeft size={16} />返回工作台</button><button type="button" onClick={onLogout}><LogOut size={16} />退出登录</button></footer>
-    </div>;
-  }
-
   return <div className="account-center-workspace">
+    <div className="account-center-energy-scene" aria-hidden="true"><i /><i /><i /></div>
     <AccountImpersonationBanner status={impersonation} />
+    <header className="account-center-topbar">
+      <button type="button" className="account-center-brand" onClick={onReturn} aria-label="一战晟铭，返回工作台"><span className="account-center-brand-mark" aria-hidden="true">◇</span><strong>一战晟铭</strong></button>
+      <div className="account-center-breadcrumb"><span>个人中心</span><b>·</b><strong>{pathname === '/account' ? '账户总览' : pathname === '/profile' ? '个人资料' : pathname === '/usage' ? '能量与账单' : pathname === '/security' ? '账号安全' : pathname === '/team' ? '团队管理' : pathname === '/api-config' ? 'API 配置' : pathname === '/accounts' ? '账号与角色' : '个人中心'}</strong></div>
+      <div className="account-center-top-account"><Avatar size={34} src={account?.avatarUrl} style={{ backgroundColor: avatar?.background }}>{avatar?.emoji}</Avatar><strong>{account?.displayName || username}</strong><RoleEnergyIcon role={account?.canonicalRole} /><em>{account?.canonicalRole}</em><AccountSwitchEntry status={impersonation} /></div>
+    </header>
     <aside className="account-center-sidebar" aria-label="个人中心导航">
       <div className="account-center-sidebar-head">
         <button type="button" className="account-center-return" aria-label="返回工作台" onClick={onReturn}><ChevronLeft size={19} /><span>返回工作台</span></button>
@@ -214,16 +192,16 @@ export function AccountCenterLayout({ account, username, avatar, pathname, onRet
       </div>
       <div className="account-center-sidebar-profile">
         <Avatar size={54} src={account?.avatarUrl} style={{ backgroundColor: avatar?.background }}>{avatar?.emoji}</Avatar>
-        <div><strong>{account?.displayName || username}</strong><small>@{username}</small><em>{account?.canonicalRole}</em></div>
+        <div><span className="account-center-sidebar-name"><strong>{account?.displayName || username}</strong><RoleEnergyIcon role={account?.canonicalRole} size={24} /></span><small>@{username}</small><em>{account?.canonicalRole}</em></div>
       </div>
       <nav className="account-center-sidebar-nav">
         <div className="account-center-sidebar-group">
           <Link href="/account" className={pathname === '/account' ? 'active' : ''} aria-current={pathname === '/account' ? 'page' : undefined}><House size={18} />账户总览</Link>
           <Link href="/profile" className={pathname === '/profile' ? 'active' : ''} aria-current={pathname === '/profile' ? 'page' : undefined}><UserRound size={18} />个人资料</Link>
           <Link href="/usage" className={pathname === '/usage' ? 'active' : ''} aria-current={pathname === '/usage' ? 'page' : undefined}><ChartNoAxesCombined size={17} />能量与账单</Link>
-          <div className="account-center-sidebar-submenu"><Link href="/security" className={pathname === '/security' ? 'active' : ''} aria-current={pathname === '/security' ? 'page' : undefined}><ShieldCheck size={17} />账号安全</Link>{canManage ? <Link href="/advanced-team-admin" className={pathname === '/advanced-team-admin' ? 'active' : ''} aria-current={pathname === '/advanced-team-admin' ? 'page' : undefined}><UsersRound size={17} />联合治理</Link> : null}</div>
+          <Link href="/security" className={pathname === '/security' ? 'active' : ''} aria-current={pathname === '/security' ? 'page' : undefined}><ShieldCheck size={17} />账号安全</Link>
         </div>
-        <div className="account-center-sidebar-group">{canManage ? <Link href="/api-config" className={pathname === '/api-config' ? 'active' : ''} aria-current={pathname === '/api-config' ? 'page' : undefined}><KeyRound size={17} />API 配置</Link> : null}<a href={ENERGY_CONSOLE_URL} target="_blank" rel="noreferrer" title="一战晟铭专属 API 控制台"><ExternalLink size={17} />YZCM API</a>{canManage ? <Link href="/team" className={pathname === '/team' ? 'active' : ''} aria-current={pathname === '/team' ? 'page' : undefined}><UsersRound size={17} />组员管理</Link> : null}</div>
+        <div className="account-center-sidebar-group">{canManage ? <Link href="/team" className={pathname === '/team' ? 'active' : ''} aria-current={pathname === '/team' ? 'page' : undefined}><UsersRound size={17} />团队管理</Link> : null}{canManage ? <Link href="/api-config" className={pathname === '/api-config' ? 'active' : ''} aria-current={pathname === '/api-config' ? 'page' : undefined}><KeyRound size={17} />API 配置</Link> : null}<a href={ENERGY_CONSOLE_URL} target="_blank" rel="noreferrer" title="一战晟铭专属 API 控制台"><ExternalLink size={17} />YZCM API</a></div>
         {canGovernAccounts || canAccessAdmin ? <div className="account-center-sidebar-group account-center-sidebar-developer">
           <span>开发者工具</span>
           {canGovernAccounts && <Link href="/accounts" className={pathname === '/accounts' ? 'active' : ''} aria-current={pathname === '/accounts' ? 'page' : undefined}><UsersRound size={17} />账号与角色</Link>}
