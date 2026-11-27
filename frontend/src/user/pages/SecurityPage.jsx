@@ -1,4 +1,4 @@
-import { Button, Form, Input, Modal, Skeleton, Tag, message } from 'antd';
+import { Avatar, Button, Form, Input, Modal, Skeleton, Tag, message } from 'antd';
 import { Copy, Fingerprint, KeyRound, Laptop, LockKeyhole, LogOut, Mail, RotateCcwKey, ShieldCheck, Smartphone, TimerReset, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -7,13 +7,15 @@ import {
   disableMfa,
   enableMfa,
   getSecurityOverview,
+  getMemberCenter,
   revokeOtherSessions,
   rotateMfaRecoveryCodes
 } from '../../shared/api/member';
 import { listPasskeys, registerPasskey, removePasskey } from '../../shared/api/accountRecovery';
 import { getEmailVerificationStatus, requestEmailVerification } from '../../shared/api/accountRecovery';
 import { passkeySupported } from '../../shared/webauthn';
-import { formatDate, PageHeader, Panel } from './accountCenterShared';
+import { avatarFallback, formatDate, PageHeader, Panel, RoleBadge } from './accountCenterShared';
+import RoleEnergyIcon from '../components/RoleEnergyIcon.jsx';
 
 function deviceLabel(session) {
   const parts = [session?.browser, session?.os].filter(Boolean);
@@ -23,6 +25,7 @@ function deviceLabel(session) {
 export default function SecurityPage() {
   const [loading, setLoading] = useState(true);
   const [security, setSecurity] = useState(null);
+  const [center, setCenter] = useState(null);
   const [passkeys, setPasskeys] = useState([]);
   const [emailStatus, setEmailStatus] = useState(null);
   const [mailing, setMailing] = useState(false);
@@ -37,8 +40,9 @@ export default function SecurityPage() {
   async function load() {
     setLoading(true);
     try {
-      const [nextSecurity, passkeyResult, nextEmailStatus] = await Promise.all([getSecurityOverview(), listPasskeys().catch(() => ({ passkeys: [] })), getEmailVerificationStatus().catch(() => null)]);
+      const [nextSecurity, passkeyResult, nextEmailStatus, nextCenter] = await Promise.all([getSecurityOverview(), listPasskeys().catch(() => ({ passkeys: [] })), getEmailVerificationStatus().catch(() => null), getMemberCenter().catch(() => null)]);
       setSecurity(nextSecurity);
+      setCenter(nextCenter);
       setPasskeys(passkeyResult.passkeys || []);
       setEmailStatus(nextEmailStatus);
     } catch (error) { message.error(error.message || '安全信息加载失败'); }
@@ -177,11 +181,18 @@ export default function SecurityPage() {
   const sessionCount = useMemo(() => (security?.sessions?.length || 0) + (security?.persistentSessions?.length || 0), [security]);
   const mfaEnabled = Boolean(security?.mfa?.enabled);
   const hasPasskey = passkeys.length > 0;
+  const member = center?.member;
 
   if (loading) return <div className="account-center-page"><Skeleton active paragraph={{ rows: 9 }} /></div>;
 
   return <div className="account-center-page security-page pc-security">
     <PageHeader title="账号安全" subtitle="管理登录方式、账号找回与已登录设备" />
+
+    {member ? <section className="pc-security-identity" aria-label="账号安全身份">
+      <Avatar size={78} src={member.avatarUrl}>{avatarFallback(member)}</Avatar>
+      <RoleEnergyIcon role={member.canonicalRole} size={42} />
+      <div><strong>{member.displayName || member.username}</strong><RoleBadge canonicalRole={member.canonicalRole} /><span><ShieldCheck size={16} />账号安全防护已启用</span></div>
+    </section> : null}
 
     <div className="pc-security-grid">
       <Panel title="身份验证" className="pc-security-auth">

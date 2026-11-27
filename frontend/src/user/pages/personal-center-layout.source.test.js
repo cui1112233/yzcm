@@ -81,6 +81,14 @@ test('team and account governance share the designed summary, filter, directory 
   assert.doesNotMatch(source, /className="admin-page account-role-page"/);
 });
 
+test('team management has the approved team hero, member workspace and real-consumption ranking', () => {
+  const source = read('user/pages/AccountRolePage.jsx');
+  for (const region of ['pc-team-hero', 'pc-team-workspace', 'pc-team-ranking']) {
+    assert.match(source, new RegExp(region));
+  }
+  assert.match(source, /monthConsumption/);
+});
+
 test('API configuration has distinct manager and founder visual contracts', () => {
   const page = read('user/pages/ApiConfigPage.jsx');
   const settings = read('user/pages/ApiIntegrationSettings.jsx');
@@ -94,6 +102,7 @@ test('API configuration has distinct manager and founder visual contracts', () =
   assert.match(settings, /添加自定义模型/);
   assert.match(presetModal, /className="pc-api-modal"/);
   assert.match(customModal, /className="pc-api-modal"/);
-  const css = read('shared/styles/account-center-pixel-parity.css');
-  assert.match(css, /\.pc-api-founder-panel \.ac-platform-preset-grid\s*\{[^}]*display:\s*grid/s);
+  assert.doesNotMatch(page, /<Panel title="平台预设模型"/);
+  assert.match(settings, /选择 YZCM 模型/);
+  assert.match(settings, /api-catalog-credential/);
 });

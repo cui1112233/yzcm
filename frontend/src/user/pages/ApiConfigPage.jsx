@@ -323,52 +323,13 @@ export default function ApiConfigPage() {
       <span><ShieldCheck size={28} /></span>
       <div><div><h2>模型服务由团队托管</h2>{member ? <RoleBadge canonicalRole={member.canonicalRole} /> : null}</div><p>你可在获授权的业务下拉框中选择管理员已配置凭证的模型；不会显示 API Key。</p></div>
       <Tag color={config?.managedBy ? 'green' : 'gold'}>{config?.managedBy ? `托管账号 @${config.managedBy}` : '等待绑定管理者'}</Tag>
-    </div> : policy.mode === 'full' ? <Panel title="平台预设模型" eyebrow="PLATFORM PRESETS" className="ac-form-panel pc-api-founder-panel" action={<Space size={12}>
-        <span className="ac-muted-copy" role="status" aria-live="polite">{SAVE_STATUS_TEXT[saveStatus]}</span>
-        <Button icon={<RefreshCw size={15} />} loading={quotaLoading} onClick={refreshQuotaState}>刷新额度</Button>
-      </Space>}>
-        <p className="ac-muted-copy">填好 API Key 后立即生效并出现在业务的视频模型下拉框；清空 Key 即从下拉移除，不需要额外开关。输入框失焦或停止输入约 0.8 秒自动保存；额度状态由服务商接口返回，不支持查询的服务商会显示“额度未知”。</p>
-        {quotaError ? <Alert
-          type="error"
-          showIcon
-          message="额度信息读取失败"
-          description={quotaError}
-          action={<Button size="small" onClick={refreshQuotaState} loading={quotaLoading}>重试</Button>}
-          style={{ marginBottom: 12 }}
-        /> : null}
-        {PLATFORM_PRESETS.map(preset => {
-          const model = modelById.get(preset.id);
-          const cardState = getPresetCardState(preset, model, presetSavingId === preset.id);
-          return <div className="ac-platform-preset-grid" key={preset.id}>
-            <div className="ac-platform-preset-info"><span className="ac-security-card-icon violet"><Video size={20} /></span><div><strong>{preset.displayName}</strong><small>{preset.description}</small></div></div>
-            <div className="ac-platform-preset-credential">
-              <Space direction="vertical" style={{ width: '100%' }} size={6}>
-                {preset.provider ? <Input disabled={!cardState.editable} value={presetBaseURLs[preset.id] ?? model?.baseUrl ?? 'http://127.0.0.1:8787'} onChange={event => { setPresetBaseURLs(current => ({ ...current, [preset.id]: event.target.value })); schedulePresetSave(preset); }} onBlur={() => flushPreset(preset)} addonBefore="Relay 地址" placeholder="http://127.0.0.1:8787" /> : null}
-                <Input.Password disabled={!cardState.editable} value={presetKeys[preset.id] || ''} onChange={event => { touchedKeysRef.current.add(preset.id); setPresetKeys(current => ({ ...current, [preset.id]: event.target.value })); markPresetDirty(preset); }} onFocus={() => focusedKeyRef.current.add(preset.id)} onBlur={() => { focusedKeyRef.current.delete(preset.id); flushPreset(preset); }} prefix={<KeyRound size={15} />} placeholder={model?.hasCredential ? '已保存；输入新 Key 覆盖，输入后清空并离开即停用' : '填写 API Key 后生效'} />
-                {preset.id === 'minimax-h3-video' ? <Input disabled={!cardState.editable} value={presetWorkflowIds[preset.id] || DEFAULT_H3_WORKFLOW_ID} onChange={event => { setPresetWorkflowIds(current => ({ ...current, [preset.id]: event.target.value })); schedulePresetSave(preset); }} onBlur={() => flushPreset(preset)} addonBefore="AutoDL 工作流 ID" placeholder={DEFAULT_H3_WORKFLOW_ID} /> : null}
-                {preset.id === 'fanke-video-api' ? <Select disabled={!cardState.editable} value={presetModelIds[preset.id] || model?.modelId || FANKE_VIDEO_MODELS[0].value} onChange={value => { setPresetModelIds(current => ({ ...current, [preset.id]: value })); schedulePresetSave(preset); flushPreset(preset); }} options={FANKE_VIDEO_MODELS} placeholder="选择视频模型" /> : null}
-              </Space>
-              <ModelQuotaStatus quota={quotaById.get(preset.id)} error={quotaError} />
-            </div>
-            <div className="ac-platform-preset-state">
-              <small>{presetSavingId === preset.id ? '保存中' : cardState.configured ? 'Key 已填写，已生效' : '填写 Key 后生效'}</small>
-            </div>
-          </div>;
-        })}
-        {noCredentialModels.map(model => (
-          <div className="ac-platform-preset-grid" key={model.id}>
-            <div className="ac-platform-preset-info"><span className="ac-security-card-icon violet"><Cpu size={20} /></span><div><strong>{model.displayName || model.id}</strong><small>本地执行器：不需要 API Key，始终出现在业务下拉框里。</small></div></div>
-            <div className="ac-platform-preset-credential"><span className="ac-muted-copy">无需填写凭证</span></div>
-            <div className="ac-platform-preset-state"><small>始终可用</small></div>
-          </div>
-        ))}
-      </Panel> : null}
+    </div> : null}
     {policy.mode !== 'none' ? <ApiIntegrationSettings
       mode={policy.mode}
       policy={policy}
       models={models}
       quotas={quotas}
-      platformPresetIds={PLATFORM_PRESET_IDS}
+      platformPresetIds={policy.mode === 'full' ? [] : PLATFORM_PRESET_IDS}
       onSaveCatalogCredential={canManageApi ? saveCatalogCredential : null}
       onUpdateCatalogModel={policy.mode === 'full' ? saveCatalogModel : null}
       onSearchYZCMModels={policy.mode === 'restricted' ? searchSavedYZCMModels : null}

@@ -9,6 +9,7 @@ import { Link } from '../components/Link';
 import PersonalCenterIcon from '../../user/components/PersonalCenterIcon.jsx';
 import { EnergyScene } from '../../user/components/PersonalCenterVisuals.jsx';
 import RoleEnergyIcon from '../../user/components/RoleEnergyIcon.jsx';
+import brandLogoNeon from '../../user/assets/personal-center/brand-logo-neon.png';
 
 const switchChannel = 'qiantie:account-impersonation';
 const PAGE_TITLES = {
@@ -181,6 +182,7 @@ export function AccountCenterLayout({ account, username, avatar, pathname, onRet
   const canManage = capabilities.includes('team_governance');
   const canGovernAccounts = capabilities.includes('account_governance');
   const canAccessAdmin = capabilities.includes('platform_admin');
+  const usageTitle = canGovernAccounts ? '全平台消耗' : '能量与账单';
   const content = impersonationRequired && !impersonation
     ? <AccountImpersonationPending error={impersonationError} onRetry={onRetryImpersonation} />
     : children;
@@ -189,8 +191,8 @@ export function AccountCenterLayout({ account, username, avatar, pathname, onRet
     <EnergyScene />
     <AccountImpersonationBanner status={impersonation} />
     <header className="pc-topbar">
-      <button type="button" className="pc-brand" onClick={onReturn} aria-label="一战晟铭，返回工作台"><img src="/assets/logo-transparent.png" alt="" /><strong>一战晟铭</strong></button>
-      <div className="pc-breadcrumb"><span>个人中心</span><b>·</b><strong>{PAGE_TITLES[pathname] || '个人中心'}</strong></div>
+      <button type="button" className="pc-brand" onClick={onReturn} aria-label="一战晟铭，返回工作台"><img src={brandLogoNeon} alt="" /><strong>一战晟铭</strong></button>
+      <div className="pc-breadcrumb"><span>个人中心</span><b>·</b><strong>{pathname === '/usage' ? usageTitle : (PAGE_TITLES[pathname] || '个人中心')}</strong></div>
       <div className="pc-top-account"><Avatar size={34} src={account?.avatarUrl} style={{ backgroundColor: avatar?.background }}>{avatar?.emoji}</Avatar><strong>{account?.displayName || username}</strong><RoleEnergyIcon role={account?.canonicalRole} /><em>{account?.canonicalRole}</em><span className="pc-online"><i />当前身份：{account?.canonicalRole}</span><AccountSwitchEntry status={impersonation} /></div>
     </header>
     <aside className="pc-sidebar" aria-label="个人中心导航">
@@ -202,7 +204,7 @@ export function AccountCenterLayout({ account, username, avatar, pathname, onRet
         <div className="pc-sidebar-group">
           <Link href="/account" className={pathname === '/account' ? 'active' : ''} aria-current={pathname === '/account' ? 'page' : undefined}><PersonalCenterIcon name="home" />账户总览</Link>
           <Link href="/profile" className={pathname === '/profile' ? 'active' : ''} aria-current={pathname === '/profile' ? 'page' : undefined}><PersonalCenterIcon name="profile" />个人资料</Link>
-          <Link href="/usage" className={pathname === '/usage' ? 'active' : ''} aria-current={pathname === '/usage' ? 'page' : undefined}><PersonalCenterIcon name="layers" />能量与账单</Link>
+          <Link href="/usage" className={pathname === '/usage' ? 'active' : ''} aria-current={pathname === '/usage' ? 'page' : undefined}><PersonalCenterIcon name={canGovernAccounts ? 'trend' : 'layers'} />{usageTitle}</Link>
           <Link href="/security" className={pathname === '/security' ? 'active' : ''} aria-current={pathname === '/security' ? 'page' : undefined}><PersonalCenterIcon name="security" />账号安全</Link>
         </div>
         <div className="pc-sidebar-group">{canManage ? <Link href="/team" className={pathname === '/team' ? 'active' : ''} aria-current={pathname === '/team' ? 'page' : undefined}><PersonalCenterIcon name="team" />团队管理</Link> : null}{canManage ? <Link href="/api-config" className={pathname === '/api-config' ? 'active' : ''} aria-current={pathname === '/api-config' ? 'page' : undefined}><PersonalCenterIcon name="api" />API 配置</Link> : null}<a href={ENERGY_CONSOLE_URL} target="_blank" rel="noreferrer" title="一战晟铭专属 API 控制台"><PersonalCenterIcon name="external" />YZCM API</a></div>

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Alert, Button, Card, Empty, Form, Input, Modal, Space, Table, Tag, Typography } from 'antd';
-import { Activity, RefreshCw, Search, UsersRound, WalletCards } from 'lucide-react';
+import { Activity, Bolt, RefreshCw, Search, Trophy, UsersRound, WalletCards } from 'lucide-react';
 import { changeAdminAccount, createUngroupedAdminAccount, getAccountAdminAudit, getAccountAdminDirectory } from '../../shared/api/accountAdmin.js';
 import { changeAdminTeam, createAdminTeam, createAdminTeamAccount } from '../../shared/api/teamAdmin.js';
 import { startAccountImpersonation } from '../../shared/api/accountImpersonation.js';
@@ -163,6 +163,9 @@ export default function AccountRolePage({ title = '账号与角色', teamsOnly =
   const allAccounts = [...teams.flatMap(team => team.accounts || []), ...ungrouped];
   const activeAccounts = allAccounts.filter(account => account.active && !account.archivedAt).length;
   const monthConsumption = allAccounts.reduce((total, account) => total + (Number(account.monthConsumption) || 0), 0);
+  const availableEnergy = allAccounts.reduce((total, account) => total + (Number(account.balance) || 0), 0);
+  const primaryTeam = teams.find(team => !team.archivedAt) || teams[0];
+  const consumptionRanking = [...allAccounts].filter(account => !account.archivedAt).sort((left, right) => (Number(right.monthConsumption) || 0) - (Number(left.monthConsumption) || 0)).slice(0, 6);
   const filteredTeams = directory ? directory.teams.map(team => ({
     ...team,
     accounts: normalizedQuery
@@ -175,9 +178,11 @@ export default function AccountRolePage({ title = '账号与角色', teamsOnly =
 
   return <section className={`account-center-page account-role-page ${teamsOnly ? 'pc-team' : 'pc-accounts'}`}>
     <PageHeader title={title} subtitle={teamsOnly ? '管理团队、成员与团队能量使用范围' : '按团队查看账号、身份与能量消耗'} actions={<Button icon={<RefreshCw size={15} />} onClick={load} loading={loading}>刷新</Button>} />
-    <div className="pc-governance-summary">
-      <div><span><UsersRound size={20} /></span><small>团队数量</small><strong>{teams.length}</strong></div>
-      <div><span><Activity size={20} /></span><small>启用账号</small><strong>{activeAccounts}</strong></div>
+    <div className={`pc-governance-summary${teamsOnly ? ' pc-team-hero' : ''}`}>
+      {teamsOnly && <div className="pc-team-name"><span><UsersRound size={22} /></span><small>团队</small><strong>{primaryTeam?.name || '暂无团队'}</strong></div>}
+      {!teamsOnly && <div><span><UsersRound size={20} /></span><small>团队数量</small><strong>{teams.length}</strong></div>}
+      {teamsOnly && <div><span><Bolt size={20} /></span><small>可用能量</small><strong>{availableEnergy || '—'}</strong></div>}
+      <div><span><Activity size={20} /></span><small>{teamsOnly ? '成员' : '启用账号'}</small><strong>{activeAccounts}</strong></div>
       <div><span><WalletCards size={20} /></span><small>本月总消耗</small><strong>{monthConsumption || '—'}</strong></div>
     </div>
     <div className="pc-governance-filter">
@@ -185,8 +190,8 @@ export default function AccountRolePage({ title = '账号与角色', teamsOnly =
       <div className="pc-governance-actions"><Space wrap>{directory?.actions.filter(action => !teamsOnly || !['create_manager', 'create_member'].includes(action)).map(action => actionButton(action))}</Space></div>
     </div>
     {error && <Alert type="error" showIcon message={error} />}
-    {directory && <div className="pc-governance-directory">
-      {filteredTeams.map(team => <Card className="account-role-team-card" key={team.id}
+    {directory && <div className={`pc-governance-directory${teamsOnly ? ' pc-team-workspace' : ''}`}>
+      <div className="pc-team-directory-main">{filteredTeams.map(team => <Card className="account-role-team-card" key={team.id}
         title={<Space>{team.name}{team.archivedAt && <Tag>已归档</Tag>}</Space>}
         extra={<Space wrap>{team.actions.map(action => actionButton(action, team))}</Space>}>
         <Typography.Paragraph type="secondary">负责人 @{team.managerUsername}</Typography.Paragraph>
@@ -195,7 +200,13 @@ export default function AccountRolePage({ title = '账号与角色', teamsOnly =
       {!teamsOnly && filteredUngrouped.length > 0 && <Card className="account-role-team-card" title="未分组">
         <Table rowKey="username" columns={columns} dataSource={filteredUngrouped} pagination={false} scroll={{ x: 820 }} />
       </Card>}
-      {filteredTeams.length === 0 && (teamsOnly || filteredUngrouped.length === 0) && <Empty description={normalizedQuery ? '没有找到匹配的团队或账号' : '暂无可管理的团队'} />}
+      {filteredTeams.length === 0 && (teamsOnly || filteredUngrouped.length === 0) && <Empty description={normalizedQuery ? '没有找到匹配的团队或账号' : '暂无可管理的团队'} />}</div>
+      {teamsOnly && <aside className="pc-team-ranking">
+        <h2><Trophy size={20} />成员能量排行</h2>
+        {consumptionRanking.length ? <ol>{consumptionRanking.map((account, index) => <li key={account.membershipId || account.username}>
+          <em>{index + 1}</em><span><strong>{account.displayName || account.username}</strong><small>@{account.username}</small></span><b>{Number(account.monthConsumption) || 0}</b>
+        </li>)}</ol> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无真实消耗记录" />}
+      </aside>}
     </div>}
     <Modal title={ACTION_LABELS[pending?.action]} open={Boolean(pending)}
       onCancel={() => { if (!saving) setPending(null); }}

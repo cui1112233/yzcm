@@ -293,7 +293,7 @@ function RestrictedApiIntegrationSettings({
       </div>
       <div className="api-integration-toolbar pc-api-manager-toolbar">
         <span className="api-integration-count"><ShieldCheck size={14} aria-hidden="true" />已展示 {selected.length} 个模型</span>
-        <Button className="api-channel-open api-preset-open" size="small" onClick={() => setPresetOpen(true)}>自定义预设</Button>
+        <Button className="api-channel-open api-preset-open" size="small" onClick={() => setPresetOpen(true)}>选择 YZCM 模型</Button>
         <Button size="small" icon={<RefreshCw size={14} />} loading={quotaLoading} onClick={() => {
           const componentEpoch = epochRef.current;
           void onRefreshQuotas?.({ isActive: () => isActive(componentEpoch) });
@@ -904,14 +904,14 @@ function FullApiIntegrationSettings({
           {model.modelId ? <>模型 <code>{model.modelId}</code></> : null}
           {!model.baseUrl && !model.modelId ? '该模型使用平台适配器，不需要地址与模型名' : ''}
         </p>
-        {model.hasCredential && !userManaged ? (
+        {!userManaged ? (
           <label className="api-channel-preset-line api-catalog-credential">
             <span>目录 Key</span>
             <Input.Password
               value={catalogKeyDrafts[model.id] || ''}
               prefix={<KeyRound size={15} />}
               disabled={saving}
-              placeholder={saving ? '保存中…' : '已保存；输入新 Key 覆盖，输入后清空并离开即停用'}
+              placeholder={saving ? '保存中…' : model.hasCredential ? '已保存；输入新 Key 覆盖，输入后清空并离开即停用' : '输入 API Key'}
               aria-label={`${model.displayName || model.id} API Key`}
               onChange={event => {
                 catalogKeyTouchedRef.current.add(model.id);
