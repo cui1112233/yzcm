@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/scripteditor"
@@ -154,6 +155,109 @@ func RegisterScriptEditorRoutes(mux *http.ServeMux, auth BridgeAuth, service *sc
 			return
 		}
 		writeJSON(w, http.StatusCreated, result)
+	})
+	handle("GET /api/script-editor/works/{workID}/assets", func(w http.ResponseWriter, req *http.Request, owner string) {
+		if !hasBindingStore {
+			writeScriptEditorError(w, scripteditor.ErrValidation)
+			return
+		}
+		if _, err := service.Store.GetWork(req.Context(), owner, req.PathValue("workID")); err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		rows, err := bindingStore.ListAssetLinks(req.Context(), owner, req.PathValue("workID"), req.URL.Query().Get("category"))
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"assets": rows})
+	})
+	handle("POST /api/script-editor/works/{workID}/assets", func(w http.ResponseWriter, req *http.Request, owner string) {
+		if !hasBindingStore {
+			writeScriptEditorError(w, scripteditor.ErrValidation)
+			return
+		}
+		var input struct {
+			AssetID  string `json:"assetId"`
+			Category string `json:"category"`
+			TargetID string `json:"targetId"`
+		}
+		if !decode(w, req, &input) {
+			return
+		}
+		workID := req.PathValue("workID")
+		if _, err := service.Store.GetWork(req.Context(), owner, workID); err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		category := strings.TrimSpace(input.Category)
+		if category != "character" && category != "scene" && category != "prop" && category != "director" {
+			writeScriptEditorError(w, scripteditor.ErrValidation)
+			return
+		}
+		row, err := bindingStore.UpsertAssetLink(req.Context(), scripteditor.AssetLink{OwnerUsername: owner, WorkID: workID, AssetID: input.AssetID, TargetType: category, TargetID: input.TargetID, SyncState: scripteditor.SyncPending, ConflictState: scripteditor.ConflictNone})
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"asset": row})
+	})
+	handle("GET /api/script-editor/works/{workID}/storyboards/{episode}", func(w http.ResponseWriter, req *http.Request, owner string) {
+		episode, err := strconv.Atoi(req.PathValue("episode"))
+		if err != nil {
+			writeScriptEditorError(w, scripteditor.ErrValidation)
+			return
+		}
+		row, err := service.Storyboard(req.Context(), owner, req.PathValue("workID"), episode)
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		length := 0
+		if detail, detailErr := service.Store.GetWork(req.Context(), owner, req.PathValue("workID")); detailErr == nil {
+			for _, script := range detail.Scripts {
+				if script.ID == row.ScriptID {
+					length = utf8.RuneCountInString(script.Content)
+					break
+				}
+			}
+		}
+		if length == 0 {
+			for _, shot := range row.Shots {
+				if shot.SourceRange.End > length {
+					length = shot.SourceRange.End
+				}
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"storyboard": row, "coverage": scripteditor.ComputeCoverage(length, func() []scripteditor.SourceRange {
+			ranges := make([]scripteditor.SourceRange, 0, len(row.Shots))
+			for _, shot := range row.Shots {
+				ranges = append(ranges, shot.SourceRange)
+			}
+			return ranges
+		}())})
+	})
+	handle("PUT /api/script-editor/works/{workID}/storyboards/{episode}", func(w http.ResponseWriter, req *http.Request, owner string) {
+		episode, err := strconv.Atoi(req.PathValue("episode"))
+		if err != nil {
+			writeScriptEditorError(w, scripteditor.ErrValidation)
+			return
+		}
+		var input struct {
+			ID               string                        `json:"id"`
+			ScriptID         string                        `json:"scriptId"`
+			Shots            []scripteditor.StoryboardShot `json:"shots"`
+			ExpectedRevision int64                         `json:"expectedRevision"`
+		}
+		if !decode(w, req, &input) {
+			return
+		}
+		row, err := service.SaveStoryboard(req.Context(), owner, req.PathValue("workID"), scripteditor.StoryboardDocument{ID: input.ID, ScriptID: input.ScriptID, Episode: episode, Shots: input.Shots}, input.ExpectedRevision)
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"storyboard": row})
 	})
 	handle("GET /api/script-editor/works/{workID}/search", func(w http.ResponseWriter, req *http.Request, owner string) {
 		hits, err := service.SearchWork(req.Context(), owner, req.PathValue("workID"), req.URL.Query().Get("q"))

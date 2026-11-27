@@ -22,6 +22,7 @@ type MemoryStore struct {
 	sourceLinks  map[string]SourceLink
 	assetLinks   map[string]AssetLink
 	jobLinks     map[string]JobLink
+	storyboards  map[string]StoryboardDocument
 	now          func() time.Time
 	newID        func(string) string
 }
@@ -29,9 +30,46 @@ type MemoryStore struct {
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		works: map[string]Work{}, chapters: map[string]Chapter{}, scripts: map[string]Script{}, handoffs: map[string]Handoff{}, jobs: map[string]Job{}, reviews: map[string]Review{},
-		workBindings: map[string]WorkBinding{}, sourceLinks: map[string]SourceLink{}, assetLinks: map[string]AssetLink{}, jobLinks: map[string]JobLink{},
+		workBindings: map[string]WorkBinding{}, sourceLinks: map[string]SourceLink{}, assetLinks: map[string]AssetLink{}, jobLinks: map[string]JobLink{}, storyboards: map[string]StoryboardDocument{},
 		now: time.Now, newID: randomID,
 	}
+}
+
+func (s *MemoryStore) GetStoryboard(_ context.Context, owner, workID string, episode int) (StoryboardDocument, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row, ok := s.storyboards[owner+"\x00"+workID+"\x00"+fmt.Sprint(episode)]
+	if !ok {
+		return StoryboardDocument{}, ErrNotFound
+	}
+	row.Shots = append([]StoryboardShot(nil), row.Shots...)
+	return row, nil
+}
+
+func (s *MemoryStore) SaveStoryboard(_ context.Context, row StoryboardDocument, expected int64) (StoryboardDocument, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.activeWork(row.OwnerUsername, row.WorkID); err != nil {
+		return StoryboardDocument{}, err
+	}
+	key := row.OwnerUsername + "\x00" + row.WorkID + "\x00" + fmt.Sprint(row.Episode)
+	now := s.now().UTC()
+	current, exists := s.storyboards[key]
+	if exists {
+		if current.Revision != expected {
+			return StoryboardDocument{}, ErrConflict
+		}
+		row.ID, row.CreatedAt, row.Revision = current.ID, current.CreatedAt, current.Revision+1
+	} else {
+		if expected != 0 {
+			return StoryboardDocument{}, ErrConflict
+		}
+		row.ID, row.CreatedAt, row.Revision = s.newID("storyboard"), now, 0
+	}
+	row.UpdatedAt = now
+	row.Shots = append([]StoryboardShot(nil), row.Shots...)
+	s.storyboards[key] = row
+	return row, nil
 }
 
 func (s *MemoryStore) UpsertWorkBinding(_ context.Context, row WorkBinding) (WorkBinding, error) {

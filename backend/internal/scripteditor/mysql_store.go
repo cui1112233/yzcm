@@ -851,3 +851,46 @@ func (s *MySQLStore) ListJobLinks(ctx context.Context, owner, workID, targetType
 	}
 	return out, rows.Err()
 }
+
+func (s *MySQLStore) GetStoryboard(ctx context.Context, owner, workID string, episode int) (StoryboardDocument, error) {
+	var row StoryboardDocument
+	var shots []byte
+	err := s.db.QueryRowContext(ctx, `SELECT id,owner_username,work_id,script_id,episode,shots_json,revision,created_at,updated_at FROM script_editor_storyboards WHERE owner_username=? AND work_id=? AND episode=?`, owner, workID, episode).Scan(&row.ID, &row.OwnerUsername, &row.WorkID, &row.ScriptID, &row.Episode, &shots, &row.Revision, &row.CreatedAt, &row.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return StoryboardDocument{}, ErrNotFound
+	}
+	if err != nil {
+		return StoryboardDocument{}, err
+	}
+	row.Shots, err = decodeStoryboardJSON(shots)
+	return row, err
+}
+
+func (s *MySQLStore) SaveStoryboard(ctx context.Context, row StoryboardDocument, expected int64) (StoryboardDocument, error) {
+	shots, err := storyboardJSON(row.Shots)
+	if err != nil {
+		return StoryboardDocument{}, ErrValidation
+	}
+	now := s.now().UTC()
+	if strings.TrimSpace(row.ID) == "" {
+		if expected != 0 {
+			return StoryboardDocument{}, ErrConflict
+		}
+		row.ID, row.Revision, row.CreatedAt, row.UpdatedAt = randomID("storyboard"), 0, now, now
+		_, err = s.db.ExecContext(ctx, `INSERT INTO script_editor_storyboards (id,owner_username,work_id,script_id,episode,shots_json,revision,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`, row.ID, row.OwnerUsername, row.WorkID, row.ScriptID, row.Episode, shots, row.Revision, row.CreatedAt, row.UpdatedAt)
+		if err != nil {
+			return StoryboardDocument{}, mapWriteError(err)
+		}
+		return row, nil
+	}
+	row.UpdatedAt, row.Revision = now, expected+1
+	result, err := s.db.ExecContext(ctx, `UPDATE script_editor_storyboards SET script_id=?,shots_json=?,revision=revision+1,updated_at=? WHERE id=? AND owner_username=? AND work_id=? AND episode=? AND revision=?`, row.ScriptID, shots, now, row.ID, row.OwnerUsername, row.WorkID, row.Episode, expected)
+	if err != nil {
+		return StoryboardDocument{}, err
+	}
+	count, _ := result.RowsAffected()
+	if count != 1 {
+		return StoryboardDocument{}, ErrConflict
+	}
+	return row, nil
+}

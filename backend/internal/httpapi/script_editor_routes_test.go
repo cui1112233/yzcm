@@ -187,6 +187,27 @@ func TestScriptEditorAgentRoutesBuildContextAndAuditDraft(t *testing.T) {
 	}
 }
 
+func TestScriptEditorAssetAndStoryboardRoutesPersist(t *testing.T) {
+	now := time.Unix(1800000000, 0).UTC()
+	api := newScriptEditorTestRouter(now)
+	created := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works", map[string]any{"title": "分镜作品", "type": "script"})
+	workID := scriptEditorID(t, created, "work")
+	source := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/scripts", map[string]any{"episode": 1, "title": "第一集", "content": "一段正文"})
+	scriptID := scriptEditorID(t, source, "script")
+	asset := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/assets", map[string]any{"assetId": "asset-1", "category": "character", "targetId": "hero"})
+	if asset.Code != http.StatusCreated {
+		t.Fatalf("asset status=%d body=%s", asset.Code, asset.Body.String())
+	}
+	saved := signedJSONRequest(t, api, now, "alice", http.MethodPut, "/api/script-editor/works/"+workID+"/storyboards/1", map[string]any{"scriptId": scriptID, "expectedRevision": 0, "shots": []map[string]any{{"id": "shot-1", "scene": "月台", "sourceRange": map[string]int{"start": 0, "end": 4}}}})
+	if saved.Code != http.StatusOK || !bytes.Contains(saved.Body.Bytes(), []byte("shot-1")) {
+		t.Fatalf("save status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	loaded := signedJSONRequest(t, api, now, "alice", http.MethodGet, "/api/script-editor/works/"+workID+"/storyboards/1", nil)
+	if loaded.Code != http.StatusOK || !bytes.Contains(loaded.Body.Bytes(), []byte(`"covered"`)) {
+		t.Fatalf("load status=%d body=%s", loaded.Code, loaded.Body.String())
+	}
+}
+
 func TestScriptEditorJobRoutesCreateListCancelAndRetry(t *testing.T) {
 	now := time.Unix(1800000000, 0).UTC()
 	api := newScriptEditorTestRouter(now)

@@ -174,5 +174,22 @@ func ScriptEditorMigrations() []Migration {
   KEY idx_script_editor_job_link_target (owner_username, work_id, target_type, target_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`,
 		},
+	}, {
+		Version:          8800415,
+		CallbackChecksum: "v88-script-editor-storyboards-v1",
+		SQL: []string{`CREATE TABLE IF NOT EXISTS script_editor_storyboards (
+  id VARCHAR(64) NOT NULL,
+  owner_username VARCHAR(191) NOT NULL,
+  work_id VARCHAR(64) NOT NULL,
+  script_id VARCHAR(64) NOT NULL DEFAULT '',
+  episode INT NOT NULL,
+  shots_json JSON NOT NULL,
+  revision BIGINT NOT NULL DEFAULT 0,
+  created_at DATETIME(6) NOT NULL,
+  updated_at DATETIME(6) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_script_editor_storyboard_episode (owner_username, work_id, episode),
+  KEY idx_script_editor_storyboard_work (owner_username, work_id, updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`},
 	}}
 }

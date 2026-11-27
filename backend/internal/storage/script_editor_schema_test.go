@@ -7,8 +7,8 @@ import (
 
 func TestScriptEditorMigrationContainsRequiredTables(t *testing.T) {
 	migrations := ScriptEditorMigrations()
-	if len(migrations) != 2 {
-		t.Fatalf("migration count = %d, want 2", len(migrations))
+	if len(migrations) != 3 {
+		t.Fatalf("migration count = %d, want 3", len(migrations))
 	}
 	if migrations[0].Version != 8800410 {
 		t.Fatalf("version = %d, want 8800410", migrations[0].Version)
@@ -30,7 +30,7 @@ func TestScriptEditorMigrationContainsRequiredTables(t *testing.T) {
 
 func TestScriptEditorStudioBindingMigration(t *testing.T) {
 	migrations := ScriptEditorMigrations()
-	latest := migrations[len(migrations)-1]
+	latest := migrations[1]
 	if latest.Version != 8800412 {
 		t.Fatalf("version = %d, want 8800412", latest.Version)
 	}
@@ -44,6 +44,13 @@ func TestScriptEditorStudioBindingMigration(t *testing.T) {
 		if !strings.Contains(sql, column) {
 			t.Fatalf("binding migration SQL missing %s", column)
 		}
+	}
+}
+
+func TestScriptEditorStoryboardMigration(t *testing.T) {
+	latest := ScriptEditorMigrations()[2]
+	if latest.Version != 8800415 || !strings.Contains(strings.Join(latest.SQL, "\n"), "script_editor_storyboards") {
+		t.Fatalf("storyboard migration invalid: %#v", latest)
 	}
 }
 
