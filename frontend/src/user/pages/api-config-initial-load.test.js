@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { loadApiConfigPage } from './api-config-initial-load.js';
+import { loadApiConfigPage, refreshApiConfigModels } from './api-config-initial-load.js';
 
 const deferred = () => {
   let resolve, reject;
@@ -76,4 +76,25 @@ test('managed accounts finish without requesting administrator models or quotas'
   await loadApiConfigPage(state.dependencies, state.callbacks);
   assert.ok(state.events.some(([name]) => name === 'ready'));
   assert.equal(state.events.some(([name]) => name === 'error'), false);
+});
+
+test('post-save refresh publishes updated models and returns while quota remains pending', async () => {
+  const quota = deferred();
+  const state = setup({ getQuotas: () => quota.promise, listModels: async () => [{ id: 'saved-key-model', hasCredential: true }] });
+  let returned = false;
+  const refresh = refreshApiConfigModels(state.dependencies, state.callbacks).then(() => { returned = true; });
+  await flush();
+  assert.ok(state.events.some(([name]) => name === 'models'), 'saved models must refresh before quota finishes');
+  assert.equal(state.events.find(([name]) => name === 'models')[1][0].hasCredential, true);
+  assert.equal(returned, true, 'saving must finish without waiting for remote quota');
+  await refresh;
+  quota.reject(new Error('remote quota timeout'));
+  await flush();
+  assert.match(state.events.find(([name]) => name === 'quotaError')[1].message, /remote quota timeout/);
+});
+
+test('post-save model refresh failure rejects instead of claiming save completion', async () => {
+  const state = setup({ listModels: async () => { throw new Error('updated catalog unavailable'); } });
+  await assert.rejects(refreshApiConfigModels(state.dependencies, state.callbacks), /updated catalog unavailable/);
+  assert.equal(state.events.some(([name]) => name === 'models'), false);
 });

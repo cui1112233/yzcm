@@ -7,7 +7,7 @@ import { getMemberCenter } from '../../shared/api/member';
 import { FANKE_VIDEO_MODELS } from './shuihuo/providerModelBinding';
 import { PageHeader, Panel, RoleBadge } from './accountCenterShared';
 import { getPresetCardState } from './api-config-preset-state';
-import { loadApiConfigPage } from './api-config-initial-load.js';
+import { loadApiConfigPage, refreshApiConfigModels } from './api-config-initial-load.js';
 import { isCatalogModelAvailable, modelNeedsNoCredential } from './apiConfigCatalogMerge';
 import ApiIntegrationSettings from './ApiIntegrationSettings';
 
@@ -99,20 +99,23 @@ export default function ApiConfigPage() {
     finally { setQuotaLoading(false); }
   }, [canManageApi]);
 
-  const refreshModels = useCallback(async () => {
-    if (!canManageApi) return;
-    const [nextModels, nextQuotas] = await Promise.all([
-      listManagedModels(),
-      getManagedModelQuotas().then(data => ({ data })).catch(error => ({ error }))
-    ]);
+  const applyModels = useCallback(nextModels => {
     setModels(nextModels);
     const h3 = nextModels.find(model => model.id === 'minimax-h3-video');
     if (h3 && !dirtyRef.current['minimax-h3-video']) setPresetWorkflowIds(current => ({ ...current, 'minimax-h3-video': h3.workflowId || DEFAULT_H3_WORKFLOW_ID }));
     const fanke = nextModels.find(model => model.id === 'fanke-video-api');
     if (fanke && !dirtyRef.current['fanke-video-api']) setPresetModelIds(current => ({ ...current, 'fanke-video-api': fanke.modelId || FANKE_VIDEO_MODELS[0].value }));
-    if (nextQuotas.error) setQuotaError(nextQuotas.error.message || '额度查询失败');
-    else { setQuotas(nextQuotas.data || []); setQuotaError(''); }
-  }, [canManageApi]);
+  }, []);
+
+  const refreshModels = useCallback(async () => {
+    if (!canManageApi) return;
+    await refreshApiConfigModels({ listModels: listManagedModels, getQuotas: getManagedModelQuotas }, {
+      models: applyModels,
+      quotas: nextQuotas => { setQuotas(nextQuotas || []); setQuotaError(''); },
+      quotaError: error => setQuotaError(error.message || '额度查询失败'),
+      quotaLoading: setQuotaLoading
+    });
+  }, [canManageApi, applyModels]);
 
   useEffect(() => {
     let alive = true;
@@ -123,13 +126,7 @@ export default function ApiConfigPage() {
     }, {
       config: whileAlive(setConfig),
       center: whileAlive(setCenter),
-      models: whileAlive(nextModels => {
-        setModels(nextModels);
-        const h3 = nextModels.find(model => model.id === 'minimax-h3-video');
-        if (h3 && !dirtyRef.current['minimax-h3-video']) setPresetWorkflowIds(current => ({ ...current, 'minimax-h3-video': h3.workflowId || DEFAULT_H3_WORKFLOW_ID }));
-        const fanke = nextModels.find(model => model.id === 'fanke-video-api');
-        if (fanke && !dirtyRef.current['fanke-video-api']) setPresetModelIds(current => ({ ...current, 'fanke-video-api': fanke.modelId || FANKE_VIDEO_MODELS[0].value }));
-      }),
+      models: whileAlive(applyModels),
       quotas: whileAlive(nextQuotas => { setQuotas(nextQuotas || []); setQuotaError(''); }),
       quotaError: whileAlive(error => setQuotaError(error.message || '额度查询失败')),
       quotaLoading: whileAlive(setQuotaLoading),
