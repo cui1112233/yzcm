@@ -93,6 +93,7 @@ func NovelFetchWorkshopMigrations() []Migration {
  reviewed_at DATETIME(6) NULL,
  PRIMARY KEY (owner_username, id)
 ) ENGINE=InnoDB`}, CallbackChecksum: "novel-fetch-legacy-model-conflicts-v1"},
+		legacyConfigMigrationStateSchema(),
 	}
 }
 

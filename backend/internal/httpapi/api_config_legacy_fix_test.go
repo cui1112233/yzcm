@@ -808,7 +808,8 @@ JSON_OBJECT('personal_api',JSON_OBJECT('apiKey',?,'model','fixture-video'))) WHE
 								t.Fatal(err)
 							}
 							resolved, err := NewCatalogVideoProviderRegistry(center, coldStore()).ResolveExactVideoModel(ctx, tc.owner, model)
-							if err == nil || resolved.APIKey != "" || !strings.Contains(rawConfig(t, tc.owner), "modelCatalogLegacyVideoPending") {
+							waiting, stateErr := store.HasPendingLegacyVideos(ctx, tc.owner)
+							if err == nil || resolved.APIKey != "" || stateErr != nil || !waiting {
 								t.Error("a replacement without matching video credential evidence completed the migration")
 							}
 						}
@@ -823,7 +824,8 @@ JSON_OBJECT('personal_api',JSON_OBJECT('apiKey',?,'model','fixture-video'))) WHE
 				if err == nil || pending.APIKey != "" {
 					t.Errorf("unchecked video resolved before file returned (database fixture selected=%t)", pending.APIKey == first)
 				}
-				if raw := rawConfig(t, tc.owner); !strings.Contains(raw, "modelCatalogLegacyVideoPending") || strings.Contains(raw, "entry-v2") {
+				waiting, stateErr := store.HasPendingLegacyVideos(ctx, tc.owner)
+				if raw := rawConfig(t, tc.owner); !waiting || stateErr != nil || strings.Contains(raw, "modelCatalogLegacyVideoPending") || strings.Contains(raw, "entry-v2") {
 					t.Error("source verification ended while original file was offline")
 				}
 				if err := os.Rename(path+".offline", path); err != nil {
@@ -864,6 +866,10 @@ JSON_OBJECT('personal_api',JSON_OBJECT('apiKey',?,'model','fixture-video'))) WHE
 					t.Fatal("expected file failure")
 				}
 				store.ReplaceLegacyConfig = nil
+				state, found, stateErr := store.LegacyConfigMigrationState(ctx, tc.owner)
+				if stateErr != nil || !found || state.Phase != "finalizing" || state.Revision != 3 || state.CandidateEnvelope == "" {
+					t.Fatal("file failure lost finalizing state or candidate evidence", stateErr)
+				}
 				wantState(t)
 				if raw := rawConfig(t, tc.owner); !strings.Contains(raw, "modelCatalogLegacyScrubPending") || strings.Contains(raw, first) {
 					t.Fatal("file failure should leave a pending plan and a committed database-source archive")

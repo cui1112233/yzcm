@@ -159,9 +159,6 @@ func normalizeVideoProviderConfig(cfg VideoProviderConfig) (VideoProviderConfig,
 			cfg.Model = DefaultPersonalVideoModel
 		}
 		cfg.APIKey = strings.TrimSpace(cfg.APIKey)
-		if cfg.APIKey == "" {
-			return cfg, fmt.Errorf("%w: personal video API key is required", ErrInvalid)
-		}
 		if strings.TrimSpace(cfg.CreateURL) == "" {
 			cfg.CreateURL = DefaultPersonalVideoCreateURL
 		}
@@ -171,6 +168,9 @@ func normalizeVideoProviderConfig(cfg VideoProviderConfig) (VideoProviderConfig,
 		if strings.TrimSpace(cfg.ResultURL) == "" {
 			cfg.ResultURL = strings.TrimRight(cfg.TasksURL, "/") + "/{id}/result"
 		}
+		if cfg.APIKey == "" {
+			return cfg, fmt.Errorf("%w: personal video API key is required", ErrInvalid)
+		}
 	case VideoProviderDoubaoLocal:
 		cfg.APIKey = ""
 		cfg.Model = strings.TrimSpace(cfg.Model)
@@ -179,9 +179,6 @@ func normalizeVideoProviderConfig(cfg VideoProviderConfig) (VideoProviderConfig,
 		}
 	case VideoProviderAutoDLH3:
 		cfg.APIKey = strings.TrimSpace(cfg.APIKey)
-		if cfg.APIKey == "" {
-			return cfg, fmt.Errorf("%w: AutoDL H3 API key is required", ErrInvalid)
-		}
 		cfg.Model = strings.TrimSpace(cfg.Model)
 		if cfg.Model == "" {
 			cfg.Model = AutoDLH3Model
@@ -193,20 +190,23 @@ func normalizeVideoProviderConfig(cfg VideoProviderConfig) (VideoProviderConfig,
 			cfg.TasksURL = DefaultAutoDLH3TasksURL
 		}
 		cfg.WorkflowID = strings.TrimSpace(cfg.WorkflowID)
+		if cfg.APIKey == "" {
+			return cfg, fmt.Errorf("%w: AutoDL H3 API key is required", ErrInvalid)
+		}
 		if cfg.WorkflowID != "" && !validAutoDLH3WorkflowID(cfg.WorkflowID) {
 			return cfg, fmt.Errorf("%w: AutoDL H3 workflow id is invalid", ErrInvalid)
 		}
 	case VideoProviderYFAISeedance:
 		cfg.APIKey = strings.TrimSpace(cfg.APIKey)
-		if cfg.APIKey == "" {
-			return cfg, fmt.Errorf("%w: YFAI Seedance API key is required", ErrInvalid)
-		}
 		cfg.Model = strings.TrimSpace(cfg.Model)
 		if cfg.Model == "" {
 			cfg.Model = "seedance-2-0-official"
 		}
 		if strings.TrimSpace(cfg.CreateURL) == "" {
 			cfg.CreateURL = "https://yf.token6688.com"
+		}
+		if cfg.APIKey == "" {
+			return cfg, fmt.Errorf("%w: YFAI Seedance API key is required", ErrInvalid)
 		}
 	default:
 		return cfg, fmt.Errorf("%w: unsupported video provider", ErrInvalid)

@@ -229,8 +229,10 @@ type legacySourceEntry struct {
 }
 
 type legacyConfigMigration struct {
-	path           string
-	file, database []legacySourceEntry
+	path                        string
+	state                       LegacyConfigMigrationState
+	releaseVideos, hasFileVideo bool
+	file, database              []legacySourceEntry
 }
 
 func legacyEntryDigest(value any) string {
@@ -305,12 +307,20 @@ func prepareLegacyModelEntries(rows []any, legacy map[string]any, sources []lega
 	return rows, sources
 }
 
+func collectLegacyVideoCandidates(document map[string]any) []legacySourceEntry {
+	return collectLegacyEntries(document, true)
+}
+
 func collectLegacySources(document map[string]any) []legacySourceEntry {
+	return collectLegacyEntries(document, false)
+}
+
+func collectLegacyEntries(document map[string]any, videosOnly bool) []legacySourceEntry {
 	var entries []legacySourceEntry
 	for i, container := range legacyCatalogContainers(document) {
 		catalog, _ := container["modelCatalog"].([]any)
 		for index, item := range catalog {
-			if row, ok := item.(map[string]any); ok && hasLegacyKey(row) {
+			if row, ok := item.(map[string]any); ok && ((videosOnly && ModelConfigText(row, "kind") == "video") || (!videosOnly && hasLegacyKey(row))) {
 				source := cloneMap(row)
 				entries = append(entries, legacySourceEntry{legacyScrubEntry: legacyScrubEntry{Container: i, Index: index, Digest: legacyEntryDigest(row)}, raw: source, model: source})
 			}
@@ -479,7 +489,7 @@ func (s *MySQLStore) applyLegacyScrubEntry(ctx context.Context, owner, document 
 	return true
 }
 
-func (s *MySQLStore) scrubLegacyModelFile(ctx context.Context, owner string, settings map[string]any) error {
+func (s *MySQLStore) scrubLegacyModelFile(ctx context.Context, owner string, settings map[string]any, state LegacyConfigMigrationState) error {
 	if s.LegacyConfigLocker != nil {
 		s.LegacyConfigLocker.Lock()
 		defer s.LegacyConfigLocker.Unlock()
@@ -546,10 +556,36 @@ func (s *MySQLStore) scrubLegacyModelFile(ctx context.Context, owner string, set
 	if err := s.finalizeLegacySettings(owner, path); err != nil {
 		return err
 	}
-	_, err = s.DB.ExecContext(ctx, `UPDATE novel_fetch_workshop_configs
+	return s.completeLegacyMigration(ctx, owner, expected, state)
+}
+
+func (s *MySQLStore) completeLegacyMigration(ctx context.Context, owner, expected string, state LegacyConfigMigrationState) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if expected != "" {
+		result, err := tx.ExecContext(ctx, `UPDATE novel_fetch_workshop_configs
 SET settings_json=JSON_REMOVE(settings_json, '$.modelCatalogLegacyScrubPending', '$.modelCatalogLegacyScrubEntries')
 WHERE owner_username=? AND JSON_UNQUOTE(JSON_EXTRACT(settings_json, '$.modelCatalogLegacyScrubPending'))=?`, owner, expected)
-	return err
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return ErrConfigConflict
+		}
+	}
+	if state.Phase == LegacyFinalizing {
+		if err := s.moveLegacyMigration(ctx, tx, &state, LegacyComplete); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *MySQLStore) finalizeLegacySettings(owner, path string) error {
@@ -583,6 +619,7 @@ func (s *MySQLStore) ResumeLegacyModelCleanup(ctx context.Context) error {
 FROM novel_fetch_workshop_configs WHERE JSON_CONTAINS_PATH(settings_json, 'one', '$.modelCatalogLegacyScrubPending',
 '$.videoProviders', '$.settings.videoProviders', '$.appConfig.videoProviders', '$.settings.appConfig.videoProviders',
 '$.settings.modelCatalog', '$.appConfig.modelCatalog', '$.settings.appConfig.modelCatalog')
+OR owner_username IN (SELECT owner_username FROM novel_fetch_legacy_config_migrations WHERE phase!='complete')
 OR (? AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(settings_json,'$.modelCatalogLegacyMigrationVersion')),'')!=?)`, s.LegacyConfigDir != "", legacyModelMigrationVersion)
 	if err != nil {
 		return err

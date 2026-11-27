@@ -1,9 +1,10 @@
 package novelfetchworkshop
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"slices"
 
 	"qiantie/backend/internal/batchfactoryv11"
 )
@@ -45,31 +46,74 @@ func (s *MySQLStore) openPendingVideos(owner string, stored any) (pendingLegacyV
 	return pending, nil
 }
 
-func (s *MySQLStore) preparePendingVideos(owner string, settings map[string]any, rows, boundRows []any, migration *legacyConfigMigration, waiting bool) ([]any, error) {
+func (p pendingLegacyVideos) any() bool { return len(p.Rows) != 0 || len(p.Sources) != 0 }
+
+func hasBoundCatalog(settings map[string]any) bool {
+	return settings[ModelSecretVersionKey] == ModelSecretVersion || settings[ModelSecretVersionKey] == "bound-v2"
+}
+
+func (s *MySQLStore) databaseVideoCandidates(owner string, settings map[string]any) (pendingLegacyVideos, error) {
 	var pending pendingLegacyVideos
-	if stored, exists := settings[legacyVideoPendingKey]; exists {
-		var err error
-		pending, err = s.openPendingVideos(owner, stored)
-		if err != nil {
-			return nil, err
+	if old := settings[legacyVideoPendingKey]; old != nil {
+		if s.ModelSecrets == nil {
+			return pending, fmt.Errorf("encrypted legacy candidate requires model configuration encryption")
 		}
-	} else if !waiting {
-		return rows, nil
+		var err error
+		pending, err = s.openPendingVideos(owner, old)
+		if err != nil {
+			return pending, err
+		}
 	}
-	if !waiting {
-		existing := rows
-		for _, item := range pending.Rows {
-			row, _ := item.(map[string]any)
-			if _, found := findLegacyTarget(row, existing); !found {
-				rows = append(rows, row)
+	bound := hasBoundCatalog(settings)
+	for _, source := range collectLegacyVideoCandidates(settings) {
+		if bound && !source.Video && source.Container == 0 {
+			continue
+		}
+		pending.Sources = append(pending.Sources, pendingVideoSource{source.legacyScrubEntry, source.raw})
+	}
+	return pending, nil
+}
+
+func (s *MySQLStore) migrationCandidates(state LegacyConfigMigrationState) (pendingLegacyVideos, error) {
+	var pending pendingLegacyVideos
+	raw, err := s.ModelSecrets.OpenLegacyConflict(state.Owner, videoCandidatesBinding(), state.CandidateEnvelope, state.CandidateFingerprint)
+	if err != nil {
+		return pending, err
+	}
+	err = json.Unmarshal([]byte(raw), &pending)
+	return pending, err
+}
+
+func (p pendingLegacyVideos) fileReady(file map[string]any) bool {
+	sources := collectLegacyVideoCandidates(file)
+	matches := func(model map[string]any) bool {
+		for _, source := range sources {
+			keys, valid := legacySourceCredentials(source)
+			local := ModelConfigText(model, "provider") == batchfactoryv11.VideoProviderDoubaoLocal && !hasLegacyCredentialValue(model)
+			fileID, databaseID := ModelConfigText(source.model, "id"), ModelConfigText(model, "id")
+			if valid && (len(keys) > 0 || local) && sameLegacyVideoTarget(model, source.model) && (fileID == "" || databaseID == "" || fileID == databaseID) {
+				return true
 			}
 		}
-		for _, saved := range pending.Sources {
-			migration.database = append(migration.database, legacySourceEntry{legacyScrubEntry: saved.legacyScrubEntry, raw: saved.Raw, model: saved.model()})
-		}
-		delete(settings, legacyVideoPendingKey)
-		return rows, nil
+		return false
 	}
+	for _, item := range p.Rows {
+		row, _ := item.(map[string]any)
+		if !matches(row) {
+			return false
+		}
+	}
+	for _, saved := range p.Sources {
+		if !matches(saved.model()) {
+			return false
+		}
+	}
+	return p.any()
+}
+
+// Keep formal rows and non-video rows in place. Restore the original database
+// videos only after the returning source passes the same identity checks.
+func (p pendingLegacyVideos) prepareRows(rows, boundRows []any, migration *legacyConfigMigration) []any {
 	formal := map[string]bool{}
 	for _, item := range boundRows {
 		row, _ := item.(map[string]any)
@@ -78,90 +122,37 @@ func (s *MySQLStore) preparePendingVideos(owner string, settings map[string]any,
 	var active []any
 	for _, item := range rows {
 		row, _ := item.(map[string]any)
-		if ModelConfigText(row, "kind") == "video" && !formal[ModelConfigText(row, "id")] {
-			pending.Rows = append(pending.Rows, item)
-		} else {
+		if ModelConfigText(row, "kind") != "video" || formal[ModelConfigText(row, "id")] {
 			active = append(active, item)
 		}
 	}
-	var immediate []legacySourceEntry
-	for _, source := range migration.database {
-		if ModelConfigText(source.model, "kind") == "video" {
-			pending.Sources = append(pending.Sources, pendingVideoSource{source.legacyScrubEntry, source.raw})
-		} else {
-			immediate = append(immediate, source)
+	if !migration.releaseVideos {
+		return active
+	}
+	// Older pending envelopes also stored a derived Rows list. The source
+	// entries retain the original fields; use a derived row only when the
+	// previous writer omitted its source (for example a keyless catalog row).
+	var restored []any
+	for _, saved := range p.Sources {
+		source := legacySourceEntry{legacyScrubEntry: saved.legacyScrubEntry, raw: saved.Raw, model: saved.model()}
+		migration.database = append(migration.database, source)
+		if !slices.ContainsFunc(restored, func(prior any) bool { return reflect.DeepEqual(prior, source.model) }) {
+			restored = append(restored, source.model)
 		}
 	}
-	migration.database = immediate
-	if len(pending.Rows)+len(pending.Sources) > 0 {
-		raw, err := json.Marshal(pending)
-		if err != nil {
-			return nil, err
-		}
-		binding := LegacyConflictSource{Document: "db:novel_fetch_workshop_configs", Field: legacyVideoPendingKey}
-		ciphertext, fingerprint, err := s.ModelSecrets.SealLegacyConflict(owner, binding, string(raw))
-		if err != nil {
-			return nil, err
-		}
-		settings[legacyVideoPendingKey] = map[string]any{"ciphertext": ciphertext, "fingerprint": fingerprint}
-	}
-	return active, nil
-}
-
-// A returning file is evidence for a staged database credential only when it
-// contains a credential for that video. The reconcile step then compares both
-// origins. A preferences-only file cannot release any staged row.
-func (s *MySQLStore) legacyVideoFileReady(owner string, settings, file map[string]any, bound bool) (bool, error) {
-	var pending pendingLegacyVideos
-	if stored := settings[legacyVideoPendingKey]; stored != nil {
-		var err error
-		pending, err = s.openPendingVideos(owner, stored)
-		if err != nil {
-			return false, err
+	sourceModels := restored
+	for _, item := range p.Rows {
+		row, _ := item.(map[string]any)
+		if _, found := findLegacyTarget(row, sourceModels); !found {
+			restored = append(restored, row)
 		}
 	}
-	for _, source := range collectLegacySources(settings) {
-		if ModelConfigText(source.model, "kind") == "video" && (!bound || source.Video || source.Container != 0) {
-			pending.Sources = append(pending.Sources, pendingVideoSource{source.legacyScrubEntry, source.raw})
+	existing := active
+	for _, item := range restored {
+		row, _ := item.(map[string]any)
+		if _, found := findLegacyTarget(row, existing); !found {
+			active = append(active, cloneMap(row))
 		}
 	}
-	sources := collectLegacySources(file)
-	if len(pending.Rows)+len(pending.Sources) == 0 {
-		return len(sources) > 0 || file[LegacyModelDefaultsFileKey] != true, nil
-	}
-	matches := func(model map[string]any) bool {
-		for _, source := range sources {
-			keys, valid := legacySourceCredentials(source)
-			local := ModelConfigText(model, "provider") == batchfactoryv11.VideoProviderDoubaoLocal && !hasLegacyCredentialValue(model)
-			fileID, databaseID := ModelConfigText(source.model, "id"), ModelConfigText(model, "id")
-			if valid && (len(keys) > 0 || local) && sameLegacyVideoTarget(model, source.model) &&
-				(fileID == "" || databaseID == "" || fileID == databaseID) {
-				return true
-			}
-		}
-		return false
-	}
-	for _, row := range pending.Rows {
-		model, _ := row.(map[string]any)
-		if !matches(model) {
-			return false, nil
-		}
-	}
-	for _, saved := range pending.Sources {
-		if !matches(saved.model()) {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
-func (s *MySQLStore) HasPendingLegacyVideos(ctx context.Context, owner string) (bool, error) {
-	var pending bool
-	err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM novel_fetch_workshop_configs
-WHERE owner_username=? AND (
-JSON_CONTAINS_PATH(settings_json,'one','$.modelCatalogLegacyVideoPending','$.modelCatalogLegacyScrubPending')
-OR (? AND JSON_CONTAINS_PATH(settings_json,'one',
-'$.videoProviders','$.settings.videoProviders','$.appConfig.videoProviders','$.settings.appConfig.videoProviders',
-'$.settings.modelCatalog','$.appConfig.modelCatalog','$.settings.appConfig.modelCatalog'))))`, owner, s.LegacyConfigDir != "").Scan(&pending)
-	return pending, err
+	return active
 }

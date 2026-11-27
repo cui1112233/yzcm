@@ -285,7 +285,7 @@ func (s *MySQLStore) GetConfig(ctx context.Context, owner string) (map[string]an
 	if s.ModelSecrets != nil {
 		return s.openConfig(ctx, owner, settings)
 	}
-	if hasLegacyVideoProviders(settings) || settings[legacyVideoPendingKey] != nil {
+	if hasLegacyVideoProviders(settings) || settings[legacyVideoPendingKey] != nil || (s.LegacyConfigDir != "" && len(collectLegacyVideoCandidates(settings)) > 0) {
 		return nil, fmt.Errorf("legacy video credentials require model configuration encryption")
 	}
 	return EnsureWorkshopDefaults(settings), nil
@@ -343,8 +343,16 @@ func (s *MySQLStore) ReadBoundModelConfig(ctx context.Context, owner string) (ma
 
 func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[string]any) (map[string]any, error) {
 	currentVersion := settings[ModelSecretVersionKey] == ModelSecretVersion
-	checkFile := s.LegacyConfigDir != "" && (settings[legacyModelMigrationVersionKey] != legacyModelMigrationVersion || settings[legacyVideoPendingKey] != nil)
-	needsDBMigration := !currentVersion || hasLegacyVideoProviders(settings) || hasNestedLegacyModels(settings)
+	state, found, err := s.discoverLegacyConfigMigration(ctx, owner, settings)
+	if err != nil {
+		return nil, err
+	}
+	if !found && s.LegacyConfigDir == "" && settings[legacyVideoPendingKey] != nil {
+		return nil, fmt.Errorf("staged legacy videos require their original file directory")
+	}
+	waiting := found && (state.Phase == LegacyAwaitingSource || state.Phase == LegacyReconciling)
+	checkFile := s.LegacyConfigDir != "" && (waiting || (!found && settings[legacyModelMigrationVersionKey] != legacyModelMigrationVersion))
+	needsDBMigration := !currentVersion || settings[legacyVideoPendingKey] != nil || hasLegacyVideoProviders(settings) || hasNestedLegacyModels(settings)
 	if needsDBMigration || checkFile {
 		path, err := s.legacyModelFilePath(owner)
 		if err != nil {
@@ -354,14 +362,17 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 		if err != nil {
 			return nil, err
 		}
-		if legacy != nil {
-			ready, err := s.legacyVideoFileReady(owner, settings, legacy, currentVersion || settings[ModelSecretVersionKey] == "bound-v2")
+		var candidates pendingLegacyVideos
+		if waiting {
+			candidates, err = s.migrationCandidates(state)
 			if err != nil {
 				return nil, err
 			}
-			if !ready {
+			if !candidates.fileReady(legacy) {
 				legacy = nil
 			}
+		} else if !found && len(legacyCatalogRows(legacy)) == 0 && ModelConfigText(settings, modelLegacyScrubPendingKey) == "" {
+			legacy = nil
 		}
 		if legacy == nil && ModelConfigText(settings, modelLegacyScrubPendingKey) != "" {
 			return nil, fmt.Errorf("legacy model file is unavailable during credential cleanup")
@@ -376,7 +387,7 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 			}
 		}
 		if (needsDBMigration || fileChecked) && (currentVersion || hasCatalog || len(rows) > 0 || len(legacy) > 0 || settings[legacyVideoMigratedKey] == true) {
-			previouslyBound := currentVersion || settings[ModelSecretVersionKey] == "bound-v2"
+			previouslyBound := hasBoundCatalog(settings)
 			var boundRows []any
 			if previouslyBound {
 				boundRows, _ = settings["modelCatalog"].([]any)
@@ -385,20 +396,19 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 					return nil, err
 				}
 			}
-			migration := &legacyConfigMigration{path: path}
+			migration := &legacyConfigMigration{path: path, state: state, releaseVideos: fileChecked, hasFileVideo: len(collectLegacyVideoCandidates(legacy)) > 0}
 			for _, source := range collectLegacySources(settings) {
-				if !previouslyBound || source.Video || source.Container != 0 {
+				if (!waiting || ModelConfigText(source.model, "kind") != "video") && (!previouslyBound || source.Video || source.Container != 0) {
 					migration.database = append(migration.database, source)
 				}
 			}
 			if !previouslyBound && len(rows) > 0 {
 				mergeLegacyModelKeys(rows, legacyCatalogRows(legacy))
 			}
-			waiting := !fileChecked && (s.LegacyConfigDir != "" || settings[legacyVideoPendingKey] != nil)
-			rows, err = s.preparePendingVideos(owner, settings, rows, boundRows, migration, waiting)
-			if err != nil {
-				return nil, err
+			if waiting {
+				rows = candidates.prepareRows(rows, boundRows, migration)
 			}
+			delete(settings, legacyVideoPendingKey)
 			rows, migration.file = prepareLegacyModelEntries(rows, legacy, collectLegacySources(legacy), previouslyBound)
 			reconcileLegacyVideoCredentials(rows, boundRows, migration.database, migration.file)
 			digest := legacyCatalogSecretDigest(legacy)
@@ -426,12 +436,12 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 		return nil, err
 	}
 	if ModelConfigText(settings, modelLegacyScrubPendingKey) != "" {
-		if err := s.scrubLegacyModelFile(ctx, owner, settings); err != nil {
+		if err := s.scrubLegacyModelFile(ctx, owner, settings, state); err != nil {
 			return nil, fmt.Errorf("clean legacy model configuration: %w", err)
 		}
 		delete(settings, modelLegacyScrubPendingKey)
 		delete(settings, legacyModelScrubEntriesKey)
-	} else if settings[legacyModelMigrationVersionKey] == legacyModelMigrationVersion && !checkFile {
+	} else if (found && state.Phase == LegacyFinalizing) || (settings[legacyModelMigrationVersionKey] == legacyModelMigrationVersion && !checkFile) {
 		path, err := s.legacyModelFilePath(owner)
 		if err != nil {
 			return nil, err
@@ -442,6 +452,14 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 		}
 		if err := s.finalizeLegacySettings(owner, path); err != nil {
 			return nil, err
+		}
+		if state.Phase == LegacyFinalizing {
+			if path == "" {
+				return nil, fmt.Errorf("legacy config directory unavailable during finalization")
+			}
+			if err := s.completeLegacyMigration(ctx, owner, "", state); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return EnsureWorkshopDefaults(settings), nil
@@ -491,10 +509,11 @@ func (s *MySQLStore) putConfig(ctx context.Context, owner string, settings map[s
 		}
 	}
 	if s.ModelSecrets != nil {
-		if migration == nil && (hasLegacyVideoProviders(previous) || hasNestedLegacyModels(previous) || ModelConfigText(previous, modelLegacyScrubPendingKey) != "") {
-			return ErrConfigConflict
-		}
 		if migration == nil {
+			unverifiedVideos := s.LegacyConfigDir != "" && !hasBoundCatalog(previous) && len(collectLegacyVideoCandidates(previous)) > 0
+			if unverifiedVideos || hasLegacyVideoProviders(previous) || hasNestedLegacyModels(previous) || ModelConfigText(previous, modelLegacyScrubPendingKey) != "" {
+				return ErrConfigConflict
+			}
 			for _, key := range []string{modelLegacyScrubPendingKey, legacyModelScrubEntriesKey, legacyModelMigrationVersionKey} {
 				delete(updated, key)
 			}
@@ -527,8 +546,25 @@ func (s *MySQLStore) putConfig(ctx context.Context, owner string, settings map[s
 			updated[ModelSecretVersionKey] = ModelSecretVersion
 		}
 		if migration != nil {
+			state := migration.state
+			if state.Owner == "" && migration.releaseVideos && migration.hasFileVideo {
+				state, err = s.beginLegacyConfigMigration(ctx, tx, owner, pendingLegacyVideos{})
+				if err != nil {
+					return err
+				}
+			}
+			if migration.releaseVideos && state.Phase == LegacyAwaitingSource {
+				if err := s.moveLegacyMigration(ctx, tx, &state, LegacyReconciling); err != nil {
+					return err
+				}
+			}
 			if err := s.stageLegacyRecovery(ctx, tx, owner, updated, migration); err != nil {
 				return err
+			}
+			if migration.releaseVideos && state.Phase == LegacyReconciling {
+				if err := s.moveLegacyMigration(ctx, tx, &state, LegacyFinalizing); err != nil {
+					return err
+				}
 			}
 		}
 	}

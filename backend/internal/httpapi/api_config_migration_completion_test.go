@@ -93,8 +93,8 @@ func TestAPIConfigPolicyMySQLDeferredMigrationCompletion(t *testing.T) {
 	}
 	pending := func(t *testing.T, owner string) bool {
 		t.Helper()
-		var result bool
-		if err := db.QueryRowContext(ctx, `SELECT JSON_CONTAINS_PATH(settings_json,'one','$.modelCatalogLegacyVideoPending') FROM novel_fetch_workshop_configs WHERE owner_username=?`, owner).Scan(&result); err != nil {
+		result, err := store.HasPendingLegacyVideos(ctx, owner)
+		if err != nil {
 			t.Fatal(err)
 		}
 		return result
@@ -111,6 +111,9 @@ func TestAPIConfigPolicyMySQLDeferredMigrationCompletion(t *testing.T) {
 		rows := modelCatalog(settings)
 		if err != nil || len(rows) != 1 || rows[0]["credential"] != "fixture-A" {
 			t.Fatal("database-only import did not retain its single source", err)
+		}
+		if _, found, err := single.LegacyConfigMigrationState(ctx, "database-only"); err != nil || found {
+			t.Fatal("database-only import created migration state", err)
 		}
 	})
 	for _, tc := range []struct {
@@ -251,5 +254,163 @@ func TestAPIConfigPolicyMySQLDeferredMigrationCompletion(t *testing.T) {
 				t.Error("usage resolver masked settings verification failure with another source")
 			}
 		})
+	}
+}
+
+func stateTestStore(t *testing.T) *novelfetchworkshop.MySQLStore {
+	t.Helper()
+	db, _ := novelAttributionDatabase(t)
+	if err := storage.RunMigrations(context.Background(), db, storage.NovelFetchWorkshopMigrations()); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	store := novelfetchworkshop.NewMySQLStore(db)
+	store.LegacyConfigDir, store.ModelSecrets = dir, NewUserConfigStore(dir).ModelConfigSecrets()
+	return store
+}
+
+func TestLegacyConfigMigrationStateCoversAllVideoCandidates(t *testing.T) {
+	ctx := context.Background()
+	store := stateTestStore(t)
+	row := `{"id":"v","kind":"video","provider":"personal_api","modelId":"expected-video","endpoint":"https://expected.example.test/video"}`
+	for _, tc := range []struct {
+		name, raw string
+		container int
+		provider  bool
+	}{
+		{"top-level", `{"modelCatalog":[` + row + `]}`, 0, false},
+		{"providers", `{"videoProviders":{"personal_api":{"model":"expected-video","createUrl":"https://expected.example.test/video"}}}`, 0, true},
+		{"nested", `{"settings":{"appConfig":{"modelCatalog":[` + row + `]}}}`, 3, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := store.DB.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_configs(owner_username,settings_json,created_at,updated_at) VALUES(?,?,NOW(6),NOW(6))`, tc.name, tc.raw); err != nil {
+				t.Fatal(err)
+			}
+			dir := filepath.Join(store.LegacyConfigDir, tc.name)
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "api-config.json"), []byte(`{"notifications":{"soundVolume":34}}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			settings, err := store.GetConfig(ctx, tc.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pending, err := store.HasPendingLegacyVideos(ctx, tc.name)
+			if err != nil || !pending || len(modelCatalog(settings)) != 0 {
+				t.Fatalf("ordinary preferences released keyless video: pending=%v rows=%d err=%v", pending, len(modelCatalog(settings)), err)
+			}
+			state, ok, err := store.LegacyConfigMigrationState(ctx, tc.name)
+			if err != nil || !ok || state.Phase != "awaiting_source" {
+				t.Fatalf("phase=%s found=%v err=%v", state.Phase, ok, err)
+			}
+			binding := novelfetchworkshop.LegacyConflictSource{Document: "db:legacy_config_migrations", Field: "video_candidates"}
+			plain, err := store.ModelSecrets.OpenLegacyConflict(tc.name, binding, state.CandidateEnvelope, state.CandidateFingerprint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var candidates struct {
+				Sources []struct {
+					Container int
+					Video     bool
+					Raw       map[string]any
+				}
+			}
+			if json.Unmarshal([]byte(plain), &candidates) != nil || len(candidates.Sources) != 1 || candidates.Sources[0].Container != tc.container || candidates.Sources[0].Video != tc.provider || len(candidates.Sources[0].Raw) == 0 {
+				t.Fatal("original video location missing")
+			}
+			restored := strings.Replace(tc.raw, `"expected-video"`, `"expected-video","apiKey":"fixture-restored"`, 1)
+			if err := os.WriteFile(filepath.Join(dir, "api-config.json"), []byte(restored), 0600); err != nil {
+				t.Fatal(err)
+			}
+			settings, err = store.GetConfig(ctx, tc.name)
+			rows := modelCatalog(settings)
+			if err != nil || len(rows) != 1 || rows[0]["credential"] != "fixture-restored" {
+				t.Fatal("restoring a matching key did not release original candidate", err)
+			}
+			state, found, err := store.LegacyConfigMigrationState(ctx, tc.name)
+			if err != nil || !found || state.Phase != "complete" || state.Revision != 4 || state.CandidateEnvelope != "" {
+				t.Fatal("verified completion did not retire candidate", err)
+			}
+		})
+	}
+}
+
+func TestLegacyConfigMigrationStateIsAccountAndPurposeBound(t *testing.T) {
+	ctx := context.Background()
+	store := stateTestStore(t)
+	const owner = "sealed-owner"
+	if _, err := store.DB.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_configs(owner_username,settings_json,created_at,updated_at) VALUES(?, '{"videoProviders":{"personal_api":{"model":"test-video","apiKey":"synthetic-state-key"}}}',NOW(6),NOW(6))`, owner); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetConfig(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	state, found, err := store.LegacyConfigMigrationState(ctx, owner)
+	if err != nil || !found || strings.Contains(state.CandidateEnvelope, "synthetic-state-key") {
+		t.Fatal("candidate not sealed", err)
+	}
+	for _, tc := range []struct {
+		owner, field string
+		valid        bool
+	}{{owner, "video_candidates", true}, {"other", "video_candidates", false}, {owner, "settings_patch", false}} {
+		plain, err := store.ModelSecrets.OpenLegacyConflict(tc.owner, novelfetchworkshop.LegacyConflictSource{Document: "db:legacy_config_migrations", Field: tc.field}, state.CandidateEnvelope, state.CandidateFingerprint)
+		if (err == nil) != tc.valid || strings.Contains(plain, "synthetic-state-key") != tc.valid {
+			t.Fatal("candidate account/purpose binding failed")
+		}
+	}
+}
+
+func TestLegacyConfigMigrationStateUpgradesPendingEnvelope(t *testing.T) {
+	ctx := context.Background()
+	store := stateTestStore(t)
+	const owner = "upgrade-video"
+	row := map[string]any{"id": "video", "kind": "video", "modelId": "old-model", "provider": "personal_api", "endpoint": "https://fixture.example.test/video", "credential": "fixture-original"}
+	pending := map[string]any{"Rows": []any{row}, "Sources": []any{map[string]any{"container": 0, "index": 1, "Raw": row}}}
+	plain, err := json.Marshal(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, fp, err := store.ModelSecrets.SealLegacyConflict(owner, novelfetchworkshop.LegacyConflictSource{Document: "db:novel_fetch_workshop_configs", Field: "modelCatalogLegacyVideoPending"}, string(plain))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := map[string]any{"modelCatalogSecretVersion": "bound-v3", "modelCatalog": []any{}, "modelCatalogLegacyVideoPending": map[string]any{"ciphertext": ciphertext, "fingerprint": fp}}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_configs(owner_username,settings_json,created_at,updated_at) VALUES(?,?,NOW(6),NOW(6))`, owner, raw); err != nil {
+		t.Fatal(err)
+	}
+	offline := novelfetchworkshop.NewMySQLStore(store.DB)
+	offline.ModelSecrets = store.ModelSecrets
+	if _, err := offline.GetConfig(ctx, owner); err == nil {
+		t.Fatal("reader without original directory acknowledged old pending video")
+	}
+	var retained bool
+	if err := store.DB.QueryRowContext(ctx, `SELECT JSON_CONTAINS_PATH(settings_json,'one','$.modelCatalogLegacyVideoPending') FROM novel_fetch_workshop_configs WHERE owner_username=?`, owner).Scan(&retained); err != nil || !retained {
+		t.Fatal("database-only reader lost a staged two-source import", err)
+	}
+	if _, err := store.GetConfig(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	state, found, err := store.LegacyConfigMigrationState(ctx, owner)
+	if err != nil || !found || state.Phase != "awaiting_source" {
+		t.Fatal("old envelope was not imported", err)
+	}
+	path := filepath.Join(store.LegacyConfigDir, owner, "api-config.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	file, _ := json.Marshal(map[string]any{"modelCatalog": []any{row}})
+	if err := os.WriteFile(path, file, 0600); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := store.GetConfig(ctx, owner)
+	rows := modelCatalog(settings)
+	if err != nil || len(rows) != 1 || rows[0]["credential"] != "fixture-original" {
+		t.Fatal("old envelope did not resume", err)
 	}
 }

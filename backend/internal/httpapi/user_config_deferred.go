@@ -91,6 +91,13 @@ func (s *UserConfigStore) writeSettingsPatch(ctx context.Context, owner string, 
 		return s.writeAuthenticatedConfig(owner, config)
 	}
 	if ok {
+		if discover, ok := catalog.(interface {
+			DiscoverLegacyConfigMigration(context.Context, string) (novelfetchworkshop.LegacyConfigMigrationState, bool, error)
+		}); ok {
+			if _, _, err := discover.DiscoverLegacyConfigMigration(ctx, owner); err != nil {
+				return err
+			}
+		}
 		pending, err := lookup.HasPendingLegacyVideos(ctx, owner)
 		if err != nil {
 			return err
