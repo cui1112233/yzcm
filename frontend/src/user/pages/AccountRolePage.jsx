@@ -159,7 +159,7 @@ export default function AccountRolePage({ title = '账号与角色', teamsOnly =
   const hasForm = createTeam || createAccount;
   const normalizedQuery = query.trim().toLowerCase();
   const teams = directory?.teams || [];
-  const ungrouped = directory?.ungrouped || [];
+  const ungrouped = directory ? directory.ungrouped : [];
   const allAccounts = [...teams.flatMap(team => team.accounts || []), ...ungrouped];
   const activeAccounts = allAccounts.filter(account => account.active && !account.archivedAt).length;
   const monthConsumption = allAccounts.reduce((total, account) => total + (Number(account.monthConsumption) || 0), 0);
