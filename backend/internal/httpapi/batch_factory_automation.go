@@ -3211,7 +3211,7 @@ func (c *BatchAutomationCoordinator) fetchAutomationSource(ctx context.Context, 
 	// 冲突。每次进入本阶段先回读最新快照，后续写入再由 _withRetry 兜底。
 	book = c.refreshAutomationBook(ctx, owner, batchID, book)
 	if groupID := firstMetadataString(book.SourceMetadata, "multimodeGroupId"); groupID != "" && book.SourceMetadata["multiModeSourceState"] == "pending" {
-		if err := c.resolveMultiModeGroup(ctx, owner, groupID); err != nil {
+		if err := c.resolveMultiModeBookSource(ctx, owner, groupID, firstMetadataString(book.SourceMetadata, "multimodeSourceKey")); err != nil {
 			return book, err
 		}
 		book = c.refreshAutomationBook(ctx, owner, batchID, book)

@@ -186,12 +186,30 @@ func batchCreationBooks(input CreateBatchInput) []CreateBookInput {
 // Work is called only by an existing request/job. Claims are short durable
 // leases, not a new background polling loop. Delivery can safely resume later.
 func ResolveMultiModeSources(ctx context.Context, store MultiModeCreationStore, owner, groupID string, prepare func(context.Context, CreateBookInput) (MultiModeSourceSnapshot, error)) error {
+	return resolveMultiModeSources(ctx, store, owner, groupID, "", prepare)
+}
+
+// ResolveMultiModeSource is used by an individual book's existing worker.
+// Other books may still be reading or have failed; they must not block this book.
+func ResolveMultiModeSource(ctx context.Context, store MultiModeCreationStore, owner, groupID, sourceKey string, prepare func(context.Context, CreateBookInput) (MultiModeSourceSnapshot, error)) error {
+	if sourceKey == "" {
+		return ErrInvalid
+	}
+	return resolveMultiModeSources(ctx, store, owner, groupID, sourceKey, prepare)
+}
+
+func resolveMultiModeSources(ctx context.Context, store MultiModeCreationStore, owner, groupID, sourceKey string, prepare func(context.Context, CreateBookInput) (MultiModeSourceSnapshot, error)) error {
 	jobs, err := store.ListMultiModeSources(ctx, owner, groupID)
 	if err != nil {
 		return err
 	}
 	var failures []error
+	found := sourceKey == ""
 	for _, job := range jobs {
+		if sourceKey != "" && job.Key != sourceKey {
+			continue
+		}
+		found = true
 		if job.Status == "ready" {
 			continue
 		}
@@ -213,6 +231,9 @@ func ResolveMultiModeSources(ctx context.Context, store MultiModeCreationStore, 
 		if workErr != nil {
 			failures = append(failures, workErr)
 		}
+	}
+	if !found {
+		return ErrNotFound
 	}
 	if err = store.DeliverMultiModeSources(ctx, owner, groupID); err != nil {
 		return err

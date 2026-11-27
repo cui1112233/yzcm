@@ -1,3 +1,4 @@
+import { prepareCreationSources } from './batchFactoryCreationSources.js';
 import BatchFactoryMultiModeCreationFields from './BatchFactoryMultiModeCreationFields.jsx';
 import {CREATION_MODE_OPTIONS,modeCreationControls,modeCreationSettings,applyMultiModePreset,buildMultiModeCreationRequest} from './batchFactoryMultiModeCreation.js';
 import { Alert, Button, Input, InputNumber, Modal, Select, Space, Switch, Tabs, Tag, message } from 'antd';
@@ -667,54 +668,8 @@ export function BatchFactoryCreateModal({ open, onCancel, onCreated, onBatchUpda
     try {
       // 编辑中点了定时入口也会先校验；此时 groups 是唯一事实源。
       // 正文按组隔离：不同书城即便撞 Book ID 也各自抓各自的，互不覆盖。
-      const sourcesByGroup = {};
-      const sourceMetadataByGroup = {};
-      const failedPlatforms = [];
-      const failedReasons = [];
-      let fetchedCount = 0;
-      for (const group of groups) {
-        const groupKey = String(group.platformId);
-        const ids = manualBookIDsFromInput(group.inputText);
-        const have = sourcesByGroup[groupKey] || group.sourceTextByBookId || {};
-        sourcesByGroup[groupKey] = have;
-        sourceMetadataByGroup[groupKey] = group.sourceMetadataByBookId || {};
-        fetchedCount += ids.filter(bookId => manualFetchedSourceText(have[bookId])).length;
-        const pending = ids.filter(bookId => !manualFetchedSourceText(have[bookId]));
-        if (!pending.length) continue;
-        try {
-          const result = await fetchDirectOriginals({
-            platform: group.platformId,
-            bookIds: pending,
-            productionMode: initialBatchSettings.productionMode,
-            maxTxt: contentCaptureCharacters
-          });
-          const groupSources = {};
-          const groupMetadata = {};
-          for (const item of Array.isArray(result?.results) ? result.results : []) {
-            if (item?.status === 'ok' || item?.status === 'processing_error') {
-              const bookId = String(item.bookId);
-              groupSources[bookId] = { data: item.data, rawData: item.rawData };
-              if (item?.sourceMetadata && typeof item.sourceMetadata === 'object' && !Array.isArray(item.sourceMetadata)) {
-                groupMetadata[bookId] = item.sourceMetadata;
-              }
-            }
-          }
-          sourcesByGroup[groupKey] = { ...have, ...groupSources };
-          sourceMetadataByGroup[groupKey] = { ...groupMetadata, ...(sourceMetadataByGroup[groupKey] || {}) };
-          // 只按本组请求的 pending id 计数，防止接口回传意外 ID 高估成功数
-          for (const bookId of pending) {
-            if (manualFetchedSourceText(groupSources[bookId])) fetchedCount += 1;
-          }
-        } catch (error) {
-          // 单组抓取失败不阻断：该组正文留空，书照样创建，列表中标红后可单独重试
-          const platformLabel = group.platformName || group.platformId;
-          failedPlatforms.push(platformLabel);
-          failedReasons.push(`${platformLabel}：${normalizedError(error, '请求失败')}`);
-          console.warn('分组抓取失败', group.platformId, error);
-          sourcesByGroup[groupKey] = { ...have };
-        }
-      }
-      // 设计约定：抓不到的书照样创建（正文为空，列表中标红），不阻断整个批量
+      const deferSources = automationEnabled || multiCreation;
+      const {sourcesByGroup,sourceMetadataByGroup,failedPlatforms,failedReasons,fetchedCount}=await prepareCreationSources({groups,deferSources,productionMode:initialBatchSettings.productionMode,maxTxt:contentCaptureCharacters},fetchDirectOriginals);
       const totalCount = totalGroupBookCount(groups);
 
       if (!validateDraft()) return;
@@ -746,9 +701,9 @@ export function BatchFactoryCreateModal({ open, onCancel, onCreated, onBatchUpda
       });
       await onCreated(multiCreation ? {...submission,multiModeRequest:multiRequest(submission)} : submission);
       reset();
-      if (failedPlatforms.length > 0) {
+      if (!deferSources && failedPlatforms.length > 0) {
         message.warning(`${fetchedCount}/${totalCount} 本已抓到正文；以下书城抓取失败：${failedPlatforms.join('、')}。${failedReasons.join('；')}失败的书已在列表中标红，可单独重试`);
-      } else if (fetchedCount < totalCount) {
+      } else if (!deferSources && fetchedCount < totalCount) {
         message.warning(`${fetchedCount}/${totalCount} 本已抓到正文，其余书将在列表中标红，可单独重试`);
       }
     } catch (error) {

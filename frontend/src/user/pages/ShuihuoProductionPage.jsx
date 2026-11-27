@@ -1,4 +1,4 @@
-import {createMultiModeBatches} from '../../shared/api/batchFactoryMultiMode.js';
+import {createMultiModeBatches,resumeMultiModeSources} from '../../shared/api/batchFactoryMultiMode.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ConfigProvider, Modal, Spin, message } from 'antd';
 import { CommentaryWorkbench } from './shuihuo/CommentaryWorkbench';
@@ -222,8 +222,8 @@ export function ShuihuoProductionPage({ openBatchOnLoad = false, theme = 'dark' 
     if(input?.multiModeRequest){
       const result=await createMultiModeBatches(input.multiModeRequest);
       const children=result?.batches || [];if(!children.length)throw Error('未返回创建的作品项目');
-      await refreshProjects();
       const first=children[0];localStorage.setItem(BATCH_FACTORY_ACTIVE_BATCH_STORAGE_KEY,first.id);setActiveBatchProject(first);setView('batch-novels');
+      void refreshProjects();
       if(result.sourceWarning)message.warning(`项目已创建，部分原文待继续读取：${result.sourceWarning}`);
       if(input.automationEnabled===true || input.multiModeAutomationRequested===true){
         const outcomes=await Promise.allSettled((result.projects||[]).map(project=>{
@@ -231,6 +231,16 @@ export function ShuihuoProductionPage({ openBatchOnLoad = false, theme = 'dark' 
           return startBatchAutomation(project.batchId,{presetId:project.presetId,runMode:project.executionMode,productionMode:child?.settingsState?.patch?.productionMode,settingsPatch:child?.settingsState?.patch||{},autoPublish:project.executionMode==='full_submit',scheduledAt:input.scheduledAt||'',scheduleMode:input.scheduleMode||'execute',concurrency:input.automationConcurrency});
         }));
         const failed=outcomes.filter(item=>item.status==='rejected');if(failed.length)message.warning(`${failed.length} 个项目暂未启动：${failed.map(item=>item.reason?.message||'请进入项目重试').join('；')}`);
+      } else {
+        // Manual creation prepares shared originals after opening the project,
+        // without starting image/video generation or publishing.
+        try {
+          const prepared=await resumeMultiModeSources(result.groupId);
+          const refreshed=prepared?.batches?.find(batch=>batch.id===first.id);
+          if(mountedRef.current && refreshed)setActiveBatchProject(current=>String(current?.id)===String(first.id)?refreshed:current);
+        } catch(error) {
+          message.warning(`项目已创建，部分原文尚未读取完成：${error?.message||'可在项目中重试读取'}`);
+        }
       }
       message.success(`已创建 ${children.length} 个独立作品项目`);
       return {...first,multiModeGroup:result};
@@ -245,8 +255,8 @@ export function ShuihuoProductionPage({ openBatchOnLoad = false, theme = 'dark' 
     localStorage.setItem(BATCH_FACTORY_ACTIVE_BATCH_STORAGE_KEY, batch.id);
     setActiveBatchProject(batch);
     setView('batch-novels');
-    await refreshProjects();
-    if (batch?.id && input?.initialBatchSettings?.productionMode !== 'text') {
+    void refreshProjects();
+    if (batch?.id && input?.automationEnabled !== true && input?.initialBatchSettings?.productionMode !== 'text') {
       try {
         const result = await classifyFetchedBatchMetadata(batch.id);
         const rows = Array.isArray(result?.results) ? result.results : [];

@@ -117,17 +117,19 @@ test('uses the unified button treatment for the new batch toolbar', () => {
 });
 
 test('grouped submit surfaces failed book cities and counts only fetched pending books', () => {
-  // I3：失败书城可见——catch 里记录书城名并 console.warn，最终 warning 带出具体书城
-  assert.match(source, /const failedPlatforms = \[\]/);
-  assert.match(source, /failedPlatforms\.push\(platformLabel\)/);
-  assert.match(source, /console\.warn\('分组抓取失败', group\.platformId, error\)/);
+  const preparation = fs.readFileSync(path.join(here, 'batchFactoryCreationSources.js'), 'utf8');
+  // I3：失败书城可见——保留书城名和失败原因，最终 warning 带出具体书城
+  assert.match(preparation, /const failedPlatforms = \[\]/);
+  assert.match(preparation, /failedPlatforms\.push\(platformLabel\)/);
   assert.match(source, /以下书城抓取失败：\$\{failedPlatforms\.join\('、'\)\}/);
   assert.match(source, /失败的书已在列表中标红，可单独重试/);
   // 全部成功但有书没正文时，沿用原来的 X/Y 文案
-  assert.match(source, /\} else if \(fetchedCount < totalCount\) \{/);
+  assert.match(source, /\} else if \(!deferSources && fetchedCount < totalCount\) \{/);
   // #6：fetchedCount 只对本组 pending id 中真正拿到非空正文的计数
-  assert.match(source, /let fetchedCount = 0/);
-  assert.match(source, /for \(const bookId of pending\) \{\s*if \(manualFetchedSourceText\(groupSources\[bookId\]\)\) fetchedCount \+= 1;/);
+  assert.match(preparation, /let fetchedCount = 0/);
+  assert.match(preparation, /for \(const bookId of pending\) \{\s*if \(manualFetchedSourceText\(groupSources\[bookId\]\)\) fetchedCount \+= 1;/);
+  assert.match(source, /const deferSources = automationEnabled \|\| multiCreation/);
+  assert.match(preparation, /if \(!pending.length \|\| deferSources\) continue/);
 });
 
 test('offers giant material intake through the resident executor', () => {

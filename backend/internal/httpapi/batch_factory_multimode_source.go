@@ -43,6 +43,10 @@ func (c *BatchAutomationCoordinator) prepareMultiModeSource(ctx context.Context,
 	return batchfactoryv11.MultiModeSourceSnapshot{Title: title, OriginalRaw: raw, Metadata: metadata}, nil
 }
 func (c *BatchAutomationCoordinator) resolveMultiModeGroup(ctx context.Context, owner, groupID string) error {
+	return c.resolveMultiModeBookSource(ctx, owner, groupID, "")
+}
+
+func (c *BatchAutomationCoordinator) resolveMultiModeBookSource(ctx context.Context, owner, groupID, sourceKey string) error {
 	store, ok := c.store.(batchfactoryv11.MultiModeCreationStore)
 	if !ok {
 		return batchfactoryv11.ErrUnavailable
@@ -51,7 +55,7 @@ func (c *BatchAutomationCoordinator) resolveMultiModeGroup(ctx context.Context, 
 	if err != nil {
 		return err
 	}
-	return batchfactoryv11.ResolveMultiModeSources(ctx, store, owner, groupID, func(ctx context.Context, input batchfactoryv11.CreateBookInput) (batchfactoryv11.MultiModeSourceSnapshot, error) {
+	prepare := func(ctx context.Context, input batchfactoryv11.CreateBookInput) (batchfactoryv11.MultiModeSourceSnapshot, error) {
 		// An OCR/direct-reader callback may have filled one child while the
 		// other projects were waiting. Reuse that saved original for delivery.
 		if strings.TrimSpace(input.OriginalRaw) == "" {
@@ -69,5 +73,9 @@ func (c *BatchAutomationCoordinator) resolveMultiModeGroup(ctx context.Context, 
 			}
 		}
 		return c.prepareMultiModeSource(ctx, owner, input)
-	})
+	}
+	if sourceKey != "" {
+		return batchfactoryv11.ResolveMultiModeSource(ctx, store, owner, groupID, sourceKey, prepare)
+	}
+	return batchfactoryv11.ResolveMultiModeSources(ctx, store, owner, groupID, prepare)
 }

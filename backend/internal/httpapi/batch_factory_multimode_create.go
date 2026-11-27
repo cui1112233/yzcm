@@ -1,13 +1,11 @@
 package httpapi
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/prompt"
-	"time"
 )
 
 type multiModeCreateRequest struct {
@@ -106,19 +104,9 @@ func registerMultiModeCreationRoutes(mux *http.ServeMux, store batchfactoryv11.S
 			writeStoreError(w, err)
 			return
 		}
-		warning := ""
-		if coordinator != nil {
-			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
-			err = coordinator.resolveMultiModeGroup(ctx, owner, result.GroupID)
-			cancel()
-			if err != nil {
-				warning = err.Error()
-			}
-			if latest, readErr := multi.GetMultiModeCreation(r.Context(), owner, result.GroupID); readErr == nil {
-				result = latest
-			}
-		}
-		writeJSON(w, http.StatusCreated, map[string]any{"groupId": result.GroupID, "batches": result.Batches, "projects": result.Projects, "sourceWarning": warning})
+		// Creation commits projects and durable source jobs only. Existing
+		// automation workers read/classify each source after entering the workspace.
+		writeJSON(w, http.StatusCreated, map[string]any{"groupId": result.GroupID, "batches": result.Batches, "projects": result.Projects})
 	})
 	mux.HandleFunc("GET /api/batch-factory/v12/multi-mode-batches/{groupId}", func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)

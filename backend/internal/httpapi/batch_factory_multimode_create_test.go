@@ -28,8 +28,18 @@ func TestMultiModeCreateHTTPReturnsFourStableProjectsAndFullSource(t *testing.T)
 		t.Fatal("lost idempotency")
 	}
 	for _, batch := range a.Batches {
+		if batch.Books[0].SourceMetadata["multiModeSourceState"] != "pending" {
+			t.Fatalf("source work ran before returning the project: %+v", batch.Books[0])
+		}
+	}
+	resumed := signedJSONRequest(t, api, now, "alice", http.MethodPost, path+"/"+a.GroupID+"/resume", map[string]any{})
+	if resumed.Code != 200 {
+		t.Fatalf("resume: %d %s", resumed.Code, resumed.Body.String())
+	}
+	after := decodeBody[batchfactoryv11.MultiModeCreationResult](t, resumed)
+	for _, batch := range after.Batches {
 		if batch.Books[0].TxtText != "完整原文。第二段内容。" {
-			t.Fatalf("missing full source: %+v", batch.Books[0])
+			t.Fatalf("missing deferred full source: %+v", batch.Books[0])
 		}
 	}
 	summary := signedJSONRequest(t, api, now, "alice", http.MethodGet, "/api/batch-factory/v12/batches/summary", nil)
