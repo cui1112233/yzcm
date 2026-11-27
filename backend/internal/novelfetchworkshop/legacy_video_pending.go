@@ -133,46 +133,59 @@ func validateLegacyVideoDocument(doc map[string]any) error {
 	return nil
 }
 
-// The previous writer stopped normalizing nonlocal provider rows at a
-// missing key. Recognize that exact generated identity using its original
-// provider fields; an independently stored row still needs file evidence.
-func (source pendingVideoSource) producedRow(row map[string]any) bool {
-	if !validLegacyVideoFields(row) || !validLegacyVideoFields(source.Raw) {
-		return false
+// Rebuild precisely the projection written into Rows by the old pending
+// envelope writer. The untouched Sources entry remains the authority for
+// matching a returning file, including its original adapter and catalog.
+func (source pendingVideoSource) historicalRow() map[string]any {
+	if !source.Video {
+		return cloneMap(source.Raw)
 	}
-	canonical := source.model()
-	if reflect.DeepEqual(row, canonical) {
-		return true
-	}
-	if !source.Video || hasLegacyCredentialValue(row) || hasLegacyCredentialValue(source.Raw) {
-		return false
-	}
-	provider := ModelConfigText(canonical, "provider")
-	if provider == batchfactoryv11.VideoProviderDoubaoLocal {
-		return false
-	}
-	old := cloneMap(canonical)
-	old["endpoint"] = ModelConfigText(source.Raw, "createUrl")
-	old["tasksEndpoint"] = ModelConfigText(source.Raw, "tasksUrl")
-	old["resultEndpoint"] = ModelConfigText(source.Raw, "resultUrl")
-	if provider != batchfactoryv11.VideoProviderPersonalAPI {
-		old["modelId"] = ModelConfigText(source.Raw, "model")
-	}
+	old := source.model()
 	delete(old, "adapterKind")
 	delete(old, "catalogSource")
-	for _, field := range []string{"id", "kind", "modelId", "provider", "baseUrl", "endpoint", "tasksEndpoint", "resultEndpoint", "workflowId", "adapterKind", "catalogSource"} {
-		if ModelConfigText(old, field) != ModelConfigText(row, field) {
-			return false
+	provider := ModelConfigText(old, "provider")
+	if ModelConfigText(source.Raw, "apiKey") == "" && provider != batchfactoryv11.VideoProviderDoubaoLocal {
+		// Missing credentials used to stop normalization before URL defaults.
+		old["endpoint"] = ModelConfigText(source.Raw, "createUrl")
+		old["tasksEndpoint"] = ModelConfigText(source.Raw, "tasksUrl")
+		old["resultEndpoint"] = ModelConfigText(source.Raw, "resultUrl")
+		if provider != batchfactoryv11.VideoProviderPersonalAPI {
+			old["modelId"] = ModelConfigText(source.Raw, "model")
+			old["displayName"] = old["modelId"]
 		}
 	}
-	return true
+	return old
 }
 
 func (p pendingLegacyVideos) orphanRows() []map[string]any {
+	if len(p.Rows) == 0 {
+		return nil
+	}
+	claimed := make([]bool, len(p.Rows))
+	for _, source := range p.Sources {
+		if !validLegacyVideoFields(source.Raw) {
+			continue
+		}
+		projected := source.historicalRow()
+		var missingKey map[string]any
+		if ModelConfigText(projected, "credential") == "" && ModelConfigText(projected, "apiKey") == "" {
+			// For an unbound catalog the old writer ran mergeLegacyModelKeys
+			// with no file rows before saving this otherwise identical record.
+			missingKey = cloneMap(projected)
+			markLegacyKeyReentry(missingKey, "legacy_missing")
+		}
+		for i, item := range p.Rows {
+			row, ok := item.(map[string]any)
+			if !claimed[i] && ok && (reflect.DeepEqual(row, projected) || missingKey != nil && reflect.DeepEqual(row, missingKey)) {
+				claimed[i] = true
+				break
+			}
+		}
+	}
 	var orphan []map[string]any
-	for _, item := range p.Rows {
-		row, _ := item.(map[string]any)
-		if !slices.ContainsFunc(p.Sources, func(source pendingVideoSource) bool { return source.producedRow(row) }) {
+	for i, item := range p.Rows {
+		if !claimed[i] {
+			row, _ := item.(map[string]any)
 			orphan = append(orphan, row)
 		}
 	}

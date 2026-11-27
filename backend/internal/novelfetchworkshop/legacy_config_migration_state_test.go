@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -181,4 +182,62 @@ func TestLegacyConfigMigrationStateRejectsMalformedTargetTypes(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestLegacyConfigMigrationStateHistoricalProviderProjection(t *testing.T) {
+	// Exact pre-1200007 provider shape before Normalize filled missing URLs.
+	raw := map[string]any{"model": "fixture-video", "createUrl": "https://fixture.invalid/create"}
+	source := pendingVideoSource{legacyScrubEntry: legacyScrubEntry{Video: true, Provider: "personal_api"}, Raw: raw}
+	generated := map[string]any{"id": "legacy-video:personal_api", "kind": "video", "provider": "personal_api", "modelId": "fixture-video", "displayName": "fixture-video", "endpoint": "https://fixture.invalid/create", "tasksEndpoint": "", "resultEndpoint": "", "workflowId": "", "enabled": true, "credentialStatus": "needs_reentry", "credentialRecoveryReason": "legacy_missing"}
+	returned := cloneMap(raw)
+	returned["apiKey"] = "synthetic-restored"
+	file := map[string]any{"videoProviders": map[string]any{"personal_api": returned}}
+	t.Run("independent-disabled-row", func(t *testing.T) {
+		other := cloneMap(generated)
+		other["enabled"], other["displayName"] = false, "user-saved-video"
+		for _, rows := range [][]any{{other, generated}, {generated, other}} {
+			p := pendingLegacyVideos{Rows: rows, Sources: []pendingVideoSource{source}}
+			orphan := p.orphanRows()
+			if len(orphan) != 1 || !reflect.DeepEqual(orphan[0], other) || p.fileReady(file) {
+				t.Fatal("independent same-ID row lost its own evidence requirement")
+			}
+		}
+	})
+	t.Run("one-source-one-generated-row", func(t *testing.T) {
+		p := pendingLegacyVideos{Rows: []any{generated, cloneMap(generated)}, Sources: []pendingVideoSource{source}}
+		if len(p.orphanRows()) != 1 || p.fileReady(file) {
+			t.Fatal("a source claimed two historical rows")
+		}
+	})
+	t.Run("keyed-row-with-original-adapter", func(t *testing.T) {
+		original := cloneMap(raw)
+		original["apiKey"], original["adapterKind"], original["catalogSource"] = "synthetic-key", "fixture-adapter", "fixture-catalog"
+		original["tasksUrl"], original["resultUrl"] = "https://fixture.invalid/tasks", "https://fixture.invalid/result"
+		keyed := cloneMap(generated)
+		keyed["tasksEndpoint"], keyed["resultEndpoint"], keyed["credential"] = original["tasksUrl"], original["resultUrl"], original["apiKey"]
+		delete(keyed, "credentialStatus")
+		delete(keyed, "credentialRecoveryReason")
+		saved := source
+		saved.Raw = original
+		p := pendingLegacyVideos{Rows: []any{keyed}, Sources: []pendingVideoSource{saved}}
+		exactFile := map[string]any{"videoProviders": map[string]any{"personal_api": original}}
+		if len(p.orphanRows()) != 0 || !p.fileReady(exactFile) {
+			t.Error("genuine keyed historical row remained pending after original returned")
+		}
+		active := p.prepareRows(nil, nil, &legacyConfigMigration{releaseVideos: true})
+		if len(active) != 1 {
+			t.Fatal("a verified provider must restore exactly one row")
+		}
+		restored := active[0].(map[string]any)
+		if restored["adapterKind"] != original["adapterKind"] || restored["catalogSource"] != original["catalogSource"] || restored["credential"] != original["apiKey"] {
+			t.Fatal("restored row must use the original provider identity and credential")
+		}
+		for _, field := range []string{"adapterKind", "catalogSource"} {
+			other := cloneMap(original)
+			delete(other, field)
+			if p.fileReady(map[string]any{"videoProviders": map[string]any{"personal_api": other}}) {
+				t.Fatalf("file with missing %s accepted", field)
+			}
+		}
+	})
 }
