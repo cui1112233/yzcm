@@ -70,3 +70,13 @@ test('team governance uses the approved 团队管理 title consistently', () => 
   assert.match(team, /title="团队管理"/);
   assert.doesNotMatch(team, /title="组员管理"/);
 });
+
+test('team and account governance share the designed summary, filter, directory and actions regions', () => {
+  const source = read('user/pages/AccountRolePage.jsx');
+  for (const region of ['pc-governance-summary', 'pc-governance-filter', 'pc-governance-directory', 'pc-governance-actions']) {
+    assert.match(source, new RegExp(region));
+  }
+  assert.match(source, /teamsOnly\s*\?\s*['"]pc-team['"]\s*:\s*['"]pc-accounts['"]/);
+  assert.match(source, /RoleBadge/);
+  assert.doesNotMatch(source, /className="admin-page account-role-page"/);
+});

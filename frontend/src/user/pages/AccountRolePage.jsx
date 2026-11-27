@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Alert, Button, Card, Empty, Form, Input, Modal, Space, Table, Tag, Typography } from 'antd';
+import { Activity, RefreshCw, Search, UsersRound, WalletCards } from 'lucide-react';
 import { changeAdminAccount, createUngroupedAdminAccount, getAccountAdminAudit, getAccountAdminDirectory } from '../../shared/api/accountAdmin.js';
 import { changeAdminTeam, createAdminTeam, createAdminTeamAccount } from '../../shared/api/teamAdmin.js';
 import { startAccountImpersonation } from '../../shared/api/accountImpersonation.js';
 import { reloadForAccountSwitch } from '../../shared/layouts/AccountCenterLayout.jsx';
+import { PageHeader, RoleBadge } from './accountCenterShared.jsx';
 
 const ROLE_LABELS = {
   founder: '开发创始',
@@ -67,6 +69,7 @@ export default function AccountRolePage({ title = '账号与角色', teamsOnly =
   const [dialogError, setDialogError] = useState('');
   const [preflight, setPreflight] = useState(null);
   const [audit, setAudit] = useState(null);
+  const [query, setQuery] = useState('');
   const [form] = Form.useForm();
 
   const load = useCallback(async () => {
@@ -135,7 +138,7 @@ export default function AccountRolePage({ title = '账号与角色', teamsOnly =
   const columns = [
     { title: '登录账号', dataIndex: 'username' },
     { title: '显示名称', dataIndex: 'displayName' },
-    { title: '角色', dataIndex: 'role', render: role => <Tag>{ROLE_LABELS[role] || role}</Tag> },
+    { title: '角色', dataIndex: 'role', render: role => <RoleBadge canonicalRole={role} compact /> },
     { title: '状态', render: (_, account) => <Space direction="vertical" size={0}>
       {account.archivedAt ? '已归档' : account.active ? '启用' : '停用'}
       {account.historical && <Tag>历史归属</Tag>}
@@ -154,29 +157,46 @@ export default function AccountRolePage({ title = '账号与角色', teamsOnly =
   const createTeam = pending?.action === 'create_team';
   const createAccount = pending?.action === 'create_member' || pending?.action === 'create_manager';
   const hasForm = createTeam || createAccount;
+  const normalizedQuery = query.trim().toLowerCase();
+  const teams = directory?.teams || [];
+  const ungrouped = directory?.ungrouped || [];
+  const allAccounts = [...teams.flatMap(team => team.accounts || []), ...ungrouped];
+  const activeAccounts = allAccounts.filter(account => account.active && !account.archivedAt).length;
+  const monthConsumption = allAccounts.reduce((total, account) => total + (Number(account.monthConsumption) || 0), 0);
+  const filteredTeams = teams.map(team => ({
+    ...team,
+    accounts: normalizedQuery
+      ? (team.accounts || []).filter(account => [account.username, account.displayName, ROLE_LABELS[account.role], team.name].some(value => String(value || '').toLowerCase().includes(normalizedQuery)))
+      : (team.accounts || [])
+  })).filter(team => !normalizedQuery || team.name.toLowerCase().includes(normalizedQuery) || team.accounts.length);
+  const filteredUngrouped = normalizedQuery
+    ? ungrouped.filter(account => [account.username, account.displayName, ROLE_LABELS[account.role]].some(value => String(value || '').toLowerCase().includes(normalizedQuery)))
+    : ungrouped;
 
-  return <section className="admin-page account-role-page">
-    <div className="admin-page-heading">
-      <Typography.Title level={2}>{title}</Typography.Title>
-      <Space wrap>
-        <Button onClick={load} loading={loading}>刷新</Button>
-        {directory?.actions.filter(action => !teamsOnly || !['create_manager', 'create_member'].includes(action))
-          .map(action => actionButton(action))}
-      </Space>
+  return <section className={`account-center-page account-role-page ${teamsOnly ? 'pc-team' : 'pc-accounts'}`}>
+    <PageHeader title={title} subtitle={teamsOnly ? '管理团队、成员与团队能量使用范围' : '按团队查看账号、身份与能量消耗'} actions={<Button icon={<RefreshCw size={15} />} onClick={load} loading={loading}>刷新</Button>} />
+    <div className="pc-governance-summary">
+      <div><span><UsersRound size={20} /></span><small>团队数量</small><strong>{teams.length}</strong></div>
+      <div><span><Activity size={20} /></span><small>启用账号</small><strong>{activeAccounts}</strong></div>
+      <div><span><WalletCards size={20} /></span><small>本月总消耗</small><strong>{monthConsumption || '—'}</strong></div>
+    </div>
+    <div className="pc-governance-filter">
+      <Input prefix={<Search size={16} />} allowClear value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索团队、账号、名称或身份" />
+      <div className="pc-governance-actions"><Space wrap>{directory?.actions.filter(action => !teamsOnly || !['create_manager', 'create_member'].includes(action)).map(action => actionButton(action))}</Space></div>
     </div>
     {error && <Alert type="error" showIcon message={error} />}
-    {directory && <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      {directory.teams.map(team => <Card key={team.id}
+    {directory && <div className="pc-governance-directory">
+      {filteredTeams.map(team => <Card className="account-role-team-card" key={team.id}
         title={<Space>{team.name}{team.archivedAt && <Tag>已归档</Tag>}</Space>}
         extra={<Space wrap>{team.actions.map(action => actionButton(action, team))}</Space>}>
         <Typography.Paragraph type="secondary">负责人 @{team.managerUsername}</Typography.Paragraph>
         <Table rowKey={account => account.membershipId || account.username} columns={columns} dataSource={team.accounts} pagination={false} scroll={{ x: 820 }} />
       </Card>)}
-      {!teamsOnly && directory.ungrouped.length > 0 && <Card title="未分组">
-        <Table rowKey="username" columns={columns} dataSource={directory.ungrouped} pagination={false} scroll={{ x: 820 }} />
+      {!teamsOnly && filteredUngrouped.length > 0 && <Card className="account-role-team-card" title="未分组">
+        <Table rowKey="username" columns={columns} dataSource={filteredUngrouped} pagination={false} scroll={{ x: 820 }} />
       </Card>}
-      {directory.teams.length === 0 && (teamsOnly || directory.ungrouped.length === 0) && <Empty description="暂无可管理的团队" />}
-    </Space>}
+      {filteredTeams.length === 0 && (teamsOnly || filteredUngrouped.length === 0) && <Empty description={normalizedQuery ? '没有找到匹配的团队或账号' : '暂无可管理的团队'} />}
+    </div>}
     <Modal title={ACTION_LABELS[pending?.action]} open={Boolean(pending)}
       onCancel={() => { if (!saving) setPending(null); }}
       onOk={() => hasForm ? form.submit() : submitAction()}
