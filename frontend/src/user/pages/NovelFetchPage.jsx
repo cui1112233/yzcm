@@ -26,7 +26,7 @@ import { readNovelFetchProcessSettings, writeNovelFetchProcessSettings } from '.
 import { NovelFetchAutomationOptions } from './novel-fetch-automation-options.js';
 import { withNovelFetchConfigDefaults, withNovelFetchVersionProfiles } from './novel-fetch-config-defaults.js';
 import { novelFetchAiVersions, novelFetchSensitiveComparisons, novelFetchSubmitDiagnostic, novelFetchTaskSummaryItems } from './novel-fetch-task-detail.js';
-import { novelFetchLatestJob, novelFetchProgressLines } from './novel-fetch-progress.js';
+import { novelFetchLatestJob, novelFetchProgressLines, novelFetchJobFinished, novelFetchActionNotice } from './novel-fetch-progress.js';
 import { beijingDateKey, currentBatchBookIds, filterNovelFetchTasks, mergeNovelFetchQueueStatus, novelFetchBatchResultSummary, novelFetchCharCount, novelFetchCurrentBatchTaskDetail, novelFetchOriginalFetchRetry, novelFetchPollingPlan, novelFetchQueueSummary, novelFetchStageLabel, novelFetchSubmissionLabel, novelFetchTaskDateKey, novelFetchTaskStatus, novelFetchVersionReady, retainVisibleTaskIds, stoppableCurrentBatchBookIds, webSubmitStatusLabel, webSubmitRunStatusLabel } from './novel-fetch-status.js';
 import { singleVersionRetryPayload, submissionPreviewMatches } from './novel-fetch-submit.js';
 import { mergeDefaultUploadProfile, uploadSessionDisplayName } from './novel-fetch-upload-profile.js';
@@ -1218,6 +1218,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
     setProcessing(true);
     setProcessRows(bookIds.map(bookId => ({ bookId, status: 'loading' })));
     let startedJobId = '';
+    let finishedJob = false;
     try {
       // The Go provider resolver reads the account's selected model. Persist the
       // visible choice before starting so a local draft cannot silently use a
@@ -1238,14 +1239,18 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
       startedJobId = started?.id || '';
       let data = started;
       const deadline = Date.now() + 30 * 60 * 1000;
-      while (data?.id && !['done', 'failed'].includes(String(data.status || '').toLowerCase()) && Date.now() < deadline) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
+      let lastTaskRefresh = Date.now();
+      while (data?.id && !novelFetchJobFinished(data) && Date.now() < deadline) {
+        const polling = novelFetchPollingPlan({ activeTab: 'process', processing: true, documentHidden: document.hidden });
+        await new Promise(resolve => setTimeout(resolve, polling.realtimeMs || 5000));
         if (processCancelRef.current) break;
         data = await getWorkshopJob(data.id);
         setProcessJob(data);
         setProcessJobs([data]);
-        // 等待期间静默刷新，避免表格每秒闪一次加载态。
-        await Promise.all([loadTasks({ silent: true }), loadCurrentBatch()]);
+        if (polling.tasksMs > 0 && Date.now() - lastTaskRefresh >= polling.tasksMs) {
+          await Promise.all([loadTasks({ silent: true }), loadCurrentBatch()]);
+          lastTaskRefresh = Date.now();
+        }
       }
       if (processCancelRef.current) {
         setProcessRows(current => current.map(row => (row.status === 'loading' ? { ...row, status: 'pending' } : row)));
@@ -1253,8 +1258,22 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
         loadTasks({ silent: true });
         return;
       }
-      if (String(data?.status || '').toLowerCase() === 'failed') throw new Error(data.error || '后台处理失败');
-      if (Date.now() >= deadline) {
+      finishedJob = novelFetchJobFinished(data);
+      const finalStatus = String(data?.status || '').trim().toLowerCase();
+      if (finalStatus === 'failed') throw new Error(data.error || '后台处理失败');
+      if (['stopped', 'cancelled', 'canceled'].includes(finalStatus)) {
+        setProcessRows(current => current.map(row => row.status === 'loading' ? { ...row, status: 'stopped' } : row));
+        message.info('后台任务已停止');
+        await loadTasks({ silent: true });
+        return;
+      }
+      if (finishedJob && !['done', 'completed'].includes(finalStatus)) {
+        setProcessRows(current => current.map(row => row.status === 'loading' ? { ...row, status: finalStatus } : row));
+        message.info(data.error || '当前执行已暂停或等待重试，请到任务列表查看原因和下次执行时间');
+        await loadTasks({ silent: true });
+        return;
+      }
+      if (!finishedJob && Date.now() >= deadline) {
         setProcessRows(current => current.map(row => (row.status === 'loading' ? { ...row, status: 'pending' } : row)));
         message.warning('后台处理已超过等待上限，仍在后台处理，请到任务列表查看进度');
         loadTasks({ silent: true });
@@ -1268,7 +1287,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
       await Promise.all([loadCurrentBatch(), loadHistoryBatches()]);
     } catch (error) {
       // 任务已提交成功时，失败只代表等待中断，后台可能仍在跑，不能把整批行标成失败。
-      if (startedJobId) {
+      if (startedJobId && !finishedJob) {
         setProcessRows(current => current.map(row => (row.status === 'loading' ? { ...row, status: 'pending' } : row)));
         message.error(`${error.message || '等待状态失败'}（任务已提交，请到任务列表查看进度）`);
       } else {
@@ -1363,7 +1382,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
   async function handleGenerateAi() {
     if (!selectedTask) return message.warning('请先选择一个任务');
     setTaskActionBusy('generate-ai');
-    try { const result = await generateWorkshopAi(selectedTask); await selectTask(selectedTask); await loadTasks(); message.success(result.message || '缺少的 AI 版本已生成'); } catch (error) { message.error(error.message || '生成 AI 版本失败'); } finally { setTaskActionBusy(''); }
+    try { const result = await generateWorkshopAi(selectedTask); await selectTask(selectedTask); await loadTasks(); const notice = novelFetchActionNotice(result, '缺少的 AI 版本已生成'); message[notice.type](notice.message); } catch (error) { message.error(error.message || '生成 AI 版本失败'); } finally { setTaskActionBusy(''); }
   }
   async function handleRetryTasks() {
     if (!selectedTaskKeys.length) return message.warning('请先选择需要重试的任务');
@@ -1478,9 +1497,9 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
   async function runTaskRowAction(action, successMessage, fallbackMessage) {
     setTasksLoading(true);
     try {
-      await action();
+      const result = await action();
       await loadTasks();
-      if (successMessage) message.success(successMessage);
+      if (successMessage) { const notice = novelFetchActionNotice(result, successMessage); message[notice.type](notice.message); }
     } catch (error) {
       message.error(error.message || fallbackMessage);
     } finally {

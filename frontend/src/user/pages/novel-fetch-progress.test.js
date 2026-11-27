@@ -1,6 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { novelFetchLatestJob, novelFetchProgressLines } from './novel-fetch-progress.js';
+import { novelFetchLatestJob, novelFetchProgressLines, novelFetchJobFinished, novelFetchActionNotice } from './novel-fetch-progress.js';
+
+test('stopped and cancelled jobs end waiting without pretending completion', () => {
+  for (const status of ['done', 'failed', 'stopped', 'cancelled', 'canceled', 'completed', ' STOPPED ', 'waiting_retry', 'waiting_classification', 'waiting_configuration', 'waiting_login', 'pending_confirmation', 'manual_only']) {
+    assert.equal(novelFetchJobFinished({ status }), true, status);
+  }
+  for (const status of ['queued', 'running', 'processing', '']) {
+    assert.equal(novelFetchJobFinished({ status }), false, status);
+  }
+});
+
+test('background generation reports queued rather than generated', () => {
+  assert.deepEqual(novelFetchActionNotice({ queued: true, job_id: 'job-1' }, '缺少的 AI 版本已生成'), {
+    type: 'info', message: '已进入后台生成队列'
+  });
+  assert.deepEqual(novelFetchActionNotice({ queued: true, message: '已进入后台生成队列' }, '操作完成'), {
+    type: 'info', message: '已进入后台生成队列'
+  });
+  assert.deepEqual(novelFetchActionNotice({ message: '所需版本已齐' }, '操作完成'), {
+    type: 'success', message: '所需版本已齐'
+  });
+});
 
 test('formats live progress with time, book name, id and message', () => {
   const lines = novelFetchProgressLines({

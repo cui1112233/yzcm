@@ -9,6 +9,16 @@ export function novelFetchLatestJob(data = {}) {
   return latest && typeof latest === 'object' && Object.keys(latest).length ? latest : null;
 }
 
+export function novelFetchJobFinished(job) {
+  // Deferred work uses another dispatch; this job ID will no longer advance.
+  return ['done', 'failed', 'stopped', 'cancelled', 'canceled', 'completed', 'waiting_retry', 'waiting_classification', 'waiting_configuration', 'waiting_login', 'pending_confirmation', 'manual_only'].includes(String(job?.status ?? job?.queue_state ?? '').trim().toLowerCase());
+}
+
+export function novelFetchActionNotice(result, fallbackText) {
+  if (result?.queued === true) return { type: 'info', message: result.message || '已进入后台生成队列' };
+  return { type: 'success', message: result?.message || fallbackText };
+}
+
 export function novelFetchProgressLines(jobOrJobs, taskRows = []) {
   const jobs = (Array.isArray(jobOrJobs) ? jobOrJobs : [jobOrJobs]).filter(Boolean);
   const latestJob = jobs[0];
