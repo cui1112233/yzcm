@@ -14,6 +14,8 @@
 5. `05-all-team-consumption.png`：开发创始与开发者查看全部团队消费；余额逐团队展示。
 6. `06-api-manager-preset-modal.png`：管理者点击“自定义预设”后才打开 YZCM 模型库。
 7. `07-accounts-by-team.png`：账号与角色按团队分组展开。
+8. `08-api-config-manager-main.png`：管理者 API 配置主页面；只选择 YZCM 模型，地址完全隐藏，每个模型独立填写 Key。
+9. `09-api-config-founder-main.png`：开发创始/获授权开发者 API 配置主页面；保留 YZCM 模型，并允许添加带地址和模型标识的自定义模型。
 
 这些图片确定视觉和布局方向，文字、权限和数据口径以正式设计文档为准。特别注意：
 
