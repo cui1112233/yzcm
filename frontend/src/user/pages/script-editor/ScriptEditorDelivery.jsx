@@ -1,5 +1,5 @@
 import { Alert, Button, Card, Input, Modal, Space, Tag, message } from 'antd';
-import { Download, ExternalLink, FileArchive, FileJson, FileText } from 'lucide-react';
+import { Download, ExternalLink, FileArchive, FileJson, FileText, Scissors } from 'lucide-react';
 import { useState } from 'react';
 import { exportScriptEditorWork, handoffScriptEditorWork } from '../../../shared/api/scriptEditor.js';
 import { validateDelivery } from './scriptEditorDelivery.js';
@@ -37,6 +37,7 @@ export default function ScriptEditorDelivery({ work }) {
       <Card title="结构化数据" extra={<FileJson size={18} />}><p>保留集数、版本、模型和来源信息。</p><Button disabled={!validation.ok} loading={busy === 'json'} onClick={() => download('json')} icon={<Download size={15} />}>导出 JSON</Button></Card>
     </div>
     <Card className="script-editor-comic-handoff" title="下一步：漫剧创作"><Space direction="vertical"><span>剧本确定后，可以把正式版直接创建成漫剧项目，继续做人物、场景、分镜、图片、配音和视频。</span><Tag color="blue">剧本编辑负责写；漫剧创作负责拍</Tag><Button disabled={!validation.ok} loading={busy === 'handoff'} icon={<ExternalLink size={15} />} onClick={() => setHandoffOpen(true)}>导入漫剧创作</Button></Space></Card>
+    <Card className="script-editor-comic-handoff" title="后期与成片"><Space direction="vertical"><span>已有视频、配音和字幕素材时，进入现有 AI-CUT 做剪辑与导出。</span><Tag color="purple">不会在剧本编辑里复制剪辑引擎</Tag><Button icon={<Scissors size={15} />} onClick={() => window.open(`/ai-cut?sourceWorkId=${encodeURIComponent(work.id)}`, '_blank')}>打开 AI-CUT</Button></Space></Card>
     <Modal title="创建漫剧项目" open={handoffOpen} onCancel={() => setHandoffOpen(false)} onOk={handoff} okText="创建并打开" confirmLoading={busy === 'handoff'} okButtonProps={{ disabled: !projectTitle.trim() }}><p>每一集的正式版会按顺序写入新项目，不会覆盖已有漫剧。</p><Input value={projectTitle} maxLength={120} onChange={event => setProjectTitle(event.target.value)} placeholder="漫剧项目名称" /></Modal>
   </section>;
 }

@@ -594,6 +594,14 @@ func RegisterScriptEditorRoutes(mux *http.ServeMux, auth BridgeAuth, service *sc
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs})
 	})
+	handle("GET /api/script-editor/works/{workID}/production", func(w http.ResponseWriter, req *http.Request, owner string) {
+		status, err := service.Production(req.Context(), owner, req.PathValue("workID"))
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"production": status})
+	})
 	handle("GET /api/script-editor/works/{workID}/jobs/{jobID}", func(w http.ResponseWriter, req *http.Request, owner string) {
 		job, err := service.Store.GetJob(req.Context(), owner, req.PathValue("workID"), req.PathValue("jobID"))
 		if err != nil {
