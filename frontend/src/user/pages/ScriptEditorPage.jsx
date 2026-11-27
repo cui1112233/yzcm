@@ -1,7 +1,7 @@
 import { Checkbox, Form, Input, message, Modal, Select, Spin } from 'antd';
 import { Upload } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { commitScriptEditorImport, createScriptEditorWork, getScriptEditorWork, listScriptEditorWorks, previewScriptEditorImport } from '../../shared/api/scriptEditor.js';
+import { commitScriptEditorImport, copyScriptEditorWork, createScriptEditorWork, deleteScriptEditorWork, exportScriptEditorWork, getScriptEditorWork, listScriptEditorWorks, previewScriptEditorImport, updateScriptEditorWork } from '../../shared/api/scriptEditor.js';
 import ScriptEditorLibrary from './script-editor/ScriptEditorLibrary.jsx';
 import ScriptEditorWorkspace from './script-editor/ScriptEditorWorkspace.jsx';
 import './script-editor.css';
@@ -27,9 +27,26 @@ export default function ScriptEditorPage() {
   async function chooseImport(file) { setBusy(true); try { const result = await previewScriptEditorImport(file); setImportFile(file); setPreview(result.preview); setSelected(result.preview.sections.map(section => section.id)); } catch (error) { message.error(error.message || '文件解析失败'); } finally { setBusy(false); } return false; }
   async function commitImport() { if (!preview || !selected.length) return message.warning('至少选择一段内容'); setBusy(true); try { const result = await commitScriptEditorImport({ title: importFile.name.replace(/\.(txt|md|markdown|docx)$/i, ''), type: preview.inferredType, filename: preview.filename, sections: preview.sections, selectedSectionIds: selected }); setImportOpen(false); setPreview(null); setImportFile(null); await load(); await openWork(result.work.id); } catch (error) { message.error(error.message || '导入失败'); } finally { setBusy(false); } }
   function changeView(next) { localStorage.setItem('script-editor:view', next); setView(next); }
+  async function workAction(action, work) {
+    try {
+    if (action === 'open') return openWork(work.id);
+    if (action === 'workspace') { await openWork(work.id); window.history.replaceState({}, '', `/script-editor?workId=${encodeURIComponent(work.id)}&tab=canvas`); window.dispatchEvent(new PopStateEvent('popstate')); return; }
+    if (action === 'rename') {
+      let title = work.title;
+      Modal.confirm({ title: '重命名作品', content: <Input defaultValue={work.title} maxLength={120} onChange={event => { title = event.target.value; }} />, okText: '保存', onOk: async () => { await updateScriptEditorWork(work.id, { title, expectedRevision: work.revision }); await load(); } });
+      return;
+    }
+    if (action === 'copy') { await copyScriptEditorWork(work.id, crypto.randomUUID()); message.success('作品已复制'); await load(); return; }
+    if (action === 'mark') { const order = ['', 'key', 'pending', 'done']; const markStatus = order[(order.indexOf(work.markStatus || '') + 1) % order.length]; await updateScriptEditorWork(work.id, { markStatus, expectedRevision: work.revision }); await load(); return; }
+    if (action === 'export') { const blob = await exportScriptEditorWork(work.id, 'txt'); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `${work.title}.txt`; anchor.click(); URL.revokeObjectURL(url); return; }
+      if (action === 'delete') Modal.confirm({ title: `删除“${work.title}”？`, content: '作品会从作品库中软删除，不会连带删除已关联的画布和媒体。', okText: '删除', okButtonProps: { danger: true }, onOk: async () => { await deleteScriptEditorWork(work.id, work.revision); await load(); } });
+    } catch (error) {
+      message.error(error.message || '作品操作失败');
+    }
+  }
 
   if (detail) return <ScriptEditorWorkspace work={detail} onReload={reloadWork} onBack={() => { window.history.replaceState({}, '', '/script-editor'); setDetail(null); load(); }} />;
-  return <main className="script-editor-page"><Spin spinning={loading}><ScriptEditorLibrary works={works} filters={filters} onFilters={setFilters} view={view} onView={changeView} onCreate={() => setCreateOpen(true)} onImport={() => setImportOpen(true)} onOpen={openWork} loading={loading} /></Spin>
+  return <main className="script-editor-page"><Spin spinning={loading}><ScriptEditorLibrary works={works} filters={filters} onFilters={setFilters} view={view} onView={changeView} onCreate={() => setCreateOpen(true)} onImport={() => setImportOpen(true)} onOpen={openWork} onAction={workAction} loading={loading} /></Spin>
     <Modal title="新建作品" open={createOpen} onCancel={() => setCreateOpen(false)} onOk={() => createForm.submit()} confirmLoading={busy} okText="创建并打开">
       <Form form={createForm} layout="vertical" onFinish={create} initialValues={{ type: 'novel' }}><Form.Item name="title" label="作品名称" rules={[{ required: true, message: '请输入作品名称' }]}><Input maxLength={120} autoFocus /></Form.Item><Form.Item name="type" label="作品类型"><Select options={[{ value: 'novel', label: '小说原文' }, { value: 'script', label: '分集剧本' }]} /></Form.Item></Form>
     </Modal>

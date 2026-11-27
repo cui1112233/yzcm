@@ -12,6 +12,9 @@ export function getScriptEditorWork(workId, signal) { return apiRequest(`${root}
 export function createScriptEditorWork(input) { return apiRequest(`${root}/works`, { method: 'POST', body: JSON.stringify(input) }); }
 export function updateScriptEditorWork(workId, input) { return apiRequest(`${root}/works/${id(workId)}`, { method: 'PATCH', body: JSON.stringify(input) }); }
 export function deleteScriptEditorWork(workId, revision) { return apiRequest(`${root}/works/${id(workId)}?expectedRevision=${Number(revision)}`, { method: 'DELETE' }); }
+export function copyScriptEditorWork(workId, requestKey) { return apiRequest(`${root}/works/${id(workId)}/copy`, { method: 'POST', body: JSON.stringify({ requestKey }) }); }
+export function getScriptEditorBinding(workId, targetType, signal) { return apiRequest(`${root}/works/${id(workId)}/bindings/${id(targetType)}`, { signal, suppressGlobalError: true }); }
+export function putScriptEditorBinding(workId, targetType, input) { return apiRequest(`${root}/works/${id(workId)}/bindings/${id(targetType)}`, { method: 'PUT', body: JSON.stringify(input), suppressGlobalError: true }); }
 export function previewScriptEditorImport(file) {
   const body = new FormData(); body.append('file', file);
   return apiRequest(`${root}/import/preview`, { method: 'POST', body, suppressGlobalError: true });
