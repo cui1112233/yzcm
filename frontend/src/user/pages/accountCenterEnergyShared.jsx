@@ -126,7 +126,7 @@ export function EnergyTeamCards({ currentTeamId, selectedTeamId, onSelect, teams
   return <Panel title="各团队余额与消耗" action={<Button type={!selectedTeamId ? 'primary' : 'default'} disabled={!currentTeamId}
     aria-pressed={!selectedTeamId} onClick={() => onSelect('')}>我的团队</Button>}>
     {children}
-    {teams?.teams.length === 0 && <p className="ac-empty">暂无可查看的团队</p>}
+    {teams?.teams.length === 0 && <p className="ac-empty">{member ? '该筛选无可查看团队' : '暂无可查看的团队'}</p>}
     {teams && <>
       <div className="energy-teams">
         {teams.teams.map(({ team, balance, consumption }) => <div className="energy-team" key={team.id}>
