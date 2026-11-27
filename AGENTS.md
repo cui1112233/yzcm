@@ -2,6 +2,13 @@
 
 All agents, chats, Codex sessions, and automation working on this repository must follow these rules before changing or deploying V88.
 
+## User-confirmed publishing targets (2026-11-27)
+
+- Authorized publishing repository: `https://github.com/cui1112233/yzcm`.
+- Production: SSH `root@115.190.156.223`, application service `qiantie.service`.
+- Do not publish this project to the old `yizhanchengming-xin` or `cui1112233/-` destinations. Preserve references needed for history and check the target repository's existing branch/history before pushing; no arbitrary new branches or force-pushes.
+- Never put passwords or API keys into memory files, documentation, or Git. Use authorized connection credentials at runtime.
+
 1. **Git branch `v88` is the canonical maintained source and future total branch.** Do not treat production/ECS files, old V78 branches, historical releases, or hotfix bundles as the source of truth.
 2. **Every feature and bug fix must be written into Git first.** Normal flow: feature/fix branch -> tests -> merge into `v88` -> record commit SHA -> deploy/sync production.
 3. **Production/ECS is a runtime copy, not a development source.** Do not complete a task by editing only the running server/container. Emergency production edits must be ported back to `v88` immediately; otherwise the task is incomplete.
