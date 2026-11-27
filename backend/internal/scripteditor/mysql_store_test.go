@@ -70,3 +70,28 @@ func TestMySQLStoreCreateScriptWritesJSONAsText(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMySQLStoreUpsertWorkBinding(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := NewMySQLStore(db)
+	now := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	s.newID = func(string) string { return "binding-1" }
+	mock.ExpectExec("INSERT INTO script_editor_work_bindings").
+		WithArgs("binding-1", "alice", "work-1", string(BindingCMCanvas), "task-1", int64(2), string(SyncPending), string(ConflictNone), now, now).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	row, err := s.UpsertWorkBinding(context.Background(), WorkBinding{OwnerUsername: "alice", WorkID: "work-1", TargetType: BindingCMCanvas, TargetID: "task-1", SourceRevision: 2, SyncState: SyncPending, ConflictState: ConflictNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.ID != "binding-1" {
+		t.Fatalf("binding = %#v", row)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

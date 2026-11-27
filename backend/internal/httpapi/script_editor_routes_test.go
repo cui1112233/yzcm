@@ -113,6 +113,29 @@ func TestScriptEditorRoutesManageChaptersAndScriptVersions(t *testing.T) {
 	}
 }
 
+func TestScriptEditorRoutesCopyWorkAndManageBindings(t *testing.T) {
+	now := time.Unix(1800000000, 0).UTC()
+	api := newScriptEditorTestRouter(now)
+	created := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works", map[string]any{"title": "长夜", "type": "novel"})
+	workID := scriptEditorID(t, created, "work")
+	copied := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/copy", map[string]any{"requestKey": "copy-1"})
+	if copied.Code != http.StatusCreated || !bytes.Contains(copied.Body.Bytes(), []byte("长夜 副本")) {
+		t.Fatalf("copy status=%d body=%s", copied.Code, copied.Body.String())
+	}
+	put := signedJSONRequest(t, api, now, "alice", http.MethodPut, "/api/script-editor/works/"+workID+"/bindings/cm_canvas", map[string]any{"targetId": "task-1", "sourceRevision": 0, "syncState": "pending", "conflictState": "none"})
+	if put.Code != http.StatusOK || !bytes.Contains(put.Body.Bytes(), []byte("task-1")) {
+		t.Fatalf("binding put status=%d body=%s", put.Code, put.Body.String())
+	}
+	get := signedJSONRequest(t, api, now, "alice", http.MethodGet, "/api/script-editor/works/"+workID+"/bindings/cm_canvas", nil)
+	if get.Code != http.StatusOK || !bytes.Contains(get.Body.Bytes(), []byte("task-1")) {
+		t.Fatalf("binding get status=%d body=%s", get.Code, get.Body.String())
+	}
+	foreign := signedJSONRequest(t, api, now, "bob", http.MethodGet, "/api/script-editor/works/"+workID+"/bindings/cm_canvas", nil)
+	if foreign.Code != http.StatusNotFound {
+		t.Fatalf("foreign binding status=%d body=%s", foreign.Code, foreign.Body.String())
+	}
+}
+
 func TestScriptEditorJobRoutesCreateListCancelAndRetry(t *testing.T) {
 	now := time.Unix(1800000000, 0).UTC()
 	api := newScriptEditorTestRouter(now)

@@ -47,6 +47,7 @@ func RegisterScriptEditorRoutes(mux *http.ServeMux, auth BridgeAuth, service *sc
 	if len(resolvers) > 0 {
 		resolver = resolvers[0]
 	}
+	bindingStore, hasBindingStore := service.Store.(scripteditor.BindingStore)
 
 	handle("GET /api/script-editor/works", func(w http.ResponseWriter, req *http.Request, owner string) {
 		query := req.URL.Query()
@@ -106,6 +107,63 @@ func RegisterScriptEditorRoutes(mux *http.ServeMux, auth BridgeAuth, service *sc
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
+	})
+	handle("POST /api/script-editor/works/{workID}/copy", func(w http.ResponseWriter, req *http.Request, owner string) {
+		var input struct {
+			RequestKey string `json:"requestKey"`
+		}
+		if !decode(w, req, &input) {
+			return
+		}
+		work, err := service.CopyWork(req.Context(), owner, req.PathValue("workID"), input.RequestKey)
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"work": work})
+	})
+	handle("GET /api/script-editor/works/{workID}/bindings/{targetType}", func(w http.ResponseWriter, req *http.Request, owner string) {
+		if !hasBindingStore {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "当前运行环境不支持工作区绑定"})
+			return
+		}
+		targetType := scripteditor.BindingTargetType(req.PathValue("targetType"))
+		if !targetType.Valid() {
+			writeScriptEditorError(w, scripteditor.ErrValidation)
+			return
+		}
+		row, err := bindingStore.WorkBinding(req.Context(), owner, req.PathValue("workID"), targetType)
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"binding": row})
+	})
+	handle("PUT /api/script-editor/works/{workID}/bindings/{targetType}", func(w http.ResponseWriter, req *http.Request, owner string) {
+		if !hasBindingStore {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "当前运行环境不支持工作区绑定"})
+			return
+		}
+		var input struct {
+			TargetID       string                     `json:"targetId"`
+			SourceRevision int64                      `json:"sourceRevision"`
+			SyncState      scripteditor.SyncState     `json:"syncState"`
+			ConflictState  scripteditor.ConflictState `json:"conflictState"`
+		}
+		if !decode(w, req, &input) {
+			return
+		}
+		workID := req.PathValue("workID")
+		if _, err := service.Store.GetWork(req.Context(), owner, workID); err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		row, err := bindingStore.UpsertWorkBinding(req.Context(), scripteditor.WorkBinding{OwnerUsername: owner, WorkID: workID, TargetType: scripteditor.BindingTargetType(req.PathValue("targetType")), TargetID: input.TargetID, SourceRevision: input.SourceRevision, SyncState: input.SyncState, ConflictState: input.ConflictState})
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"binding": row})
 	})
 
 	handle("POST /api/script-editor/works/{workID}/chapters", func(w http.ResponseWriter, req *http.Request, owner string) {

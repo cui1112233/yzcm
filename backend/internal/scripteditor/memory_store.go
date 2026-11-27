@@ -11,22 +11,157 @@ import (
 )
 
 type MemoryStore struct {
-	mu       sync.Mutex
-	works    map[string]Work
-	chapters map[string]Chapter
-	scripts  map[string]Script
-	handoffs map[string]Handoff
-	jobs     map[string]Job
-	reviews  map[string]Review
-	now      func() time.Time
-	newID    func(string) string
+	mu           sync.Mutex
+	works        map[string]Work
+	chapters     map[string]Chapter
+	scripts      map[string]Script
+	handoffs     map[string]Handoff
+	jobs         map[string]Job
+	reviews      map[string]Review
+	workBindings map[string]WorkBinding
+	sourceLinks  map[string]SourceLink
+	assetLinks   map[string]AssetLink
+	jobLinks     map[string]JobLink
+	now          func() time.Time
+	newID        func(string) string
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		works: map[string]Work{}, chapters: map[string]Chapter{}, scripts: map[string]Script{}, handoffs: map[string]Handoff{}, jobs: map[string]Job{}, reviews: map[string]Review{},
+		workBindings: map[string]WorkBinding{}, sourceLinks: map[string]SourceLink{}, assetLinks: map[string]AssetLink{}, jobLinks: map[string]JobLink{},
 		now: time.Now, newID: randomID,
 	}
+}
+
+func (s *MemoryStore) UpsertWorkBinding(_ context.Context, row WorkBinding) (WorkBinding, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.activeWork(row.OwnerUsername, row.WorkID); err != nil {
+		return WorkBinding{}, err
+	}
+	if err := row.Validate(); err != nil {
+		return WorkBinding{}, err
+	}
+	key := row.OwnerUsername + "\x00" + row.WorkID + "\x00" + string(row.TargetType)
+	now := s.now().UTC()
+	if current, ok := s.workBindings[key]; ok {
+		row.ID, row.CreatedAt = current.ID, current.CreatedAt
+	} else {
+		row.ID, row.CreatedAt = s.newID("binding"), now
+	}
+	row.UpdatedAt = now
+	s.workBindings[key] = row
+	return row, nil
+}
+
+func (s *MemoryStore) WorkBinding(_ context.Context, owner, workID string, targetType BindingTargetType) (WorkBinding, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row, ok := s.workBindings[owner+"\x00"+workID+"\x00"+string(targetType)]
+	if !ok {
+		return WorkBinding{}, ErrNotFound
+	}
+	return row, nil
+}
+
+func (s *MemoryStore) UpsertSourceLink(_ context.Context, row SourceLink) (SourceLink, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.activeWork(row.OwnerUsername, row.WorkID); err != nil {
+		return SourceLink{}, err
+	}
+	if strings.TrimSpace(row.SourceType) == "" || strings.TrimSpace(row.SourceID) == "" || strings.TrimSpace(row.TargetType) == "" || strings.TrimSpace(row.TargetID) == "" {
+		return SourceLink{}, ErrValidation
+	}
+	key := row.OwnerUsername + "\x00" + row.WorkID + "\x00" + row.SourceType + "\x00" + row.SourceID + "\x00" + row.TargetType + "\x00" + row.TargetID
+	now := s.now().UTC()
+	if current, ok := s.sourceLinks[key]; ok {
+		row.ID, row.CreatedAt = current.ID, current.CreatedAt
+	} else {
+		row.ID, row.CreatedAt = s.newID("source_link"), now
+	}
+	row.UpdatedAt = now
+	s.sourceLinks[key] = row
+	return row, nil
+}
+
+func (s *MemoryStore) ListSourceLinks(_ context.Context, owner, workID, targetType string) ([]SourceLink, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []SourceLink{}
+	for _, row := range s.sourceLinks {
+		if row.OwnerUsername == owner && row.WorkID == workID && (targetType == "" || row.TargetType == targetType) {
+			out = append(out, row)
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) UpsertAssetLink(_ context.Context, row AssetLink) (AssetLink, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.activeWork(row.OwnerUsername, row.WorkID); err != nil {
+		return AssetLink{}, err
+	}
+	if strings.TrimSpace(row.AssetID) == "" || strings.TrimSpace(row.TargetType) == "" || strings.TrimSpace(row.TargetID) == "" {
+		return AssetLink{}, ErrValidation
+	}
+	key := row.OwnerUsername + "\x00" + row.WorkID + "\x00" + row.AssetID + "\x00" + row.TargetType + "\x00" + row.TargetID
+	now := s.now().UTC()
+	if current, ok := s.assetLinks[key]; ok {
+		row.ID, row.CreatedAt = current.ID, current.CreatedAt
+	} else {
+		row.ID, row.CreatedAt = s.newID("asset_link"), now
+	}
+	row.UpdatedAt = now
+	s.assetLinks[key] = row
+	return row, nil
+}
+
+func (s *MemoryStore) ListAssetLinks(_ context.Context, owner, workID, targetType string) ([]AssetLink, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []AssetLink{}
+	for _, row := range s.assetLinks {
+		if row.OwnerUsername == owner && row.WorkID == workID && (targetType == "" || row.TargetType == targetType) {
+			out = append(out, row)
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) UpsertJobLink(_ context.Context, row JobLink) (JobLink, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.activeWork(row.OwnerUsername, row.WorkID); err != nil {
+		return JobLink{}, err
+	}
+	if strings.TrimSpace(row.JobID) == "" || strings.TrimSpace(row.TargetType) == "" || strings.TrimSpace(row.TargetID) == "" {
+		return JobLink{}, ErrValidation
+	}
+	key := row.OwnerUsername + "\x00" + row.WorkID + "\x00" + row.JobID + "\x00" + row.TargetType + "\x00" + row.TargetID
+	now := s.now().UTC()
+	if current, ok := s.jobLinks[key]; ok {
+		row.ID, row.CreatedAt = current.ID, current.CreatedAt
+	} else {
+		row.ID, row.CreatedAt = s.newID("job_link"), now
+	}
+	row.UpdatedAt = now
+	s.jobLinks[key] = row
+	return row, nil
+}
+
+func (s *MemoryStore) ListJobLinks(_ context.Context, owner, workID, targetType string) ([]JobLink, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []JobLink{}
+	for _, row := range s.jobLinks {
+		if row.OwnerUsername == owner && row.WorkID == workID && (targetType == "" || row.TargetType == targetType) {
+			out = append(out, row)
+		}
+	}
+	return out, nil
 }
 
 func (s *MemoryStore) GetHandoff(_ context.Context, owner, workID, requestKey string) (Handoff, error) {

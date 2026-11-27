@@ -715,3 +715,130 @@ func (s *MySQLStore) CreateReview(ctx context.Context, row Review) (Review, erro
 	_, err := s.db.ExecContext(ctx, `INSERT INTO script_editor_reviews (id,work_id,script_id,owner_username,review_type,result_json,model_id,prompt_id,created_at) VALUES (?,?,?,?,?,?,?,?,?)`, row.ID, row.WorkID, row.ScriptID, row.OwnerUsername, row.Type, string(row.Result), row.ModelID, row.PromptID, row.CreatedAt)
 	return row, mapWriteError(err)
 }
+
+func (s *MySQLStore) UpsertWorkBinding(ctx context.Context, row WorkBinding) (WorkBinding, error) {
+	if err := row.Validate(); err != nil {
+		return WorkBinding{}, err
+	}
+	if row.ID == "" {
+		row.ID = s.newID("binding")
+	}
+	now := s.now().UTC()
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = now
+	}
+	row.UpdatedAt = now
+	_, err := s.db.ExecContext(ctx, `INSERT INTO script_editor_work_bindings (id,owner_username,work_id,target_type,target_id,source_revision,sync_state,conflict_state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE target_id=VALUES(target_id),source_revision=VALUES(source_revision),sync_state=VALUES(sync_state),conflict_state=VALUES(conflict_state),updated_at=VALUES(updated_at)`, row.ID, row.OwnerUsername, row.WorkID, string(row.TargetType), row.TargetID, row.SourceRevision, string(row.SyncState), string(row.ConflictState), row.CreatedAt, row.UpdatedAt)
+	return row, mapWriteError(err)
+}
+
+func scanWorkBinding(row scanner) (WorkBinding, error) {
+	var out WorkBinding
+	var targetType, syncState, conflictState string
+	err := row.Scan(&out.ID, &out.OwnerUsername, &out.WorkID, &targetType, &out.TargetID, &out.SourceRevision, &syncState, &conflictState, &out.CreatedAt, &out.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return WorkBinding{}, ErrNotFound
+	}
+	out.TargetType, out.SyncState, out.ConflictState = BindingTargetType(targetType), SyncState(syncState), ConflictState(conflictState)
+	return out, err
+}
+
+func (s *MySQLStore) WorkBinding(ctx context.Context, owner, workID string, targetType BindingTargetType) (WorkBinding, error) {
+	return scanWorkBinding(s.db.QueryRowContext(ctx, `SELECT id,owner_username,work_id,target_type,target_id,source_revision,sync_state,conflict_state,created_at,updated_at FROM script_editor_work_bindings WHERE owner_username=? AND work_id=? AND target_type=?`, owner, workID, string(targetType)))
+}
+
+func (s *MySQLStore) UpsertSourceLink(ctx context.Context, row SourceLink) (SourceLink, error) {
+	if row.ID == "" {
+		row.ID = s.newID("source_link")
+	}
+	now := s.now().UTC()
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = now
+	}
+	row.UpdatedAt = now
+	_, err := s.db.ExecContext(ctx, `INSERT INTO script_editor_source_links (id,owner_username,work_id,source_type,source_id,target_type,target_id,source_revision,sync_state,conflict_state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE source_revision=VALUES(source_revision),sync_state=VALUES(sync_state),conflict_state=VALUES(conflict_state),updated_at=VALUES(updated_at)`, row.ID, row.OwnerUsername, row.WorkID, row.SourceType, row.SourceID, row.TargetType, row.TargetID, row.SourceRevision, string(row.SyncState), string(row.ConflictState), row.CreatedAt, row.UpdatedAt)
+	return row, mapWriteError(err)
+}
+
+func (s *MySQLStore) ListSourceLinks(ctx context.Context, owner, workID, targetType string) ([]SourceLink, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,owner_username,work_id,source_type,source_id,target_type,target_id,source_revision,sync_state,conflict_state,created_at,updated_at FROM script_editor_source_links WHERE owner_username=? AND work_id=? AND (?='' OR target_type=?) ORDER BY created_at`, owner, workID, targetType, targetType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SourceLink{}
+	for rows.Next() {
+		var row SourceLink
+		var syncState, conflictState string
+		if err := rows.Scan(&row.ID, &row.OwnerUsername, &row.WorkID, &row.SourceType, &row.SourceID, &row.TargetType, &row.TargetID, &row.SourceRevision, &syncState, &conflictState, &row.CreatedAt, &row.UpdatedAt); err != nil {
+			return nil, err
+		}
+		row.SyncState, row.ConflictState = SyncState(syncState), ConflictState(conflictState)
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *MySQLStore) UpsertAssetLink(ctx context.Context, row AssetLink) (AssetLink, error) {
+	if row.ID == "" {
+		row.ID = s.newID("asset_link")
+	}
+	now := s.now().UTC()
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = now
+	}
+	row.UpdatedAt = now
+	_, err := s.db.ExecContext(ctx, `INSERT INTO script_editor_asset_links (id,owner_username,work_id,asset_id,target_type,target_id,source_revision,sync_state,conflict_state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE source_revision=VALUES(source_revision),sync_state=VALUES(sync_state),conflict_state=VALUES(conflict_state),updated_at=VALUES(updated_at)`, row.ID, row.OwnerUsername, row.WorkID, row.AssetID, row.TargetType, row.TargetID, row.SourceRevision, string(row.SyncState), string(row.ConflictState), row.CreatedAt, row.UpdatedAt)
+	return row, mapWriteError(err)
+}
+
+func (s *MySQLStore) ListAssetLinks(ctx context.Context, owner, workID, targetType string) ([]AssetLink, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,owner_username,work_id,asset_id,target_type,target_id,source_revision,sync_state,conflict_state,created_at,updated_at FROM script_editor_asset_links WHERE owner_username=? AND work_id=? AND (?='' OR target_type=?) ORDER BY created_at`, owner, workID, targetType, targetType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []AssetLink{}
+	for rows.Next() {
+		var row AssetLink
+		var syncState, conflictState string
+		if err := rows.Scan(&row.ID, &row.OwnerUsername, &row.WorkID, &row.AssetID, &row.TargetType, &row.TargetID, &row.SourceRevision, &syncState, &conflictState, &row.CreatedAt, &row.UpdatedAt); err != nil {
+			return nil, err
+		}
+		row.SyncState, row.ConflictState = SyncState(syncState), ConflictState(conflictState)
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *MySQLStore) UpsertJobLink(ctx context.Context, row JobLink) (JobLink, error) {
+	if row.ID == "" {
+		row.ID = s.newID("job_link")
+	}
+	now := s.now().UTC()
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = now
+	}
+	row.UpdatedAt = now
+	_, err := s.db.ExecContext(ctx, `INSERT INTO script_editor_job_links (id,owner_username,work_id,job_id,target_type,target_id,source_revision,sync_state,conflict_state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE source_revision=VALUES(source_revision),sync_state=VALUES(sync_state),conflict_state=VALUES(conflict_state),updated_at=VALUES(updated_at)`, row.ID, row.OwnerUsername, row.WorkID, row.JobID, row.TargetType, row.TargetID, row.SourceRevision, string(row.SyncState), string(row.ConflictState), row.CreatedAt, row.UpdatedAt)
+	return row, mapWriteError(err)
+}
+
+func (s *MySQLStore) ListJobLinks(ctx context.Context, owner, workID, targetType string) ([]JobLink, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,owner_username,work_id,job_id,target_type,target_id,source_revision,sync_state,conflict_state,created_at,updated_at FROM script_editor_job_links WHERE owner_username=? AND work_id=? AND (?='' OR target_type=?) ORDER BY created_at`, owner, workID, targetType, targetType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []JobLink{}
+	for rows.Next() {
+		var row JobLink
+		var syncState, conflictState string
+		if err := rows.Scan(&row.ID, &row.OwnerUsername, &row.WorkID, &row.JobID, &row.TargetType, &row.TargetID, &row.SourceRevision, &syncState, &conflictState, &row.CreatedAt, &row.UpdatedAt); err != nil {
+			return nil, err
+		}
+		row.SyncState, row.ConflictState = SyncState(syncState), ConflictState(conflictState)
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}

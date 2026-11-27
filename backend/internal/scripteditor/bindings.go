@@ -60,25 +60,44 @@ func (row WorkBinding) Validate() error {
 }
 
 type SourceLink struct {
-	ID, OwnerUsername, WorkID, SourceType, SourceID, TargetType, TargetID string
-	SourceRevision                                                        int64
-	SyncState                                                             SyncState
-	ConflictState                                                         ConflictState
-	CreatedAt, UpdatedAt                                                  time.Time
+	ID             string        `json:"id"`
+	OwnerUsername  string        `json:"-"`
+	WorkID         string        `json:"workId"`
+	SourceType     string        `json:"sourceType"`
+	SourceID       string        `json:"sourceId"`
+	TargetType     string        `json:"targetType"`
+	TargetID       string        `json:"targetId"`
+	SourceRevision int64         `json:"sourceRevision"`
+	SyncState      SyncState     `json:"syncState"`
+	ConflictState  ConflictState `json:"conflictState"`
+	CreatedAt      time.Time     `json:"createdAt"`
+	UpdatedAt      time.Time     `json:"updatedAt"`
 }
 
 type AssetLink struct {
-	ID, OwnerUsername, WorkID, AssetID, TargetType, TargetID string
-	SourceRevision                                           int64
-	SyncState                                                SyncState
-	ConflictState                                            ConflictState
-	CreatedAt, UpdatedAt                                     time.Time
+	ID             string        `json:"id"`
+	OwnerUsername  string        `json:"-"`
+	WorkID         string        `json:"workId"`
+	AssetID        string        `json:"assetId"`
+	TargetType     string        `json:"targetType"`
+	TargetID       string        `json:"targetId"`
+	SourceRevision int64         `json:"sourceRevision"`
+	SyncState      SyncState     `json:"syncState"`
+	ConflictState  ConflictState `json:"conflictState"`
+	CreatedAt      time.Time     `json:"createdAt"`
+	UpdatedAt      time.Time     `json:"updatedAt"`
 }
 
 type JobLink struct {
-	ID, OwnerUsername, WorkID, JobID, TargetType, TargetID string
-	SourceRevision                                         int64
-	SyncState                                              SyncState
-	ConflictState                                          ConflictState
-	CreatedAt, UpdatedAt                                   time.Time
+	ID             string        `json:"id"`
+	OwnerUsername  string        `json:"-"`
+	WorkID         string        `json:"workId"`
+	JobID          string        `json:"jobId"`
+	TargetType     string        `json:"targetType"`
+	TargetID       string        `json:"targetId"`
+	SourceRevision int64         `json:"sourceRevision"`
+	SyncState      SyncState     `json:"syncState"`
+	ConflictState  ConflictState `json:"conflictState"`
+	CreatedAt      time.Time     `json:"createdAt"`
+	UpdatedAt      time.Time     `json:"updatedAt"`
 }
