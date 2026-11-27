@@ -530,6 +530,12 @@ func (s *MySQLStore) finishLegacyMigration(ctx context.Context, owner string, se
 	if err != nil {
 		return err
 	}
+	// Another instance may have completed this exact revision after GetConfig
+	// read it. Its committed receipt is sufficient if no scrub plan remains.
+	if found && state.Phase == LegacyFinalizing && locked.Phase == LegacyComplete &&
+		configRevision(current) == configRevision(settings) && ModelConfigText(current, modelLegacyScrubPendingKey) == "" && current[legacyModelScrubEntriesKey] == nil {
+		return tx.Commit()
+	}
 	if found != (state.Owner != "") || locked.Phase != state.Phase || configRevision(current) != configRevision(settings) ||
 		!reflect.DeepEqual(current[modelLegacyScrubPendingKey], settings[modelLegacyScrubPendingKey]) || !reflect.DeepEqual(current[legacyModelScrubEntriesKey], settings[legacyModelScrubEntriesKey]) {
 		return ErrConfigConflict
@@ -589,18 +595,11 @@ func (s *MySQLStore) importAndCompleteLegacySettings(ctx context.Context, owner,
 	}
 	// Serialize competing standard-file writers. Appends only lock the
 	// migration row and therefore remain possible between writing and CAS.
-	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	tx, err := s.beginLegacySettingFileWrite(ctx, owner)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	// The per-account writer row exists even for an imported settings file
-	// whose owner has never opened the novel workshop. An append only locks the
-	// separate migration row, allowing its revision to change while we write.
-	if _, err := tx.ExecContext(ctx, `INSERT INTO novel_fetch_legacy_setting_files(owner_username,fingerprint) VALUES(?,'')
- ON DUPLICATE KEY UPDATE fingerprint=fingerprint`, owner); err != nil {
-		return err
-	}
 	var raw []byte
 	err = tx.QueryRowContext(ctx, `SELECT settings_json FROM novel_fetch_workshop_configs WHERE owner_username=? FOR UPDATE`, owner).Scan(&raw)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {

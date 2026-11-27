@@ -13,6 +13,7 @@ import { createAntTheme, parseThemeId } from '../shared/styles/theme';
 import { SettingsPage } from './pages/SettingsPage';
 import ApiConfigPage from './pages/ApiConfigPage';
 import { HomePage } from './pages/HomePage';
+import { applyPreviewChannelEdits } from './pages/apiIntegrationChannelEdits';
 import { isCatalogModelAvailable } from './pages/apiConfigCatalogMerge';
 
 const params = new URLSearchParams(window.location.search);
@@ -137,19 +138,7 @@ window.fetch = (input, init) => {
         pinned: Array.isArray(payload.pinned) ? payload.pinned : liveIntegrationState.pinned,
         channelSelection: { ...liveIntegrationState.channelSelection, ...(payload.channelSelection || {}) },
         values: { ...liveIntegrationState.values, ...(payload.values || {}) },
-        // 与 Go 侧一致：只有显式提交 customChannels 时才整表替换。
-        customChannels: Array.isArray(payload.customChannels)
-          ? payload.customChannels.map((channel, index) => {
-            const existing = liveIntegrationState.customChannels.find(item => item.id === channel.id);
-            return {
-              ...channel,
-              id: channel.id || `ch_preview_${index + 1}`,
-              apiFormat: channel.apiFormat || existing?.apiFormat || 'openai_compatible',
-              fullUrl: channel.fullUrl === true,
-              hasApiKey: channel.apiKey ? true : (channel.clearApiKey ? false : existing?.hasApiKey === true)
-            };
-          })
-          : liveIntegrationState.customChannels
+        customChannels: applyPreviewChannelEdits(liveIntegrationState.customChannels, payload)
       };
     }
     return Promise.resolve(jsonResponse(liveIntegrationState));

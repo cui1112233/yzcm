@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -209,15 +210,110 @@ func (edit LegacySettingEdit) Validate() error {
 		case len(path) == 3 && !edit.Delete:
 			return errors.New("whole channel replacement is unsafe")
 		case len(path) > 3 && path[3] == "id":
-			return errors.New("channel identity cannot be reassigned")
+			var id string
+			if !channelIdentityEcho(edit) || edit.Delete || json.Unmarshal(edit.Value, &id) != nil || id != path[2] {
+				return errors.New("channel identity cannot be reassigned")
+			}
 		}
 	}
 	return nil
 }
 
+func channelIdentityEcho(edit LegacySettingEdit) bool {
+	p := edit.Path
+	return len(p) == 4 && p[0] == "apiIntegrations" && p[1] == "customChannels" && p[3] == "id"
+}
+
+// Old map-to-array conversion emitted every field of each channel together,
+// including its own ID. Subsequent explicit requests appended more edits.
+func NormalizeHistoricalChannelRows(edits []LegacySettingEdit) ([]LegacySettingEdit, error) {
+	if !slices.ContainsFunc(edits, channelIdentityEcho) {
+		return edits, nil
+	}
+	out := make([]LegacySettingEdit, 0, len(edits))
+	for i := 0; i < len(edits); {
+		p := edits[i].Path
+		if len(p) < 4 || p[0] != "apiIntegrations" || p[1] != "customChannels" {
+			out = append(out, edits[i])
+			i++
+			continue
+		}
+		seen := map[string]bool{}
+		end := i
+		copied := false
+		for end < len(edits) {
+			edit := edits[end]
+			if len(edit.Path) < 4 || !slices.Equal(edit.Path[:3], p[:3]) {
+				break
+			}
+			key, err := json.Marshal(edit.Path[3:])
+			if err != nil {
+				return nil, err
+			}
+			if seen[string(key)] {
+				break
+			}
+			seen[string(key)] = true
+			if channelIdentityEcho(edit) {
+				if err := edit.Validate(); err != nil {
+					return nil, err
+				}
+				copied = true
+			}
+			end++
+		}
+		if !copied {
+			out = append(out, edits[i:end]...)
+		} else {
+			for _, edit := range edits[i:end] {
+				if channelIdentityEcho(edit) || edit.Delete {
+					continue
+				}
+				var value any
+				if err := json.Unmarshal(edit.Value, &value); err != nil {
+					return nil, err
+				}
+				if historicalChannelDefault(edit.Path[3:], value) {
+					continue
+				}
+				edit.OnlyIfMissing = true
+				out = append(out, edit)
+			}
+		}
+		i = end
+	}
+	return out, nil
+}
+
+func historicalChannelDefault(path []string, value any) bool {
+	switch v := value.(type) {
+	case nil:
+		return true
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return true
+		}
+		return len(path) == 1 && (path[0] == "apiFormat" && v == "openai_compatible" || path[0] == "model" && v == "gpt-4o-mini" || path[0] == "baseUrl" && v == "https://api.openai.com/v1")
+	case float64:
+		return v == 0
+	case []any:
+		return len(v) == 0
+	case map[string]any:
+		return len(v) == 0
+	case bool:
+		return len(path) == 1 && path[0] == "enabled" && v
+	}
+	return false
+}
+
 func compactSettingEdits(edits []LegacySettingEdit) ([]LegacySettingEdit, error) {
 	// Keep the order of the last assignments: a channel deletion may be
 	// followed by recreation, or a group deletion by a child assignment.
+	var err error
+	edits, err = NormalizeHistoricalChannelRows(edits)
+	if err != nil {
+		return nil, err
+	}
 	seen := map[string]bool{}
 	result := make([]LegacySettingEdit, 0, len(edits))
 	for i := len(edits) - 1; i >= 0; i-- {
@@ -279,6 +375,11 @@ func (s *MySQLStore) ImportLegacySettingEdits(ctx context.Context, owner string,
 }
 func (s *MySQLStore) mergeLegacySettingEdits(ctx context.Context, owner string, edits []LegacySettingEdit, fingerprint string) error {
 	importing := fingerprint != ""
+	var err error
+	edits, err = NormalizeHistoricalChannelRows(edits)
+	if err != nil {
+		return err
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -364,6 +465,43 @@ ON DUPLICATE KEY UPDATE revision=revision`, owner)
 		}
 	}
 	return tx.Commit()
+}
+
+// Lock a row that exists independently of the workshop configuration. Both
+// ordinary standard-file writes and finalization hold it until file I/O ends.
+func (s *MySQLStore) beginLegacySettingFileWrite(ctx context.Context, owner string) (*sql.Tx, error) {
+	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return nil, err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO novel_fetch_legacy_setting_files(owner_username,fingerprint) VALUES(?,'')
+ ON DUPLICATE KEY UPDATE fingerprint=fingerprint`, owner)
+	if err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	return tx, nil
+}
+
+// WriteStandardSettingsIfReady checks the phase again after acquiring the
+// file lock. A false result routes the request back to the active journal.
+func (s *MySQLStore) WriteStandardSettingsIfReady(ctx context.Context, owner string, write func(completed bool) error) (bool, error) {
+	tx, err := s.beginLegacySettingFileWrite(ctx, owner)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	state, found, err := readMigrationState(tx.QueryRowContext(ctx, migrationStateQuery+" FOR UPDATE", owner))
+	if err != nil {
+		return false, err
+	}
+	if found && state.Phase != LegacyComplete {
+		return false, nil
+	}
+	if err := write(found); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 type settingPatchExecutor interface {

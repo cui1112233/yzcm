@@ -387,7 +387,7 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 			if !ready {
 				legacy = nil
 			}
-		} else if !found && len(legacyCatalogRows(legacy)) == 0 && ModelConfigText(settings, modelLegacyScrubPendingKey) == "" {
+		} else if len(legacyCatalogRows(legacy)) == 0 && ModelConfigText(settings, modelLegacyScrubPendingKey) == "" {
 			legacy = nil
 		}
 		if legacy == nil && ModelConfigText(settings, modelLegacyScrubPendingKey) != "" {

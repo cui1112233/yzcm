@@ -320,7 +320,8 @@ func sanitizeIntegrationChannel(input map[string]any, previous map[string]any) (
 	channel := map[string]any{}
 	id, _ := input["id"].(string)
 	id = strings.TrimSpace(id)
-	if id == "" {
+	addressed := id != ""
+	if !addressed {
 		buffer := make([]byte, 6)
 		if _, err := rand.Read(buffer); err != nil {
 			return nil, false
@@ -329,13 +330,19 @@ func sanitizeIntegrationChannel(input map[string]any, previous map[string]any) (
 	}
 	channel["id"] = id
 
-	name, _ := input["name"].(string)
-	name = strings.TrimSpace(name)
-	if name == "" || len([]rune(name)) > 64 {
-		return nil, false
+	name, named := input["name"].(string)
+	if !named && previous != nil {
+		name, _ = previous["name"].(string)
 	}
-	channel["name"] = name
-
+	// An identified channel may be temporarily unavailable during migration.
+	// Its omitted name never becomes a synthetic assignment.
+	if named || previous != nil || !addressed {
+		name = strings.TrimSpace(name)
+		if name == "" || len([]rune(name)) > 64 {
+			return nil, false
+		}
+		channel["name"] = name
+	}
 	baseURL, _ := input["baseUrl"].(string)
 	baseURL = strings.TrimSpace(baseURL)
 	if len(baseURL) > 1024 {
@@ -470,34 +477,40 @@ func sanitizeIntegrationChannel(input map[string]any, previous map[string]any) (
 }
 
 func (s *UserConfigStore) encryptLegacyIntegrationFile(ctx context.Context, owner string) error {
-	path, err := s.configPath(owner)
-	if err != nil {
-		return err
-	}
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	var stored map[string]any
-	if err := json.Unmarshal(raw, &stored); err != nil {
-		return err
-	}
-	if CountPlaintextConfigSecrets(stored) == 0 {
-		return nil
-	}
-	if s.journal != nil {
-		state, found, err := s.journal.DiscoverLegacyConfigMigration(ctx, owner)
+	encrypt := func(_ bool) error {
+		path, err := s.configPath(owner)
 		if err != nil {
 			return err
 		}
-		if found && state.Phase != novelfetchworkshop.LegacyComplete {
+		raw, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
+		if err != nil {
+			return err
+		}
+		var stored map[string]any
+		if err := json.Unmarshal(raw, &stored); err != nil {
+			return err
+		}
+		if CountPlaintextConfigSecrets(stored) == 0 {
+			return nil
+		}
+		return s.writeAuthenticatedConfig(owner, stored)
 	}
-	return s.writeAuthenticatedConfig(owner, stored)
+	if s.journal == nil {
+		return encrypt(false)
+	}
+	state, found, err := s.journal.DiscoverLegacyConfigMigration(ctx, owner)
+	if err != nil {
+		return err
+	}
+	if found && state.Phase != novelfetchworkshop.LegacyComplete {
+		return nil
+	}
+	_, err = s.journal.WriteStandardSettingsIfReady(ctx, owner, encrypt)
+	return err
+
 }
 
 func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, store *UserConfigStore, accounts auth.Store, catalog novelfetchworkshop.Store) {

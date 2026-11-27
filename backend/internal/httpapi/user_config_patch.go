@@ -69,7 +69,11 @@ func applyFieldEdit(object map[string]any, path []string, value any, edit settin
 }
 
 func (edits settingsEdits) apply(config map[string]any) error {
-	for _, edit := range edits {
+	normalized, err := novelfetchworkshop.NormalizeHistoricalChannelRows(edits)
+	if err != nil {
+		return err
+	}
+	for _, edit := range normalized {
 		if err := edit.Validate(); err != nil {
 			return err
 		}
@@ -95,17 +99,18 @@ func (edits settingsEdits) apply(config map[string]any) error {
 			integration = map[string]any{}
 		}
 		channels, ok := integration["customChannels"].([]any)
-		if _, present := integration["customChannels"]; present && !ok {
-			if edit.OnlyIfMissing {
+		if previous, present := integration["customChannels"]; present && !ok {
+			if edit.OnlyIfMissing || edit.Delete && previous == nil {
 				continue
 			}
 			return errors.New("invalid restored channel list")
 		}
 		index := slices.IndexFunc(channels, func(v any) bool { row, _ := v.(map[string]any); return row["id"] == path[2] })
 		if len(path) == 3 {
-			if index >= 0 && edit.Delete {
-				channels = slices.Delete(channels, index, index+1)
+			if index < 0 {
+				continue
 			}
+			channels = slices.Delete(channels, index, index+1)
 		} else {
 			var row map[string]any
 			if index >= 0 {
@@ -163,7 +168,7 @@ func integrationChannelEdits(submitted []map[string]any, normalized []any, delet
 	return edits
 }
 
-func submittedIDs(value any, max int) ([]string, error) {
+func submittedIDs(value any, max int, limitBytes int) ([]string, error) {
 	list, ok := value.([]any)
 	if !ok || max > 0 && len(list) > max {
 		return nil, errors.New("选项列表无效")
@@ -173,7 +178,7 @@ func submittedIDs(value any, max int) ([]string, error) {
 	for _, item := range list {
 		id, ok := item.(string)
 		id = strings.TrimSpace(id)
-		if !ok || id == "" || len(id) > 64 {
+		if !ok || id == "" || limitBytes > 0 && len(id) > limitBytes {
 			return nil, errors.New("选项标识无效")
 		}
 		if !seen[id] {
@@ -212,7 +217,7 @@ func integrationRequestEdits(config, input map[string]any) (settingsEdits, error
 		explicit["values"] = values
 	}
 	if pins, ok := input["pinned"]; ok {
-		ids, err := submittedIDs(pins, 0)
+		ids, err := submittedIDs(pins, 0, 64)
 		if err != nil {
 			return nil, err
 		}
@@ -237,7 +242,7 @@ func integrationRequestEdits(config, input map[string]any) (settingsEdits, error
 			switch v := value.(type) {
 			case string:
 				var err error
-				ids, err = submittedIDs([]any{v}, 1)
+				ids, err = submittedIDs([]any{v}, 1, 64)
 				if err != nil {
 					return nil, err
 				}
@@ -246,7 +251,7 @@ func integrationRequestEdits(config, input map[string]any) (settingsEdits, error
 					return nil, errors.New("渠道选择包含未知字段")
 				}
 				var err error
-				ids, err = submittedIDs(v["enabled"], 20)
+				ids, err = submittedIDs(v["enabled"], 20, 64)
 				if err != nil {
 					return nil, err
 				}
@@ -261,7 +266,7 @@ func integrationRequestEdits(config, input map[string]any) (settingsEdits, error
 	var deleted []string
 	if v, ok := input["deletedChannelIds"]; ok {
 		var err error
-		deleted, err = submittedIDs(v, 0)
+		deleted, err = submittedIDs(v, 0, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -287,12 +292,7 @@ func integrationRequestEdits(config, input map[string]any) (settingsEdits, error
 			}
 			id, _ := row["id"].(string)
 			id = strings.TrimSpace(id)
-			validation := row
-			if _, hasName := row["name"]; !hasName && id != "" {
-				validation = cloneConfigMap(row)
-				validation["name"] = id
-			}
-			channel, ok := sanitizeIntegrationChannel(validation, existing[id])
+			channel, ok := sanitizeIntegrationChannel(row, existing[id])
 			if !ok {
 				return nil, errors.New("自定义渠道无效")
 			}

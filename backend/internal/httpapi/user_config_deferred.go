@@ -154,38 +154,47 @@ func (p *configSecretProvider) importDeferredSettings(ctx context.Context, owner
 }
 
 func (s *UserConfigStore) writeSettingsPatch(ctx context.Context, owner string, config map[string]any, changes settingsEdits) error {
-	if s.journal != nil {
-		state, found, err := s.journal.DiscoverLegacyConfigMigration(ctx, owner)
+	if s.journal == nil {
+		return s.writeAuthenticatedConfig(owner, config)
+	}
+	state, found, err := s.journal.DiscoverLegacyConfigMigration(ctx, owner)
+	if err != nil {
+		return err
+	}
+	pending := found && state.Phase != novelfetchworkshop.LegacyComplete
+	write := func(completed bool) error {
+		path, err := s.configPath(owner)
 		if err != nil {
 			return err
 		}
-		if found {
-			if state.Phase != novelfetchworkshop.LegacyComplete {
-				err = s.journal.AppendLegacySettingEdits(ctx, owner, changes)
-				if !errors.Is(err, novelfetchworkshop.ErrConfigConflict) {
-					return err
-				}
-			}
-			// Completion may have published a newer revision since the form read.
-			// Merge only this request into the verified standard document.
-			path, err := s.configPath(owner)
-			if err != nil {
-				return err
-			}
-			current, err := s.readStandardFile(path)
-			if err != nil {
-				return err
-			}
-			if current == nil || current["ciphertext"] != nil || current["fingerprint"] != nil {
-				return errors.New("completed standard configuration unavailable")
-			}
-			if err := changes.apply(current); err != nil {
-				return err
-			}
-			return s.writeAuthenticatedConfig(owner, current)
+		current, err := s.readStandardFile(path)
+		if err != nil {
+			return err
 		}
+		if completed && current == nil || current["ciphertext"] != nil || current["fingerprint"] != nil {
+			return errors.New("standard configuration unavailable")
+		}
+		if !completed {
+			current = mergeConfigMap(defaultUserConfig, current)
+		}
+		if err := changes.apply(current); err != nil {
+			return err
+		}
+		return s.writeAuthenticatedConfig(owner, current)
 	}
-	return s.writeAuthenticatedConfig(owner, config)
+	for {
+		if pending {
+			err = s.journal.AppendLegacySettingEdits(ctx, owner, changes)
+			if !errors.Is(err, novelfetchworkshop.ErrConfigConflict) {
+				return err
+			}
+		}
+		written, err := s.journal.WriteStandardSettingsIfReady(ctx, owner, write)
+		if err != nil || written {
+			return err
+		}
+		pending = true
+	}
 }
 
 func (p *configSecretProvider) ApplyLegacySettingEdits(owner, path string, edits []novelfetchworkshop.LegacySettingEdit) error {
@@ -200,17 +209,24 @@ func (p *configSecretProvider) ApplyLegacySettingEdits(owner, path string, edits
 	if len(edits) == 0 {
 		return nil
 	}
+	before, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
 	if err := settingsEdits(edits).apply(config); err != nil {
 		return err
+	}
+	expected, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(before, expected) {
+		return nil
 	}
 	if err := s.writeAuthenticatedConfig(owner, config); err != nil {
 		return err
 	}
 	verified, err := s.readStandardFile(path)
-	if err != nil {
-		return err
-	}
-	expected, err := json.Marshal(config)
 	if err != nil {
 		return err
 	}

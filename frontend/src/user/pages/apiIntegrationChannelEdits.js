@@ -36,3 +36,26 @@ export function mergeChannelEdit(previous, edit) {
   if (edit.apiKey) delete merged.clearApiKey;
   return merged;
 }
+
+export function applyPreviewChannelEdits(previous, payload) {
+  const byId = new Map(previous.map(channel => [channel.id, channel]));
+  for (const patch of payload.customChannels || []) {
+    const id = patch.id || `ch_preview_${crypto.randomUUID()}`;
+    const row = { ...(byId.get(id) || { id, hasApiKey: false }) };
+    for (const key of ['name', 'baseUrl', 'model', 'concurrency', 'apiFormat', 'fullUrl', 'enabled', 'group']) {
+      if (Object.hasOwn(patch, key)) {
+        if (patch[key] === null) delete row[key];
+        else row[key] = patch[key];
+      }
+    }
+    if (patch.params && typeof patch.params === 'object' && !Array.isArray(patch.params)) {
+      if (Object.keys(patch.params).length) row.params = { ...row.params, ...patch.params };
+      else delete row.params;
+    }
+    if (patch.clearApiKey === true) row.hasApiKey = false;
+    else if (typeof patch.apiKey === 'string' && patch.apiKey.trim()) row.hasApiKey = true;
+    byId.set(id, row);
+  }
+  for (const id of payload.deletedChannelIds || []) byId.delete(id);
+  return [...byId.values()];
+}

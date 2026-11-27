@@ -11,3 +11,18 @@ test('key change and explicit clear replace each other in pending edits', () => 
   assert.deepEqual(mergeChannelEdit({ id: 'a', clearApiKey: true }, { id: 'a', apiKey: 'synthetic' }), { id: 'a', apiKey: 'synthetic' });
   assert.deepEqual(mergeChannelEdit({ id: 'a', apiKey: 'synthetic' }, { id: 'a', clearApiKey: true }), { id: 'a', clearApiKey: true });
 });
+
+test('preview writes use stable channel IDs and keep omitted fields', async () => {
+  const { applyPreviewChannelEdits } = await import('./apiIntegrationChannelEdits.js');
+  const old = [{ id: 'a', name: 'A', fullUrl: true, model: 'saved', hasApiKey: true, params: { keep: 1, change: 2 } }, { id: 'b', name: 'B' }];
+  const after = applyPreviewChannelEdits(old, { customChannels: [{ id: 'a', name: 'renamed', params: { change: 3 }, apiKey: '  ' }] });
+  assert.deepEqual(after, [{ ...old[0], name: 'renamed', params: { keep: 1, change: 3 } }, old[1]]);
+  assert.deepEqual(applyPreviewChannelEdits(after, { deletedChannelIds: ['a'] }), [old[1]]);
+  assert.deepEqual(applyPreviewChannelEdits(after, { customChannels: [] }), after);
+  assert.deepEqual(applyPreviewChannelEdits(after, { customChannels: [{ id: 'a', params: null }] }), after);
+  const cleared = applyPreviewChannelEdits(after, { customChannels: [{ id: 'a', clearApiKey: true, params: {} }] });
+  assert.equal(cleared[0].hasApiKey, false);
+  assert.equal('params' in cleared[0], false);
+  assert.equal('apiKey' in cleared[0], false);
+  assert.equal(old[0].name, 'A');
+});

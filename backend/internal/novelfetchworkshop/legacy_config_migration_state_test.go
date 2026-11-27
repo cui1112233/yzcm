@@ -277,3 +277,17 @@ func (p pendingLegacyVideos) fileReady(file map[string]any) bool {
 	_, ok := p.matchFile(file)
 	return ok
 }
+
+func TestLegacySettingPatchAlreadyFinishedByAnotherWriter(t *testing.T) {
+	ctx := context.Background()
+	db := migrationStateTestDB(t)
+	s := NewMySQLStore(db)
+	s.LegacyConfigDir = t.TempDir()
+	if _, err := db.Exec("INSERT INTO novel_fetch_legacy_config_migrations(owner_username,phase,revision) VALUES('ordinary','complete',4)"); err != nil {
+		t.Fatal(err)
+	}
+	stale := LegacyConfigMigrationState{Owner: "ordinary", Phase: LegacyFinalizing, Revision: 3}
+	if err := s.finishLegacyMigration(ctx, "ordinary", map[string]any{}, stale); err != nil {
+		t.Fatalf("the concurrent finisher already verified the same configuration: %v", err)
+	}
+}
