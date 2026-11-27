@@ -13,6 +13,7 @@ func screenplayAssistantSessionMigration() Migration {
         revision BIGINT UNSIGNED NOT NULL DEFAULT 1,
         archived_at DATETIME(6) NULL,
         request_token VARCHAR(64) NULL,
+        request_deadline DATETIME(6) NULL,
         request_actor VARCHAR(191) NULL,
         request_status ENUM('running','unknown') NULL,
         body JSON NOT NULL,
@@ -20,8 +21,6 @@ func screenplayAssistantSessionMigration() Migration {
         updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
         PRIMARY KEY(owner_username,project_id,session_id),
         KEY assistant_session_list(owner_username,project_id,archived_at,updated_at),
-        KEY assistant_session_parent(owner_username,project_id,parent_session_id),
-        CONSTRAINT fk_assistant_session_parent FOREIGN KEY(owner_username,project_id,parent_session_id)
-            REFERENCES screenplay_assistant_sessions(owner_username,project_id,session_id)
+        KEY assistant_session_parent(owner_username,project_id,parent_session_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`}}
 }

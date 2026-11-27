@@ -144,6 +144,9 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 		}
 		return true
 	}
+	if sessionRepo, ok := repo.(*screenplay.MySQLAuthoringRepository); ok {
+		registerAssistantSessionManagement(sessionRepo, handle, decode)
+	}
 	respond := func(w http.ResponseWriter, st screenplay.AuthoringState, e error, actor string) {
 		if e != nil {
 			authoringError(w, e)
