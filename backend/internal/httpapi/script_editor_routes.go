@@ -48,6 +48,7 @@ func RegisterScriptEditorRoutes(mux *http.ServeMux, auth BridgeAuth, service *sc
 		resolver = resolvers[0]
 	}
 	bindingStore, hasBindingStore := service.Store.(scripteditor.BindingStore)
+	agentBridge := scripteditor.AgentBridge{Store: service.Store}
 
 	handle("GET /api/script-editor/works", func(w http.ResponseWriter, req *http.Request, owner string) {
 		query := req.URL.Query()
@@ -121,6 +122,38 @@ func RegisterScriptEditorRoutes(mux *http.ServeMux, auth BridgeAuth, service *sc
 			return
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"work": work})
+	})
+	handle("POST /api/script-editor/works/{workID}/agent-context", func(w http.ResponseWriter, req *http.Request, owner string) {
+		var input struct {
+			References []scripteditor.AgentReference `json:"references"`
+		}
+		if !decode(w, req, &input) {
+			return
+		}
+		contextValue, err := agentBridge.BuildContext(req.Context(), owner, req.PathValue("workID"), input.References)
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"context": contextValue})
+	})
+	handle("POST /api/script-editor/works/{workID}/agent-drafts/{draftID}/apply", func(w http.ResponseWriter, req *http.Request, owner string) {
+		var input struct {
+			ScriptID         string `json:"scriptId"`
+			Title            string `json:"title"`
+			Content          string `json:"content"`
+			Mode             string `json:"mode"`
+			ExpectedRevision int64  `json:"expectedRevision"`
+		}
+		if !decode(w, req, &input) {
+			return
+		}
+		result, err := agentBridge.ApplyDraft(req.Context(), owner, scripteditor.AgentDraft{ID: req.PathValue("draftID"), WorkID: req.PathValue("workID"), ScriptID: input.ScriptID, Title: input.Title, Content: input.Content, Mode: input.Mode}, input.ExpectedRevision)
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, result)
 	})
 	handle("GET /api/script-editor/works/{workID}/search", func(w http.ResponseWriter, req *http.Request, owner string) {
 		hits, err := service.SearchWork(req.Context(), owner, req.PathValue("workID"), req.URL.Query().Get("q"))

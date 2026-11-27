@@ -170,6 +170,23 @@ func TestScriptEditorRoutesImportAndReplaceScripts(t *testing.T) {
 	}
 }
 
+func TestScriptEditorAgentRoutesBuildContextAndAuditDraft(t *testing.T) {
+	now := time.Unix(1800000000, 0).UTC()
+	api := newScriptEditorTestRouter(now)
+	created := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works", map[string]any{"title": "Agent 作品", "type": "script"})
+	workID := scriptEditorID(t, created, "work")
+	source := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/scripts", map[string]any{"episode": 1, "title": "第一集", "content": "旧稿"})
+	scriptID := scriptEditorID(t, source, "script")
+	contextResponse := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/agent-context", map[string]any{"references": []map[string]any{{"type": "script", "id": scriptID}}})
+	if contextResponse.Code != http.StatusOK || !bytes.Contains(contextResponse.Body.Bytes(), []byte(scriptID)) {
+		t.Fatalf("context status=%d body=%s", contextResponse.Code, contextResponse.Body.String())
+	}
+	applied := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/agent-drafts/draft-1/apply", map[string]any{"scriptId": scriptID, "content": "Agent 新稿", "mode": "confirm", "expectedRevision": 0})
+	if applied.Code != http.StatusCreated || !bytes.Contains(applied.Body.Bytes(), []byte(`"generationSource":"ai"`)) || !bytes.Contains(applied.Body.Bytes(), []byte(`"auditId"`)) {
+		t.Fatalf("apply status=%d body=%s", applied.Code, applied.Body.String())
+	}
+}
+
 func TestScriptEditorJobRoutesCreateListCancelAndRetry(t *testing.T) {
 	now := time.Unix(1800000000, 0).UTC()
 	api := newScriptEditorTestRouter(now)

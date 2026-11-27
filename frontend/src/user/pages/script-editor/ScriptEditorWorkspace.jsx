@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState } from 'react';
 import ScriptEditorSource from './ScriptEditorSource.jsx';
 import ScriptEditorScripts from './ScriptEditorScripts.jsx';
 import ScriptEditorDelivery from './ScriptEditorDelivery.jsx';
+import ScriptEditorAgent from './ScriptEditorAgent.jsx';
 import { buildStudioSearch, resolveStudioLocation, SCRIPT_EDITOR_RAIL_ITEMS } from './studioContract.js';
 
 const icons = {
@@ -62,6 +63,7 @@ export default function ScriptEditorWorkspace({ work, onBack, onReload }) {
   let content = <PendingPanel tab={location.tab} />;
   if (location.tab === 'source') content = <ScriptEditorSource work={work} onReload={onReload} />;
   if (location.tab === 'scripts') content = <ScriptEditorScripts work={work} onReload={onReload} />;
+  if (location.tab === 'agent') content = <ScriptEditorAgent work={work} onReload={onReload} />;
   if (location.tab === 'delivery') content = <ScriptEditorDelivery work={work} />;
 
   return <main className="script-editor-page is-workspace">

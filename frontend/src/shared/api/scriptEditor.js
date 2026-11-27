@@ -13,6 +13,8 @@ export function createScriptEditorWork(input) { return apiRequest(`${root}/works
 export function updateScriptEditorWork(workId, input) { return apiRequest(`${root}/works/${id(workId)}`, { method: 'PATCH', body: JSON.stringify(input) }); }
 export function deleteScriptEditorWork(workId, revision) { return apiRequest(`${root}/works/${id(workId)}?expectedRevision=${Number(revision)}`, { method: 'DELETE' }); }
 export function copyScriptEditorWork(workId, requestKey) { return apiRequest(`${root}/works/${id(workId)}/copy`, { method: 'POST', body: JSON.stringify({ requestKey }) }); }
+export function buildScriptEditorAgentContext(workId, references) { return apiRequest(`${root}/works/${id(workId)}/agent-context`, { method: 'POST', body: JSON.stringify({ references }), suppressGlobalError: true }); }
+export function applyScriptEditorAgentDraft(workId, draftId, input) { return apiRequest(`${root}/works/${id(workId)}/agent-drafts/${id(draftId)}/apply`, { method: 'POST', body: JSON.stringify(input), suppressGlobalError: true }); }
 export function getScriptEditorBinding(workId, targetType, signal) { return apiRequest(`${root}/works/${id(workId)}/bindings/${id(targetType)}`, { signal, suppressGlobalError: true }); }
 export function putScriptEditorBinding(workId, targetType, input) { return apiRequest(`${root}/works/${id(workId)}/bindings/${id(targetType)}`, { method: 'PUT', body: JSON.stringify(input), suppressGlobalError: true }); }
 export function searchScriptEditorWork(workId, query, signal) { return apiRequest(`${root}/works/${id(workId)}/search?q=${encodeURIComponent(query)}`, { signal, suppressGlobalError: true }); }
