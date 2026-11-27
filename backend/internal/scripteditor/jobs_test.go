@@ -111,7 +111,7 @@ func TestRunJobDoesNotRepeatUncertainModelCall(t *testing.T) {
 	job, _ := service.CreateGenerationJob(ctx, "alice", work.ID, CreateGenerationJobInput{RequestKey: "uncertain-1", Episodes: []int{1}, ChapterIDs: []string{chapter.ID}, ModelID: "text-model"})
 	result, _ := json.Marshal(JobResult{Calls: map[string]JobCall{"episode-1": {Fingerprint: "abc", State: JobCallMayHaveSent}}})
 	job.Status, job.Result = JobRunning, result
-	job.LeaseUntil = time.Now().Add(-time.Minute)
+	job.LeaseUntil = time.Time{}
 	job, _ = service.Store.UpdateJob(ctx, job, job.Revision)
 	generator := &episodeGenerator{}
 	service.GeneratorResolver = func(context.Context, string, string) (ScriptGenerator, error) { return generator, nil }
