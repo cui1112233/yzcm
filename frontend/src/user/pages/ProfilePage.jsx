@@ -1,5 +1,5 @@
-import { Avatar, Button, Form, Input, Modal, Skeleton, Tag, message } from 'antd';
-import { Camera, CheckCircle2, Mail, Pencil, Phone, ShieldCheck, UserRound } from 'lucide-react';
+import { Avatar, Button, Form, Input, Skeleton, Tag, message } from 'antd';
+import { Camera, CheckCircle2, Mail, Phone, ShieldCheck, UserRound } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { getMemberCenter, updateMemberProfile, uploadMemberAvatar } from '../../shared/api/member';
 import { getEmailVerificationStatus, requestEmailVerification } from '../../shared/api/accountRecovery';
@@ -39,7 +39,6 @@ export default function ProfilePage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [mailing, setMailing] = useState(false);
-  const [editing, setEditing] = useState(false);
   const [center, setCenter] = useState(null);
   const [emailStatus, setEmailStatus] = useState(null);
   const fileRef = useRef(null);
@@ -75,7 +74,6 @@ export default function ProfilePage() {
       const previousEmail = center?.member?.email || '';
       const result = await updateMemberProfile(values);
       setCenter(current => ({ ...current, member: mergeProfileMember(current.member, result.member) }));
-      setEditing(false);
       window.dispatchEvent(new CustomEvent('qiantie:profile-updated'));
       if ((result.member?.email || '') !== previousEmail) {
         setEmailStatus(await getEmailVerificationStatus().catch(() => null));
@@ -135,21 +133,23 @@ export default function ProfilePage() {
     <PageHeader title="个人资料" subtitle="管理您的公开资料与团队名片" />
     <section className="pc-profile-identity" aria-label="个人身份名片">
       <button className="pc-profile-avatar" type="button" onClick={() => fileRef.current?.click()} disabled={saving} aria-label="更换头像"><Avatar size={86} src={member.avatarUrl}>{avatarFallback(member)}</Avatar><i><Camera size={14} /></i></button>
-      <div className="pc-profile-name"><div><strong>{member.displayName || member.username}</strong><RoleEnergyIcon role={membershipRole} size={34} /></div><small>@{member.username}</small><span><CheckCircle2 size={15} /> AI 服务已启用</span></div>
+      <div className="pc-profile-name"><div><RoleEnergyIcon role={membershipRole} size={42} /><strong>{member.displayName || member.username}</strong></div><small><span>@{member.username}</span><i /><span>团队：{center?.team?.name || '未加入团队'}</span><i /><span className="pc-profile-ai"><CheckCircle2 size={15} /> AI 服务已启用</span></small></div>
       <div className="pc-profile-role"><RoleBadge canonicalRole={member.canonicalRole} /><small>身份由系统分配，不可自行修改</small></div>
       <Button className="pc-profile-avatar-action" loading={saving} onClick={() => fileRef.current?.click()} icon={<Camera size={15} />}>更换头像</Button>
     </section>
 
     <div className="pc-profile-grid">
-      <Panel title="基础资料" className="pc-profile-basic" action={<Button type="text" icon={<Pencil size={15} />} onClick={() => setEditing(true)}>编辑</Button>}>
-        <div className="pc-profile-fields">
-          <div><span>显示名称</span><strong>{member.displayName || '未填写'}</strong></div>
-          <div><span>手机号码</span><strong>{member.phone || '未填写'}</strong></div>
-          <div><span>邮箱地址</span><strong>{member.email || '未填写'}</strong>{emailStatus?.verified ? <Tag color="green">已验证</Tag> : member.email ? <Button type="link" loading={mailing} disabled={!emailStatus?.deliveryConfigured} onClick={sendVerification}>发送验证</Button> : null}</div>
-          <div><span>团队职务</span><strong>{member.teamTitle || membershipRole}</strong></div>
-          <div className="pc-profile-bio"><span>个人简介</span><p>{member.bio || '暂未填写个人简介'}</p></div>
-        </div>
-        <Button type="primary" icon={<Pencil size={15} />} onClick={() => setEditing(true)}>修改资料</Button>
+      <Panel title="基础资料" className="pc-profile-basic">
+        <Form className="pc-profile-inline-form" form={form} layout="horizontal" onFinish={save} labelAlign="left" labelCol={{ flex: '150px' }} wrapperCol={{ flex: 1 }}>
+          <Form.Item label="显示名称" name="displayName" rules={[{ required: true, whitespace: true, max: 40 }]}><Input maxLength={40} allowClear /></Form.Item>
+          <Form.Item label="手机号码" name="phone"><Input prefix={<Phone size={15} />} maxLength={32} placeholder="未填写" /></Form.Item>
+          <Form.Item label="邮箱地址" name="email">
+            <div className="pc-profile-email-field"><Form.Item name="email" noStyle><Input prefix={<Mail size={15} />} maxLength={120} placeholder="未填写" /></Form.Item>{emailStatus?.verified ? <Tag color="green">已验证</Tag> : member.email ? <Button type="link" loading={mailing} disabled={!emailStatus?.deliveryConfigured} onClick={sendVerification}>发送验证</Button> : null}</div>
+          </Form.Item>
+          <Form.Item label="团队职务" name="teamTitle"><Input maxLength={60} placeholder={membershipRole} /></Form.Item>
+          <Form.Item label="个人简介" name="bio"><Input.TextArea rows={4} maxLength={240} showCount placeholder="介绍您的职责与协作方向" /></Form.Item>
+          <div className="pc-profile-form-actions"><Button type="primary" htmlType="submit" loading={saving}>保存资料</Button><Button disabled={saving} onClick={() => form.resetFields()}>取消修改</Button></div>
+        </Form>
       </Panel>
 
       <div className="pc-profile-side">
@@ -164,8 +164,5 @@ export default function ProfilePage() {
       </div>
     </div>
     <input ref={fileRef} className="member-hidden-file" type="file" accept="image/png,image/jpeg,image/webp" onChange={upload} />
-    <Modal className="pg-edit-modal" title="编辑个人资料" open={editing} onCancel={() => setEditing(false)} onOk={() => form.submit()} okText="保存修改" confirmLoading={saving}>
-      <Form form={form} layout="vertical" onFinish={save}><Form.Item label="显示名称" name="displayName" rules={[{ required: true, whitespace: true, max: 40 }]}><Input maxLength={40} /></Form.Item><Form.Item label="手机号" name="phone"><Input prefix={<Phone size={15} />} maxLength={32} /></Form.Item><Form.Item label="邮箱" name="email"><Input prefix={<Mail size={15} />} maxLength={120} /></Form.Item><Form.Item label="团队职务" name="teamTitle"><Input maxLength={60} /></Form.Item><Form.Item label="个人简介" name="bio"><Input.TextArea rows={4} maxLength={240} showCount /></Form.Item></Form>
-    </Modal>
   </div>;
 }

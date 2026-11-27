@@ -251,6 +251,79 @@
 .pc-api-modal .api-preset-picker-col { border-color: rgba(132, 202, 255, .28); background: rgba(7, 22, 57, .55); }
 .pc-api-modal .api-preset-picker-head { border-bottom-color: rgba(132, 202, 255, .2); color: var(--pc-text); background: rgba(60, 91, 160, .2); }
 
+/* Approved personal-center visual contract: 1678 x 937 desktop baseline. */
+.pc-shell { grid-template-columns: 223px minmax(0, 1fr); grid-template-rows: 58px minmax(0, 1fr); }
+.pc-topbar { padding-inline: 36px 28px; background: rgba(4, 12, 38, .58); border-bottom-color: rgba(117, 198, 255, .52); box-shadow: inset 0 -1px rgba(255,255,255,.06), 0 0 24px rgba(86,131,255,.18); }
+.pc-brand img { width: 54px; height: 36px; filter: hue-rotate(178deg) saturate(2.2) brightness(1.45) drop-shadow(0 0 9px rgba(77,220,255,.75)); }
+.pc-sidebar { margin: 18px 10px 14px 12px; padding: 18px 10px 12px; border: 1px solid rgba(173,218,255,.72); border-radius: 22px; background: linear-gradient(160deg, rgba(39,66,127,.48), rgba(8,25,67,.42)); box-shadow: inset 0 1px rgba(255,255,255,.22), inset 0 -1px rgba(87,162,255,.18), 0 0 24px rgba(72,164,255,.16); backdrop-filter: blur(26px) saturate(1.35); }
+.pc-sidebar-profile { gap: 10px; padding-bottom: 17px; }
+.pc-sidebar-nav { gap: 0; }
+.pc-sidebar-group { padding: 6px 0; }
+.pc-sidebar a, .pc-sidebar-actions button { min-height: 45px; font-size: 15px; }
+.pc-sidebar a.active { border-color: rgba(167,232,255,.94); background: linear-gradient(90deg, rgba(32,201,255,.65), rgba(80,91,236,.48)); box-shadow: inset 0 0 22px rgba(152,235,255,.28), 0 0 22px rgba(42,200,255,.46); }
+.pc-main > .account-center-page, .pc-main > .api-config-page { padding: 25px 27px 40px 30px; }
+.pc-main .ac-page-header { min-height: 72px; margin-bottom: 16px; }
+.pc-main .ac-page-header > div:first-child { display: flex; align-items: center; gap: 18px; min-width: 0; }
+.pc-main .ac-page-header > div:first-child > svg { width: 34px; height: 34px; flex: 0 0 auto; color: #f7fbff; }
+.pc-main .ac-page-header h1 { font-size: 32px; font-weight: 650; letter-spacing: .06em; white-space: nowrap; }
+.pc-main .ac-page-header p { font-size: 17px; line-height: 1.45; white-space: nowrap; }
+.pc-main .ac-panel, .pc-main .ac-metric-card, .pc-main .pg-information-section, .pc-main .api-config-section, .pc-main .account-role-team-card,
+.pc-glass { border-color: rgba(171,219,255,.72); background: linear-gradient(145deg, rgba(42,72,137,.54), rgba(9,25,67,.46)); box-shadow: inset 0 1px rgba(255,255,255,.24), inset 0 -1px rgba(94,171,255,.22), 0 0 0 1px rgba(83,111,255,.12), 0 0 20px rgba(63,183,255,.20), 0 20px 44px rgba(0,4,30,.25); backdrop-filter: blur(25px) saturate(1.3); }
+.pc-main .ac-panel-header, .pc-glass-head { border-bottom-color: rgba(166,211,255,.28); }
+.pc-main .ant-input, .pc-main .ant-input-affix-wrapper, .pc-main .ant-select-selector, .pc-main .ant-input-number, .pc-main textarea.ant-input { border-color: rgba(143,193,255,.48) !important; background: linear-gradient(180deg, rgba(45,73,135,.50), rgba(16,37,86,.48)) !important; box-shadow: inset 0 1px rgba(255,255,255,.08); }
+.pc-main .ant-input:focus, .pc-main .ant-input-affix-wrapper-focused, .pc-main .ant-select-focused .ant-select-selector { border-color: #7ee8ff !important; box-shadow: 0 0 0 1px rgba(93,220,255,.3), 0 0 18px rgba(69,208,255,.2) !important; }
+.pc-main .ant-btn-primary { color: #fff; border-color: #8cecff; background: linear-gradient(180deg, rgba(44,211,255,.95), rgba(73,107,244,.92)); box-shadow: inset 0 1px rgba(255,255,255,.42), 0 0 20px rgba(69,218,255,.55); }
+
+.pc-profile-identity { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "avatar name action" "avatar role action"; min-height: 164px; margin-bottom: 26px; padding: 18px 34px; gap: 0 28px; border-color: rgba(174,223,255,.78); background: linear-gradient(112deg, rgba(43,76,146,.51), rgba(22,48,108,.40)); box-shadow: inset 0 1px rgba(255,255,255,.28), inset 0 -1px rgba(101,174,255,.24), 0 0 24px rgba(81,191,255,.26), 0 22px 45px rgba(0,3,28,.26); }
+.pc-profile-identity::after { display: none; }
+.pc-profile-avatar .ant-avatar { width: 112px !important; height: 112px !important; line-height: 112px !important; }
+.pc-profile-name { align-self: end; }
+.pc-profile-name > div { gap: 12px; }
+.pc-profile-name strong { font-size: 30px; letter-spacing: .025em; }
+.pc-profile-name small { display: flex; align-items: center; gap: 18px; margin: 8px 0 0; font-size: 14px; }
+.pc-profile-name small > i { width: 1px; height: 18px; background: rgba(165,203,255,.36); }
+.pc-profile-name small .pc-profile-ai { display: inline-flex; align-items: center; gap: 7px; color: var(--pc-text); }
+.pc-profile-name small .pc-profile-ai svg { color: var(--pc-success); }
+.pc-profile-role { grid-area: role; display: flex; align-self: start; justify-self: start; align-items: center; gap: 12px; min-width: 0; margin-top: 2px; }
+.pc-profile-role small { display: none; }
+.pc-profile-avatar-action { grid-area: action; align-self: center; min-width: 132px; }
+.pc-profile-grid { grid-template-columns: minmax(0, 1.5fr) minmax(420px, 1fr); gap: 20px; }
+.pc-profile-side { gap: 20px; }
+.pc-profile .ac-panel-header { min-height: 58px; }
+.pc-profile-inline-form { padding: 20px 28px 22px; }
+.pc-profile-inline-form .ant-form-item { margin-bottom: 13px; }
+.pc-profile-inline-form .ant-form-item-label { display: flex; align-items: center; }
+.pc-profile-inline-form .ant-form-item-label > label { color: #eef6ff; font-size: 15px; }
+.pc-profile-inline-form .ant-input, .pc-profile-inline-form .ant-input-affix-wrapper { min-height: 41px; font-size: 15px; }
+.pc-profile-inline-form textarea.ant-input { min-height: 102px; resize: none; }
+.pc-profile-email-field { display: flex; align-items: center; gap: 10px; }
+.pc-profile-email-field > .ant-input-affix-wrapper { flex: 1; }
+.pc-profile-form-actions { display: grid; grid-template-columns: minmax(180px, 240px) minmax(150px, 220px); justify-content: center; gap: 24px; padding-top: 5px; }
+.pc-profile-form-actions .ant-btn { height: 43px; font-size: 16px; }
+.pc-profile-ownership .pc-profile-list, .pc-profile-visibility .pc-profile-list { padding-top: 8px; }
+.pc-profile-list > div { min-height: 43px; }
+.pc-profile-notice { margin-top: 14px !important; padding: 10px 13px; }
+.pc-profile-security-link { margin-bottom: 14px !important; }
+
+.pc-overview > .ac-page-header { display: none; }
+.pc-overview-hero > .pc-glass { min-height: 236px; }
+.pc-overview-dashboard > * { min-height: 294px; }
+.pc-overview-footer .pc-glass { min-height: 207px; }
+.energy-page { gap: 16px; }
+.energy-page .pc-glass-head { min-height: 52px; padding-block: 10px; }
+.energy-page .pc-glass-body { padding: 17px 20px; }
+
+.pc-security-grid { gap: 20px; }
+.pc-security-row { min-height: 64px; }
+.pc-security .ac-panel-header { min-height: 52px; }
+.pc-governance-summary > div, .pc-governance-filter, .pc-governance-directory .account-role-team-card { border-color: rgba(171,219,255,.68); background: linear-gradient(145deg, rgba(42,72,137,.50), rgba(9,25,67,.43)); box-shadow: inset 0 1px rgba(255,255,255,.2), 0 0 18px rgba(63,183,255,.16); }
+.pc-governance-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.pc-governance-summary > div { min-height: 84px; }
+.pc-api-manager > .settings-api-section, .pc-api-founder > .settings-api-section, .pc-api-founder-panel, .pc-api-member-card { border-color: rgba(171,219,255,.70); background: linear-gradient(145deg, rgba(42,72,137,.52), rgba(9,25,67,.44)); box-shadow: inset 0 1px rgba(255,255,255,.22), 0 0 22px rgba(63,183,255,.18); }
+.pc-api-manager-cards { grid-template-columns: 1fr; }
+.pc-api-manager-cards .api-channel-card { min-height: 96px; }
+.pc-api-modal .ant-modal-content { border-color: rgba(177,222,255,.82); background: linear-gradient(145deg, rgba(37,65,128,.95), rgba(7,20,56,.97)); box-shadow: inset 0 1px rgba(255,255,255,.24), 0 0 34px rgba(79,196,255,.28), 0 30px 90px rgba(0,3,28,.7); }
+
 .pc-overview,
 .pc-profile,
 .pc-security,
