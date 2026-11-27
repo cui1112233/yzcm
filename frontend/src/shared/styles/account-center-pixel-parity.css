@@ -193,6 +193,42 @@
 .pc-governance-directory .ant-typography-secondary { color: var(--pc-muted) !important; }
 .pc-governance-directory .member-role-badge { white-space: nowrap; }
 
+.pc-api-manager > .settings-api-section,
+.pc-api-founder > .settings-api-section,
+.pc-api-founder-panel,
+.pc-api-member-card { margin-top: 16px; padding: 20px 22px; border: 1px solid var(--pc-line); border-radius: 19px; color: var(--pc-text); background: linear-gradient(145deg, rgba(37, 67, 129, .68), rgba(10, 25, 62, .64)); box-shadow: inset 0 1px rgba(255,255,255,.16), 0 16px 38px rgba(0,4,24,.24); backdrop-filter: blur(22px) saturate(1.2); }
+.pc-api-manager .settings-api-section > div:first-child h2,
+.pc-api-founder .settings-api-section > div:first-child h2 { margin: 0 0 7px; color: #fff; font-size: 21px; }
+.pc-api-manager .settings-api-section > div:first-child p,
+.pc-api-founder .settings-api-section > div:first-child p { margin: 0 0 15px; color: var(--pc-muted); line-height: 1.65; }
+.pc-api-manager-toolbar { justify-content: flex-end; padding: 10px 12px; border: 1px solid rgba(132, 202, 255, .22); border-radius: 13px; background: rgba(11, 29, 69, .42); }
+.pc-api-manager-toolbar .api-integration-count { margin-right: auto; }
+.pc-api-manager .api-group,
+.pc-api-founder .api-group { border-color: rgba(132, 202, 255, .27); border-radius: 15px; background: rgba(10, 27, 67, .5); }
+.pc-api-manager .api-group-head,
+.pc-api-founder .api-group-head { min-height: 50px; padding-inline: 16px; }
+.pc-api-manager .api-group-body,
+.pc-api-founder .api-group-body { border-top-color: rgba(132, 202, 255, .18); }
+.pc-api-manager-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.pc-api-manager-cards .api-channel-card { min-height: 146px; border-color: rgba(132, 202, 255, .27); border-radius: 14px; background: linear-gradient(145deg, rgba(40, 68, 127, .54), rgba(11, 27, 64, .54)); }
+.pc-api-manager-cards .api-catalog-credential { margin-top: auto; }
+.pc-api-founder-panel .ac-panel-header { display: flex; align-items: center; justify-content: space-between; padding-bottom: 14px; border-bottom: 1px solid rgba(132, 202, 255, .18); }
+.pc-api-founder-panel .ac-panel-header h2 { margin: 0; }
+.pc-api-founder-panel .ac-platform-preset-grid { border-color: rgba(132, 202, 255, .24); border-radius: 14px; background: rgba(11, 29, 69, .42); }
+.pc-api-founder-groups { gap: 13px; }
+.pc-api-founder .api-enabled-bar { padding: 8px 0; }
+.pc-api-founder .api-custom-open { color: #07172e; border-color: #83e9ff; background: linear-gradient(135deg, #76e6ff, #88a3ff); }
+.pc-api-member-card { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 15px; }
+.pc-api-member-card > span { display: grid; width: 48px; height: 48px; place-items: center; border: 1px solid rgba(103, 225, 255, .44); border-radius: 15px; color: var(--pc-cyan); }
+.pc-api-member-card h2, .pc-api-member-card p { margin: 0; }
+.pc-api-member-card p { margin-top: 5px; color: var(--pc-muted); }
+.pc-api-modal .ant-modal-content { overflow: hidden; border: 1px solid rgba(132, 202, 255, .48); border-radius: 20px; color: var(--pc-text); background: linear-gradient(145deg, rgba(31, 55, 109, .96), rgba(8, 20, 53, .97)); box-shadow: inset 0 1px rgba(255,255,255,.18), 0 24px 80px rgba(0,4,24,.6), 0 0 28px rgba(77,220,255,.12); backdrop-filter: blur(26px); }
+.pc-api-modal .ant-modal-header { background: transparent; }
+.pc-api-modal .ant-modal-title,
+.pc-api-modal .ant-modal-close { color: var(--pc-text); }
+.pc-api-modal .api-preset-picker-col { border-color: rgba(132, 202, 255, .28); background: rgba(7, 22, 57, .55); }
+.pc-api-modal .api-preset-picker-head { border-bottom-color: rgba(132, 202, 255, .2); color: var(--pc-text); background: rgba(60, 91, 160, .2); }
+
 .pc-overview,
 .pc-profile,
 .pc-security,
@@ -215,6 +251,7 @@
   .pc-main > .account-center-page,
   .pc-main > .api-config-page { padding-inline: 20px; }
   .pc-profile-grid, .pc-security-grid { grid-template-columns: 1fr; }
+  .pc-api-manager-cards { grid-template-columns: 1fr; }
   .pc-governance-summary { grid-template-columns: 1fr 1fr; }
   .pc-security-auth, .pc-security-recovery, .pc-security-devices, .pc-security-activity { grid-column: 1; grid-row: auto; }
 }

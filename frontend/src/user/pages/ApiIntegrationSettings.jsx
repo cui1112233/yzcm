@@ -291,7 +291,7 @@ function RestrictedApiIntegrationSettings({
         <h2 id="settings-api-title">YZCM API 模型</h2>
         <p>这里只显示 YZCM 已保存目录。选择模型后分别填写 Key；隐藏卡片不会删除 Key，也不会改变业务下拉中的可用状态。</p>
       </div>
-      <div className="api-integration-toolbar">
+      <div className="api-integration-toolbar pc-api-manager-toolbar">
         <span className="api-integration-count"><ShieldCheck size={14} aria-hidden="true" />已展示 {selected.length} 个模型</span>
         <Button className="api-channel-open api-preset-open" size="small" onClick={() => setPresetOpen(true)}>自定义预设</Button>
         <Button size="small" icon={<RefreshCw size={14} />} loading={quotaLoading} onClick={() => {
@@ -309,7 +309,7 @@ function RestrictedApiIntegrationSettings({
                 <span className="api-group-meta">已选 {rows.length}</span>
               </div>
               <div className="api-group-body">
-                {rows.length ? <div className="api-channel-cards">{rows.map(model => {
+                {rows.length ? <div className="api-channel-cards pc-api-manager-cards">{rows.map(model => {
                   const requestState = keyRequests[model.id] || {};
                   const saving = requestState.saving === true;
                   const quota = quotaByModelId.get(model.id) || quotaByModelId.get(model.modelId);
@@ -1036,7 +1036,7 @@ function FullApiIntegrationSettings({
         <span className="api-integration-hint" role="status" aria-live="polite">{SAVE_STATUS_TEXT[saveStatus]}</span>
         <span className="api-integration-hint">文本 / 视频 / 图片组里同时列出「目录模型」与「渠道」；渠道填了 Key 就可用，清空 Key 就不出现</span>
       </div>
-      <div className="api-integration-groups">
+      <div className="api-integration-groups pc-api-founder-groups">
         {groups.map(group => {
           const channelDef = API_CHANNEL_PRESETS[group.id];
           // 渠道组默认展开；非渠道组是纯配置项，默认收起。

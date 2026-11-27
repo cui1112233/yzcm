@@ -129,6 +129,7 @@ export default function ApiCustomModelModal({
 
   return (
     <Modal
+      className="pc-api-modal"
       open={open}
       title={mode === 'edit' ? `编辑自定义模型 · ${KIND_LABELS[kind] || kind}` : `添加自定义模型 · ${KIND_LABELS[kind] || kind}`}
       onCancel={onCancel}

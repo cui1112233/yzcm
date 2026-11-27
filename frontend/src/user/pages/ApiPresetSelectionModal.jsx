@@ -88,6 +88,7 @@ function RestrictedYZCMPresetModal({ open, selectedModels = [], saving = false, 
 
   return (
     <Modal
+      className="pc-api-modal"
       open={open}
       title="自定义预设 · YZCM 模型"
       width={800}
@@ -201,6 +202,7 @@ function StaticPresetSelectionModal({
 
   return (
     <Modal
+      className="pc-api-modal"
       open={open}
       title={`自定义预设${groupTitle ? ` · ${groupTitle}` : ''}`}
       width={760}

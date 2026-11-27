@@ -80,3 +80,18 @@ test('team and account governance share the designed summary, filter, directory 
   assert.match(source, /RoleBadge/);
   assert.doesNotMatch(source, /className="admin-page account-role-page"/);
 });
+
+test('API configuration has distinct manager and founder visual contracts', () => {
+  const page = read('user/pages/ApiConfigPage.jsx');
+  const settings = read('user/pages/ApiIntegrationSettings.jsx');
+  const presetModal = read('user/pages/ApiPresetSelectionModal.jsx');
+  const customModal = read('user/pages/ApiCustomModelModal.jsx');
+  assert.match(page, /pc-api-manager/);
+  assert.match(page, /pc-api-founder/);
+  assert.match(settings, /pc-api-manager-toolbar/);
+  assert.match(settings, /pc-api-manager-cards/);
+  assert.match(settings, /pc-api-founder-groups/);
+  assert.match(settings, /添加自定义模型/);
+  assert.match(presetModal, /className="pc-api-modal"/);
+  assert.match(customModal, /className="pc-api-modal"/);
+});

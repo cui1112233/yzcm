@@ -316,14 +316,14 @@ export default function ApiConfigPage() {
   if (loading) return <div className="account-center-page"><Skeleton active paragraph={{ rows: 9 }} /></div>;
   if (loadError || !config) return <div className="account-center-page api-config-page"><Alert type="error" showIcon message="API 配置尚未就绪" description={loadError || '未取得有效配置，请刷新重试'} /></div>;
 
-  return <div className="account-center-page api-config-page">
+  return <div className={`account-center-page api-config-page ${policy.mode === 'restricted' ? 'pc-api-manager' : policy.mode === 'full' ? 'pc-api-founder' : 'pc-api-member'}`}>
     <PageHeader title="API 配置" subtitle="统一管理平台预设模型与各渠道 API 接口；业务页面按凭证自动读取可用模型。" />
     {memberError ? <Alert type="warning" showIcon message={memberError} /> : null}
-    {policy.mode === 'none' ? <div className="ac-managed-api-card">
+    {policy.mode === 'none' ? <div className="ac-managed-api-card pc-api-member-card">
       <span><ShieldCheck size={28} /></span>
       <div><div><h2>模型服务由团队托管</h2>{member ? <RoleBadge canonicalRole={member.canonicalRole} /> : null}</div><p>你可在获授权的业务下拉框中选择管理员已配置凭证的模型；不会显示 API Key。</p></div>
       <Tag color={config?.managedBy ? 'green' : 'gold'}>{config?.managedBy ? `托管账号 @${config.managedBy}` : '等待绑定管理者'}</Tag>
-    </div> : policy.mode === 'full' ? <Panel title="平台预设模型" eyebrow="PLATFORM PRESETS" className="ac-form-panel" action={<Space size={12}>
+    </div> : policy.mode === 'full' ? <Panel title="平台预设模型" eyebrow="PLATFORM PRESETS" className="ac-form-panel pc-api-founder-panel" action={<Space size={12}>
         <span className="ac-muted-copy" role="status" aria-live="polite">{SAVE_STATUS_TEXT[saveStatus]}</span>
         <Button icon={<RefreshCw size={15} />} loading={quotaLoading} onClick={refreshQuotaState}>刷新额度</Button>
       </Space>}>
