@@ -905,14 +905,21 @@ func startNovelFetchTaskCleanup(ctx context.Context, store *novelfetchworkshop.M
 // startNovelFetchBodyCleanup 定时兜底回收批量测书的过期正文。
 // 删除历史文档只把正文标记为 releasable，真正的 TOS 对象删除依赖这里。
 func startNovelFetchBodyCleanup(ctx context.Context, store *novelfetchworkshop.MySQLStore) {
+	startNovelFetchBodyCleanupWithTiming(ctx, store, time.Minute, 6*time.Hour)
+}
+
+func startNovelFetchBodyCleanupWithTiming(startupCtx context.Context, store *novelfetchworkshop.MySQLStore, initial, interval time.Duration) context.CancelFunc {
+	// Build uses a short startup deadline. Permanent maintenance must outlive
+	// it while retaining an explicit stop function for controlled shutdown/tests.
+	ctx, cancel := context.WithCancel(context.WithoutCancel(startupCtx))
 	if store == nil {
-		return
+		return cancel
 	}
 	const batchLimit = 500
 	const maxBatchesPerSweep = 20
 	go func() {
 		// 启动后尽快回收一次，避免服务重启把已过期正文又拖一天。
-		timer := time.NewTimer(time.Minute)
+		timer := time.NewTimer(initial)
 		defer timer.Stop()
 		for {
 			select {
@@ -941,8 +948,9 @@ func startNovelFetchBodyCleanup(ctx context.Context, store *novelfetchworkshop.M
 						log.Printf("novel fetch retired object cleanup deleted %d objects", deleted)
 					}
 				}
-				timer.Reset(6 * time.Hour)
+				timer.Reset(interval)
 			}
 		}
 	}()
+	return cancel
 }
