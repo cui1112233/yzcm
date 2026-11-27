@@ -101,16 +101,17 @@ type WorkDetail struct {
 }
 
 type Chapter struct {
-	ID            string    `json:"id"`
-	WorkID        string    `json:"workId"`
-	OwnerUsername string    `json:"-"`
-	Title         string    `json:"title"`
-	Order         int       `json:"order"`
-	Content       string    `json:"content"`
-	WordCount     int       `json:"wordCount"`
-	Revision      int64     `json:"revision"`
-	CreatedAt     time.Time `json:"createdAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	ID                      string    `json:"id"`
+	WorkID                  string    `json:"workId"`
+	OwnerUsername           string    `json:"-"`
+	Title                   string    `json:"title"`
+	Order                   int       `json:"order"`
+	Content                 string    `json:"content"`
+	WordCount               int       `json:"wordCount"`
+	Revision                int64     `json:"revision"`
+	CreatedAt               time.Time `json:"createdAt"`
+	UpdatedAt               time.Time `json:"updatedAt"`
+	ReferencedByScriptCount int       `json:"referencedByScriptCount,omitempty"`
 }
 
 type Script struct {

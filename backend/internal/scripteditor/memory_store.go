@@ -270,6 +270,13 @@ func (s *MemoryStore) GetWork(_ context.Context, owner, id string) (WorkDetail, 
 	for _, script := range s.scripts {
 		if script.OwnerUsername == owner && script.WorkID == id {
 			detail.Scripts = append(detail.Scripts, cloneScript(script))
+			for _, chapterID := range script.SourceChapterIDs {
+				for index := range detail.Chapters {
+					if detail.Chapters[index].ID == chapterID {
+						detail.Chapters[index].ReferencedByScriptCount++
+					}
+				}
+			}
 		}
 	}
 	sort.Slice(detail.Chapters, func(i, j int) bool { return detail.Chapters[i].Order < detail.Chapters[j].Order })

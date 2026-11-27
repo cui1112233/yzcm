@@ -56,3 +56,45 @@ func TestMemoryStoreWorkBindingIsOwnerScoped(t *testing.T) {
 		t.Fatalf("foreign binding error = %v", err)
 	}
 }
+
+func TestSearchWorkReturnsTitleAndBodyOffsets(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	service := NewService(store)
+	work, _ := store.CreateWork(ctx, "alice", CreateWorkInput{Title: "月台故事", Type: WorkNovel})
+	chapter, _ := store.CreateChapter(ctx, "alice", work.ID, CreateChapterInput{Title: "重逢", Content: "他在深夜月台等待列车", Order: 1})
+	hits, err := service.SearchWork(ctx, "alice", work.ID, "月台")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("hits = %#v", hits)
+	}
+	if hits[0].ChapterID != chapter.ID || hits[0].Start < 0 || hits[0].End <= hits[0].Start {
+		t.Fatalf("body hit = %#v", hits[0])
+	}
+	if _, err := service.SearchWork(ctx, "bob", work.ID, "月台"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("foreign search error = %v", err)
+	}
+}
+
+func TestImportIntoWorkAppendsAndReplacesWithRevision(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	service := NewService(store)
+	work, _ := store.CreateWork(ctx, "alice", CreateWorkInput{Title: "作品", Type: WorkNovel})
+	chapter, _ := store.CreateChapter(ctx, "alice", work.ID, CreateChapterInput{Title: "旧章", Content: "旧内容", Order: 1})
+	sections := []ImportSection{{ID: "s1", Title: "新章", Content: "新内容"}}
+	result, err := service.ImportIntoWork(ctx, "alice", work.ID, ImportIntoWorkInput{Mode: ImportAppend, Sections: sections, SelectedSectionIDs: []string{"s1"}})
+	if err != nil || len(result.Chapters) != 2 {
+		t.Fatalf("append = %#v, %v", result, err)
+	}
+	result, err = service.ImportIntoWork(ctx, "alice", work.ID, ImportIntoWorkInput{Mode: ImportReplaceChapter, ChapterID: chapter.ID, ExpectedRevision: chapter.Revision, Sections: sections, SelectedSectionIDs: []string{"s1"}})
+	if err != nil || result.Chapters[0].Title != "新章" || result.Chapters[0].Content != "新内容" {
+		t.Fatalf("replace = %#v, %v", result, err)
+	}
+	_, err = service.ImportIntoWork(ctx, "alice", work.ID, ImportIntoWorkInput{Mode: ImportReplaceChapter, ChapterID: chapter.ID, ExpectedRevision: chapter.Revision, Sections: sections, SelectedSectionIDs: []string{"s1"}})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale replace error = %v", err)
+	}
+}

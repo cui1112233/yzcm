@@ -89,6 +89,15 @@ func (s *MySQLStore) GetWork(ctx context.Context, owner, id string) (WorkDetail,
 		return WorkDetail{}, err
 	}
 	detail.Chapters, detail.Scripts = chapters, scripts
+	for _, script := range scripts {
+		for _, chapterID := range script.SourceChapterIDs {
+			for index := range detail.Chapters {
+				if detail.Chapters[index].ID == chapterID {
+					detail.Chapters[index].ReferencedByScriptCount++
+				}
+			}
+		}
+	}
 	return detail, nil
 }
 

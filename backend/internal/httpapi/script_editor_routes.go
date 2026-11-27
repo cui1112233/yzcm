@@ -122,6 +122,26 @@ func RegisterScriptEditorRoutes(mux *http.ServeMux, auth BridgeAuth, service *sc
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"work": work})
 	})
+	handle("GET /api/script-editor/works/{workID}/search", func(w http.ResponseWriter, req *http.Request, owner string) {
+		hits, err := service.SearchWork(req.Context(), owner, req.PathValue("workID"), req.URL.Query().Get("q"))
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"hits": hits})
+	})
+	handle("POST /api/script-editor/works/{workID}/import", func(w http.ResponseWriter, req *http.Request, owner string) {
+		var input scripteditor.ImportIntoWorkInput
+		if !decode(w, req, &input) {
+			return
+		}
+		work, err := service.ImportIntoWork(req.Context(), owner, req.PathValue("workID"), input)
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"work": work})
+	})
 	handle("GET /api/script-editor/works/{workID}/bindings/{targetType}", func(w http.ResponseWriter, req *http.Request, owner string) {
 		if !hasBindingStore {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "当前运行环境不支持工作区绑定"})

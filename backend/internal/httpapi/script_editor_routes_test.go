@@ -136,6 +136,23 @@ func TestScriptEditorRoutesCopyWorkAndManageBindings(t *testing.T) {
 	}
 }
 
+func TestScriptEditorRoutesSearchWorkAndImportIntoWork(t *testing.T) {
+	now := time.Unix(1800000000, 0).UTC()
+	api := newScriptEditorTestRouter(now)
+	created := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works", map[string]any{"title": "月台", "type": "novel"})
+	workID := scriptEditorID(t, created, "work")
+	chapter := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/chapters", map[string]any{"title": "第一章", "content": "深夜月台"})
+	chapterID := scriptEditorID(t, chapter, "chapter")
+	search := signedJSONRequest(t, api, now, "alice", http.MethodGet, "/api/script-editor/works/"+workID+"/search?q=%E6%9C%88%E5%8F%B0", nil)
+	if search.Code != http.StatusOK || !bytes.Contains(search.Body.Bytes(), []byte(chapterID)) {
+		t.Fatalf("search status=%d body=%s", search.Code, search.Body.String())
+	}
+	imported := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/import", map[string]any{"mode": "append", "sections": []map[string]any{{"id": "s1", "title": "第二章", "content": "列车到站"}}, "selectedSectionIds": []string{"s1"}})
+	if imported.Code != http.StatusOK || !bytes.Contains(imported.Body.Bytes(), []byte("列车到站")) {
+		t.Fatalf("import status=%d body=%s", imported.Code, imported.Body.String())
+	}
+}
+
 func TestScriptEditorJobRoutesCreateListCancelAndRetry(t *testing.T) {
 	now := time.Unix(1800000000, 0).UTC()
 	api := newScriptEditorTestRouter(now)
