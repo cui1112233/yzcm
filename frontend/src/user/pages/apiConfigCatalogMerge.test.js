@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isCatalogModelAvailable, isPlatformManagedModel, mergeGroupEntries, modelIdentity, normalizeEndpoint } from './apiConfigCatalogMerge.js';
+import { isCatalogModelAvailable, isCatalogModelVisibleForManagement, isUserManagedCatalogModel, isPlatformManagedModel, mergeGroupEntries, modelIdentity, normalizeEndpoint } from './apiConfigCatalogMerge.js';
 
 test('地址归一化忽略大小写与末尾斜杠', () => {
   assert.equal(normalizeEndpoint(' HTTPS://API.Example.com/v1/ '), 'https://api.example.com/v1');
@@ -83,4 +83,38 @@ test('平台预设按面板归属过滤，新增预设 id 自动生效', () => {
 
 test('普通目录模型不会被当成平台预设藏起来', () => {
   assert.equal(isPlatformManagedModel({ id: 'custom-text-model' }, new Set(['yd2-mini-video'])), false);
+});
+
+const repairTextModel = {
+  id: 'custom-anti-2-gemini-3-8-flash', kind: 'text', modelId: 'gpt-6.1-terra',
+  baseUrl: 'https://text.example.test/v1', enabled: true, available: false,
+  hasCredential: false, credentialStatus: 'needs_reentry'
+};
+
+test('management keeps the existing text target editable for key repair without making it runtime available', () => {
+  const row = repairTextModel;
+  const visible = [row].filter(model => isCatalogModelVisibleForManagement(model, [], true));
+  assert.equal(visible.length, 1, 'existing missing-key text model must be reachable for repair');
+  const merged = mergeGroupEntries({ catalogModels: visible });
+  assert.equal(merged.catalog[0].id, row.id);
+  assert.equal(merged.catalog[0].modelId, 'gpt-6.1-terra');
+  assert.equal(isUserManagedCatalogModel(merged.catalog[0], []), true, 'repair must use the existing custom-model edit form');
+  assert.equal(isCatalogModelAvailable(row), false, 'repair visibility must not activate the runtime picker');
+  assert.equal(isCatalogModelVisibleForManagement({ ...row, credentialStatus: undefined }, [], true), true);
+});
+
+test('management repair visibility preserves disabled, retired, pending video and platform ownership exclusions', () => {
+  for (const row of [
+    { ...repairTextModel, enabled: false },
+    { ...repairTextModel, displayName: '[off] old model' },
+    { ...repairTextModel, kind: 'video', runtimeReason: 'legacy_video_migration_pending' },
+    { ...repairTextModel, kind: 'video', unavailableReason: 'execution_adapter_unavailable' },
+    { ...repairTextModel, id: 'platform-video' },
+    { ...repairTextModel, builtIn: true }
+  ]) assert.equal(isCatalogModelVisibleForManagement(row, ['platform-video'], true), false, JSON.stringify(row));
+});
+
+test('missing-key repair requires management permission and does not broaden member visibility', () => {
+  assert.equal(isCatalogModelVisibleForManagement(repairTextModel, [], false), false);
+  assert.equal(isCatalogModelVisibleForManagement({ ...repairTextModel, hasCredential: true, available: true }, [], false), true);
 });

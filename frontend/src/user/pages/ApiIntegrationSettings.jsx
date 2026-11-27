@@ -7,7 +7,7 @@ import { API_CHANNEL_PRESETS, API_INTEGRATION_GROUPS } from './apiIntegrationSch
 import { channelEdits, mergeChannelEdit } from './apiIntegrationChannelEdits';
 import { buildPresetSelectionPayload, filterPresetsBySelection, selectedPresetIds } from './apiPresetSelection';
 import { createRevisionTracker, sameText } from './hydrationGuard';
-import { isCatalogModelAvailable, isPlatformManagedModel, isUserManagedCatalogModel, mergeGroupEntries, modelIdentity } from './apiConfigCatalogMerge';
+import { isCatalogModelVisibleForManagement, isUserManagedCatalogModel, mergeGroupEntries, modelIdentity } from './apiConfigCatalogMerge';
 import { getApiIntegrations, revealApiIntegration, saveApiIntegrations } from '../../shared/api/apiIntegrations';
 import { invalidateAvailableModelCatalog } from '../../shared/api/modelCatalog';
 import '../../shared/styles/api-integrations.css';
@@ -226,8 +226,8 @@ export default function ApiIntegrationSettings({
 
   const platformPresetIdSet = useMemo(() => new Set(platformPresetIds), [platformPresetIds]);
 
-  // 模型目录条目按 kind 归到文本/视频/图片三组，只有「可用」的才进入页面。
-  // 可用性由服务端 available 字段给出，与 /api/models 下拉完全同一口径。
+  // 模型目录按 kind 分组；管理者还能看见缺 Key 的已有自定义模型，便于补填。
+  // 业务下拉仍以 available 判断可用性，不受这里的修复入口影响。
   // 平台托管的模型（预设面板里的条目、本地执行器）在上方面板或引擎设置里维护，
   // 这里按归属过滤，不写死 id 清单；以后预设面板新增条目会自动去重。
   const catalogByGroup = useMemo(() => {
@@ -235,11 +235,10 @@ export default function ApiIntegrationSettings({
     (Array.isArray(models) ? models : []).forEach(model => {
       const kind = model?.kind;
       if (!map[kind]) return;
-      if (isPlatformManagedModel(model, platformPresetIdSet)) return;
-      if (isCatalogModelAvailable(model)) map[kind].push(model);
+      if (isCatalogModelVisibleForManagement(model, platformPresetIdSet, typeof onUpdateCatalogModel === 'function')) map[kind].push(model);
     });
     return map;
-  }, [models, platformPresetIdSet]);
+  }, [models, platformPresetIdSet, onUpdateCatalogModel]);
 
   const quotaByModelId = useMemo(
     () => new Map((Array.isArray(quotas) ? quotas : []).map(quota => [quota?.modelId, quota])),
