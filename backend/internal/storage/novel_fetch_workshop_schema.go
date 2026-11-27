@@ -95,6 +95,7 @@ func NovelFetchWorkshopMigrations() []Migration {
 ) ENGINE=InnoDB`}, CallbackChecksum: "novel-fetch-legacy-model-conflicts-v1"},
 		legacyConfigMigrationStateSchema(),
 		legacySettingFileReceiptsSchema(),
+		legacySettingSourceEvidenceSchema(),
 	}
 }
 

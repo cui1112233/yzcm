@@ -130,6 +130,30 @@ func (edits settingsEdits) apply(config map[string]any) error {
 	return nil
 }
 
+// Partial edits can exist while the standard file is offline. Only publish
+// them when each affected channel left in the restored document has a name.
+func validateEditedChannelNames(config map[string]any, edits settingsEdits) error {
+	addressed := map[string]bool{}
+	for _, edit := range edits {
+		p := edit.Path
+		if len(p) >= 4 && p[0] == apiIntegrationsSettingKey && p[1] == "customChannels" && p[3] != "id" {
+			addressed[p[2]] = true
+		}
+	}
+	for _, item := range apiIntegrationChannels(apiIntegrationStoredMap(config)) {
+		channel := item.(map[string]any)
+		id, _ := channel["id"].(string)
+		if addressed[id] {
+			name, _ := channel["name"].(string)
+			name = strings.TrimSpace(name)
+			if name == "" || len([]rune(name)) > 64 {
+				return errors.New("自定义渠道缺少有效名称")
+			}
+		}
+	}
+	return nil
+}
+
 func integrationChannelEdits(submitted []map[string]any, normalized []any, deleted []string) settingsEdits {
 	var edits settingsEdits
 	for i, input := range submitted {

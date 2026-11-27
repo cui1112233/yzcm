@@ -71,3 +71,38 @@ func TestLegacySettingFileReceiptsUpgrade(t *testing.T) {
 		t.Fatal("historical migration checksum changed", err)
 	}
 }
+
+func TestLegacySettingFileEvidenceUpgradePreservesReceipts(t *testing.T) {
+	ctx := context.Background()
+	db := energyMigrationTestDatabase(t)
+	prior := legacySettingFileReceiptsSchema()
+	if err := RunMigrations(ctx, db, []Migration{prior}); err != nil {
+		t.Fatal(err)
+	}
+	fp := strings.Repeat("1", 64)
+	if _, err := db.Exec("INSERT INTO novel_fetch_legacy_setting_files(owner_username,fingerprint) VALUES('owner',?)", fp); err != nil {
+		t.Fatal(err)
+	}
+	var upgrade []Migration
+	for _, m := range NovelFetchWorkshopMigrations() {
+		if m.Version == 1200009 {
+			upgrade = append(upgrade, m)
+		}
+	}
+	if len(upgrade) != 1 {
+		t.Fatal("missing additive evidence migration")
+	}
+	for range 2 {
+		if err := RunMigrations(ctx, db, upgrade); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var counted int
+	if err := db.QueryRow("SELECT COUNT(*) FROM novel_fetch_legacy_setting_files WHERE owner_username='owner' AND fingerprint=? AND source_ciphertext IS NULL", fp).Scan(&counted); err != nil || counted != 1 {
+		t.Fatal("lost old receipt", err)
+	}
+	var checksum string
+	if err := db.QueryRow("SELECT checksum FROM schema_migrations WHERE version=1200008").Scan(&checksum); err != nil || checksum != ChecksumFor(prior) {
+		t.Fatal("receipt migration changed", err)
+	}
+}

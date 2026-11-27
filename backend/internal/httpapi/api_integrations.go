@@ -331,17 +331,16 @@ func sanitizeIntegrationChannel(input map[string]any, previous map[string]any) (
 	channel["id"] = id
 
 	name, named := input["name"].(string)
-	if !named && previous != nil {
-		name, _ = previous["name"].(string)
-	}
 	// An identified channel may be temporarily unavailable during migration.
 	// Its omitted name never becomes a synthetic assignment.
-	if named || previous != nil || !addressed {
+	if named || !addressed {
 		name = strings.TrimSpace(name)
 		if name == "" || len([]rune(name)) > 64 {
 			return nil, false
 		}
 		channel["name"] = name
+	} else if existing, ok := previous["name"].(string); ok {
+		channel["name"] = existing
 	}
 	baseURL, _ := input["baseUrl"].(string)
 	baseURL = strings.TrimSpace(baseURL)

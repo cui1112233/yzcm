@@ -1,5 +1,10 @@
 package storage
 
+import (
+	"context"
+	"database/sql"
+)
+
 func legacyConfigMigrationStateSchema() Migration {
 	return Migration{Version: 1200007, CallbackChecksum: "novel-fetch-legacy-config-migrations-v1", SQL: []string{`CREATE TABLE IF NOT EXISTS novel_fetch_legacy_config_migrations (
   owner_username VARCHAR(191) NOT NULL,
@@ -25,4 +30,15 @@ func legacySettingFileReceiptsSchema() Migration {
  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
  PRIMARY KEY(owner_username,fingerprint)
  ) ENGINE=InnoDB`}}
+}
+
+func legacySettingSourceEvidenceSchema() Migration {
+	return Migration{Version: 1200009, CallbackChecksum: "legacy-setting-source-evidence-v1",
+		SQL: []string{`ALTER TABLE novel_fetch_legacy_setting_files ADD COLUMN source_ciphertext LONGTEXT NULL`},
+		Adopt: func(ctx context.Context, tx *sql.Tx) (bool, error) {
+			var exists bool
+			err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='novel_fetch_legacy_setting_files' AND column_name='source_ciphertext' AND data_type='longtext' AND is_nullable='YES')`).Scan(&exists)
+			return exists, err
+		},
+	}
 }

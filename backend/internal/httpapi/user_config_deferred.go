@@ -130,7 +130,7 @@ func (p *configSecretProvider) importDeferredSettings(ctx context.Context, owner
 			return false, err
 		}
 	}
-	if err := journal.ImportLegacySettingEdits(ctx, owner, edits, envelope.Fingerprint); err != nil {
+	if err := journal.ImportLegacySettingEdits(ctx, owner, edits, envelope.Fingerprint, envelope.Ciphertext); err != nil {
 		return false, err
 	}
 	_, _, active, err := journal.LoadLegacySettingEdits(ctx, owner)
@@ -155,6 +155,9 @@ func (p *configSecretProvider) importDeferredSettings(ctx context.Context, owner
 
 func (s *UserConfigStore) writeSettingsPatch(ctx context.Context, owner string, config map[string]any, changes settingsEdits) error {
 	if s.journal == nil {
+		if err := validateEditedChannelNames(config, changes); err != nil {
+			return err
+		}
 		return s.writeAuthenticatedConfig(owner, config)
 	}
 	state, found, err := s.journal.DiscoverLegacyConfigMigration(ctx, owner)
@@ -178,6 +181,9 @@ func (s *UserConfigStore) writeSettingsPatch(ctx context.Context, owner string, 
 			current = mergeConfigMap(defaultUserConfig, current)
 		}
 		if err := changes.apply(current); err != nil {
+			return err
+		}
+		if err := validateEditedChannelNames(current, changes); err != nil {
 			return err
 		}
 		return s.writeAuthenticatedConfig(owner, current)
@@ -214,6 +220,9 @@ func (p *configSecretProvider) ApplyLegacySettingEdits(owner, path string, edits
 		return err
 	}
 	if err := settingsEdits(edits).apply(config); err != nil {
+		return err
+	}
+	if err := validateEditedChannelNames(config, edits); err != nil {
 		return err
 	}
 	expected, err := json.Marshal(config)
