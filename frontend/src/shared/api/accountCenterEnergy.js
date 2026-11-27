@@ -21,6 +21,7 @@ export const ENERGY_CONSOLE_URL = 'http://newapi.yzcm.site/';
 export const ENERGY_TIME_ZONE = 'Asia/Shanghai';
 export const ENERGY_RANKING_PAGE_SIZE = 8;
 export const ENERGY_LEDGER_PAGE_SIZE = 20;
+export const ENERGY_TEAM_PAGE_SIZE = 12;
 const ENERGY_MAX_OFFSET = 10000;
 const datePattern = /^([1-9]\d{3}-\d{2}-\d{2})(?:T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2}))?$/;
 
@@ -80,8 +81,8 @@ export async function getAccountOverview(filters, options) {
 }
 
 /** @param {EnergyFilters} filters @param {EnergyRequestOptions} [options] @returns {Promise<EnergyTeams>} */
-export async function getEnergyTeams({ from, to, limit, offset }, options) {
-  return energyRequest('energy/teams', normalizeEnergyFilters({ from, to, limit, offset }), options);
+export async function getEnergyTeams({ member, from, to, limit, offset }, options) {
+  return energyRequest('energy/teams', normalizeEnergyFilters({ member, from, to, limit, offset }), options);
 }
 
 /** @param {EnergyFilters} filters @param {EnergyRequestOptions} [options] @returns {Promise<EnergyRanking>} */

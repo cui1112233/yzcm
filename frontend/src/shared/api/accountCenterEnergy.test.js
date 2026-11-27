@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  exportEnergyLedgerPage, getAccountOverview, loadEnergyDashboard, normalizeEnergyFilters, trustedEnergyConsole
+  exportEnergyLedgerPage, getAccountOverview, getEnergyTeams, loadEnergyDashboard, normalizeEnergyFilters, trustedEnergyConsole
 } from './accountCenterEnergy.js';
 
 test('normalizes one bounded filter and accepts real calendar dates', () => {
@@ -56,4 +56,17 @@ test('recharge uses only the configured console URL', () => {
   for (const url of [undefined, '', 'javascript:alert(1)', 'http://newapi.yzcm.site.example/', 'http://newapi.yzcm.site/?redirect=elsewhere']) {
     assert.equal(trustedEnergyConsole(url), '');
   }
+});
+
+test('team cards send the same member and date filter without excluding other teams', async t => {
+  const original = globalThis.localStorage;
+  globalThis.localStorage = { getItem: () => 'test-session' };
+  t.after(() => { if (original) globalThis.localStorage = original; else delete globalThis.localStorage; });
+  t.mock.method(globalThis, 'fetch', async path => {
+    const url = new URL(path, 'http://localhost');
+    assert.equal(url.pathname, '/api/account-center/energy/teams');
+    assert.deepEqual(Object.fromEntries(url.searchParams), { member: 'peer', from: '2026-11-02', to: '2026-11-27', limit: '12', offset: '0' });
+    return Response.json({ teams: [] });
+  });
+  await getEnergyTeams({ teamId: 'only-the-active-team', member: ' peer ', from: '2026-11-02', to: '2026-11-27', limit: 12, offset: 0 });
 });

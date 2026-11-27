@@ -1,6 +1,6 @@
 import { Alert, Button, Skeleton } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
-import { ENERGY_TIME_ZONE, getEnergyTeams, trustedEnergyConsole } from '../../shared/api/accountCenterEnergy.js';
+import { ENERGY_TEAM_PAGE_SIZE, ENERGY_TIME_ZONE, getEnergyTeams, trustedEnergyConsole } from '../../shared/api/accountCenterEnergy.js';
 import { Panel } from './accountCenterShared.jsx';
 import './account-center-energy.css';
 
@@ -115,22 +115,29 @@ export function EnergyTeamScope({ currentTeamId, selectedTeamId, onSelect, from,
   const [paging, setPaging] = useState({});
   const dateKey = JSON.stringify([from, to]);
   const offset = paging.dateKey === dateKey ? paging.offset : 0;
-  const teams = useEnergyQuery(JSON.stringify([dateKey, offset]), signal => getEnergyTeams({ from, to, limit: 12, offset }, { signal }));
+  const teams = useEnergyQuery(JSON.stringify([dateKey, offset]), signal => getEnergyTeams({ from, to, limit: ENERGY_TEAM_PAGE_SIZE, offset }, { signal }));
+  return <EnergyTeamCards currentTeamId={currentTeamId} selectedTeamId={selectedTeamId} onSelect={onSelect}
+    teams={teams.data} onPage={next => setPaging({ dateKey, offset: next })}>
+    <EnergyQueryState query={teams} label="团队余额与消耗" />
+  </EnergyTeamCards>;
+}
+
+export function EnergyTeamCards({ currentTeamId, selectedTeamId, onSelect, teams, onPage, member, activeSummary, children }) {
   return <Panel title="各团队余额与消耗" action={<Button type={!selectedTeamId ? 'primary' : 'default'} disabled={!currentTeamId}
     aria-pressed={!selectedTeamId} onClick={() => onSelect('')}>我的团队</Button>}>
-    <EnergyQueryState query={teams} label="团队余额与消耗" />
-    {teams.data?.teams.length === 0 && <p className="ac-empty">暂无可查看的团队</p>}
-    {teams.data && <>
+    {children}
+    {teams?.teams.length === 0 && <p className="ac-empty">暂无可查看的团队</p>}
+    {teams && <>
       <div className="energy-teams">
-        {teams.data.teams.map(({ team, balance, consumption }) => <div className="energy-team" key={team.id}>
+        {teams.teams.map(({ team, balance, consumption }) => <div className="energy-team" key={team.id}>
           <strong>{team.name}{team.archivedAt ? '（已归档）' : ''}</strong>
-          <EnergyBalanceValue balance={balance} />
-          <span>已核账消耗 {reconciledTotal(consumption)}</span>
+          <EnergyBalanceValue balance={activeSummary?.team?.id === team.id ? activeSummary.balance : balance} />
+          <span>{member ? '该成员已核账消耗' : '团队已核账消耗'} {reconciledTotal(consumption)}</span>
           <Button size="small" type={team.id === (selectedTeamId || currentTeamId) ? 'primary' : 'default'}
             aria-pressed={team.id === (selectedTeamId || currentTeamId)} onClick={() => onSelect(team.id)}>查看 {team.name}</Button>
         </div>)}
       </div>
-      <EnergyPager page={teams.data} onPage={next => setPaging({ dateKey, offset: next })} label="团队" />
+      <EnergyPager page={teams} onPage={onPage} label="团队" />
     </>}
   </Panel>;
 }

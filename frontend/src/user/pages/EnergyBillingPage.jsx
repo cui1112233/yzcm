@@ -1,12 +1,13 @@
 import { Alert, Button, Input, Tag } from 'antd';
 import { useEffect, useRef, useState } from 'react';
 import {
-  ENERGY_LEDGER_PAGE_SIZE, exportEnergyLedgerPage, getAccountOverview, loadEnergyDashboard, normalizeEnergyFilters
+  ENERGY_LEDGER_PAGE_SIZE, ENERGY_TEAM_PAGE_SIZE, exportEnergyLedgerPage, getAccountOverview, getEnergyTeams,
+  loadEnergyDashboard, normalizeEnergyFilters
 } from '../../shared/api/accountCenterEnergy.js';
 import { FEATURE_LABELS, PageHeader, Panel, RoleBadge } from './accountCenterShared.jsx';
 import {
   canSelectEnergyTeam, energyAmount, energyRoleLabel, energyTime, EnergyMetrics, EnergyPager, EnergyQueryState,
-  EnergyRanking, EnergyRecharge, EnergyTeamScope, useEnergyQuery
+  EnergyRanking, EnergyRecharge, EnergyTeamCards, useEnergyQuery
 } from './accountCenterEnergyShared.jsx';
 
 const blankFilters = { from: '', to: '', member: '' };
@@ -101,35 +102,48 @@ export default function EnergyBillingPage() {
   const [applied, setApplied] = useState({});
   const [ledgerOffset, setLedgerOffset] = useState(0);
   const [rankingOffset, setRankingOffset] = useState(0);
+  const [teamOffset, setTeamOffset] = useState(0);
   const selectTeam = current && canSelectEnergyTeam(current);
   const scope = (selectTeam && teamId) || current?.team?.id;
   const criteria = current && { from: current.filter.from, to: current.filter.to, ...applied };
   const filters = { ...criteria, teamId: scope, limit: ENERGY_LEDGER_PAGE_SIZE, offset: ledgerOffset };
-  const dashboardKey = scope ? JSON.stringify([current.subject.role, current.subject.username, filters, rankingOffset]) : null;
-  const dashboard = useEnergyQuery(dashboardKey, signal => loadEnergyDashboard(filters, current.subject, { signal, rankingOffset }));
+  const dashboardKey = current ? JSON.stringify([current.subject.role, current.subject.username, selectTeam, filters, rankingOffset, teamOffset]) : null;
+  const billing = useEnergyQuery(dashboardKey, async signal => {
+    const [dashboard, teams] = await Promise.all([
+      scope ? loadEnergyDashboard(filters, current.subject, { signal, rankingOffset }) : null,
+      selectTeam ? getEnergyTeams({ ...criteria, limit: ENERGY_TEAM_PAGE_SIZE, offset: teamOffset }, { signal }) : null
+    ]);
+    return { dashboard, teams };
+  });
   function resetPages() { setLedgerOffset(0); setRankingOffset(0); }
   function changeTeam(id) {
     setTeamId(id);
     if ((id || current.team?.id) !== scope) {
       setApplied(({ member, ...dates }) => dates);
+      if (applied.member) setTeamOffset(0);
       resetPages();
     }
   }
-  const ready = dashboard.data;
+  function applyFilters(next) {
+    setApplied(next);
+    resetPages();
+    setTeamOffset(0);
+  }
+  const ready = billing.data?.dashboard;
 
   return <div className="account-center-page energy-page">
-    <PageHeader title="能量与账单" actions={<Button onClick={current ? dashboard.retry : overview.retry}>刷新账单</Button>} />
+    <PageHeader title="能量与账单" actions={<Button onClick={overview.retry}>刷新账单</Button>} />
     <EnergyQueryState query={overview} label="账号与团队" />
     {current && <>
       <Panel title={ready?.summary.team?.name || (scope === current.team?.id ? current.team?.name : '') || '团队能量'}
         action={<RoleBadge canonicalRole={energyRoleLabel(current.subject.role)} />}>
         <EnergyRecharge url={current.rechargeUrl} />
       </Panel>
-      {selectTeam && <EnergyTeamScope currentTeamId={current.team?.id} selectedTeamId={teamId}
-        onSelect={changeTeam} from={criteria.from} to={criteria.to} />}
-      {scope && <EnergyFiltersForm key={scope} ownOnly={current.subject.role === 'member'} applied={applied} onApply={next => { setApplied(next); resetPages(); }} />}
-      <EnergyQueryState query={dashboard} label="能量与账单" />
-      {!scope && <><p className="ac-empty">{selectTeam ? '当前账号没有所属团队，请选择一个团队查看账单' : '当前账号没有可查询的所属团队'}</p><EnergyMetrics data={current} /></>}
+      {scope && <EnergyFiltersForm key={scope} ownOnly={current.subject.role === 'member'} applied={applied} onApply={applyFilters} />}
+      <EnergyQueryState query={{ ...billing, retry: overview.retry }} label="能量与账单" />
+      {billing.data?.teams && <EnergyTeamCards currentTeamId={current.team?.id} selectedTeamId={teamId}
+        onSelect={changeTeam} teams={billing.data.teams} onPage={setTeamOffset} member={criteria.member} activeSummary={ready?.summary} />}
+      {billing.data && !scope && <><p className="ac-empty">{selectTeam ? '当前账号没有所属团队，请选择一个团队查看账单' : '当前账号没有可查询的所属团队'}</p><EnergyMetrics data={current} /></>}
       {ready && <>
         <p className="energy-hint">{energyTime(ready.summary.filter.from)} 至 {energyTime(ready.summary.filter.to)}（不含结束时间）</p>
         <EnergyMetrics data={ready.summary} member={criteria.member} />
