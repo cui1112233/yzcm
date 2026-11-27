@@ -496,7 +496,7 @@ func recoverStaleNovelFetchTasks(ctx context.Context, store novelfetchworkshop.S
 // "ai_processing". The stored body is the authoritative signal for automatic
 // submission; an empty version must never be treated as ready.
 func novelFetchDocumentHasGeneratedAI(document novelfetchworkshop.Document) bool {
-	for index := 1; index <= 20; index++ {
+	for index := 1; index <= novelfetchworkshop.MaxAIVersions; index++ {
 		versionID := fmt.Sprintf("ai%d", index)
 		if value, ok := document.Versions[versionID]; ok {
 			text := strings.TrimSpace(fmt.Sprint(value))

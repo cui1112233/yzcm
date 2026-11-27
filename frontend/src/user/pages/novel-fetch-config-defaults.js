@@ -2,7 +2,7 @@ function defaultEnabled(value) {
   return typeof value === 'boolean' ? value : true;
 }
 
-export const NOVEL_FETCH_AI_VERSION_LIMIT = 20;
+export const NOVEL_FETCH_AI_VERSION_LIMIT = 5;
 export const NOVEL_FETCH_PROFILE_VERSIONS = ['original', ...Array.from({ length: NOVEL_FETCH_AI_VERSION_LIMIT }, (_, index) => `ai${index + 1}`)];
 
 export function withNovelFetchVersionProfiles(bindings = {}) {

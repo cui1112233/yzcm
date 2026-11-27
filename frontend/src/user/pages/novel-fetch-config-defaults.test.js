@@ -26,7 +26,7 @@ test('旧配置缺少自动处理开关时默认开启', () => {
     retries: 1,
     temperature: 0.2
   });
-  assert.deepEqual(result.web_submit.version_profiles, Object.fromEntries(['original', ...Array.from({ length: 20 }, (_, i) => `ai${i + 1}`)].map(version => [version, ''])));
+  assert.deepEqual(result.web_submit.version_profiles, Object.fromEntries(['original', ...Array.from({ length: 5 }, (_, i) => `ai${i + 1}`)].map(version => [version, ''])));
 });
 
 test('敏感词 AI 参数保留用户已保存的 REA 字段', () => {

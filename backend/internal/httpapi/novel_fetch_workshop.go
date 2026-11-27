@@ -4104,8 +4104,8 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求内容无效"})
 			return
 		}
-		if input.Count < 0 || input.Count > 20 {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "AI 数量须为 1 到 20"})
+		if input.Count < 0 || input.Count > novelfetchworkshop.MaxAIVersions {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "AI 数量须为 1 到 5"})
 			return
 		}
 		queueWorkshopGenerate(w, req, store, queue, input.Count)
@@ -4857,7 +4857,7 @@ func novelFetchClassificationResolved(document novelfetchworkshop.Document) bool
 }
 
 // canonicalNovelFetchAIVersion maps aliases such as ai01/ai001 to the
-// canonical ai1..ai20 identifier. Anything outside that range is rejected so a
+// canonical ai1..ai5 identifier. Anything outside that range is rejected so a
 // single job cannot request an unbounded number of AI rewrites per book.
 func canonicalNovelFetchAIVersion(value string) (string, bool) {
 	name := strings.ToLower(strings.TrimSpace(value))
@@ -4865,7 +4865,7 @@ func canonicalNovelFetchAIVersion(value string) (string, bool) {
 		return "", false
 	}
 	index, err := strconv.Atoi(strings.TrimPrefix(name, "ai"))
-	if err != nil || index < 1 || index > 20 {
+	if err != nil || index < 1 || index > novelfetchworkshop.MaxAIVersions {
 		return "", false
 	}
 	return "ai" + strconv.Itoa(index), true
@@ -4893,7 +4893,7 @@ func normalizeNovelFetchAIVersions(values []string) ([]string, error) {
 		}
 		canonical, ok := canonicalNovelFetchAIVersion(value)
 		if !ok {
-			return nil, fmt.Errorf("不支持的AI版本：%s（仅支持 ai1 到 ai20）", value)
+			return nil, fmt.Errorf("不支持的AI版本：%s（仅支持 ai1 到 ai5）", value)
 		}
 		if seen[canonical] {
 			continue

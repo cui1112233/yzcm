@@ -288,13 +288,16 @@ func rewritePersistenceFailure(err error) error {
 	return fmt.Errorf("AI 输出已返回但后续处理或保存失败，持久化结果未知，请核对后手动处理: %w", errors.Join(ErrRewritePersistence, err))
 }
 
+// MaxAIVersions is the per-book limit for new AI text versions.
+const MaxAIVersions = 5
+
 // GenerateAIRewrites 生成并保存 ai1、ai2... 版本。任何一次模型失败都不会保存半截版本。
 func GenerateAIRewrites(ctx context.Context, store Store, owner, bookID string, count int, provider RewriteProvider) (Document, error) {
 	if provider == nil {
 		return Document{}, errors.New("AI 改文模型未配置")
 	}
-	if count < 1 || count > 20 {
-		return Document{}, errors.New("生成数量需为 1~20 的整数")
+	if count < 1 || count > MaxAIVersions {
+		return Document{}, errors.New("生成数量需为 1~5 的整数")
 	}
 	versions := make([]string, 0, count)
 	for index := 1; index <= count; index++ {
@@ -366,7 +369,7 @@ func GenerateAIRewritesForVersionsProcessed(ctx context.Context, store Store, ow
 			return Document{}, fmt.Errorf("不支持的改文版本：%s", versionID)
 		}
 		index, parseErr := strconv.Atoi(strings.TrimPrefix(versionID, "ai"))
-		if parseErr != nil || index < 1 || index > 20 {
+		if parseErr != nil || index < 1 || index > MaxAIVersions {
 			return Document{}, fmt.Errorf("不支持的改文版本：%s", versionID)
 		}
 		seen[versionID] = true

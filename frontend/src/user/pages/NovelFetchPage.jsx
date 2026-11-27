@@ -24,7 +24,7 @@ import { createNovelFetchIntake } from '../../shared/api/batchFactory';
 import { listAvailableModels as listAvailableTextModels, modelSelectOptions } from '../../shared/api/modelCatalog';
 import { readNovelFetchProcessSettings, writeNovelFetchProcessSettings, resolveNovelFetchTextModel, novelFetchTextModelError, resolveNovelFetchSelectedVersions } from './novel-fetch-process-settings';
 import { NovelFetchAutomationOptions } from './novel-fetch-automation-options.js';
-import { withNovelFetchConfigDefaults, withNovelFetchVersionProfiles, NOVEL_FETCH_PROFILE_VERSIONS } from './novel-fetch-config-defaults.js';
+import { withNovelFetchConfigDefaults, withNovelFetchVersionProfiles, NOVEL_FETCH_PROFILE_VERSIONS, NOVEL_FETCH_AI_VERSION_LIMIT } from './novel-fetch-config-defaults.js';
 import { novelFetchAiVersions, novelFetchSensitiveComparisons, novelFetchSubmitDiagnostic, novelFetchTaskSummaryItems } from './novel-fetch-task-detail.js';
 import { novelFetchLatestJob, novelFetchProgressLines, novelFetchJobFinished, novelFetchJobState, novelFetchActionNotice } from './novel-fetch-progress.js';
 import { beijingDateKey, currentBatchBookIds, filterNovelFetchTasks, mergeNovelFetchQueueStatus, novelFetchBatchResultSummary, novelFetchCharCount, novelFetchCurrentBatchTaskDetail, novelFetchOriginalFetchRetry, novelFetchPollingPlan, novelFetchQueueSummary, novelFetchStageLabel, novelFetchSubmissionLabel, novelFetchTaskDateKey, novelFetchTaskStatus, novelFetchVersionReady, novelFetchClassificationLabel, retainVisibleTaskIds, stoppableCurrentBatchBookIds, webSubmitStatusLabel, webSubmitRunStatusLabel } from './novel-fetch-status.js';
@@ -333,7 +333,7 @@ function NovelFetchConfigPanel({ form, effectiveValues, dirty, onDirty, versionP
           <Form.Item name={['fetch', 'retries']} label="抓取重试"><InputNumber min={0} max={10} style={{ width: '100%' }} /></Form.Item>
           <Form.Item name={['fetch', 'original_fetch_retry_interval_minutes']} label="抓取失败再试（分钟）"><InputNumber min={1} max={1440} placeholder="默认 60" style={{ width: '100%' }} /></Form.Item>
           <Form.Item name={['fetch', 'timeout_seconds']} label="抓取超时（秒）"><InputNumber min={1} max={300} style={{ width: '100%' }} /></Form.Item>
-          <Form.Item name={['rewrite', 'default_ai_count']} label="默认 AI 数量"><InputNumber min={1} max={20} style={{ width: '100%' }} /></Form.Item>
+          <Form.Item name={['rewrite', 'default_ai_count']} label="默认 AI 数量"><InputNumber min={1} max={NOVEL_FETCH_AI_VERSION_LIMIT} style={{ width: '100%' }} /></Form.Item>
           <Form.Item name={['rewrite', 'process_line_count']} label="默认处理行数"><InputNumber min={1} max={100} style={{ width: '100%' }} /></Form.Item>
           <Form.Item name={['rewrite', 'anchor_line_count']} label="锚点行数"><InputNumber min={0} max={100} style={{ width: '100%' }} /></Form.Item>
           <Form.Item name={['rewrite', 'temperature']} label="改文温度"><InputNumber min={0} max={2} step={0.01} style={{ width: '100%' }} /></Form.Item>
@@ -1977,7 +1977,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
   const versionConfigPanel = <div className="novel-fetch-panel novel-fetch-version-config-panel">
     <div className="novel-fetch-public-heading"><div><Typography.Title level={4}>版本对应配置档</Typography.Title><Typography.Text type="secondary">管理默认上传配置档和各版本的配置档绑定，统一使用右上角保存。</Typography.Text></div></div>
     <Space wrap><Button onClick={() => handleWebSubmit(syncWebSubmitConfigs, '已同步批量后台配置')}>同步批量后台配置</Button><Button onClick={syncWebSubmitOrganizations}>同步组织归属</Button><Button onClick={() => handleWebSubmit(syncWebSubmitStyles, '已同步批量风格类型')}>同步批量风格类型</Button></Space>
-    <div className="novel-fetch-version-profile-grid"><label>默认上传配置档<Select value={selectedUploadProfile || undefined} placeholder="选择默认配置档" options={uploadProfiles.map(profile => ({ value: String(profile.id || profile.name), label: profile.name || profile.id }))} onChange={value => { setSelectedUploadProfile(value); setConfigDirty(true); }} /></label>{AI_VERSIONS.map(version => <label key={version}>{AI_VERSION_LABELS[version]} 配置档<Select allowClear value={profileBindings[version] || undefined} placeholder="跟随默认配置档" options={uploadProfiles.map(profile => ({ value: String(profile.id || profile.name), label: profile.name || profile.id }))} onChange={value => { setProfileBindings(current => ({ ...withNovelFetchVersionProfiles(current), [version]: value || '' })); setConfigDirty(true); }} /></label>)}</div><Typography.Text type="secondary">原文和 AI1-AI20 均可单独指定；未绑定版本统一跟随默认配置档。</Typography.Text><Typography.Text type="secondary">提示词请在“提示词配置”中编辑；全部修改统一点击右上角“保存配置”。</Typography.Text>
+    <div className="novel-fetch-version-profile-grid"><label>默认上传配置档<Select value={selectedUploadProfile || undefined} placeholder="选择默认配置档" options={uploadProfiles.map(profile => ({ value: String(profile.id || profile.name), label: profile.name || profile.id }))} onChange={value => { setSelectedUploadProfile(value); setConfigDirty(true); }} /></label>{AI_VERSIONS.map(version => <label key={version}>{AI_VERSION_LABELS[version]} 配置档<Select allowClear value={profileBindings[version] || undefined} placeholder="跟随默认配置档" options={uploadProfiles.map(profile => ({ value: String(profile.id || profile.name), label: profile.name || profile.id }))} onChange={value => { setProfileBindings(current => ({ ...withNovelFetchVersionProfiles(current), [version]: value || '' })); setConfigDirty(true); }} /></label>)}</div><Typography.Text type="secondary">原文和 AI1-AI5 均可单独指定；未绑定版本统一跟随默认配置档。</Typography.Text><Typography.Text type="secondary">提示词请在“提示词配置”中编辑；全部修改统一点击右上角“保存配置”。</Typography.Text>
   </div>;
   const submissionStatus = [
     { key: 'environment', label: '环境', value: webSubmitEnvironment ? '已检测' : '待检测' },
@@ -2126,7 +2126,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
           <V88Button variant="secondary" loading={taskActionBusy === 'generate-ai'} onClick={handleGenerateAi}>生成 AI 改文</V88Button>
           <V88Button variant="secondary" loading={taskActionBusy === 'sensitive-repair'} onClick={handleSensitiveRepair}>敏感词 AI 修复</V88Button>
           <Typography.Text type="secondary">AI 数量</Typography.Text>
-          <InputNumber min={1} max={20} value={batchAiCount} onChange={value => setBatchAiCount(value || 1)} />
+          <InputNumber min={1} max={NOVEL_FETCH_AI_VERSION_LIMIT} value={batchAiCount} onChange={value => setBatchAiCount(value || 1)} />
           <V88Button variant="secondary" loading={taskActionBusy === 'ai-count'} onClick={updateSelectedAiCount}>调整选中</V88Button>
           <V88Button variant="secondary" loading={taskActionBusy === 'rules-selected'} onClick={applySelectedRules}>规则处理选中</V88Button>
           <V88Button variant="secondary" icon={<Factory size={16} />} title={`入厂内容：${batchFactoryVersionLabel(batchFactorySourceVersion)}`} onClick={transferToBatchFactory}>进入批量工厂</V88Button>

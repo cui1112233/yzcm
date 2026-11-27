@@ -47,21 +47,21 @@ func TestChainExplicitEmptyPreviewNeverFallsBackToAI1(t *testing.T) {
 	}
 }
 
-func TestChainTwentyRequestedVersionsAreAllCandidates(t *testing.T) {
+func TestChainFiveRequestedVersionsAreAllCandidates(t *testing.T) {
 	s := novelfetchworkshop.NewMemoryStore()
 	versions := []string{}
-	for i := 1; i <= 20; i++ {
+	for i := 1; i <= 5; i++ {
 		versions = append(versions, fmt.Sprintf("ai%d", i))
 	}
 	got, err := missingWorkshopAIBodies(context.Background(), s, "tester", novelfetchworkshop.Document{BookID: "book"}, versions)
-	if err != nil || len(got) != 20 || got[19] != "ai20" {
-		t.Fatalf("twenty selected versions became %v (%v)", got, err)
+	if err != nil || len(got) != 5 || got[4] != "ai5" {
+		t.Fatalf("five selected versions became %v (%v)", got, err)
 	}
-	canonical, err := normalizeNovelFetchAIVersions([]string{"AI00020", "ai020", "original"})
-	if err != nil || len(canonical) != 2 || canonical[0] != "ai20" {
+	canonical, err := normalizeNovelFetchAIVersions([]string{"AI0005", "ai05", "original"})
+	if err != nil || len(canonical) != 2 || canonical[0] != "ai5" {
 		t.Fatalf("bounded aliases rejected: %v %v", canonical, err)
 	}
-	for _, v := range []string{"ai21", "ai0", "ai-1", "ai99999999999999999999"} {
+	for _, v := range []string{"ai6", "ai20", "ai21", "ai0", "ai-1", "ai99999999999999999999"} {
 		if _, err := normalizeNovelFetchAIVersions([]string{v}); err == nil {
 			t.Fatalf("unbounded version accepted: %s", v)
 		}

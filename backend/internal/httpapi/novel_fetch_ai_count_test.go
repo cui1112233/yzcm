@@ -105,12 +105,19 @@ func TestWorkshopAICountLimitAndDurableReadyVersions(t *testing.T) {
 
 func TestWorkshopAICountRejectsInvalidValues(t *testing.T) {
 	store := novelfetchworkshop.NewMemoryStore()
-	for _, body := range []string{`{"count":-1}`, `{"count":21}`} {
+	for _, body := range []string{`{"count":-1}`, `{"count":6}`, `{"count":21}`} {
 		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
 		res := httptest.NewRecorder()
 		updateTaskMeta(res, req, store, "aiCount")
 		if res.Code != http.StatusBadRequest {
 			t.Fatalf("invalid value accepted: %s", body)
 		}
+	}
+}
+
+func TestWorkshopAICountNeverExceedsFiveWithOldConfig(t *testing.T) {
+	cfg := map[string]any{"rewrite": map[string]any{"max_ai_count": 20, "default_ai_count": 20}}
+	if got := workshopAIRequestedCount(novelfetchworkshop.Document{}, cfg, 0); got != 5 {
+		t.Fatalf("old config requested %d versions", got)
 	}
 }

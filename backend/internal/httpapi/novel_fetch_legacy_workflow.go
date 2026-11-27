@@ -727,8 +727,8 @@ func updateTaskMeta(w http.ResponseWriter, req *http.Request, store novelfetchwo
 		return
 	}
 	uniqueIDs := uniqueNovelFetchTaskIDs(resolvedIDs)
-	if in.Count < 1 || in.Count > 20 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "AI 数量须为 1 到 20"})
+	if in.Count < 1 || in.Count > novelfetchworkshop.MaxAIVersions {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "AI 数量须为 1 到 5"})
 		return
 	}
 	cfg, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
