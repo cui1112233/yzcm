@@ -93,9 +93,9 @@ type migrationFinalizerProbe struct {
 }
 
 func (*migrationFinalizerProbe) OpenModelConfig(string, map[string]any) error { return nil }
-func (p *migrationFinalizerProbe) FinalizeLegacySettings(string, string) error {
+func (p *migrationFinalizerProbe) ImportDeferredSettings(context.Context, string, string, *MySQLStore) (bool, error) {
 	p.finalized = true
-	return nil
+	return false, nil
 }
 
 func TestLegacyConfigMigrationStateStaleFinalization(t *testing.T) {

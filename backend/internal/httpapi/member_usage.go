@@ -33,9 +33,7 @@ func YZCMUsageCredentialResolver(config *UserConfigStore, primary ...func(contex
 		if strings.TrimSpace(owner) == "" || config == nil {
 			return "", errors.New("usage account unavailable")
 		}
-		config.mu.Lock()
 		settings, err := config.GetConfig(ctx, owner)
-		config.mu.Unlock()
 		if err != nil {
 			return "", err
 		}

@@ -1,18 +1,18 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"qiantie/backend/internal/novelfetchworkshop"
 )
 
-// Only explicit user updates belong in this file. Merging defaults or a copy
-// of the old catalog here would hide unrelated values when the file returns.
 const deferredSettingsFile = "deferred-settings.json"
 
 type deferredSettingsEnvelope struct {
@@ -20,142 +20,177 @@ type deferredSettingsEnvelope struct {
 	Fingerprint string `json:"fingerprint"`
 }
 
-func (s *UserConfigStore) deferredSettings(owner string) (settingsEdits, error) {
-	if s == nil || s.BaseDir == "" {
-		return nil, nil
-	}
-	path, err := UserScopedPath(s.BaseDir, owner, deferredSettingsFile)
-	if err != nil {
-		return nil, err
-	}
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var stored deferredSettingsEnvelope
-	if err := json.Unmarshal(raw, &stored); err != nil {
-		return nil, err
-	}
-	binding := novelfetchworkshop.LegacyConflictSource{Document: deferredSettingsFile, Field: "settings"}
-	plain, err := s.secrets.OpenLegacyConflict(owner, binding, stored.Ciphertext, stored.Fingerprint)
-	if err != nil {
-		return nil, err
-	}
+func snapshotAssignments(path []string, values, defaults map[string]any) settingsEdits {
 	var edits settingsEdits
-	if err := json.Unmarshal([]byte(plain), &edits); err != nil {
-		// Older encrypted files contained maps. Empty generated sections had
-		// no delete intent. Preserve restored fields which those sections hid.
-		var old map[string]any
-		if err := json.Unmarshal([]byte(plain), &old); err != nil {
-			return nil, err
+	for key, value := range values {
+		fallback := defaults[key]
+		if nested, ok := value.(map[string]any); ok {
+			child, _ := fallback.(map[string]any)
+			edits = append(edits, snapshotAssignments(append(path, key), nested, child)...)
+			continue
 		}
-		if section, ok := old[apiIntegrationsSettingKey].(map[string]any); ok {
-			if channels, ok := section["customChannels"].([]any); ok {
-				delete(section, "customChannels")
-				for _, v := range channels {
-					row, _ := v.(map[string]any)
-					if id, _ := row["id"].(string); id != "" {
-						edits = append(edits, fieldEdits([]string{apiIntegrationsSettingKey, "customChannels", id}, row)...)
-					}
-				}
+		switch v := value.(type) {
+		case nil:
+			continue
+		case string:
+			if strings.TrimSpace(v) == "" {
+				continue
 			}
-			if pins, ok := section["pinned"].([]any); ok && len(pins) == 0 {
-				delete(section, "pinned")
+		case []any:
+			if len(v) == 0 {
+				continue
+			}
+		case float64:
+			if v == 0 {
+				continue
 			}
 		}
-		edits = append(edits, fieldEdits(nil, old)...)
-	}
-	for _, edit := range edits {
-		if len(edit.Path) == 0 {
-			return nil, fmt.Errorf("invalid deferred settings path")
+		raw, _ := json.Marshal(value)
+		base, _ := json.Marshal(fallback)
+		if !bytes.Equal(raw, base) {
+			edits = append(edits, fieldEdits(path, map[string]any{key: value})...)
 		}
 	}
-	if edits == nil {
-		edits = settingsEdits{}
+	return edits
+}
+func snapshotEdits(old map[string]any) settingsEdits {
+	edits := snapshotAssignments(nil, preferenceOnlyPatch(old), defaultUserConfig)
+	section, _ := old[apiIntegrationsSettingKey].(map[string]any)
+	channelDefaults := map[string]any{"enabled": true, "apiFormat": "openai_compatible", "model": defaultUserConfig["model"], "baseUrl": defaultUserConfig["baseUrl"]}
+	channels, _ := section["customChannels"].([]any)
+	for _, v := range channels {
+		row, _ := v.(map[string]any)
+		id, _ := row["id"].(string)
+		if id == "" {
+			continue
+		}
+		delete(row, "id")
+		edits = append(edits, snapshotAssignments([]string{apiIntegrationsSettingKey, "customChannels", id}, row, channelDefaults)...)
 	}
-	return edits, nil
+	delete(section, "customChannels")
+	return append(edits, snapshotAssignments([]string{apiIntegrationsSettingKey}, section, nil)...)
 }
 
-func (s *UserConfigStore) writeSettingsPatch(ctx context.Context, owner string, config map[string]any, changes settingsEdits, catalog novelfetchworkshop.Store) error {
-	saved, err := s.deferredSettings(owner)
+// Called with the configuration file lock held. The file remains in place
+// until both the database commit and a separate authenticated read succeed.
+func (p *configSecretProvider) ImportDeferredSettings(ctx context.Context, owner, path string, journal *novelfetchworkshop.MySQLStore) (bool, error) {
+	return p.importDeferredSettings(ctx, owner, path, journal, false)
+}
+func (p *configSecretProvider) importDeferredSettings(ctx context.Context, owner, path string, journal *novelfetchworkshop.MySQLStore, discover bool) (bool, error) {
+	legacyPath := filepath.Join(filepath.Dir(path), deferredSettingsFile)
+	raw, err := os.ReadFile(legacyPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		return err
+		return false, err
 	}
-	lookup, ok := catalog.(interface {
-		HasPendingLegacyVideos(context.Context, string) (bool, error)
-	})
-	if !ok && saved == nil {
-		return s.writeAuthenticatedConfig(owner, config)
+	var envelope deferredSettingsEnvelope
+	if err = json.Unmarshal(raw, &envelope); err != nil {
+		return false, err
 	}
-	if ok {
-		if discover, ok := catalog.(interface {
-			DiscoverLegacyConfigMigration(context.Context, string) (novelfetchworkshop.LegacyConfigMigrationState, bool, error)
-		}); ok {
-			if _, _, err := discover.DiscoverLegacyConfigMigration(ctx, owner); err != nil {
-				return err
-			}
+	plain, err := p.OpenLegacyConflict(owner, novelfetchworkshop.LegacyConflictSource{Document: deferredSettingsFile, Field: "settings"}, envelope.Ciphertext, envelope.Fingerprint)
+	if err != nil {
+		return false, err
+	}
+	var edits settingsEdits
+	switch data := bytes.TrimSpace([]byte(plain)); {
+	case len(data) > 0 && data[0] == '[':
+		if err := json.Unmarshal(data, &edits); err != nil {
+			return false, err
 		}
-		pending, err := lookup.HasPendingLegacyVideos(ctx, owner)
+	case len(data) > 0 && data[0] == '{':
+		var old map[string]any
+		if err := json.Unmarshal(data, &old); err != nil {
+			return false, err
+		}
+		edits = snapshotEdits(old)
+	default:
+		return false, errors.New("invalid deferred settings document")
+	}
+	if journal == nil {
+		return false, errors.New("legacy settings import requires migration storage")
+	}
+	if discover {
+		if _, _, err := journal.DiscoverLegacyConfigMigration(ctx, owner); err != nil {
+			return false, err
+		}
+	}
+	if err := journal.ImportLegacySettingEdits(ctx, owner, edits); err != nil {
+		return false, err
+	}
+	if _, _, active, err := journal.LoadLegacySettingEdits(ctx, owner); err != nil {
+		return false, err
+	} else if !active {
+		return false, novelfetchworkshop.ErrConfigConflict
+	}
+	return true, os.Remove(legacyPath)
+}
+
+func (s *UserConfigStore) writeSettingsPatch(ctx context.Context, owner string, config map[string]any, changes settingsEdits) error {
+	if s.journal != nil {
+		state, found, err := s.journal.DiscoverLegacyConfigMigration(ctx, owner)
 		if err != nil {
 			return err
 		}
-		if !pending {
-			if saved != nil {
-				path, err := s.configPath(owner)
-				if err != nil {
+		if found {
+			if state.Phase != novelfetchworkshop.LegacyComplete {
+				err = s.journal.AppendLegacySettingEdits(ctx, owner, changes)
+				if !errors.Is(err, novelfetchworkshop.ErrConfigConflict) {
 					return err
 				}
-				if err := s.secrets.FinalizeLegacySettings(owner, path); err != nil {
-					return err
-				}
-				config = s.readLegacyConfig(owner)
-				changes.apply(config)
 			}
-			return s.writeAuthenticatedConfig(owner, config)
+			// Completion may have published a newer revision since the form read.
+			// Merge only this request into the verified standard document.
+			path, err := s.configPath(owner)
+			if err != nil {
+				return err
+			}
+			current, err := s.readStandardFile(path)
+			if err != nil {
+				return err
+			}
+			if current == nil || current["ciphertext"] != nil || current["fingerprint"] != nil {
+				return errors.New("completed standard configuration unavailable")
+			}
+			if err := changes.apply(current); err != nil {
+				return err
+			}
+			return s.writeAuthenticatedConfig(owner, current)
 		}
 	}
-	raw, err := json.Marshal(append(saved, changes...))
-	if err != nil {
-		return err
-	}
-	binding := novelfetchworkshop.LegacyConflictSource{Document: deferredSettingsFile, Field: "settings"}
-	ciphertext, fingerprint, err := s.secrets.SealLegacyConflict(owner, binding, string(raw))
-	if err != nil {
-		return err
-	}
-	path, err := UserScopedPath(s.BaseDir, owner, deferredSettingsFile)
-	if err != nil {
-		return err
-	}
-	return writeUserConfigDocument(path, deferredSettingsEnvelope{ciphertext, fingerprint})
+	return s.writeAuthenticatedConfig(owner, config)
 }
 
-// FinalizeLegacySettings is called with the owner's configuration writer
-// locked. Assignments and tombstones can be replayed if removal is interrupted.
-func (p *configSecretProvider) FinalizeLegacySettings(owner, path string) error {
+func (p *configSecretProvider) ApplyLegacySettingEdits(owner, path string, edits []novelfetchworkshop.LegacySettingEdit) error {
 	s := &UserConfigStore{BaseDir: filepath.Dir(filepath.Dir(path)), secrets: p}
-	edits, err := s.deferredSettings(owner)
-	if err != nil || edits == nil {
-		return err
-	}
-	raw, err := os.ReadFile(path)
+	config, err := s.readStandardFile(path)
 	if err != nil {
 		return err
 	}
-	var config map[string]any
-	if err := json.Unmarshal(raw, &config); err != nil {
+	if config == nil || config["ciphertext"] != nil || config["fingerprint"] != nil {
+		return errors.New("standard configuration unavailable during replay")
+	}
+	if err := settingsEdits(edits).apply(config); err != nil {
 		return err
 	}
-	if config == nil || config["ciphertext"] != nil && config["fingerprint"] != nil {
-		return fmt.Errorf("standard configuration is unavailable for deferred settings")
-	}
-	edits.apply(config)
-	delete(config, novelfetchworkshop.LegacyModelDefaultsFileKey)
 	if err := s.writeAuthenticatedConfig(owner, config); err != nil {
 		return err
 	}
-	return os.Remove(filepath.Join(filepath.Dir(path), deferredSettingsFile))
+	verified, err := s.readStandardFile(path)
+	if err != nil {
+		return err
+	}
+	expected, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	actual, err := json.Marshal(verified)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(expected, actual) {
+		return fmt.Errorf("standard configuration verification failed")
+	}
+	return nil
 }

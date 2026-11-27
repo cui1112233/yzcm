@@ -457,13 +457,14 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 		return nil, err
 	}
 	hasScrubPlan := ModelConfigText(settings, modelLegacyScrubPendingKey) != ""
-	replaySettings := settings[legacyModelMigrationVersionKey] == legacyModelMigrationVersion && !checkFile && s.LegacyConfigDir != ""
-	if hasScrubPlan || state.Phase == LegacyFinalizing || replaySettings {
+	if hasScrubPlan || state.Phase == LegacyFinalizing {
 		if err := s.finishLegacyMigration(ctx, owner, settings, state); err != nil {
 			return nil, fmt.Errorf("clean legacy model configuration: %w", err)
 		}
 		delete(settings, modelLegacyScrubPendingKey)
 		delete(settings, legacyModelScrubEntriesKey)
+	} else if err := s.resumeArchivedSettingFile(ctx, owner, state.Phase); err != nil {
+		return nil, err
 	}
 	return EnsureWorkshopDefaults(settings), nil
 }

@@ -22,8 +22,6 @@ func configuredStorageRoot(ctx context.Context, configs *UserConfigStore, userna
 	if configs == nil {
 		return "", nil
 	}
-	configs.mu.Lock()
-	defer configs.mu.Unlock()
 	config, err := configs.GetConfig(ctx, username)
 	if err != nil {
 		return "", err

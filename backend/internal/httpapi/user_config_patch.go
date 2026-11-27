@@ -1,17 +1,16 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"slices"
 	"strings"
+
+	"qiantie/backend/internal/novelfetchworkshop"
 )
 
 // A journal records the caller's explicit field assignments and removals.
 // Channel paths address a stable channel ID, never a position in a list.
-type settingsEdit struct {
-	Path   []string `json:"path"`
-	Value  any      `json:"value,omitempty"`
-	Delete bool     `json:"delete,omitempty"`
-}
+type settingsEdit = novelfetchworkshop.LegacySettingEdit
 
 type settingsEdits []settingsEdit
 
@@ -22,17 +21,21 @@ func fieldEdits(prefix []string, patch map[string]any) settingsEdits {
 		if nested, ok := value.(map[string]any); ok {
 			edits = append(edits, fieldEdits(path, nested)...)
 		} else {
-			edits = append(edits, settingsEdit{Path: path, Value: value, Delete: value == nil})
+			edit := settingsEdit{Path: path, Delete: value == nil}
+			if value != nil {
+				edit.Value, _ = json.Marshal(value)
+			}
+			edits = append(edits, edit)
 		}
 	}
 	return edits
 }
 
-func applyFieldEdit(object map[string]any, path []string, edit settingsEdit) {
+func applyFieldEdit(object map[string]any, path []string, value any, remove bool) {
 	for _, field := range path[:len(path)-1] {
 		child, ok := object[field].(map[string]any)
 		if !ok {
-			if edit.Delete {
+			if remove {
 				return
 			}
 			child = map[string]any{}
@@ -41,18 +44,24 @@ func applyFieldEdit(object map[string]any, path []string, edit settingsEdit) {
 		object = child
 	}
 	key := path[len(path)-1]
-	if edit.Delete {
+	if remove {
 		delete(object, key)
 	} else {
-		object[key] = edit.Value
+		object[key] = value
 	}
 }
 
-func (edits settingsEdits) apply(config map[string]any) {
+func (edits settingsEdits) apply(config map[string]any) error {
 	for _, edit := range edits {
+		var value any
+		if !edit.Delete {
+			if err := json.Unmarshal(edit.Value, &value); err != nil {
+				return err
+			}
+		}
 		path := edit.Path
 		if len(path) < 3 || path[0] != apiIntegrationsSettingKey || path[1] != "customChannels" {
-			applyFieldEdit(config, path, edit)
+			applyFieldEdit(config, path, value, edit.Delete)
 			continue
 		}
 		integration := apiIntegrationStoredMap(config)
@@ -73,11 +82,12 @@ func (edits settingsEdits) apply(config map[string]any) {
 				row = map[string]any{"id": path[2]}
 				channels = append(channels, row)
 			}
-			applyFieldEdit(row, path[3:], edit)
+			applyFieldEdit(row, path[3:], value, edit.Delete)
 		}
 		integration["customChannels"] = channels
 		config[apiIntegrationsSettingKey] = integration
 	}
+	return nil
 }
 
 func integrationChannelEdits(previous []any, submitted []map[string]any, normalized []any) settingsEdits {

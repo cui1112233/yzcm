@@ -276,6 +276,7 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	}
 	novelFetchStore := novelfetchworkshop.NewMySQLStore(db)
 	userConfigStore := httpapi.NewUserConfigStore(cfg.ScriptHistoryDir)
+	userConfigStore.UseLegacySettingJournal(novelFetchStore)
 	novelFetchStore.ModelSecrets = userConfigStore.ModelConfigSecrets()
 	agentWorkspaceStore := agentworkspace.NewMySQLStore(db)
 	agentProxyStore := agentproxy.NewMySQLStore(db)

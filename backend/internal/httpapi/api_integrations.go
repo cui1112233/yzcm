@@ -1,9 +1,11 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -300,6 +302,19 @@ func coerceIntegrationValue(key string, value any) (any, bool) {
 }
 
 func sanitizeIntegrationChannel(input map[string]any, previous map[string]any) (map[string]any, bool) {
+	for key, raw := range input {
+		switch key {
+		case "id", "name", "baseUrl", "model", "group", "apiFormat", "apiKey":
+			if _, ok := raw.(string); !ok {
+				return nil, false
+			}
+		case "enabled", "fullUrl", "clearApiKey":
+			if _, ok := raw.(bool); !ok {
+				return nil, false
+			}
+		}
+	}
+
 	channel := map[string]any{}
 	id, _ := input["id"].(string)
 	id = strings.TrimSpace(id)
@@ -452,6 +467,37 @@ func sanitizeIntegrationChannel(input map[string]any, previous map[string]any) (
 	return channel, true
 }
 
+func (s *UserConfigStore) encryptLegacyIntegrationFile(ctx context.Context, owner string) error {
+	path, err := s.configPath(owner)
+	if err != nil {
+		return err
+	}
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var stored map[string]any
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		return err
+	}
+	if CountPlaintextConfigSecrets(stored) == 0 {
+		return nil
+	}
+	if s.journal != nil {
+		state, found, err := s.journal.DiscoverLegacyConfigMigration(ctx, owner)
+		if err != nil {
+			return err
+		}
+		if found && state.Phase != novelfetchworkshop.LegacyComplete {
+			return nil
+		}
+	}
+	return s.writeAuthenticatedConfig(owner, stored)
+}
+
 func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, store *UserConfigStore, accounts auth.Store, catalog novelfetchworkshop.Store) {
 	if root == nil || middleware.AuthStore == nil || store == nil || accounts == nil {
 		return
@@ -470,7 +516,7 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 			return
 		}
 		store.mu.Lock()
-		config, err := store.effectiveConfig(access.identity.Subject.Username)
+		config, err := store.effectiveConfig(req.Context(), access.identity.Subject.Username)
 		store.mu.Unlock()
 		if err != nil {
 			writeAuthError(w, http.StatusServiceUnavailable, "读取接口配置失败")
@@ -500,7 +546,7 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 		}
 		store.mu.Lock()
 		defer store.mu.Unlock()
-		config, err := store.effectiveConfig(identity.Username)
+		config, err := store.effectiveConfig(req.Context(), identity.Username)
 		if err != nil {
 			writeAuthError(w, http.StatusServiceUnavailable, "读取接口配置失败")
 			return
@@ -593,7 +639,7 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 		if payload.CustomChannels != nil {
 			edits = append(edits, integrationChannelEdits(previousChannels, *payload.CustomChannels, channels)...)
 		}
-		if err := store.writeSettingsPatch(req.Context(), identity.Username, config, edits, catalog); err != nil {
+		if err := store.writeSettingsPatch(req.Context(), identity.Username, config, edits); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "配置保存失败"})
 			return
 		}
@@ -657,21 +703,16 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 			return
 		}
 		store.mu.Lock()
-		config, err := store.effectiveConfig(identity.Username)
+		config, err := store.effectiveConfig(req.Context(), identity.Username)
 		if err != nil {
 			store.mu.Unlock()
 			writeAuthError(w, http.StatusServiceUnavailable, "读取接口配置失败")
 			return
 		}
-		path, pathErr := store.configPath(identity.Username)
-		raw, rawErr := os.ReadFile(path)
-		var persisted map[string]any
-		if pathErr == nil && rawErr == nil && json.Unmarshal(raw, &persisted) == nil && CountPlaintextConfigSecrets(persisted) > 0 {
-			if err := store.writeAuthenticatedConfig(identity.Username, store.readLegacyConfig(identity.Username)); err != nil {
-				store.mu.Unlock()
-				writeAuthError(w, http.StatusServiceUnavailable, "加密旧配置失败")
-				return
-			}
+		if err := store.encryptLegacyIntegrationFile(req.Context(), identity.Username); err != nil {
+			store.mu.Unlock()
+			writeAuthError(w, http.StatusServiceUnavailable, "加密旧配置失败")
+			return
 		}
 		stored := apiIntegrationStoredMap(config)
 		store.mu.Unlock()

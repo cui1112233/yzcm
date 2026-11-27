@@ -797,12 +797,15 @@ JSON_OBJECT('personal_api',JSON_OBJECT('apiKey',?,'model','fixture-video'))) WHE
 					}
 					if tc.rewritePreferenceFile {
 						replacements := []string{`{"notifications":{"soundVolume":42}}`, `{"modelCatalog":[],"modelCatalogLegacyDefaultsFile":false}`, `{"settings":{"videoProviders":{"personal_api":{"model":"fixture-video","apiKey":""}}}}`}
-						changes, err := os.ReadFile(filepath.Join(filepath.Dir(path), "deferred-settings.json"))
-						if err != nil || !bytes.Contains(changes, []byte("enc:v2:")) || bytes.Contains(changes, []byte("soundVolume")) {
-							t.Error("deferred preference changes are not independently encrypted")
-						} else {
-							replacements = append(replacements, string(changes))
+						state, found, err := store.LegacyConfigMigrationState(ctx, tc.owner)
+						if err != nil || !found || !strings.HasPrefix(state.PatchEnvelope, "enc:v2:") || strings.Contains(state.PatchEnvelope, "soundVolume") {
+							t.Fatal("settings patch missing its independent database encryption", err)
 						}
+						copied, err := json.Marshal(deferredSettingsEnvelope{state.PatchEnvelope, state.PatchFingerprint})
+						if err != nil {
+							t.Fatal(err)
+						}
+						replacements = append(replacements, string(copied))
 						for _, doc := range replacements {
 							if err := os.WriteFile(path, []byte(doc), 0600); err != nil {
 								t.Fatal(err)

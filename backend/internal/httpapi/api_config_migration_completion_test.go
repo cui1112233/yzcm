@@ -167,69 +167,71 @@ func TestAPIConfigPolicyMySQLDeferredMigrationCompletion(t *testing.T) {
 			if err := login.CreateSession(ctx, auth.Session{Username: name, Token: name, IssuedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := store.GetConfig(ctx, name); err != nil {
+			const video = `{"id":"v","kind":"video","provider":"personal_api","modelId":"expected-video","endpoint":"https://expected.example.test/video","credential":"fixture-A"}`
+			if _, err := db.Exec("UPDATE novel_fetch_workshop_configs SET settings_json=? WHERE owner_username=?", `{"modelCatalog":[`+video+`]}`, name); err != nil {
 				t.Fatal(err)
 			}
-			reply := impersonationRequest(router, "POST", "/api/settings/api-integrations", name, `{"pinned":["openrouterApiKey"],"values":{"kimiOfficialApiKey":null}}`, nil)
+			reply := impersonationRequest(router, "POST", "/api/config", name, `{"notifications":{"soundVolume":42,"soundEnabled":false}}`, nil)
 			if reply.Code != http.StatusOK {
-				t.Fatalf("integration patch status %d", reply.Code)
+				t.Fatalf("first preference save: %d", reply.Code)
 			}
-			reply = impersonationRequest(router, "POST", "/api/config", name, `{"notifications":{"soundVolume":42}}`, nil)
+			state, found, err := store.LegacyConfigMigrationState(ctx, name)
+			if err != nil || !found || state.PatchEnvelope == "" {
+				t.Fatal("first preference save did not create the encrypted MySQL journal", err)
+			}
+			reply = impersonationRequest(router, "POST", "/api/settings/api-integrations", name, `{"pinned":["openrouterApiKey"],"values":{"kimiOfficialApiKey":null},"customChannels":[{"id":"old","name":"renamed"}]}`, nil)
 			if reply.Code != http.StatusOK {
-				t.Fatalf("preference patch status %d", reply.Code)
+				t.Fatalf("integration patch: %d", reply.Code)
 			}
-			journal := filepath.Join(filepath.Dir(path), "deferred-settings.json")
-			copyOfJournal, err := os.ReadFile(journal)
-			if err != nil {
-				t.Fatal(err)
+			journal := filepath.Join(filepath.Dir(path), deferredSettingsFile)
+			if _, err := os.Stat(journal); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("new save created the old deferred file")
 			}
-			write(t, path, string(copyOfJournal))
+			write(t, path, `{"ciphertext":"synthetic-only","fingerprint":"synthetic-only"}`)
 			reply = impersonationRequest(router, "GET", "/api/config", name, "", nil)
-			if reply.Code != http.StatusOK || strings.Contains(reply.Body.String(), "fingerprint") || strings.Contains(reply.Body.String(), "ciphertext") {
-				t.Error("internal envelope metadata reached an unrestricted configuration view")
+			if reply.Code != http.StatusOK || strings.Contains(reply.Body.String(), "ciphertext") || strings.Contains(reply.Body.String(), "fingerprint") {
+				t.Fatal("public view exposed envelope")
 			}
-			write(t, path, `{"notifications":{"soundVolume":60},"videoProviders":{"personal_api":{"model":"expected-video","apiKey":"fixture-B","createUrl":"https://expected.example.test/video"}},"apiIntegrations":{"values":{"deepseekOfficialApiKey":"fixture-preserved","kimiOfficialApiKey":"fixture-clear"},"customChannels":[{"id":"old","name":"old","apiKey":"fixture-channel"}],"channelSelection":{"text":{"enabled":["old"]}}},"unrelated":"keep"}`)
+			write(t, path, `{"modelCatalog":[`+strings.Replace(video, "fixture-A", "fixture-B", 1)+`],"notifications":{"soundVolume":60},"apiIntegrations":{"values":{"deepseekOfficialApiKey":"fixture-preserved","kimiOfficialApiKey":"fixture-clear"},"customChannels":[{"id":"old","name":"old","model":"original-model","apiKey":"fixture-channel"},{"id":"untouched","name":"untouched"}],"channelSelection":{"text":{"enabled":["old"]}}},"unrelated":"keep"}`)
+			cold := novelfetchworkshop.NewMySQLStore(db)
+			cold.LegacyConfigDir, cold.ModelSecrets, cold.LegacyConfigLocker = dir, config.ModelConfigSecrets(), config.LegacyModelFileLocker()
 			if interrupted {
 				if err := os.Mkdir(path+".tmp", 0700); err != nil {
 					t.Fatal(err)
 				}
 				if _, err := store.GetConfig(ctx, name); err == nil {
-					t.Error("standard file write interruption was acknowledged as completion")
+					t.Fatal("write interruption acknowledged")
 				}
-				if _, err := os.Stat(journal); err != nil {
-					t.Fatal("failed merge lost the journal")
+				state, _, err := cold.LegacyConfigMigrationState(ctx, name)
+				if err != nil || state.Phase != novelfetchworkshop.LegacyFinalizing || state.PatchEnvelope == "" {
+					t.Fatal("lost journal on interruption", err)
 				}
 				if err := os.Remove(path + ".tmp"); err != nil {
 					t.Fatal(err)
 				}
+				cold.ModelSecrets = &concurrentPatchWriter{configSecretProvider: config.secrets, store: cold}
 			}
-			if _, err := store.GetConfig(ctx, name); err != nil {
+			if _, err := cold.GetConfig(ctx, name); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := os.Stat(journal); !errors.Is(err, os.ErrNotExist) {
-				t.Error("verified settings journal not retired after migration completion")
+			state, _, err = cold.LegacyConfigMigrationState(ctx, name)
+			if err != nil || state.Phase != novelfetchworkshop.LegacyComplete || state.PatchEnvelope != "" {
+				t.Fatal("latest revision not completed", err)
 			}
-			if interrupted {
-				// Recreate the durable state after standard config was written
-				// but before journal removal. A cold reader must finish it.
-				write(t, journal, string(copyOfJournal))
-				cold := novelfetchworkshop.NewMySQLStore(db)
-				cold.LegacyConfigDir, cold.ModelSecrets, cold.LegacyConfigLocker = dir, config.ModelConfigSecrets(), config.LegacyModelFileLocker()
-				if _, err := cold.GetConfig(ctx, name); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := os.Stat(journal); !errors.Is(err, os.ErrNotExist) {
-					t.Fatal("replayed journal was not retired")
-				}
+			records, _, err := cold.ListLegacyModelConflicts(ctx, name, "")
+			if err != nil || len(records) != 2 {
+				t.Fatal("video conflict did not retain both origins", err)
 			}
-			saved := config.readLegacyConfig(name)
-			if saved["notifications"].(map[string]any)["soundVolume"] != float64(42) {
-				t.Error("standard file did not retain the acknowledged volume after replay")
+			saved := config.read(name)
+			notifications := saved["notifications"].(map[string]any)
+			if notifications["soundVolume"] != float64(42) || notifications["soundEnabled"] != false || interrupted && notifications["petVisible"] != false {
+				t.Fatal("lost explicit preference edits during replay")
 			}
 			integration := apiIntegrationStoredMap(saved)
 			values := apiIntegrationValues(integration)
-			if values["deepseekOfficialApiKey"] != "fixture-preserved" || values["kimiOfficialApiKey"] != nil || len(apiIntegrationChannels(integration)) != 1 || len(apiIntegrationChannelSelection(integration)) != 1 || len(apiIntegrationPinned(integration)) != 1 || saved["unrelated"] != "keep" {
-				t.Error("standard file did not preserve untouched integration fields and apply explicit edits")
+			channels := apiIntegrationChannels(integration)
+			if values["deepseekOfficialApiKey"] != "fixture-preserved" || values["kimiOfficialApiKey"] != nil || len(channels) != 2 || channels[0].(map[string]any)["name"] != "renamed" || channels[0].(map[string]any)["apiKey"] != "fixture-channel" || channels[0].(map[string]any)["model"] != "original-model" || len(apiIntegrationChannelSelection(integration)) != 1 || len(apiIntegrationPinned(integration)) != 1 || saved["unrelated"] != "keep" {
+				t.Fatal("standard settings lost or overwritten")
 			}
 			reply = impersonationRequest(router, "POST", "/api/config", name, `{"notifications":{"soundVolume":51}}`, nil)
 			if reply.Code != http.StatusOK {
@@ -701,5 +703,190 @@ func TestLegacyConfigMigrationStateVerifiedPositionsKeepSeparateCredentials(t *t
 				}
 			}
 		})
+	}
+}
+
+type concurrentPatchWriter struct {
+	*configSecretProvider
+	store    *novelfetchworkshop.MySQLStore
+	injected bool
+}
+
+func (w *concurrentPatchWriter) ApplyLegacySettingEdits(owner, path string, edits []novelfetchworkshop.LegacySettingEdit) error {
+	if err := w.configSecretProvider.ApplyLegacySettingEdits(owner, path, edits); err != nil {
+		return err
+	}
+	if !w.injected {
+		w.injected = true
+		return w.store.AppendLegacySettingEdits(context.Background(), owner, fieldEdits(nil, map[string]any{"notifications": map[string]any{"petVisible": false}}))
+	}
+	return nil
+}
+func patchTestStore(t *testing.T) *novelfetchworkshop.MySQLStore {
+	t.Helper()
+	s := stateTestStore(t)
+	if _, err := s.DB.Exec("INSERT INTO novel_fetch_legacy_config_migrations(owner_username,phase) VALUES('a','finalizing'),('b','finalizing')"); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+func TestLegacySettingPatchJournalCompactsExplicitEdits(t *testing.T) {
+	s := patchTestStore(t)
+	ctx := context.Background()
+	for _, patch := range []map[string]any{{"x": 1, "y": true}, {"x": nil}} {
+		if err := s.AppendLegacySettingEdits(ctx, "a", fieldEdits(nil, patch)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	edits, rev, active, err := s.LoadLegacySettingEdits(ctx, "a")
+	if err != nil || !active || len(edits) != 2 || rev != 3 {
+		t.Fatal("journal not compacted", rev, err)
+	}
+	doc := map[string]any{"x": "prior"}
+	settingsEdits(edits).apply(doc)
+	if _, ok := doc["x"]; ok || doc["y"] != true {
+		t.Fatal("explicit removal lost")
+	}
+}
+func TestLegacySettingPatchJournalCASPreservesConcurrentEdit(t *testing.T) {
+	s := patchTestStore(t)
+	ctx := context.Background()
+	_, old, _, err := s.LoadLegacySettingEdits(ctx, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendLegacySettingEdits(ctx, "a", fieldEdits(nil, map[string]any{"x": "new"})); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.CompleteLegacySettingEdits(ctx, "a", old); ok || err != nil {
+		t.Fatal("stale completion", err)
+	}
+	edits, rev, active, err := s.LoadLegacySettingEdits(ctx, "a")
+	if !active || len(edits) != 1 || err != nil {
+		t.Fatal("lost concurrent edit", err)
+	}
+	if ok, err := s.CompleteLegacySettingEdits(ctx, "a", rev); !ok || err != nil {
+		t.Fatal("completion failed", err)
+	}
+}
+func TestLegacySettingPatchJournalRejectsCrossAccountAndPurpose(t *testing.T) {
+	s := patchTestStore(t)
+	ctx := context.Background()
+	if err := s.AppendLegacySettingEdits(ctx, "a", fieldEdits(nil, map[string]any{"x": "synthetic-only"})); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := s.LegacyConfigMigrationState(ctx, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ModelSecrets.OpenLegacyConflict("a", novelfetchworkshop.LegacyConflictSource{Document: "db:legacy_config_migrations", Field: "video_candidates"}, state.PatchEnvelope, state.PatchFingerprint); err == nil {
+		t.Fatal("accepted other purpose")
+	}
+	if _, err := s.DB.Exec("UPDATE novel_fetch_legacy_config_migrations SET patch_ciphertext=?,patch_fingerprint=? WHERE owner_username='b'", state.PatchEnvelope, state.PatchFingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := s.LoadLegacySettingEdits(ctx, "b"); err == nil {
+		t.Fatal("accepted other account")
+	}
+}
+func TestLegacyDeferredSnapshotConversionIsConservative(t *testing.T) {
+	s := patchTestStore(t)
+	ctx := context.Background()
+	c := NewUserConfigStore(s.LegacyConfigDir)
+	c.journal = s
+	raw := `{"notifications":{"soundVolume":60,"soundEnabled":false},"apiIntegrations":{"values":{"kimiOfficialApiKey":null},"pinned":[],"customChannels":[{"id":"v","name":"renamed","enabled":true,"apiFormat":"openai_compatible","group":"","model":"","baseUrl":"","concurrency":0,"params":{},"capabilities":null}]}}`
+	binding := novelfetchworkshop.LegacyConflictSource{Document: deferredSettingsFile, Field: "settings"}
+	ciphertext, fingerprint, err := c.secrets.SealLegacyConflict("a", binding, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, _ := UserScopedPath(c.BaseDir, "a", deferredSettingsFile)
+	if err := writeUserConfigDocument(path, deferredSettingsEnvelope{ciphertext, fingerprint}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.GetConfig(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+	edits, _, _, err := s.LoadLegacySettingEdits(ctx, "a")
+	if err != nil || len(edits) != 2 {
+		t.Fatalf("snapshot should import only the rename and mute, got %d edits: %v", len(edits), err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("verified old file not retired")
+	}
+	for _, edit := range edits {
+		if edit.Delete {
+			t.Fatal("empty snapshot field became a tombstone")
+		}
+	}
+	// Recreate the old file after import and a subsequent acknowledged save.
+	if err := s.AppendLegacySettingEdits(ctx, "a", fieldEdits([]string{apiIntegrationsSettingKey, "customChannels", "v"}, map[string]any{"name": "newer"})); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeUserConfigDocument(path, deferredSettingsEnvelope{ciphertext, fingerprint}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := c.GetConfig(ctx, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if apiIntegrationChannels(apiIntegrationStoredMap(doc))[0].(map[string]any)["name"] != "newer" {
+		t.Fatal("retry overwrote newer edit")
+	}
+}
+
+func TestLegacySettingPatchImportsExplicitArrayAndRetainsUnverifiedFile(t *testing.T) {
+	ctx := context.Background()
+	store := patchTestStore(t)
+	config := NewUserConfigStore(store.LegacyConfigDir)
+	config.journal = store
+	file, _ := UserScopedPath(config.BaseDir, "a", deferredSettingsFile)
+	binding := novelfetchworkshop.LegacyConflictSource{Document: deferredSettingsFile, Field: "settings"}
+	save := func(owner string) {
+		t.Helper()
+		ciphertext, fingerprint, err := config.secrets.SealLegacyConflict(owner, binding, `[{"path":["notifications","soundVolume"],"value":0},{"path":["apiIntegrations","values","kimiOfficialApiKey"],"delete":true}]`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := writeUserConfigDocument(file, deferredSettingsEnvelope{ciphertext, fingerprint}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save("b")
+	if _, err := config.GetConfig(ctx, "a"); err == nil {
+		t.Fatal("accepted another account's file")
+	}
+	if _, err := os.Stat(file); err != nil {
+		t.Fatal("unverified file removed", err)
+	}
+	save("a")
+	if _, err := config.GetConfig(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+	edits, _, active, err := store.LoadLegacySettingEdits(ctx, "a")
+	if err != nil || !active || len(edits) != 2 || string(edits[0].Value) != "0" || !edits[1].Delete {
+		t.Fatal("explicit array did not preserve zero and explicit deletion", err)
+	}
+	if _, err := os.Stat(file); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("verified old file still present")
+	}
+}
+
+func TestLegacySettingPatchRejectsGeneratedValuesFromInvalidChannelFields(t *testing.T) {
+	for key, value := range map[string]any{"model": 42, "baseUrl": false, "enabled": "no", "clearApiKey": "yes"} {
+		if _, ok := sanitizeIntegrationChannel(map[string]any{"id": "v", "name": "rename", key: value}, nil); ok {
+			t.Errorf("invalid %s became a generated assignment", key)
+		}
+	}
+}
+
+func TestLegacySettingPatchPublicViewOmitsInternalFields(t *testing.T) {
+	doc := map[string]any{"revision": 7, "configRevision": "8", "modelCatalogLegacyDefaultsFile": true, "notifications": map[string]any{"migrationPhase": "finalizing", "patchCiphertext": "opaque", "candidateFingerprint": "fingerprint", "soundVolume": 42}}
+	view := publicUserConfig(doc)
+	raw, _ := json.Marshal(view)
+	for _, field := range []string{"revision", "Revision", "Legacy", "migrationPhase", "patchCiphertext", "candidateFingerprint"} {
+		if strings.Contains(string(raw), field) {
+			t.Fatalf("public field leaked: %s", field)
+		}
 	}
 }

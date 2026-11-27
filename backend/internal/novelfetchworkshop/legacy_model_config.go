@@ -27,10 +27,6 @@ const legacyModelScrubEntriesKey = "modelCatalogLegacyScrubEntries"
 const legacyModelScrubEntryDoneKey = "modelCatalogLegacyScrubEntryDone"
 const legacyModelMigrationVersion = "entry-v2"
 
-// LegacyModelDefaultsFileKey marks a preferences file created from defaults
-// when the original could not be read. It cannot attest to a legacy source.
-const LegacyModelDefaultsFileKey = "modelCatalogLegacyDefaultsFile"
-
 func hasLegacyVideoProviders(document map[string]any) bool {
 	for _, container := range legacyCatalogContainers(document) {
 		if _, exists := container["videoProviders"]; exists {
@@ -515,24 +511,26 @@ func (s *MySQLStore) finishLegacyMigration(ctx context.Context, owner string, se
 	if path == "" {
 		return fmt.Errorf("legacy config directory unavailable during finalization")
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	var raw []byte
-	if err := tx.QueryRowContext(ctx, `SELECT settings_json FROM novel_fetch_workshop_configs WHERE owner_username=? FOR UPDATE`, owner).Scan(&raw); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT settings_json FROM novel_fetch_workshop_configs WHERE owner_username=? FOR UPDATE`, owner).Scan(&raw); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	var current map[string]any
-	if err := json.Unmarshal(raw, &current); err != nil {
-		return err
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &current); err != nil {
+			return err
+		}
 	}
-	locked, found, err := readMigrationState(tx.QueryRowContext(ctx, migrationStateQuery+" FOR UPDATE", owner))
+	locked, found, err := readMigrationState(tx.QueryRowContext(ctx, migrationStateQuery, owner))
 	if err != nil {
 		return err
 	}
-	if found != (state.Owner != "") || locked.Phase != state.Phase || locked.Revision != state.Revision || configRevision(current) != configRevision(settings) ||
+	if found != (state.Owner != "") || locked.Phase != state.Phase || configRevision(current) != configRevision(settings) ||
 		!reflect.DeepEqual(current[modelLegacyScrubPendingKey], settings[modelLegacyScrubPendingKey]) || !reflect.DeepEqual(current[legacyModelScrubEntriesKey], settings[legacyModelScrubEntriesKey]) {
 		return ErrConfigConflict
 	}
@@ -548,17 +546,100 @@ func (s *MySQLStore) finishLegacyMigration(ctx context.Context, owner string, se
 			return err
 		}
 	}
-	if err := s.finalizeLegacySettings(owner, path); err != nil {
-		return err
-	}
 	if expected != "" {
 		if _, err := tx.ExecContext(ctx, `UPDATE novel_fetch_workshop_configs SET settings_json=JSON_REMOVE(settings_json,'$.modelCatalogLegacyScrubPending','$.modelCatalogLegacyScrubEntries') WHERE owner_username=?`, owner); err != nil {
 			return err
 		}
 	}
-	if locked.Phase == LegacyFinalizing {
-		if err := s.moveLegacyMigration(ctx, tx, &locked, LegacyComplete); err != nil {
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.importAndCompleteLegacySettings(ctx, owner, path, locked.Phase)
+}
+
+// Ordinary reads only check for an old journal left by a previous release.
+func (s *MySQLStore) resumeArchivedSettingFile(ctx context.Context, owner string, phase LegacyConfigMigrationPhase) error {
+	if s.LegacyConfigDir == "" {
+		return nil
+	}
+	if s.LegacyConfigLocker != nil {
+		s.LegacyConfigLocker.Lock()
+		defer s.LegacyConfigLocker.Unlock()
+	}
+	path, err := s.legacyModelFilePath(owner)
+	if err != nil {
+		return err
+	}
+	return s.importAndCompleteLegacySettings(ctx, owner, path, phase)
+}
+
+func (s *MySQLStore) importAndCompleteLegacySettings(ctx context.Context, owner, path string, phase LegacyConfigMigrationPhase) error {
+	imported := false
+	if importer, ok := s.ModelSecrets.(interface {
+		ImportDeferredSettings(context.Context, string, string, *MySQLStore) (bool, error)
+	}); ok {
+		var err error
+		imported, err = importer.ImportDeferredSettings(ctx, owner, path, s)
+		if err != nil {
 			return err
+		}
+	}
+	if phase != LegacyFinalizing && (!imported || phase == LegacyAwaitingSource || phase == LegacyReconciling) {
+		return nil
+	}
+	// Serialize competing standard-file writers. Appends only lock the
+	// migration row and therefore remain possible between writing and CAS.
+	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var raw []byte
+	err = tx.QueryRowContext(ctx, `SELECT settings_json FROM novel_fetch_workshop_configs WHERE owner_username=? FOR UPDATE`, owner).Scan(&raw)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if len(raw) > 0 {
+		var latest map[string]any
+		if err := json.Unmarshal(raw, &latest); err != nil {
+			return err
+		}
+		if ModelConfigText(latest, modelLegacyScrubPendingKey) != "" || latest[legacyModelScrubEntriesKey] != nil {
+			return ErrConfigConflict
+		}
+	}
+	for {
+		latest, found, err := readMigrationState(tx.QueryRowContext(ctx, migrationStateQuery, owner))
+		if err != nil {
+			return err
+		}
+		if !found || latest.Phase == LegacyComplete {
+			break
+		}
+		if latest.Phase != LegacyFinalizing {
+			return ErrConfigConflict
+		}
+		edits, err := s.openSettingEdits(owner, latest)
+		if err != nil {
+			return err
+		}
+		if len(edits) > 0 {
+			writer, ok := s.ModelSecrets.(interface {
+				ApplyLegacySettingEdits(string, string, []LegacySettingEdit) error
+			})
+			if !ok {
+				return errors.New("no standard settings writer available")
+			}
+			if err := writer.ApplyLegacySettingEdits(owner, path, edits); err != nil {
+				return err
+			}
+		}
+		complete, err := completeLegacySettingEdits(ctx, tx, owner, latest.Revision)
+		if err != nil {
+			return err
+		}
+		if complete {
+			break
 		}
 	}
 	return tx.Commit()
@@ -623,13 +704,6 @@ func (s *MySQLStore) scrubLegacyModelFile(ctx context.Context, tx *sql.Tx, owner
 	return nil
 }
 
-func (s *MySQLStore) finalizeLegacySettings(owner, path string) error {
-	if writer, ok := s.ModelSecrets.(interface{ FinalizeLegacySettings(string, string) error }); ok && path != "" {
-		return writer.FinalizeLegacySettings(owner, path)
-	}
-	return nil
-}
-
 func replaceLegacyModelDocument(path string, document map[string]any) error {
 	temporary, err := os.CreateTemp(filepath.Dir(path), ".api-config-*.tmp")
 	if err != nil {
@@ -650,12 +724,10 @@ func replaceLegacyModelDocument(path string, document map[string]any) error {
 
 // ResumeLegacyModelCleanup retries previously committed file cleanup after a restart.
 func (s *MySQLStore) ResumeLegacyModelCleanup(ctx context.Context) error {
-	rows, err := s.DB.QueryContext(ctx, `SELECT owner_username
-FROM novel_fetch_workshop_configs WHERE JSON_CONTAINS_PATH(settings_json, 'one', '$.modelCatalogLegacyScrubPending',
-'$.videoProviders', '$.settings.videoProviders', '$.appConfig.videoProviders', '$.settings.appConfig.videoProviders',
-'$.settings.modelCatalog', '$.appConfig.modelCatalog', '$.settings.appConfig.modelCatalog')
-OR owner_username IN (SELECT owner_username FROM novel_fetch_legacy_config_migrations WHERE phase!='complete')
-OR (? AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(settings_json,'$.modelCatalogLegacyMigrationVersion')),'')!=?)`, s.LegacyConfigDir != "", legacyModelMigrationVersion)
+	// Include accounts that predate the migration table. GetConfig discovers
+	// their state with the same decoder used by preference saves.
+	rows, err := s.DB.QueryContext(ctx, `SELECT BINARY owner_username FROM novel_fetch_workshop_configs
+ UNION SELECT BINARY owner_username FROM novel_fetch_legacy_config_migrations WHERE phase!='complete'`)
 	if err != nil {
 		return err
 	}
