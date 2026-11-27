@@ -424,6 +424,15 @@ func compatibilityConfigForEcho(r *http.Request, store novelfetchworkshop.Store,
 	if err != nil {
 		return nil, err
 	}
+	// Novel Fetch GET exposes the safe runtime view. Compare its unchanged
+	// echo against that same view, including any pending-video restrictions.
+	if r.URL.Path == "/api/novel-fetch-workshop/config" {
+		if reader, ok := store.(interface {
+			ReadRuntimeConfig(context.Context, string) (map[string]any, error)
+		}); ok {
+			return reader.ReadRuntimeConfig(r.Context(), effective)
+		}
+	}
 	if reader, ok := store.(interface {
 		ReadBoundModelConfig(context.Context, string) (map[string]any, error)
 	}); ok {
@@ -445,7 +454,7 @@ func formalCompatibilityCatalog(r *http.Request, store novelfetchworkshop.Store,
 	if err != nil {
 		return []any{}
 	}
-	if effective != owner {
+	if effective != owner || initial["modelCatalog"] == nil {
 		initial, err = novelfetchworkshop.ReadRuntimeConfig(r.Context(), store, effective)
 		if err != nil {
 			return []any{}
