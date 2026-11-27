@@ -383,12 +383,18 @@ func (a textAPI) content(w http.ResponseWriter, r *http.Request, x textRequest) 
 func (a textAPI) verifyArtifactFile(x textRequest, art txt.PageArtifact, label string) error {
 	f, err := a.files.OpenContext(x, art.StorageRef)
 	if err != nil {
-		return fmt.Errorf("%w（%s图片不可读取）", txt.ErrNotReady, label)
+		if retryableTextLocalRead(err) || errors.Is(err, context.Canceled) {
+			return fmt.Errorf("%s图片读取失败：%w", label, err)
+		}
+		return fmt.Errorf("%w（%s图片不可读取）：%w", txt.ErrNotReady, label, err)
 	}
 	defer f.Close()
 	h := sha256.New()
 	n, err := io.Copy(h, io.LimitReader(f, art.ByteSize+1))
-	if err != nil || n != art.ByteSize || hex.EncodeToString(h.Sum(nil)) != art.SHA256 {
+	if err != nil {
+		return fmt.Errorf("%s图片读取失败：%w", label, err)
+	}
+	if n != art.ByteSize || hex.EncodeToString(h.Sum(nil)) != art.SHA256 {
 		return fmt.Errorf("%w（%s图片已损坏）", txt.ErrNotReady, label)
 	}
 	return x.Err()

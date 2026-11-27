@@ -272,6 +272,9 @@ func (c *BatchAutomationCoordinator) configureTextWorkflow(repo txt.Repository, 
 	}
 	a := textAPI{c.store, repo, files, c}
 	c.textEnsure = func(ctx context.Context, req txt.EnsureRequest) (txt.EnsureResult, error) {
+		parentCtx := ctx
+		ctx, cancelSetup := context.WithTimeout(ctx, 10*time.Minute)
+		defer cancelSetup()
 		unlock := c.lockBatchRun(req.Owner, "text-workflow/"+req.BatchID+"/"+req.BookID)
 		defer unlock()
 		batch, err := c.store.GetBatch(ctx, req.Owner, req.BatchID)
@@ -293,7 +296,7 @@ func (c *BatchAutomationCoordinator) configureTextWorkflow(repo txt.Repository, 
 				return txt.EnsureResult{Stage: "text_publish"}, err
 			}
 		}
-		w := txt.Workflow{Repo: repo}
+		w := txt.Workflow{Repo: repo, StageTimeout: automationTextStageTimeout}
 		var publishAttempt batchfactoryv11.BookStageRun
 		if c.textPublish != nil {
 			w.Publish = func(ctx context.Context, r txt.EnsureRequest, collection txt.Collection) (bool, error) {
@@ -333,6 +336,7 @@ func (c *BatchAutomationCoordinator) configureTextWorkflow(repo txt.Repository, 
 			}
 		}
 		w.Process = func(ctx context.Context, req txt.EnsureRequest, verify bool) (out txt.WorkflowProduction, err error) {
+			x.Context = ctx
 			processed, err := c.batchSensitiveStageFromBook(ctx, req.Owner, x.batch, x.book, req.ForceSensitive, verify)
 			if err != nil {
 				return out, err
@@ -366,6 +370,7 @@ func (c *BatchAutomationCoordinator) configureTextWorkflow(repo txt.Repository, 
 			return out, err
 		}
 		w.Prepare = func(ctx context.Context, req txt.EnsureRequest, prod txt.WorkflowProduction, d txt.Document, reflow bool) error {
+			x.Context = ctx
 			if d.ID != "" && d.OriginalText != x.book.TxtText {
 				return txt.ErrConflict
 			}
@@ -389,6 +394,7 @@ func (c *BatchAutomationCoordinator) configureTextWorkflow(repo txt.Repository, 
 			return err
 		}
 		w.Render = func(ctx context.Context, req txt.EnsureRequest, d txt.Document, p txt.Page) error {
+			x.Context = ctx
 			input, renderer, err := a.renderInput(x, d, p, p.ID == "", txt.PagePatch{})
 			if err != nil {
 				return err
@@ -404,13 +410,15 @@ func (c *BatchAutomationCoordinator) configureTextWorkflow(repo txt.Repository, 
 			_, err = a.saveImage(x, p.ID, rev, false, "", data, mime)
 			return err
 		}
-		w.VerifyFile = func(_ context.Context, artifact txt.PageArtifact, label string) error {
+		w.VerifyFile = func(ctx context.Context, artifact txt.PageArtifact, label string) error {
+			x.Context = ctx
 			return a.verifyArtifactFile(x, artifact, label)
 		}
-		w.Validate = func(_ context.Context, _ txt.EnsureRequest, d txt.Document) error {
+		w.Validate = func(ctx context.Context, _ txt.EnsureRequest, d txt.Document) error {
+			x.Context = ctx
 			_, err := a.verifyCollectionFiles(x, textInput{VersionID: d.ActiveVersionID, ExpectedRevision: d.Revision, PaginationVersion: d.PaginationVersion})
 			return err
 		}
-		return w.Ensure(ctx, req)
+		return w.Ensure(parentCtx, req)
 	}
 }

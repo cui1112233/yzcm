@@ -2447,8 +2447,20 @@ func (c *BatchAutomationCoordinator) launchRun(owner, batchID, jobID string, job
 	if c.runEpochs == nil {
 		c.runEpochs = map[string]int64{}
 	}
-	c.runEpochs[jobID]++
-	epoch := c.runEpochs[jobID]
+	// A restarted coordinator has an empty in-memory counter, while book
+	// claims still contain the previous process's epochs. Never reuse one:
+	// the priority dispatcher would mistake that stale claim for this run.
+	lastEpoch := c.runEpochs[jobID]
+	if entries, ok := runJob["books"].(map[string]any); ok {
+		for _, raw := range entries {
+			entry, _ := raw.(map[string]any)
+			if claimed := int64(automationNumberValue(entry[automationBookClaimEpochField], 0)); claimed > lastEpoch {
+				lastEpoch = claimed
+			}
+		}
+	}
+	epoch := lastEpoch + 1
+	c.runEpochs[jobID] = epoch
 	c.runCancels[jobID] = cancel
 	c.controlMu.Unlock()
 	go func(job map[string]any) {
@@ -3842,7 +3854,8 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 							return
 						case <-ticker.C:
 							last, _ := stallLast.Load().(time.Time)
-							if !automationProgressStalled(last, c.now()) {
+							stage, _ := stallStage.Load().(string)
+							if !automationProgressStalledInStage(last, c.now(), stage) {
 								continue
 							}
 							stallLast.Store(last)
@@ -4074,9 +4087,8 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 						fail("text_process", err, err.Error())
 						continue
 					}
-					textCtx, cancel := context.WithTimeout(ctx, stageTimeout)
-					result, err := c.textEnsure(textCtx, req)
-					cancel()
+					// The workflow bounds each phase; rendering must not consume the upload deadline.
+					result, err := c.textEnsure(ctx, req)
 					if result.Collection.ID != "" {
 						entry["textCollectionId"] = result.Collection.ID
 					}
@@ -4091,6 +4103,11 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 					if err != nil {
 						if ctx.Err() != nil {
 							fail(result.Stage, err, err.Error())
+							continue
+						}
+						if scheduleTextLocalRecovery(entry, result.Stage, err, c.now()) {
+							appendAutomationBookLog(entry, c.now(), result.Stage, automationStringValue(entry["message"], err.Error()))
+							persist()
 							continue
 						}
 						entry["status"], entry["stage"], entry["error"], entry["message"], entry["updatedAt"] = "failed", result.Stage, err.Error(), err.Error(), c.now()
@@ -4648,15 +4665,6 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 						publishCtx, cancel := context.WithTimeout(ctx, comicPublishStageTimeout)
 						record, publishErr := c.comicPublish(publishCtx, owner, batchID, book.ID, collection, frozenComicSettings(entry, effective))
 						cancel()
-						if publishErr != nil {
-							if n8ImagesAlreadyUploadedError(publishErr.Error()) {
-								entry["status"], entry["stage"], entry["message"], entry["updatedAt"] = "completed", "uploaded", "图片已上传完成，N8 已确认图片已占用；已停止重复上传", c.now()
-								entry["publishError"], entry["error"], entry["retryRequested"] = publishErr.Error(), "", false
-								delete(entry, "retryAt")
-								persist()
-								continue
-							}
-						}
 						if publishErr != nil || record.Status != "published" {
 							// 图片已上传但合集没建起来：这是可续建状态，不能映射成
 							// completed。放回回补队列，下一轮只复用 imageIDs 建合集。
@@ -6028,6 +6036,7 @@ func resetRetryableAutomationBooks(books map[string]any, only map[string]bool, n
 			delete(entry, "needsManual")
 			resetAutomationManualPageRetryBudget(entry)
 			delete(entry, "contentPolicyRetryCount")
+			delete(entry, "textRecoveryAttempts")
 			delete(entry, "retryAt")
 			delete(entry, "retryReason")
 			// 人工重试同样重置“批次末尾回补”的预算与等待标记。

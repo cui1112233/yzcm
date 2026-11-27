@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 type EnsureRequest struct {
@@ -46,6 +47,8 @@ type StageCheckpoint struct {
 }
 
 type Workflow struct {
+	// StageTimeout bounds each phase independently; parent cancellation still wins.
+	StageTimeout    func(string) time.Duration
 	Repo            Repository
 	Track           func(context.Context, Scope, StageCheckpoint, bool, func() error) error
 	Process         func(context.Context, EnsureRequest, bool) (WorkflowProduction, error)
@@ -125,11 +128,28 @@ func (w Workflow) Ensure(ctx context.Context, req EnsureRequest) (res EnsureResu
 			return res, ErrInvalid
 		}
 	}
-	stage := func(id, label, key string, reuse bool, run func() error) error {
+	parent := ctx
+	cancelStage := func() {}
+	defer func() { cancelStage() }()
+	enter := func(id, label string) {
+		if res.Stage == id {
+			return
+		}
+		cancelStage()
+		ctx = parent
+		cancelStage = func() {}
+		if w.StageTimeout != nil {
+			if budget := w.StageTimeout(id); budget > 0 {
+				ctx, cancelStage = context.WithTimeout(parent, budget)
+			}
+		}
 		res.Stage = id
 		if req.Progress != nil {
 			req.Progress(id, label)
 		}
+	}
+	stage := func(id, label, key string, reuse bool, run func() error) error {
+		enter(id, label)
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -140,6 +160,7 @@ func (w Workflow) Ensure(ctx context.Context, req EnsureRequest) (res EnsureResu
 		return w.Track(ctx, req.Scope, checkpoint, reuse, run)
 	}
 	publish := func(verifyErr error) error {
+		enter("text_publish", "正在上传")
 		key := fingerprint(res.Collection.ID, req.PublishSettingsKey)
 		if req.PublishIntentKey != "" {
 			key = fingerprint(key, req.PublishIntentKey)
@@ -172,7 +193,7 @@ func (w Workflow) Ensure(ctx context.Context, req EnsureRequest) (res EnsureResu
 		return w.VerifyPublished(ctx, req, res.Collection)
 	}
 	if req.CollectionID != "" && req.Target == "published" {
-		res.Stage = "text_publish"
+		enter("text_publish", "正在上传")
 		res.Collection, err = w.Repo.GetCollection(ctx, req.Scope, req.CollectionID)
 		if err != nil {
 			return res, err
@@ -184,6 +205,7 @@ func (w Workflow) Ensure(ctx context.Context, req EnsureRequest) (res EnsureResu
 		res.Published = err == nil
 		return res, err
 	}
+	enter("text_process", "文本处理")
 	production, verifyErr := w.Process(ctx, req, true)
 	err = stage("text_process", "文本处理", req.SourceKey, verifyErr == nil, func() error {
 		if verifyErr == nil {
@@ -196,6 +218,7 @@ func (w Workflow) Ensure(ctx context.Context, req EnsureRequest) (res EnsureResu
 	if err != nil {
 		return res, err
 	}
+	enter("text_paginate", "正在分页")
 	var next workflowSnapshot
 	if err = json.Unmarshal(production.Snapshot, &next); err != nil {
 		return res, err
@@ -226,6 +249,7 @@ func (w Workflow) Ensure(ctx context.Context, req EnsureRequest) (res EnsureResu
 	if err != nil {
 		return res, err
 	}
+	enter("text_render", "正在渲染")
 	var current, desired map[string]any
 	if err = json.Unmarshal(doc.ConfigSnapshot, &current); err != nil {
 		return res, err
@@ -302,6 +326,7 @@ func (w Workflow) Ensure(ctx context.Context, req EnsureRequest) (res EnsureResu
 	if err != nil {
 		return res, err
 	}
+	enter("text_validate", "正在校验")
 	head, err := w.Repo.GetDocument(ctx, req.Scope)
 	if err != nil {
 		return res, err
@@ -325,6 +350,7 @@ func (w Workflow) Ensure(ctx context.Context, req EnsureRequest) (res EnsureResu
 	if err != nil {
 		return res, err
 	}
+	enter("text_collection", "正在整理合集")
 	res.Collection, err = w.matchingCollection(ctx, req.Scope, head, manifest)
 	if err != nil {
 		return res, err
