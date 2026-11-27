@@ -266,3 +266,83 @@ func TestRulesBodyProcessesTextAndPreservesFailedStoredVersion(t *testing.T) {
 		t.Fatal(out)
 	}
 }
+
+func TestRulesBodyRestorePrefersStoredRawAndHonorsMaxTxt(t *testing.T) {
+	ctx := context.Background()
+	s := rulesBodySetup(t, novelfetchworkshop.Document{
+		Original: "旧处理正文", ProcessedText: "旧处理正文", OriginalRaw: "过时内联原文", MaxTxt: 4,
+	})
+	rawRef, err := s.PutBody(ctx, "alice", novelfetchworkshop.BodyRecord{
+		BookID: "123", BodyRef: novelfetchworkshop.BodyRef{VersionID: "original_raw"}, Content: "真实原文后续保留",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "/", strings.NewReader(`{"ids":["123"],"scope":"original"}`))
+	r = r.WithContext(context.WithValue(r.Context(), bridgeIdentityKey{}, BridgeIdentity{Username: "alice"}))
+	w := httptest.NewRecorder()
+	applySensitive(w, r, s, true, nil)
+	if w.Code != 200 {
+		t.Fatalf("HTTP %d %s", w.Code, w.Body.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	rulesBodyResult(t, out, "original", "success")
+	if out["updated"] != float64(1) || out["failed"] != float64(0) || out["restored"] != true {
+		t.Fatal(out)
+	}
+	body, err := s.GetBody(ctx, "alice", "123", "original")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := s.GetDocument(ctx, "alice", "123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.Content != "真实原文" || saved.ProcessedText != "真实原文" || saved.Original != "真实原文" || saved.ProcessedChars != 4 {
+		t.Fatalf("restore did not use bounded stored raw: body=%q saved=%+v", body.Content, saved)
+	}
+	raw, err := s.GetBody(ctx, "alice", "123", "original_raw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw.Content != "真实原文后续保留" || raw.Revision != rawRef.Revision || raw.ContentHash != rawRef.ContentHash || saved.OriginalRaw != "过时内联原文" {
+		t.Fatalf("restore rewrote raw source: raw=%+v inline=%q", raw, saved.OriginalRaw)
+	}
+}
+
+type rulesBodyListErrorStore struct{ *rulesBodyFaultStore }
+
+func (s rulesBodyListErrorStore) ListBodyRefs(context.Context, string, string) ([]novelfetchworkshop.BodyRef, error) {
+	return nil, errors.New("body reference listing unavailable")
+}
+func TestRulesBodyListFailureKeepsKnownInlineSuccessPartial(t *testing.T) {
+	ctx := context.Background()
+	base := rulesBodySetup(t, novelfetchworkshop.Document{Versions: map[string]any{"ai1": "已知AI正文"}})
+	out := rulesBodyRequest(t, rulesBodyListErrorStore{base}, "ai")
+	if out["updated"] != float64(1) || out["failed"] != float64(1) || out["skipped"] != float64(0) {
+		t.Fatal(out)
+	}
+	rulesBodyResult(t, out, "", "failed")
+	rulesBodyResult(t, out, "ai1", "success")
+	rows, _ := out["version_results"].([]any)
+	if len(rows) != 2 {
+		t.Fatalf("expected listing failure and known version success: %v", rows)
+	}
+	saved, err := base.GetDocument(ctx, "alice", "123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Meta["sensitiveStatus"] != "partial" || saved.Meta["sensitiveProcessed"] != false {
+		t.Fatalf("listing failure hidden by success: %+v", saved.Meta)
+	}
+	body, err := base.GetBody(ctx, "alice", "123", "ai1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.Content != "已知AI正文" || saved.BodyRefs["ai1"].Revision != body.Revision {
+		t.Fatalf("known version not saved: body=%+v saved=%+v", body, saved)
+	}
+}
