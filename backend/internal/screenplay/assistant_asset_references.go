@@ -28,18 +28,27 @@ func assistantAssetReference(asset Asset, characters, scene, props string, proto
 		}
 		return false
 	}
-	switch asset.Type {
-	case AssetCharacter:
-		if match(characters) {
+	ids, _, bindingErr := ShotAssetBindingIDs(protocol, asset.Type, true)
+	for _, id := range ids {
+		if id == asset.ID {
 			return true
 		}
-	case AssetScene:
-		if match(scene) {
-			return true
-		}
-	case AssetProp:
-		if match(props) {
-			return true
+	}
+	_, explicit, _ := ShotAssetBindingIDs(protocol, asset.Type, false)
+	if !explicit || bindingErr != nil {
+		switch asset.Type {
+		case AssetCharacter:
+			if match(characters) {
+				return true
+			}
+		case AssetScene:
+			if match(scene) {
+				return true
+			}
+		case AssetProp:
+			if match(props) {
+				return true
+			}
 		}
 	}
 	var fields any
@@ -65,6 +74,19 @@ func assistantAssetReference(asset Asset, characters, scene, props string, proto
 				}
 			}
 			return false
+		}
+		if obj, ok := fields.(map[string]any); ok {
+			if bindingErr != nil && walk(obj[bindingIDKey(asset.Type)], true) {
+				return true
+			}
+			if bindings, ok := obj["asset_bindings"].(map[string]any); ok {
+				if bindingErr != nil && walk(bindings[bindingIDKey(asset.Type)], true) {
+					return true
+				}
+				for _, k := range bindingKinds {
+					delete(bindings, bindingIDKey(k))
+				}
+			}
 		}
 		if walk(fields, false) {
 			return true

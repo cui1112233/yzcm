@@ -33,6 +33,7 @@ const ScreenplayAuthoringShotEditTools = `
 - modify_storyboard：action=update时，new_data仅填写用户要求修改的video_desc（视频提示词）、image_prompt、line（台词/旁白）、voice_actor、emotion。
 - add_shot（或modify_storyboard action=add）：new_data仅接受video_desc/image_prompt/line/voice_actor/emotion和duration_sec。可提供insert_after_shot_id真实字符串ID或唯一insert_after_shot_number正整数序号，不能混用；省略定位则追加末尾。服务器生成新ID，来源未核验且不自动绑定资产，不能传source_elements/协议/媒体/身份。
 - delete_shots（或modify_storyboard action=delete）：shot_ids为1至200个真实ID或shot_numbers为1至200个正整数序号，不能混用、重复或包含未知目标。只删所选镜头记录，保留素材文件；可以删为空分镜。
+- bind_shot_assets：选择真实shot_id或shot_number，可给episode_no和engine。人物用character_ids/character_names字符串数组，道具用prop_ids/prop_names字符串数组，场景用单个scene_id/scene_name字符串。只使用当前作品真实资产编号或完整唯一名称，两者同时给时，去重后的资产和顺序须一致。mode默认merge，按原顺序追加去重，空值不改变原绑定，已有不同场景需用replace。replace只替换填写的类型，空数组或空场景字符串会解除该类绑定。准备后等待用户确认。绑定供视频参考图与主体视频使用，镜头生图仍手选参考图。
 - modify_script_text暂不支持：当前创作分镜没有独立画面描述字段；不能把画面描述写进台词或视频词代替。
 - modify_image_prompt、modify_video_prompt：new_prompt为新提示词，action仅replace或append（追加原文末尾，不自动加换行）。不支持rewrite、optimize、fix_violations或instruction。
 已有镜头文字修改用从真实读取结果取得的shot_id字符串或正整数shot_number定位，可给episode_no和engine；多个剧集/引擎必须明确指定。shot_index与原版数字shot_id不能猜测转换，需先读取真实ID或序号。不能传身份、作品、媒体字段、准备/确认标记；字段精确小写且不能重复。未要求修改的字段不要填写。服务器会保留完整原镜头及未请求字段、来源、协议、绑定和媒体；准备成功只表示等待用户确认，不得声称已经修改。`

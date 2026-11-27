@@ -34,3 +34,17 @@ proposal.querySelector('button').click();await tick();await tick();assert(writes
 const confirm=[...document.querySelectorAll('.ant-popover button')].find(b=>b.classList.contains('ant-btn-primary'));assert(confirm,'missing confirmation');confirm.click();await tick();await tick();assert(writes.length===1,'wrong apply count');assert(writes[0].url.endsWith('/projects/p/assistant/apply')&&writes[0].body.proposal_id==='shot'&&writes[0].body.expected_revision===3&&writes[0].body.confirmed===true,'wrong confirmation payload');assert(document.querySelector('.comic-assistant-proposal button').disabled,'applied proposal can repeat');document.body.dataset.result='passed';})().catch(e=>{document.body.dataset.result='failed';document.body.dataset.error=e.message});
 `);
 });
+
+test('助手绑定显示真实镜头、资产名称和编号并等待二次确认', {skip:!browser},async()=>{
+ await runCheckCase('assistant-shot-binding',`
+import React from 'react';import{createRoot}from'react-dom/client';import{ComicAssistantPanel}from './ComicScreenplayAuthoringPanels.jsx';import{setToken,setVerifiedImpersonation}from '../../shared/api/client.js';setToken('fixture');setVerifiedImpersonation({actorUsername:'alice',username:'alice',impersonationId:'none'});
+const tick=()=>new Promise(r=>setTimeout(r,120));const assert=(v,m)=>{if(!v)throw Error(m)};
+const state={revision:3,messages:[],proposals:[{id:'shot',summary:'助手方案',status:'pending',actions:[{kind:'creative_shot',target_id:'real-shot',creative_shot:{binding:{selected:{character:['id-new'],scene:[],prop:[]}},board_id:'real-board',episode_no:2,engine:'prompt_138',before:{id:'real-shot',seq:7},after:{id:'real-shot',seq:7},changes:[{field:'character_ids',before:'林晚 [id-old]',after:'林清 [id-new]'},{field:'scene_id',before:'街道 [id-street]',after:''},{field:'prop_ids',before:'纸伞',after:''}]}}]}]};
+let writes=[];window.fetch=async(url,opts={})=>{if(opts.method==='POST'){writes.push({url:String(url),body:JSON.parse(opts.body)});state.revision++;state.proposals[0].status='applied';}return new Response(JSON.stringify({state}),{status:200,headers:{'Content-Type':'application/json'}})};
+(async()=>{createRoot(document.getElementById('root')).render(<ComicAssistantPanel projectId="p" canGenerate={false}/>);
+for(let i=0;i<50&&!document.querySelector('.comic-assistant-proposal');i++)await tick();
+const proposal=document.querySelector('.comic-assistant-proposal');assert(proposal,'missing proposal');for(const text of ['第2集','镜头7','prompt_138','real-shot','绑定分镜资产','绑定人物','林晚 [id-old]','林清 [id-new]','绑定场景','街道 [id-street]','绑定道具','纸伞','（空）','修改前','修改后'])assert(proposal.textContent.includes(text),'missing '+text);assert(writes.length===0,'wrote before confirmation');
+proposal.querySelector('button').click();await tick();await tick();assert(writes.length===0,'popconfirm wrote without confirm');
+const confirm=[...document.querySelectorAll('.ant-popover button')].find(b=>b.classList.contains('ant-btn-primary'));assert(confirm,'missing confirmation');confirm.click();await tick();await tick();assert(writes.length===1,'wrong apply count');assert(writes[0].url.endsWith('/projects/p/assistant/apply')&&writes[0].body.proposal_id==='shot'&&writes[0].body.expected_revision===3&&writes[0].body.confirmed===true,'wrong confirmation payload');assert(document.querySelector('.comic-assistant-proposal button').disabled,'applied proposal can repeat');document.body.dataset.result='passed';})().catch(e=>{document.body.dataset.result='failed';document.body.dataset.error=e.message});
+`);
+});

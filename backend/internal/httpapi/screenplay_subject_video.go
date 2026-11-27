@@ -78,35 +78,7 @@ func screenplaySubjectNames(value string) []string {
 
 // Explicit IDs from the original storyboard fields win over name matching.
 func screenplayBoundSubjects(shot screenplay.StoryboardShot, assets []screenplay.Asset, includeProps bool) ([]screenplay.Asset, error) {
-	var fields struct {
-		Characters []json.RawMessage `json:"character_ids"`
-		Scene      json.RawMessage   `json:"scene_id"`
-		Props      []json.RawMessage `json:"prop_ids"`
-	}
-	if len(shot.ProtocolFields) > 0 && json.Unmarshal(shot.ProtocolFields, &fields) != nil {
-		return nil, fmt.Errorf("分镜主体绑定格式无效")
-	}
-	parseID := func(raw json.RawMessage) string {
-		var v string
-		if json.Unmarshal(raw, &v) == nil {
-			return v
-		}
-		var n json.Number
-		if json.Unmarshal(raw, &n) == nil {
-			return string(n)
-		}
-		return ""
-	}
-	ids := map[screenplay.AssetType][]json.RawMessage{screenplay.AssetCharacter: fields.Characters, screenplay.AssetProp: fields.Props}
-	if len(fields.Scene) > 0 && string(fields.Scene) != "null" && string(fields.Scene) != "0" && string(fields.Scene) != `""` {
-		ids[screenplay.AssetScene] = []json.RawMessage{fields.Scene}
-	}
 	names := map[screenplay.AssetType]string{screenplay.AssetCharacter: shot.Characters, screenplay.AssetScene: shot.Scene, screenplay.AssetProp: shot.Props}
-	targets := screenplayReferenceTargets(shot, assets)
-	allowed := map[string]bool{}
-	for _, id := range targets {
-		allowed[id] = true
-	}
 	out := []screenplay.Asset{}
 	seen := map[string]bool{}
 	for _, kind := range []screenplay.AssetType{screenplay.AssetCharacter, screenplay.AssetScene, screenplay.AssetProp} {
@@ -119,9 +91,12 @@ func screenplayBoundSubjects(shot screenplay.StoryboardShot, assets []screenplay
 				seen[a.ID] = true
 			}
 		}
-		if len(ids[kind]) > 0 {
-			for _, raw := range ids[kind] {
-				id := parseID(raw)
+		ids, present, e := screenplay.ShotAssetBindingIDs(shot.ProtocolFields, kind, true)
+		if e != nil {
+			return nil, fmt.Errorf("分镜主体绑定格式无效: %w", e)
+		}
+		if present {
+			for _, id := range ids {
 				found := false
 				for _, a := range assets {
 					if a.ID == id && a.Type == kind {
@@ -147,7 +122,7 @@ func screenplayBoundSubjects(shot screenplay.StoryboardShot, assets []screenplay
 					matches = append(matches, a)
 				}
 			}
-			if len(matches) != 1 || !allowed[matches[0].ID] {
+			if len(matches) != 1 {
 				return nil, fmt.Errorf("主体 %s 缺失或重名，请明确绑定资产", name)
 			}
 			appendOne(matches[0])

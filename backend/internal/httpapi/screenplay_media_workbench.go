@@ -887,7 +887,10 @@ func (s *ScreenplayMediaWorkbench) References(ctx context.Context, p screenplay.
 	if e != nil {
 		return nil, e
 	}
-	targets := screenplayReferenceTargets(shot, assets)
+	targets, e := screenplayReferenceTargets(p, shot, assets)
+	if e != nil {
+		return nil, e
+	}
 	urls := []string{}
 	seen := map[string]bool{}
 	for _, target := range targets {
@@ -1246,7 +1249,10 @@ func (s *ScreenplayMediaWorkbench) ReferenceIDs(ctx context.Context, p screenpla
 	if e != nil {
 		return nil, e
 	}
-	targets := screenplayReferenceTargets(shot, assets)
+	targets, e := screenplayReferenceTargets(p, shot, assets)
+	if e != nil {
+		return nil, e
+	}
 	ids := []string{}
 	seen := map[string]bool{}
 	for _, target := range targets {

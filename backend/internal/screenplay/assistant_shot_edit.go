@@ -21,12 +21,13 @@ type AssistantCreativeShotEdit struct {
 	Engine  StoryboardEngine      `json:"engine"`
 	Before  StoryboardShot        `json:"before"`
 	After   StoryboardShot        `json:"after"`
+	Binding *AssistantShotBinding `json:"binding,omitempty"`
 	Changes []AssistantShotChange `json:"changes"`
 }
 
 func IsAssistantShotEditTool(name string) bool {
 	switch name {
-	case "add_shot", "delete_shots", "modify_storyboard", "modify_script_text", "modify_image_prompt", "modify_video_prompt":
+	case "bind_shot_assets", "add_shot", "delete_shots", "modify_storyboard", "modify_script_text", "modify_image_prompt", "modify_video_prompt":
 		return true
 	}
 	return false
@@ -96,6 +97,9 @@ func shotText(s *StoryboardShot, field string) *string {
 	return nil
 }
 func PrepareAssistantShotEdit(ctx context.Context, store Store, owner, project, name string, raw json.RawMessage) (AuthoringAction, string, error) {
+	if name == "bind_shot_assets" {
+		return prepareAssistantShotBinding(ctx, store, owner, project, raw)
+	}
 	if isShotStructure(name, raw) {
 		return PrepareAssistantShotStructure(ctx, store, owner, project, name, raw)
 	}
@@ -171,39 +175,9 @@ func PrepareAssistantShotEdit(ctx context.Context, store Store, owner, project, 
 		}
 		values[field] = value
 	}
-	if _, e = store.GetProject(ctx, owner, project); e != nil {
-		return AuthoringAction{}, "", e
-	}
-	boards, e := store.ListStoryboards(ctx, owner, project, engine)
+	b, found, e := assistantShotTarget(ctx, store, owner, project, episode, engine, id, number)
 	if e != nil {
 		return AuthoringAction{}, "", e
-	}
-	matches := []Storyboard{}
-	for _, b := range boards {
-		if episode == 0 || episode == b.EpisodeNo {
-			matches = append(matches, b)
-		}
-	}
-	if len(matches) != 1 {
-		return fail("请明确选择唯一episode_no和engine")
-	}
-	b := matches[0]
-	var found *StoryboardShot
-	for _, sh := range b.Shots {
-		if (id != "" && sh.ID != id) || (id == "" && sh.Seq != number) {
-			continue
-		}
-		if number != 0 && sh.Seq != number {
-			return fail("镜头ID与序号冲突")
-		}
-		if found != nil {
-			return fail("镜头目标有歧义")
-		}
-		cp := sh
-		found = &cp
-	}
-	if found == nil {
-		return fail("当前作品及所选剧集和引擎中没有该镜头")
 	}
 	edit := AssistantCreativeShotEdit{BoardID: b.ID, Episode: b.EpisodeNo, Engine: b.Engine, Before: *found, After: *found}
 	for _, field := range []string{"video_desc", "image_prompt", "line", "voice_actor", "emotion"} {
@@ -236,6 +210,9 @@ func validateCreativeShotAction(a AuthoringAction) error {
 	d := a.CreativeShot
 	if d == nil || a.TargetID == "" || d.BoardID == "" || d.Episode <= 0 || d.Engine == "" || a.ExpectedRevision <= 0 || a.TargetID != d.Before.ID || len(d.Changes) == 0 || len(d.Changes) > 5 {
 		return ErrInvalidArgument
+	}
+	if d.Binding != nil {
+		return validateBindingEdit(d)
 	}
 	rebuilt := d.Before
 	seen := map[string]bool{}
@@ -272,9 +249,50 @@ func applyCreativeShot(board *Storyboard, a AuthoringAction) error {
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(current, original) {
+	if !bytes.Equal(current, original) && !(d.Binding != nil && bindingShotEqual(board.Shots[i], d.Before)) {
 		return ErrRevisionConflict
 	}
 	board.Shots[i] = d.After
 	return nil
+}
+
+func assistantShotTarget(ctx context.Context, store Store, owner, project string, episode int, engine StoryboardEngine, id string, number int) (Storyboard, *StoryboardShot, error) {
+	invalid := func(reason string) (Storyboard, *StoryboardShot, error) {
+		return Storyboard{}, nil, fmt.Errorf("%w: %s", ErrInvalidArgument, reason)
+	}
+	if _, e := store.GetProject(ctx, owner, project); e != nil {
+		return Storyboard{}, nil, e
+	}
+	boards, e := store.ListStoryboards(ctx, owner, project, engine)
+	if e != nil {
+		return Storyboard{}, nil, e
+	}
+	matches := []Storyboard{}
+	for _, b := range boards {
+		if episode == 0 || episode == b.EpisodeNo {
+			matches = append(matches, b)
+		}
+	}
+	if len(matches) != 1 {
+		return invalid("请明确选择唯一episode_no和engine")
+	}
+	b := matches[0]
+	var found *StoryboardShot
+	for _, sh := range b.Shots {
+		if (id != "" && sh.ID != id) || (id == "" && sh.Seq != number) {
+			continue
+		}
+		if number != 0 && sh.Seq != number {
+			return invalid("镜头ID与序号冲突")
+		}
+		if found != nil {
+			return invalid("镜头目标有歧义")
+		}
+		cp := sh
+		found = &cp
+	}
+	if found == nil {
+		return invalid("当前作品及所选剧集和引擎中没有该镜头")
+	}
+	return b, found, nil
 }

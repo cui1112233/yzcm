@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -61,6 +62,20 @@ func (m *MemoryStore) CommitAuthoringShot(_ context.Context, repository Authorin
 	i, a, e := pendingShotAction(st, id, v)
 	if e != nil {
 		return AuthoringState{}, e
+	}
+	if d := a.CreativeShot.Binding; d != nil {
+		for _, expected := range d.Assets {
+			found := false
+			for _, asset := range m.assets[key] {
+				if asset.ID == expected.ID {
+					found = asset.Type == expected.Type && asset.Name == expected.Name && asset.Revision == expected.Revision
+					break
+				}
+			}
+			if !found {
+				return AuthoringState{}, ErrRevisionConflict
+			}
+		}
 	}
 	for j, b := range m.storyboards[key] {
 		if b.ID != a.CreativeShot.BoardID {
@@ -154,9 +169,24 @@ func (s *MySQLStore) CommitAuthoringShot(ctx context.Context, repository Authori
 	if original == nil {
 		original = map[string]json.RawMessage{}
 	}
-	for _, c := range d.Changes {
-		if c.Field != "video_desc" {
-			original[c.Field] = known[c.Field]
+	if d.Binding != nil {
+		for _, expected := range d.Binding.Assets {
+			var current bindingAsset
+			current.ID = expected.ID
+			e = tx.QueryRowContext(ctx, `SELECT asset_type,name,revision FROM screenplay_assets WHERE id=? AND project_id=? AND owner_username=? FOR UPDATE`, expected.ID, p, o).Scan(&current.Type, &current.Name, &current.Revision)
+			if errors.Is(e, sql.ErrNoRows) || e == nil && current != expected {
+				return AuthoringState{}, ErrRevisionConflict
+			}
+			if e != nil {
+				return AuthoringState{}, e
+			}
+		}
+		original["protocol_fields"] = known["protocol_fields"]
+	} else {
+		for _, c := range d.Changes {
+			if c.Field != "video_desc" {
+				original[c.Field] = known[c.Field]
+			}
 		}
 	}
 	merged, e := json.Marshal(original)
@@ -164,7 +194,12 @@ func (s *MySQLStore) CommitAuthoringShot(ctx context.Context, repository Authori
 		return AuthoringState{}, e
 	}
 	now := time.Now().UTC()
-	result, e := tx.ExecContext(ctx, `UPDATE screenplay_storyboard_shots SET video_desc=?,protocol_json=?,updated_at=? WHERE id=? AND storyboard_id=? AND project_id=? AND owner_username=?`, d.After.VideoDesc, string(merged), now, a.TargetID, b.ID, p, o)
+	var result sql.Result
+	if d.Binding != nil {
+		result, e = tx.ExecContext(ctx, `UPDATE screenplay_storyboard_shots SET characters_text=?,scene_name=?,props_text=?,protocol_json=?,updated_at=? WHERE id=? AND storyboard_id=? AND project_id=? AND owner_username=?`, d.After.Characters, d.After.Scene, d.After.Props, string(merged), now, a.TargetID, b.ID, p, o)
+	} else {
+		result, e = tx.ExecContext(ctx, `UPDATE screenplay_storyboard_shots SET video_desc=?,protocol_json=?,updated_at=? WHERE id=? AND storyboard_id=? AND project_id=? AND owner_username=?`, d.After.VideoDesc, string(merged), now, a.TargetID, b.ID, p, o)
+	}
 	if e = oneShotRow(result, e); e != nil {
 		return AuthoringState{}, e
 	}
