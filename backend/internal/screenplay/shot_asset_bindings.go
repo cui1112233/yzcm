@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"qiantie/backend/internal/prompt"
 )
 
 var bindingKinds = []AssetType{AssetCharacter, AssetScene, AssetProp}
@@ -64,6 +66,22 @@ func bindingValues(raw json.RawMessage, single bool) ([]string, error) {
 	return values, nil
 }
 
+// Nine-grid output stores its source scene label in scene_id. Qualify the
+// saved protocol with its recorded template identity, independent of the label.
+func nineGridSourceScene(contractJSON json.RawMessage) bool {
+	var contract struct {
+		ID       string `json:"prompt_id"`
+		Digest   string `json:"prompt_digest"`
+		Protocol string `json:"output_protocol"`
+		Parser   string `json:"parser_version"`
+	}
+	if len(contractJSON) == 0 || json.Unmarshal(contractJSON, &contract) != nil || contract.Protocol != "storyboard_nine_grid_v1" {
+		return false
+	}
+	selected, e := prompt.ResolveCreativePrompt(contract.ID, "storyboard")
+	return e == nil && selected.Supported && selected.SourceID > 0 && selected.OutputProtocol == contract.Protocol && selected.Digest == contract.Digest && selected.ParserVersion == contract.Parser
+}
+
 // ShotAssetBindingIDs distinguishes an explicit empty selection from a missing
 // type. Old subject IDs are considered only when the caller requests them.
 func ShotAssetBindingIDs(raw json.RawMessage, kind AssetType, legacy bool) ([]string, bool, error) {
@@ -88,6 +106,9 @@ func ShotAssetBindingIDs(raw json.RawMessage, kind AssetType, legacy bool) ([]st
 	}
 	var raws []json.RawMessage
 	if kind == AssetScene {
+		if nineGridSourceScene(fields["_cm_contract"]) {
+			return nil, false, nil
+		}
 		raws = []json.RawMessage{v}
 	} else if json.Unmarshal(v, &raws) != nil {
 		return nil, true, ErrInvalidArgument

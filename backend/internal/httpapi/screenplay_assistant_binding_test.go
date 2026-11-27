@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"slices"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"qiantie/backend/internal/agentworkspace"
 	"qiantie/backend/internal/batchfactoryv11"
+	"qiantie/backend/internal/prompt"
 	"qiantie/backend/internal/screenplay"
 )
 
@@ -118,6 +120,68 @@ func TestBindingLegacyOrdinaryVideoUsesSceneName(t *testing.T) {
 		}
 	}
 }
+func TestBindingNineGridSourceSceneInSubjectAndSoraRequests(t *testing.T) {
+	ctx := context.Background()
+	library, first, _, _, _ := assetLibraryServiceFixture(t)
+	m := library.Media
+	p, e := m.Projects.GetProject(ctx, "alice", first.ProjectID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	scene, e := m.Projects.CreateAsset(ctx, screenplay.Asset{ID: "old-scene-uuid", OwnerUsername: "alice", ProjectID: p.ID, Type: screenplay.AssetScene, Name: "街道", Extra: map[string]string{"sora2_info": "asset-street"}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	runner := screenplayVideoRunner{References: m.References, ReferenceIDs: m.ReferenceIDs, Subjects: m.VideoSubjects}
+	selected, e := prompt.ResolveCreativePrompt("luoshui_storyboard_175", "storyboard")
+	if e != nil {
+		t.Fatal(e)
+	}
+	contract := map[string]any{"prompt_id": selected.ID, "prompt_digest": selected.Digest, "parser_version": selected.ParserVersion, "output_protocol": selected.OutputProtocol}
+	for _, tc := range []struct {
+		name, id, label      string
+		source, explicit, ok bool
+	}{
+		{"nine-grid source", "S1", "街道", true, false, true}, {"unicode source", "场景一", "街道", true, false, true}, {"arbitrary source", "雨后/片头", "街道", true, false, true},
+		{"legacy asset", scene.ID, "街道", false, false, true}, {"unproven label", "S1", "街道", false, false, false}, {"expired explicit ID", "S1", "街道", true, true, false},
+	} {
+		for _, subject := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/subject=%t", tc.name, subject), func(t *testing.T) {
+				fields := map[string]any{"scene_id": tc.id}
+				if tc.source {
+					fields["_cm_contract"] = contract
+				}
+				if tc.explicit {
+					fields["asset_bindings"] = map[string]any{"scene_id": "deleted-asset"}
+				}
+				raw, _ := json.Marshal(fields)
+				sh := screenplay.StoryboardShot{ID: "shot", Scene: tc.label, Seq: 1, Duration: 4, VideoDesc: "@街道 夜景", ProtocolFields: raw}
+				p.CreativeConfig = &screenplay.CreativeConfig{UseSubjectMode: subject, AutoReplaceSora2Info: !subject}
+				if !subject {
+					p.CreativeConfig.VideoGenerationMode = "text_to_video"
+				}
+				in, _, e := runner.prepareInput(ctx, p, screenplay.Storyboard{ID: "b"}, sh, "fixture", "720p")
+				if !tc.ok {
+					if e == nil {
+						t.Fatalf("ambiguous/dead binding accepted: %+v", in)
+					}
+					return
+				}
+				if e != nil {
+					t.Fatal(e)
+				}
+				if subject {
+					if !slices.Equal(in.SubjectReferenceURIs, []string{"asset://asset-street"}) {
+						t.Fatal(in)
+					}
+				} else if in.Prompt != "@asset-street 夜景" || len(in.ImageURLs) != 0 {
+					t.Fatal(in)
+				}
+			})
+		}
+	}
+}
+
 func TestBindingChatScopesAndConfirmation(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()

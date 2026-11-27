@@ -106,7 +106,7 @@ func screenplayBoundSubjects(shot screenplay.StoryboardShot, assets []screenplay
 					}
 				}
 				if !found {
-					return nil, fmt.Errorf("找不到当前作品的绑定主体 %s", id)
+					return nil, fmt.Errorf("找不到当前作品的绑定主体 %s，请重新绑定此镜头", id)
 				}
 			}
 			continue

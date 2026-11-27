@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+
+	"qiantie/backend/internal/prompt"
 )
 
 func TestBindingLegacyDeleteProtection(t *testing.T) {
@@ -187,5 +189,28 @@ func TestBindingRepairsDeadSelectionOnlyWithReplace(t *testing.T) {
 		if sh.Scene != "旧街" || sh.Props != "书" || sh.Characters == "阿青" {
 			t.Fatal(sh)
 		}
+	}
+}
+
+func TestBindingNineGridSourceIsNotALegacyAssetReference(t *testing.T) {
+	contract, e := prompt.ResolveCreativePrompt("luoshui_storyboard_175", "storyboard")
+	if e != nil {
+		t.Fatal(e)
+	}
+	marker := map[string]string{"prompt_id": contract.ID, "prompt_digest": contract.Digest, "parser_version": contract.ParserVersion, "output_protocol": contract.OutputProtocol}
+	fields := map[string]any{"scene_id": "source-label", "_cm_contract": marker}
+	raw, _ := json.Marshal(fields)
+	old := Asset{ID: "source-label", Type: AssetScene, Name: "另一场景"}
+	if assistantAssetReference(old, "", "街道", "", raw) {
+		t.Fatal("source label blocked unrelated asset deletion")
+	}
+	actual := Asset{ID: "scene-asset", Type: AssetScene, Name: "街道"}
+	if !assistantAssetReference(actual, "", "街道", "", raw) {
+		t.Fatal("lost the real name-based scene reference")
+	}
+	marker["prompt_digest"] = "incorrect"
+	raw, _ = json.Marshal(fields)
+	if !assistantAssetReference(old, "", "街道", "", raw) {
+		t.Fatal("unverified source marker suppressed a legacy asset ID")
 	}
 }
