@@ -246,6 +246,10 @@ func (t adminTx) Change(ctx context.Context, c AdminChange) error {
 		_, err = t.tx.ExecContext(ctx, insertGrantSQL, c.GrantID, c.Username, GrantCapabilityTeamCreate, GrantScopePlatform, "", c.Actor, nil)
 	case "revoke_team_create":
 		_, err = t.tx.ExecContext(ctx, `UPDATE account_center_grants SET revoked_at=CURRENT_TIMESTAMP(6) WHERE username=? AND scope=? AND capability=? AND team_id IS NULL AND revoked_at IS NULL`, c.Username, GrantScopePlatform, GrantCapabilityTeamCreate)
+	case "grant_custom_api":
+		_, err = t.tx.ExecContext(ctx, insertGrantSQL, c.GrantID, c.Username, GrantCapabilityCustomAPI, GrantScopePlatform, "", c.Actor, nil)
+	case "revoke_custom_api":
+		_, err = t.tx.ExecContext(ctx, `UPDATE account_center_grants SET revoked_at=CURRENT_TIMESTAMP(6) WHERE username=? AND scope=? AND capability=? AND team_id IS NULL AND revoked_at IS NULL`, c.Username, GrantScopePlatform, GrantCapabilityCustomAPI)
 	case "enable", "disable":
 		_, err = t.tx.ExecContext(ctx, `UPDATE accounts SET active=? WHERE username=?`, c.Action == "enable", c.Username)
 	case "archive":

@@ -53,6 +53,7 @@ type Reader interface {
 
 type Query struct {
 	Kind, Q       string
+	ExactModelID  string
 	Limit, Offset int
 	SnapshotID    uint64
 }
@@ -114,7 +115,7 @@ func (query Query) Normalize() (Query, error) {
 	if query.Limit == 0 {
 		query.Limit = defaultLimit
 	}
-	if (query.Kind != "" && !validKind(query.Kind)) || !validText(query.Q, 191) ||
+	if (query.Kind != "" && !validKind(query.Kind)) || !validText(query.Q, 191) || !validText(query.ExactModelID, 191) ||
 		query.Limit < 1 || query.Limit > maxLimit || query.Offset < 0 || query.Offset > maxOffset {
 		return Query{}, ErrInvalidQuery
 	}
@@ -310,7 +311,10 @@ WHERE sync_run_id=? AND adapted=TRUE AND allowed=TRUE`
 		statement += ` AND kind=?`
 		args = append(args, query.Kind)
 	}
-	if query.Q != "" {
+	if query.ExactModelID != "" {
+		statement += ` AND model_id=?`
+		args = append(args, query.ExactModelID)
+	} else if query.Q != "" {
 		statement += ` AND (display_name LIKE ? ESCAPE '=' OR model_id COLLATE utf8mb4_0900_as_ci LIKE ? ESCAPE '=')`
 		pattern := "%" + likeLiteral.Replace(query.Q) + "%"
 		args = append(args, pattern, pattern)

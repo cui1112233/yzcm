@@ -7,6 +7,7 @@ type Action string
 const (
 	ActionCreateTeam      Action = "create_team"
 	ActionGrantTeamCreate Action = "grant_team_create"
+	ActionGrantCustomAPI  Action = "grant_custom_api"
 	ActionManageTeam      Action = "manage_team"
 	ActionRestoreTeam     Action = "restore_team"
 	ActionCreateAccount   Action = "create_account"
@@ -64,7 +65,7 @@ func (Policy) Can(actor Identity, action Action, target PolicyTarget) bool {
 	canManageMember := manager && account.Role == RoleMember && target.InManagedTeam
 	canSupportAccount := founder || developer && teamAccount || canManageMember
 	switch action {
-	case ActionGrantTeamCreate:
+	case ActionGrantTeamCreate, ActionGrantCustomAPI:
 		return founder && account.Role == RoleDeveloper
 	case ActionGrantDeveloper, ActionPurgeAccount:
 		return founder

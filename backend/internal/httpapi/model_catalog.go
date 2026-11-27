@@ -143,7 +143,12 @@ func (s resolvedOwnerModelCatalogStore) GetConfig(ctx context.Context, owner str
 	if s.resolveOwner != nil {
 		resolvedOwner = strings.TrimSpace(s.resolveOwner(owner))
 	}
-	if resolvedOwner == "" || resolvedOwner == owner {
+	if resolvedOwner == "" {
+		delete(config, "modelCatalog")
+		delete(config, "modelCatalogVersion")
+		return config, nil
+	}
+	if resolvedOwner == owner {
 		return config, nil
 	}
 	managed, err := s.Store.GetConfig(ctx, resolvedOwner)
@@ -167,41 +172,82 @@ func (s resolvedOwnerModelCatalogStore) GetConfig(ctx context.Context, owner str
 	return merged, nil
 }
 
-func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridgeAuth, store novelfetchworkshop.Store, userConfig *UserConfigStore, accounts auth.Store, profiles *MemberProfileStore) {
+func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridgeAuth, configAuth BridgeAuth, store novelfetchworkshop.Store, userConfig *UserConfigStore, accounts auth.Store, profiles *MemberProfileStore, saved yzcmmodels.Reader) {
 	mux := http.NewServeMux()
+	policy := func(req *http.Request) apiConfigAccess {
+		return apiConfigPolicy(req.Context(), configAuth.AccountCenterStore)
+	}
+	public := func(access apiConfigAccess, model map[string]any) map[string]any {
+		if access.custom {
+			return publicManagedModel(model)
+		}
+		return publicRestrictedModel(model)
+	}
 	mux.HandleFunc("POST /api/test/text", func(w http.ResponseWriter, req *http.Request) {
-		testConfiguredModel(w, req, store, "text")
+		access := policy(req)
+		if access.authorize(w, true, true) {
+			testConfiguredModel(w, req, store, access.identity.Subject.Username, "text")
+		}
 	})
 	mux.HandleFunc("POST /api/test/image", func(w http.ResponseWriter, req *http.Request) {
-		testConfiguredModel(w, req, store, "image")
+		access := policy(req)
+		if access.authorize(w, true, true) {
+			testConfiguredModel(w, req, store, access.identity.Subject.Username, "image")
+		}
 	})
 	mux.HandleFunc("GET /api/models", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
 		modelOwner := effectiveModelCatalogOwner(identity, profiles, accounts)
+		if configAuth.AccountCenterStore != nil {
+			var err error
+			modelOwner, err = ResolveAPIConfigOwner(req.Context(), configAuth.AccountCenterStore, identity.Username)
+			if err != nil {
+				writeJSON(w, http.StatusOK, map[string]any{"models": []any{}})
+				return
+			}
+		}
 		models, err := readModelCatalog(req, store, userConfig, modelOwner, req.URL.Query().Get("kind"), true)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
+		if configAuth.AccountCenterStore != nil {
+			ctx, _ := configAuth.accountCenterContext(req.Context(), identity.Username)
+			if !apiConfigPolicy(ctx, configAuth.AccountCenterStore).custom {
+				for i, model := range models {
+					models[i] = map[string]any{"id": model["id"], "kind": model["kind"], "modelId": model["modelId"], "displayName": model["displayName"],
+						"available": model["available"], "hasCredential": model["hasCredential"], "enabled": model["enabled"]}
+				}
+			}
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"models": models})
 	})
 	mux.HandleFunc("GET /api/config/models", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "无权管理模型"})
+		access := policy(req)
+		if !access.authorize(w, false, false) {
 			return
 		}
-		models, err := readModelCatalog(req, store, userConfig, identity.Username, req.URL.Query().Get("kind"), false)
+		kind := req.URL.Query().Get("kind")
+		if kind != "" && !modelKinds[kind] {
+			writeAPIConfigError(w, accountcenter.ErrInvalid)
+			return
+		}
+		settings, err := store.GetConfig(req.Context(), access.identity.Subject.Username)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			writeAuthError(w, http.StatusServiceUnavailable, "模型配置暂不可用")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"models": models})
+		models := []map[string]any{}
+		for _, model := range modelCatalog(settings) {
+			if (kind == "" || model["kind"] == kind) && (access.custom || isManagedYZCMModel(model)) {
+				models = append(models, public(access, model))
+			}
+		}
+		writeJSON(w, http.StatusOK, access.response(map[string]any{"models": models}))
 	})
 	mux.HandleFunc("POST /api/config/models", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "无权管理模型"})
+		access := policy(req)
+		if !access.authorize(w, true, false) {
 			return
 		}
 		var input map[string]any
@@ -209,9 +255,19 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求内容无效"})
 			return
 		}
-		model, err := normalizeManagedModel(input)
+		var model map[string]any
+		var err error
+		if !access.custom || allowedInputFields(input, "kind", "modelId", "credential") {
+			model, err = newRestrictedYZCMModel(req.Context(), saved, input)
+		} else {
+			model, err = normalizeManagedModel(input)
+			if err != nil {
+				writeAuthError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			writeAPIConfigError(w, err)
 			return
 		}
 		// H3 新建时必须同时给出 Key 和工作流，否则建出来就是一条不可用配置。
@@ -220,7 +276,12 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "H3 需要填写 API Key"})
 			return
 		}
-		settings, _ := store.GetConfig(req.Context(), identity.Username)
+		owner := access.identity.Subject.Username
+		settings, err := store.GetConfig(req.Context(), owner)
+		if err != nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "模型配置暂不可用")
+			return
+		}
 		catalog := modelCatalog(settings)
 		for _, current := range catalog {
 			if current["id"] == model["id"] {
@@ -230,18 +291,18 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 		}
 		catalog = append(catalog, model)
 		settings["modelCatalog"] = catalog
-		if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+		if err := store.PutConfig(req.Context(), owner, settings); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存模型失败"})
 			return
 		}
-		writeJSON(w, http.StatusCreated, map[string]any{"model": publicManagedModel(model)})
+		writeJSON(w, http.StatusCreated, map[string]any{"model": public(access, model)})
 	})
 	mux.HandleFunc("POST /api/config/models/test", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "无权管理模型"})
+		access := policy(req)
+		if !access.authorize(w, true, true) {
 			return
 		}
+		identity := access.identity.Subject
 		var input map[string]any
 		if err := decodeNovelFetchJSON(w, req, &input); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求内容无效"})
@@ -323,11 +384,11 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "文本模型连接成功，现在可以保存并启用。"})
 	})
 	mux.HandleFunc("POST /api/config/models/test-audio", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "无权管理模型"})
+		access := policy(req)
+		if !access.authorize(w, true, true) {
 			return
 		}
+		identity := access.identity.Subject
 		var input map[string]any
 		if err := decodeNovelFetchJSON(w, req, &input); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求内容无效"})
@@ -371,9 +432,8 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "contentType": contentType, "message": "音频模型连接成功，现在可以保存并启用。"})
 	})
 	mux.HandleFunc("PATCH /api/config/models/{modelId}", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "无权管理模型"})
+		access := policy(req)
+		if !access.authorize(w, true, false) {
 			return
 		}
 		var patch map[string]any
@@ -381,13 +441,47 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求内容无效"})
 			return
 		}
-		settings, _ := store.GetConfig(req.Context(), identity.Username)
+		if !access.custom && !allowedInputFields(patch, "credential", "clearCredential") {
+			writeAccountCenterForbidden(w)
+			return
+		}
+		if !access.custom && !strings.HasPrefix(req.PathValue("modelId"), "yzcm:") {
+			writeAccountCenterForbidden(w)
+			return
+		}
+		if _, _, err := modelCredentialPatch(patch); err != nil {
+			writeAPIConfigError(w, err)
+			return
+		}
+		owner := access.identity.Subject.Username
+		settings, err := store.GetConfig(req.Context(), owner)
+		if err != nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "模型配置暂不可用")
+			return
+		}
 		catalog := modelCatalog(settings)
 		found := false
 		var updated map[string]any
 		for index, current := range catalog {
 			if current["id"] != req.PathValue("modelId") {
 				continue
+			}
+			if isManagedYZCMModel(current) {
+				if !allowedInputFields(patch, "credential", "clearCredential") {
+					writeAccountCenterForbidden(w)
+					return
+				}
+				credential, clear, _ := modelCredentialPatch(patch)
+				if clear || credential != "" {
+					current["credential"] = credential
+					delete(current, "apiKey")
+				}
+				updated, found = current, true
+				break
+			}
+			if !access.custom {
+				writeAccountCenterForbidden(w)
+				return
 			}
 			for key, value := range patch {
 				if key == "id" || key == "clearCredential" {
@@ -435,24 +529,36 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			return
 		}
 		settings["modelCatalog"] = catalog
-		if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+		if err := store.PutConfig(req.Context(), owner, settings); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存模型失败"})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"model": publicManagedModel(updated)})
+		writeJSON(w, http.StatusOK, map[string]any{"model": public(access, updated)})
 	})
 	mux.HandleFunc("DELETE /api/config/models/{modelId}", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "无权管理模型"})
+		access := policy(req)
+		if !access.authorize(w, true, false) {
 			return
 		}
-		settings, _ := store.GetConfig(req.Context(), identity.Username)
+		if !access.custom && !strings.HasPrefix(req.PathValue("modelId"), "yzcm:") {
+			writeAccountCenterForbidden(w)
+			return
+		}
+		owner := access.identity.Subject.Username
+		settings, err := store.GetConfig(req.Context(), owner)
+		if err != nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "模型配置暂不可用")
+			return
+		}
 		catalog := modelCatalog(settings)
 		filtered := make([]map[string]any, 0, len(catalog))
 		removed := false
 		for _, model := range catalog {
 			if model["id"] == req.PathValue("modelId") {
+				if !access.custom && !isManagedYZCMModel(model) {
+					writeAccountCenterForbidden(w)
+					return
+				}
 				removed = true
 				continue
 			}
@@ -463,19 +569,22 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			return
 		}
 		settings["modelCatalog"] = filtered
-		if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+		if err := store.PutConfig(req.Context(), owner, settings); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "删除模型失败"})
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("GET /api/config/models/quotas", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "无权管理模型"})
+		access := policy(req)
+		if !access.authorize(w, false, false) {
 			return
 		}
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		if !access.custom {
+			writeJSON(w, http.StatusOK, map[string]any{"quotas": []any{}})
+			return
+		}
+		settings, err := store.GetConfig(req.Context(), access.identity.Subject.Username)
 		if err != nil {
 			writeJSON(w, http.StatusOK, map[string]any{"quotas": []any{}})
 			return
@@ -492,9 +601,7 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 		writeJSON(w, http.StatusOK, map[string]any{"quotas": quotas})
 	})
 	mux.HandleFunc("GET /api/config/models/local-doubao-executor-video/pairing-status", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "无权管理模型"})
+		if !policy(req).authorize(w, false, true) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"executorPaired": false})
@@ -502,17 +609,13 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 	secured := bridgeAuth.Middleware(mux)
 	root.Handle("/api/models", secured)
 	root.Handle("/api/models/", secured)
-	root.Handle("/api/config/models", secured)
-	root.Handle("/api/config/models/", secured)
-	root.Handle("/api/test/", secured)
+	config := configAuth.Middleware(mux)
+	root.Handle("/api/config/models", config)
+	root.Handle("/api/config/models/", config)
+	root.Handle("/api/test/", config)
 }
 
-func testConfiguredModel(w http.ResponseWriter, req *http.Request, store novelfetchworkshop.Store, kind string) {
-	identity, ok := BridgeIdentityFromContext(req.Context())
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "kind": kind, "error": "unauthorized"})
-		return
-	}
+func testConfiguredModel(w http.ResponseWriter, req *http.Request, store novelfetchworkshop.Store, owner, kind string) {
 	var input map[string]any
 	if err := decodeNovelFetchJSON(w, req, &input); err != nil {
 		return
@@ -522,7 +625,7 @@ func testConfiguredModel(w http.ResponseWriter, req *http.Request, store novelfe
 			input = nested
 		}
 	}
-	settings, err := store.GetConfig(req.Context(), identity.Username)
+	settings, err := store.GetConfig(req.Context(), owner)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "kind": kind, "error": "无法读取当前模型配置，请稍后重试。"})
 		return
@@ -947,12 +1050,7 @@ func normalizeManagedModel(input map[string]any) (map[string]any, error) {
 }
 
 func publicManagedModel(model map[string]any) map[string]any {
-	result := map[string]any{}
-	for key, value := range model {
-		if key != "credential" && key != "apiKey" {
-			result[key] = value
-		}
-	}
+	result := redactAPIConfig(model).(map[string]any)
 	result["hasCredential"] = managedModelHasCredential(model)
 	result["available"] = managedModelAvailable(model)
 	result["capabilities"] = publicModelCapabilities(model)

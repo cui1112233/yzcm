@@ -4380,7 +4380,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		}
 		publicAppConfig := publicNovelFetchConfig(appConfig)
 		publicAIConfig := publicNovelFetchConfig(aiConfig)
-		publicSettings := publicNovelFetchConfig(publicSource)
+		publicSettings := publicCompatibilityConfig(req, publicNovelFetchConfig(publicSource))
 		// The legacy embedded workbench reads the catalog and its counters from
 		// the top-level response.  Keep that view in the same response as the
 		// canonical appConfig so both pages consume one Go-owned configuration
@@ -4391,7 +4391,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		}
 		knowledge = publicNovelFetchConfig(knowledge)
 		knowledgeSummary := batchKnowledgeSummary(knowledge, false)
-		writeJSON(w, http.StatusOK, map[string]any{
+		writeJSON(w, http.StatusOK, publicCompatibilityConfig(req, map[string]any{
 			"appConfig":         publicAppConfig,
 			"platforms":         platforms,
 			"styles":            styles,
@@ -4400,7 +4400,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			"knowledge":         knowledge,
 			"knowledge_loaded":  true,
 			"knowledge_summary": knowledgeSummary,
-		})
+		}))
 	})
 
 	saveWorkshopConfig := func(w http.ResponseWriter, req *http.Request) {
@@ -4444,6 +4444,9 @@ func saveNovelFetchConfig(w http.ResponseWriter, req *http.Request, store novelf
 	var patch map[string]any
 	if err := decodeNovelFetchJSON(w, req, &patch); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求内容无效"})
+		return
+	}
+	if rejectCompatibilityAPIConfigWrite(w, req, patch) {
 		return
 	}
 	settings, _ := patch["settings"].(map[string]any)
@@ -4508,7 +4511,7 @@ func saveNovelFetchConfig(w http.ResponseWriter, req *http.Request, store novelf
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存设置失败"})
 		return
 	}
-	writeJSON(w, http.StatusOK, response(merged))
+	writeJSON(w, http.StatusOK, publicCompatibilityConfig(req, response(merged)))
 }
 
 func genderNeedsResolution(value string) bool {

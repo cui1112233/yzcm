@@ -38,7 +38,7 @@ func RegisterBatchRewriteConfigCompat(root *http.ServeMux, middleware BridgeAuth
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取设置失败"})
 			return
 		}
-		writeJSON(w, http.StatusOK, legacyBatchRewriteConfig(settings, strings.HasSuffix(req.URL.Path, "/bootstrap")))
+		writeJSON(w, http.StatusOK, publicCompatibilityConfig(req, legacyBatchRewriteConfig(settings, strings.HasSuffix(req.URL.Path, "/bootstrap"))))
 	}
 	handler := middleware.Middleware(http.HandlerFunc(read))
 	root.Handle("GET /api/batch-rewrite/config", handler)

@@ -21,6 +21,7 @@ type MySQLStore struct {
 	DB              *sql.DB
 	LegacyConfigDir string
 	ObjectBodies    *BodyObjectStore
+	ModelSecrets    ModelConfigSecrets
 
 	// The legacy api-config.json can be several megabytes. Parsing it on every
 	// settings read costs hundreds of milliseconds and used to dominate the
@@ -37,6 +38,14 @@ type legacyConfigCacheEntry struct {
 }
 
 func NewMySQLStore(db *sql.DB) *MySQLStore { return &MySQLStore{DB: db} }
+
+const ModelSecretVersionKey = "modelCatalogSecretVersion"
+const ModelSecretVersion = "bound-v2"
+
+type ModelConfigSecrets interface {
+	SealModelConfig(owner string, next, previous map[string]any) error
+	OpenModelConfig(owner string, settings map[string]any) error
+}
 
 func (s *MySQLStore) GetDocument(ctx context.Context, owner, bookID string) (Document, error) {
 	var raw []byte
@@ -260,7 +269,7 @@ func (s *MySQLStore) GetConfig(ctx context.Context, owner string) (map[string]an
 			}
 		}
 		settings[ConfigRevisionKey] = "0"
-		return EnsureWorkshopDefaults(settings), nil
+		return s.openConfig(ctx, owner, settings)
 	}
 	if err != nil {
 		return nil, err
@@ -272,18 +281,37 @@ func (s *MySQLStore) GetConfig(ctx context.Context, owner string) (map[string]an
 	if settings == nil {
 		settings = map[string]any{}
 	}
-	legacyCatalog := s.readLegacyModelCatalog(owner)
-	if catalog, ok := settings["modelCatalog"].([]any); !ok || len(catalog) == 0 {
-		if len(legacyCatalog) > 0 {
-			settings["modelCatalog"] = legacyCatalog
+	if settings[ModelSecretVersionKey] != ModelSecretVersion {
+		legacyCatalog := s.readLegacyModelCatalog(owner)
+		if catalog, ok := settings["modelCatalog"].([]any); !ok || len(catalog) == 0 {
+			if len(legacyCatalog) > 0 {
+				settings["modelCatalog"] = legacyCatalog
+			}
+		} else {
+			// A previous migration may have persisted only the redacted catalog in
+			// MySQL. Keep credentials local and hydrate only missing runtime fields
+			// from the user's uncommitted legacy config file; never write them back.
+			mergeLegacyRuntimeModelFields(catalog, legacyCatalog)
 		}
-	} else {
-		// A previous migration may have persisted only the redacted catalog in
-		// MySQL. Keep credentials local and hydrate only missing runtime fields
-		// from the user's uncommitted legacy config file; never write them back.
-		mergeLegacyRuntimeModelFields(catalog, legacyCatalog)
 	}
 	settings[ConfigRevisionKey] = configRevision(settings)
+	return s.openConfig(ctx, owner, settings)
+}
+
+func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[string]any) (map[string]any, error) {
+	if s.ModelSecrets != nil {
+		if _, hasCatalog := settings["modelCatalog"]; hasCatalog && settings[ModelSecretVersionKey] != ModelSecretVersion {
+			if err := s.PutConfig(ctx, owner, settings); err != nil {
+				return nil, err
+			}
+			settings[ModelSecretVersionKey] = ModelSecretVersion
+			// Do not return legacy plaintext until its transactional upgrade committed.
+			return s.GetConfig(ctx, owner)
+		}
+		if err := s.ModelSecrets.OpenModelConfig(owner, settings); err != nil {
+			return nil, err
+		}
+	}
 	return EnsureWorkshopDefaults(settings), nil
 }
 
@@ -401,6 +429,15 @@ func (s *MySQLStore) PutConfig(ctx context.Context, owner string, settings map[s
 		return err
 	}
 	updated := cloneMap(settings)
+	if s.ModelSecrets != nil {
+		delete(updated, ModelSecretVersionKey)
+		if _, present := updated["modelCatalog"]; present {
+			if err := s.ModelSecrets.SealModelConfig(owner, updated, previous); err != nil {
+				return err
+			}
+			updated[ModelSecretVersionKey] = ModelSecretVersion
+		}
+	}
 	updated[ConfigRevisionKey] = next
 	raw, err := json.Marshal(updated)
 	if err != nil {

@@ -84,7 +84,7 @@ func registerAccountCenterAdmin(root *http.ServeMux, auth BridgeAuth) {
 	for _, action := range []string{"archive_team", "restore_team"} {
 		register("POST", "/teams/{teamId}/"+action, admin.teamChange(action))
 	}
-	for _, action := range []string{"set_member", "set_manager", "set_developer", "enable", "disable", "archive", "restore", "purge_preflight", "purge", "grant_team_create", "revoke_team_create"} {
+	for _, action := range []string{"set_member", "set_manager", "set_developer", "enable", "disable", "archive", "restore", "purge_preflight", "purge", "grant_team_create", "revoke_team_create", "grant_custom_api", "revoke_custom_api"} {
 		register("POST", "/accounts/{username}/"+action, admin.accountChange(action))
 	}
 }
@@ -239,6 +239,13 @@ func (s adminSnapshot) accountActions(person ac.Identity, team ac.Team) []string
 			actions = append(actions, "revoke_team_create")
 		} else {
 			actions = append(actions, "grant_team_create")
+		}
+	}
+	if policy.Can(s.actor, ac.ActionGrantCustomAPI, target) {
+		if s.hasPlatformGrant(person.Username, ac.GrantCapabilityCustomAPI) {
+			actions = append(actions, "revoke_custom_api")
+		} else {
+			actions = append(actions, "grant_custom_api")
 		}
 	}
 	// The manager recorded on the team must remain eligible to manage it.
@@ -522,7 +529,7 @@ func (s accountCenterAdmin) accountChange(action string) http.HandlerFunc {
 				return nil, ac.ErrForbidden
 			}
 			change := ac.AdminChange{Action: action, Username: person.Username, TeamID: team.ID, Role: strings.TrimPrefix(action, "set_")}
-			if action == "grant_team_create" {
+			if action == "grant_team_create" || action == "grant_custom_api" {
 				id, err := newSessionToken()
 				if err != nil {
 					return nil, err

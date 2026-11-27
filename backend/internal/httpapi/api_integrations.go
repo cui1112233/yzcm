@@ -5,10 +5,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/apisecrets"
 	"qiantie/backend/internal/auth"
+	"qiantie/backend/internal/novelfetchworkshop"
 )
 
 // 「API 接口」配置的独立存储键。它只写进用户自己的 api-config.json / MySQL
@@ -449,45 +452,35 @@ func sanitizeIntegrationChannel(input map[string]any, previous map[string]any) (
 	return channel, true
 }
 
-func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, store *UserConfigStore, accounts auth.Store, profiles ...*MemberProfileStore) {
+func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, store *UserConfigStore, accounts auth.Store, catalog novelfetchworkshop.Store) {
 	if root == nil || middleware.AuthStore == nil || store == nil || accounts == nil {
 		return
 	}
-	var profileStore *MemberProfileStore
-	if len(profiles) > 0 {
-		profileStore = profiles[0]
-	}
-	canManage := func(req *http.Request) (BridgeIdentity, bool) {
-		identity, ok := BridgeIdentityFromContext(req.Context())
-		if !ok {
-			return BridgeIdentity{}, false
-		}
-		allowed, _ := configManagementState(identity, profileStore, accounts)
-		return identity, allowed
+	policy := func(req *http.Request) apiConfigAccess {
+		return apiConfigPolicy(req.Context(), middleware.AccountCenterStore)
 	}
 
 	root.Handle("GET /api/settings/api-integrations", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		identity, ok := BridgeIdentityFromContext(req.Context())
-		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		access := policy(req)
+		if !access.authorize(w, false, false) {
+			return
+		}
+		if !access.custom {
+			writeJSON(w, http.StatusOK, access.response(map[string]any{}))
 			return
 		}
 		store.mu.Lock()
-		config := store.read(identity.Username)
+		config := store.read(access.identity.Subject.Username)
 		store.mu.Unlock()
-		writeJSON(w, http.StatusOK, apiIntegrationsView(apiIntegrationStoredMap(config)))
+		writeJSON(w, http.StatusOK, access.response(apiIntegrationsView(apiIntegrationStoredMap(config))))
 	})))
 
 	root.Handle("POST /api/settings/api-integrations", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		identity, allowed := canManage(req)
-		if identity.Username == "" {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		access := policy(req)
+		if !access.authorize(w, true, true) {
 			return
 		}
-		if !allowed {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "没有权限修改 API 接口配置"})
-			return
-		}
+		identity := access.identity.Subject
 		// 用指针区分「没提交这个键」和「提交了空值」：输入类字段自动保存时
 		// 只带 values 一个键，未提交的 pinned / customChannels 必须保持原值，
 		// 不能被当成整组覆盖。
@@ -578,7 +571,7 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 		}
 		next["channelSelection"] = selection
 		config[apiIntegrationsSettingKey] = next
-		if err := store.write(identity.Username, config); err != nil {
+		if err := store.writeAuthenticatedConfig(identity.Username, config); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "配置保存失败"})
 			return
 		}
@@ -586,25 +579,74 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 	})))
 
 	root.Handle("POST /api/settings/api-integrations/reveal", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		identity, allowed := canManage(req)
-		if identity.Username == "" {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		access := policy(req)
+		if !access.authorize(w, true, false) {
 			return
 		}
-		if !allowed {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "没有权限查看密钥"})
+		if bearerToken(req) == "" {
+			writeAccountCenterForbidden(w)
 			return
 		}
+		identity := access.identity.Subject
 		var payload struct {
 			Key string `json:"key"`
 		}
-		if json.NewDecoder(http.MaxBytesReader(w, req.Body, 8<<10)).Decode(&payload) != nil {
+		decoder := json.NewDecoder(http.MaxBytesReader(w, req.Body, 8<<10))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&payload) != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求内容无效"})
 			return
 		}
 		key := strings.TrimSpace(payload.Key)
+		reveal := func(value string) {
+			if apisecrets.IsEncrypted(value) {
+				writeAuthError(w, http.StatusConflict, "该密钥无法解密，请重新填写后保存")
+				return
+			}
+			if err := middleware.AccountCenterStore.AppendAudit(req.Context(), accountcenter.AuditEvent{ActorUsername: access.identity.Actor.Username,
+				SubjectUsername: identity.Username, TeamID: identity.TeamID, Action: "reveal_model_key"}); err != nil {
+				writeAuthError(w, http.StatusServiceUnavailable, "暂时无法记录密钥查看")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"key": key, "value": value})
+		}
+		if id, modelKey := strings.CutPrefix(key, "model:"); modelKey {
+			if catalog == nil || id == "" || (!access.custom && !strings.HasPrefix(id, "yzcm:")) {
+				writeAccountCenterForbidden(w)
+				return
+			}
+			config, err := catalog.GetConfig(req.Context(), identity.Username)
+			if err != nil {
+				writeAuthError(w, http.StatusServiceUnavailable, "模型配置暂不可用")
+				return
+			}
+			for _, model := range modelCatalog(config) {
+				if model["id"] == id && (access.custom || isManagedYZCMModel(model)) {
+					value, _ := model["credential"].(string)
+					reveal(value)
+					return
+				}
+			}
+			writeAccountCenterForbidden(w)
+			return
+		}
+		if !access.custom {
+			writeAccountCenterForbidden(w)
+			return
+		}
 		store.mu.Lock()
-		stored := apiIntegrationStoredMap(store.read(identity.Username))
+		config := store.read(identity.Username)
+		path, pathErr := store.configPath(identity.Username)
+		raw, rawErr := os.ReadFile(path)
+		var persisted map[string]any
+		if pathErr == nil && rawErr == nil && json.Unmarshal(raw, &persisted) == nil && CountPlaintextConfigSecrets(persisted) > 0 {
+			if err := store.writeAuthenticatedConfig(identity.Username, config); err != nil {
+				store.mu.Unlock()
+				writeAuthError(w, http.StatusServiceUnavailable, "加密旧配置失败")
+				return
+			}
+		}
+		stored := apiIntegrationStoredMap(config)
 		store.mu.Unlock()
 		if strings.HasPrefix(key, "custom:") {
 			id := strings.TrimPrefix(key, "custom:")
@@ -622,7 +664,7 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 					writeJSON(w, http.StatusConflict, map[string]string{"error": "该渠道密钥无法解密，请重新填写后保存"})
 					return
 				}
-				writeJSON(w, http.StatusOK, map[string]any{"key": key, "value": apiKey})
+				reveal(apiKey)
 				return
 			}
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "渠道不存在"})
@@ -638,7 +680,7 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "该密钥无法解密，请重新填写后保存"})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"key": key, "value": value})
+		reveal(value)
 	})))
 }
 

@@ -674,12 +674,16 @@ func registerShuihuoProjectCompatRoutes(root *http.ServeMux, auth BridgeAuth, st
 		models := []any{}
 		if _, durableOK := store.(batchfactoryv11.ShuihuoConfigStore); durableOK {
 			if config, err := loadShuihuoOwnerConfig(r.Context(), store, owner, catalogStore); err == nil {
+				fields := []string{"id", "name", "displayName", "kind", "modelId", "enabled", "configured"}
+				if apiConfigPolicy(r.Context(), auth.AccountCenterStore).custom {
+					fields = append(fields, "provider", "adapterKind")
+				}
 				if catalog, catalogOK := config["modelCatalog"].([]any); catalogOK {
 					for _, raw := range catalog {
 						if model, modelOK := raw.(map[string]any); modelOK {
 							// Never return credentials from the account-level catalog.
 							copy := map[string]any{}
-							for _, key := range []string{"id", "name", "displayName", "kind", "provider", "adapterKind", "modelId", "enabled", "configured"} {
+							for _, key := range fields {
 								if value, exists := model[key]; exists {
 									copy[key] = value
 								}
@@ -714,13 +718,13 @@ func registerShuihuoProjectCompatRoutes(root *http.ServeMux, auth BridgeAuth, st
 		writeJSON(w, http.StatusOK, map[string]any{"presets": presets})
 	})))
 	root.Handle("/api/shuihuo-production/admin/models", auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		identity, ok := BridgeIdentityFromContext(r.Context())
-		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		access := apiConfigPolicy(r.Context(), auth.AccountCenterStore)
+		if !access.authorize(w, r.Method != http.MethodGet, true) {
 			return
 		}
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权管理模型"})
+		identity := access.identity.Subject
+		if catalogStore == nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "模型配置服务暂不可用")
 			return
 		}
 		config, err := loadShuihuoOwnerConfig(r.Context(), store, identity.Username, catalogStore)
@@ -763,7 +767,7 @@ func registerShuihuoProjectCompatRoutes(root *http.ServeMux, auth BridgeAuth, st
 		model["id"] = modelID
 		models = append(models, model)
 		config["modelCatalog"] = models
-		if err := saveShuihuoAdminModelCatalog(r.Context(), store, catalogStore, identity.Username, config, models); err != nil {
+		if err := saveShuihuoAdminModelCatalog(r.Context(), catalogStore, identity.Username, models); err != nil {
 			writeStoreError(w, err)
 			return
 		}
@@ -776,13 +780,13 @@ func registerShuihuoProjectCompatRoutes(root *http.ServeMux, auth BridgeAuth, st
 		writeJSON(w, http.StatusCreated, map[string]any{"model": safeShuihuoAdminModels([]map[string]any{model})[0]})
 	})))
 	root.Handle("/api/shuihuo-production/admin/models/{modelId}", auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		identity, ok := BridgeIdentityFromContext(r.Context())
-		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		access := apiConfigPolicy(r.Context(), auth.AccountCenterStore)
+		if !access.authorize(w, true, true) {
 			return
 		}
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权管理模型"})
+		identity := access.identity.Subject
+		if catalogStore == nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "模型配置服务暂不可用")
 			return
 		}
 		config, err := loadShuihuoOwnerConfig(r.Context(), store, identity.Username, catalogStore)
@@ -806,7 +810,7 @@ func registerShuihuoProjectCompatRoutes(root *http.ServeMux, auth BridgeAuth, st
 		if r.Method == http.MethodDelete {
 			models = append(models[:index], models[index+1:]...)
 			config["modelCatalog"] = models
-			if err := saveShuihuoAdminModelCatalog(r.Context(), store, catalogStore, identity.Username, config, models); err != nil {
+			if err := saveShuihuoAdminModelCatalog(r.Context(), catalogStore, identity.Username, models); err != nil {
 				writeStoreError(w, err)
 				return
 			}
@@ -828,7 +832,7 @@ func registerShuihuoProjectCompatRoutes(root *http.ServeMux, auth BridgeAuth, st
 		}
 		models[index] = current
 		config["modelCatalog"] = models
-		if err := saveShuihuoAdminModelCatalog(r.Context(), store, catalogStore, identity.Username, config, models); err != nil {
+		if err := saveShuihuoAdminModelCatalog(r.Context(), catalogStore, identity.Username, models); err != nil {
 			writeStoreError(w, err)
 			return
 		}
@@ -841,15 +845,11 @@ func registerShuihuoProjectCompatRoutes(root *http.ServeMux, auth BridgeAuth, st
 		writeJSON(w, http.StatusOK, map[string]any{"model": safeShuihuoAdminModels([]map[string]any{current})[0]})
 	})))
 	root.Handle("/api/shuihuo-production/admin/models/{modelId}/test", auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		identity, ok := BridgeIdentityFromContext(r.Context())
-		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		access := apiConfigPolicy(r.Context(), auth.AccountCenterStore)
+		if !access.authorize(w, true, true) {
 			return
 		}
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权测试模型"})
-			return
-		}
+		identity := access.identity.Subject
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
@@ -1191,12 +1191,12 @@ func registerShuihuoProjectCompatRoutes(root *http.ServeMux, auth BridgeAuth, st
 				for key, value := range config {
 					merged[key] = value
 				}
-				writeJSON(w, http.StatusOK, safeShuihuoConfigForResponse(merged))
+				writeJSON(w, http.StatusOK, publicCompatibilityConfig(r, safeShuihuoConfigForResponse(merged)))
 				return
 			}
 			if value, exists := shuihuoProductionConfigs.Load(owner); exists {
 				if config, ok := value.(map[string]any); ok {
-					writeJSON(w, http.StatusOK, safeShuihuoConfigForResponse(config))
+					writeJSON(w, http.StatusOK, publicCompatibilityConfig(r, safeShuihuoConfigForResponse(config)))
 				} else {
 					writeJSON(w, http.StatusOK, value)
 				}
@@ -1210,6 +1210,10 @@ func registerShuihuoProjectCompatRoutes(root *http.ServeMux, auth BridgeAuth, st
 			if !decodeJSON(w, r, &input) {
 				return
 			}
+			if containsAPIConfig(input) {
+				writeAccountCenterForbidden(w)
+				return
+			}
 			config := shuihuoDefaultConfig()
 			for key, value := range input {
 				config[key] = value
@@ -1219,11 +1223,11 @@ func registerShuihuoProjectCompatRoutes(root *http.ServeMux, auth BridgeAuth, st
 					writeStoreError(w, err)
 					return
 				}
-				writeJSON(w, http.StatusOK, config)
+				writeJSON(w, http.StatusOK, publicCompatibilityConfig(r, config))
 				return
 			}
 			shuihuoProductionConfigs.Store(owner, config)
-			writeJSON(w, http.StatusOK, config)
+			writeJSON(w, http.StatusOK, publicCompatibilityConfig(r, config))
 			return
 		}
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -2853,13 +2857,15 @@ func loadShuihuoOwnerConfig(ctx context.Context, store batchfactoryv11.Store, ow
 		shuihuoProductionConfigs.Store(owner, config)
 	}
 	if len(catalogStores) > 0 && catalogStores[0] != nil {
-		if managed, err := catalogStores[0].GetConfig(ctx, owner); err == nil {
-			if catalog, ok := managed["modelCatalog"].([]any); ok && len(catalog) > 0 {
-				config["modelCatalog"] = catalog
-			}
-			if version, ok := managed["modelCatalogVersion"]; ok {
-				config["modelCatalogVersion"] = version
-			}
+		managed, err := catalogStores[0].GetConfig(ctx, owner)
+		if err != nil {
+			return nil, err
+		}
+		if catalog, ok := managed["modelCatalog"].([]any); ok {
+			config["modelCatalog"] = catalog
+		}
+		if version, ok := managed["modelCatalogVersion"]; ok {
+			config["modelCatalogVersion"] = version
 		}
 	}
 	// Older personal API settings stored the image provider in the top-level
@@ -2905,6 +2911,11 @@ func ensureLegacyShuihuoImageModel(config map[string]any) {
 }
 
 func saveShuihuoOwnerConfig(ctx context.Context, store batchfactoryv11.Store, owner string, config map[string]any) error {
+	// The merged catalog can contain decrypted runtime credentials. The
+	// production settings row stores only non-model configuration.
+	config = redactAPIConfig(config).(map[string]any)
+	delete(config, "modelCatalog")
+	delete(config, "modelCatalogVersion")
 	if durable, ok := store.(batchfactoryv11.ShuihuoConfigStore); ok {
 		return durable.SaveShuihuoConfig(ctx, owner, config)
 	}
@@ -2912,25 +2923,17 @@ func saveShuihuoOwnerConfig(ctx context.Context, store batchfactoryv11.Store, ow
 	return nil
 }
 
-// saveShuihuoAdminModelCatalog keeps the admin catalog and the account model
-// catalog in sync. The latter is what the user-facing API configuration and
-// runtime model selectors read, so saving only the Shuihuo compatibility blob
-// would make an admin edit disappear on the next read.
-func saveShuihuoAdminModelCatalog(ctx context.Context, store batchfactoryv11.Store, catalogStore novelfetchworkshop.Store, owner string, config map[string]any, models []map[string]any) error {
-	if catalogStore != nil {
-		managed, err := catalogStore.GetConfig(ctx, owner)
-		if err != nil {
-			return err
-		}
-		managed["modelCatalog"] = models
-		if _, ok := managed["modelCatalogVersion"]; !ok {
-			managed["modelCatalogVersion"] = 1
-		}
-		if err := catalogStore.PutConfig(ctx, owner, managed); err != nil {
-			return err
-		}
+// saveShuihuoAdminModelCatalog routes edits through the encrypted account catalog.
+func saveShuihuoAdminModelCatalog(ctx context.Context, catalogStore novelfetchworkshop.Store, owner string, models []map[string]any) error {
+	managed, err := catalogStore.GetConfig(ctx, owner)
+	if err != nil {
+		return err
 	}
-	return saveShuihuoOwnerConfig(ctx, store, owner, config)
+	managed["modelCatalog"] = models
+	if _, ok := managed["modelCatalogVersion"]; !ok {
+		managed["modelCatalogVersion"] = 1
+	}
+	return catalogStore.PutConfig(ctx, owner, managed)
 }
 
 func shuihuoCollection(config map[string]any, key string, fallback []map[string]any) []map[string]any {

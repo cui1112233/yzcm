@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/auth"
 	"qiantie/backend/internal/novelfetchworkshop"
 )
@@ -129,6 +130,14 @@ func (s *UserConfigStore) GetConfig(_ context.Context, username string) (map[str
 }
 
 func (s *UserConfigStore) write(username string, config map[string]any) error {
+	return s.writeConfig(username, config, false)
+}
+
+func (s *UserConfigStore) writeAuthenticatedConfig(username string, config map[string]any) error {
+	return s.writeConfig(username, config, true)
+}
+
+func (s *UserConfigStore) writeConfig(username string, config map[string]any, strict bool) error {
 	if s == nil || s.BaseDir == "" {
 		return fmt.Errorf("用户配置存储未配置")
 	}
@@ -143,7 +152,13 @@ func (s *UserConfigStore) write(username string, config map[string]any) error {
 	// 落盘加密：在深拷贝上转换，避免把调用方内存里的明文替换成密文。
 	persisted := config
 	if cloned, ok := deepCloneConfigValue(config).(map[string]any); ok {
-		s.secrets.encrypt(cloned)
+		if strict {
+			if err := s.secrets.encryptStrict(cloned); err != nil {
+				return err
+			}
+		} else {
+			s.secrets.encrypt(cloned)
+		}
 		persisted = cloned
 	}
 	raw, err := json.MarshalIndent(persisted, "", "  ")
@@ -232,23 +247,6 @@ func configManagementState(identity BridgeIdentity, profiles *MemberProfileStore
 	return false, nil
 }
 
-func managedPublicUserConfig(config map[string]any, managedBy any) map[string]any {
-	result := publicUserConfig(config)
-	result["provider"] = "managed"
-	result["baseUrl"] = ""
-	result["model"] = ""
-	result["hasApiKey"] = false
-	if image, ok := result["image"].(map[string]any); ok {
-		image["baseUrl"], image["model"], image["displayName"], image["hasApiKey"] = "", "", "", false
-	}
-	if video, ok := result["video"].(map[string]any); ok {
-		video["baseUrl"], video["model"], video["displayName"], video["hasApiKey"] = "", "", "", false
-	}
-	result["canManageApi"] = false
-	result["managedBy"] = managedBy
-	return result
-}
-
 func mergeManagedModelCatalog(ctx context.Context, config map[string]any, catalogStore novelfetchworkshop.Store, username string) {
 	if catalogStore == nil || strings.TrimSpace(username) == "" {
 		return
@@ -295,9 +293,23 @@ func registerUserConfigRoutes(root *http.ServeMux, middleware BridgeAuth, store 
 	if root == nil || middleware.AuthStore == nil || store == nil || accounts == nil {
 		return
 	}
-	var profileStore *MemberProfileStore
-	if len(profiles) > 0 {
-		profileStore = profiles[0]
+	view := func(req *http.Request, identity BridgeIdentity, config map[string]any) map[string]any {
+		access := apiConfigPolicy(req.Context(), middleware.AccountCenterStore)
+		if !access.custom {
+			result := preferenceOnlyPatch(config)
+			if middleware.AccountCenterStore != nil && access.identity.Subject.Role == accountcenter.RoleMember {
+				if owner, err := ResolveAPIConfigOwner(req.Context(), middleware.AccountCenterStore, identity.Username); err == nil {
+					result["managedBy"] = owner
+				}
+			}
+			return access.response(redactAPIConfig(result).(map[string]any))
+		}
+		delete(config, "modelCatalog")
+		mergeManagedModelCatalog(req.Context(), config, catalogStore, identity.Username)
+		result := publicUserConfig(config)
+		applyManagedTextModelPublic(result)
+		result["managedBy"] = nil
+		return access.response(redactAPIConfig(result).(map[string]any))
 	}
 	root.Handle("GET /api/config", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		identity, ok := BridgeIdentityFromContext(req.Context())
@@ -308,18 +320,8 @@ func registerUserConfigRoutes(root *http.ServeMux, middleware BridgeAuth, store 
 		store.mu.Lock()
 		config := store.read(identity.Username)
 		store.mu.Unlock()
-		canManageAPI, managedBy := configManagementState(identity, profileStore, accounts)
-		modelOwner := effectiveModelCatalogOwner(identity, profileStore, accounts)
-		mergeManagedModelCatalog(req.Context(), config, catalogStore, modelOwner)
-		if !canManageAPI {
-			writeJSON(w, http.StatusOK, managedPublicUserConfig(config, managedBy))
-			return
-		}
-		result := publicUserConfig(config)
-		applyManagedTextModelPublic(result)
-		result["canManageApi"] = true
-		result["managedBy"] = nil
-		writeJSON(w, http.StatusOK, result)
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, view(req, identity, config))
 	})))
 	root.Handle("POST /api/config", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		identity, ok := BridgeIdentityFromContext(req.Context())
@@ -332,29 +334,25 @@ func registerUserConfigRoutes(root *http.ServeMux, middleware BridgeAuth, store 
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求内容无效"})
 			return
 		}
-		canManageAPI, managedBy := configManagementState(identity, profileStore, accounts)
-		if !canManageAPI {
-			patch = preferenceOnlyPatch(patch)
+		access := apiConfigPolicy(req.Context(), middleware.AccountCenterStore)
+		if !access.custom {
+			if len(preferenceOnlyPatch(patch)) != len(patch) || containsAPIConfig(patch) {
+				writeAccountCenterForbidden(w)
+				return
+			}
+		}
+		if _, supplied := patch["modelCatalog"]; supplied {
+			writeAccountCenterForbidden(w)
+			return
 		}
 		store.mu.Lock()
 		config := mergeConfigMap(store.read(identity.Username), patch)
-		err := store.write(identity.Username, config)
+		err := store.writeAuthenticatedConfig(identity.Username, config)
 		store.mu.Unlock()
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "配置保存失败"})
 			return
 		}
-		if !canManageAPI {
-			modelOwner := effectiveModelCatalogOwner(identity, profileStore, accounts)
-			mergeManagedModelCatalog(req.Context(), config, catalogStore, modelOwner)
-			writeJSON(w, http.StatusOK, managedPublicUserConfig(config, managedBy))
-			return
-		}
-		mergeManagedModelCatalog(req.Context(), config, catalogStore, identity.Username)
-		result := publicUserConfig(config)
-		applyManagedTextModelPublic(result)
-		result["canManageApi"] = true
-		result["managedBy"] = nil
-		writeJSON(w, http.StatusOK, result)
+		writeJSON(w, http.StatusOK, view(req, identity, config))
 	})))
 }

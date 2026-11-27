@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/auth"
 	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/yzcmusage"
@@ -12,7 +13,7 @@ import (
 // NovelCreationTextResolver rechecks active membership and the current manager
 // binding before every actual external call. The supplied resolver honours an
 // explicit model ID and never substitutes a different configured model.
-func NovelCreationTextResolver(accounts auth.Store, profiles *MemberProfileStore, resolve AgentTextModelResolver) AgentTextModelResolver {
+func NovelCreationTextResolver(accounts auth.Store, profiles *MemberProfileStore, resolve AgentTextModelResolver, centers ...accountcenter.Store) AgentTextModelResolver {
 	return func(ctx context.Context, owner, modelID string) (batchfactoryv11.DirectorProvider, error) {
 		if accounts != nil {
 			account, err := accounts.FindAccount(ctx, owner)
@@ -21,6 +22,13 @@ func NovelCreationTextResolver(accounts auth.Store, profiles *MemberProfileStore
 			}
 		}
 		effective := effectiveModelCatalogOwner(BridgeIdentity{Username: owner}, profiles, accounts)
+		if len(centers) > 0 && centers[0] != nil {
+			var err error
+			effective, err = ResolveAPIConfigOwner(ctx, centers[0], owner)
+			if err != nil {
+				return nil, err
+			}
+		}
 		if accounts != nil && effective != owner {
 			account, err := accounts.FindAccount(ctx, effective)
 			if err != nil || !account.Active {

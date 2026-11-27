@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"log"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"sync"
 
 	"qiantie/backend/internal/apisecrets"
+	"qiantie/backend/internal/novelfetchworkshop"
 )
 
 // configSecretProvider 是 UserConfigStore 的密钥加解密入口。
@@ -20,6 +22,127 @@ type configSecretProvider struct {
 	keyFile string
 	mu      sync.Mutex
 	warned  map[string]bool
+}
+
+func (p *configSecretProvider) encryptStrict(config map[string]any) error {
+	if CountPlaintextConfigSecrets(config) == 0 {
+		return nil
+	}
+	cipher, err := p.secrets.WriteCipher()
+	if err != nil {
+		return err
+	}
+	transformConfigSecrets(config, func(value string) string {
+		if err != nil || value == "" || apisecrets.IsEncrypted(value) {
+			return value
+		}
+		var sealed string
+		sealed, err = cipher.Encrypt(value)
+		return sealed
+	})
+	return err
+}
+
+func (s *UserConfigStore) ModelConfigSecrets() novelfetchworkshop.ModelConfigSecrets {
+	return s.secrets
+}
+
+func modelSecretBinding(owner string, model map[string]any, field string) ([]byte, error) {
+	id, _ := model["id"].(string)
+	kind, _ := model["kind"].(string)
+	if owner == "" || id == "" || !modelKinds[kind] {
+		return nil, apisecrets.ErrBadCiphertext
+	}
+	return json.Marshal([]string{"qiantie:v88:model:bound-v2", strings.ToLower(owner), kind, id, firstText(model["catalogSource"]), firstText(model["modelId"]), firstText(model["baseUrl"]), field})
+}
+
+func (p *configSecretProvider) SealModelConfig(owner string, next, previous map[string]any) error {
+	oldModels := map[string]map[string]any{}
+	for _, model := range modelCatalog(previous) {
+		oldModels[firstText(model["id"])] = model
+	}
+	var cipher *apisecrets.Cipher
+	for _, model := range modelCatalog(next) {
+		for _, field := range []string{"credential", "apiKey"} {
+			value, _ := model[field].(string)
+			if strings.TrimSpace(value) == "" {
+				continue
+			}
+			if cipher == nil {
+				var err error
+				cipher, err = p.secrets.WriteCipher()
+				if err != nil {
+					return err
+				}
+			}
+			binding, err := modelSecretBinding(owner, model, field)
+			if err != nil {
+				return err
+			}
+			if apisecrets.IsEncrypted(value) {
+				// Only migration can ingest a historical v1 record. An already
+				// bound record must authenticate for this precise model and field.
+				if strings.HasPrefix(value, apisecrets.BoundPrefix) {
+					if _, err := cipher.OpenBound(value, binding); err != nil {
+						return err
+					}
+					continue
+				}
+				if previous[novelfetchworkshop.ModelSecretVersionKey] == novelfetchworkshop.ModelSecretVersion {
+					return apisecrets.ErrBadCiphertext
+				}
+				value, err = cipher.Decrypt(value)
+				if err != nil {
+					return err
+				}
+			}
+			if previousCipher, _ := oldModels[firstText(model["id"])][field].(string); strings.HasPrefix(previousCipher, apisecrets.BoundPrefix) {
+				if prior, err := cipher.OpenBound(previousCipher, binding); err == nil && prior == value {
+					model[field] = previousCipher
+					continue
+				}
+			}
+			model[field], err = cipher.SealBound(value, binding)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (p *configSecretProvider) OpenModelConfig(owner string, settings map[string]any) error {
+	var cipher *apisecrets.Cipher
+	for _, model := range modelCatalog(settings) {
+		for _, field := range []string{"credential", "apiKey"} {
+			value, _ := model[field].(string)
+			if strings.TrimSpace(value) == "" {
+				continue
+			}
+			if settings[novelfetchworkshop.ModelSecretVersionKey] != novelfetchworkshop.ModelSecretVersion || !strings.HasPrefix(value, apisecrets.BoundPrefix) {
+				return apisecrets.ErrBadCiphertext
+			}
+			if cipher == nil {
+				var err error
+				cipher, err = p.secrets.ReadCipher()
+				if err != nil {
+					return err
+				}
+			}
+			binding, err := modelSecretBinding(owner, model, field)
+			if err != nil {
+				return err
+			}
+			model[field], err = cipher.OpenBound(value, binding)
+			if err != nil {
+				return err
+			}
+		}
+		if firstText(model["credential"]) == "" && firstText(model["apiKey"]) != "" {
+			model["credential"] = model["apiKey"]
+		}
+	}
+	return nil
 }
 
 func newConfigSecretProvider(baseDir string) *configSecretProvider {

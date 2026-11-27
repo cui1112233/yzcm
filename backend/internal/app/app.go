@@ -266,6 +266,8 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 		return nil, err
 	}
 	novelFetchStore := novelfetchworkshop.NewMySQLStore(db)
+	userConfigStore := httpapi.NewUserConfigStore(cfg.ScriptHistoryDir)
+	novelFetchStore.ModelSecrets = userConfigStore.ModelConfigSecrets()
 	agentWorkspaceStore := agentworkspace.NewMySQLStore(db)
 	agentProxyStore := agentproxy.NewMySQLStore(db)
 	aiCutStore := aicut.NewMySQLStore(db)
@@ -338,8 +340,11 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 		}
 		novelFetchRewrite = novelFetchRewriteAdapter{provider: textProvider}
 	}
-	var userConfigStore *httpapi.UserConfigStore
 	resolveCatalogTextProviderWithSelection := func(ctx context.Context, owner, selection string) (*batchfactoryv11.OpenAICompatibleProvider, error) {
+		owner, err := httpapi.ResolveAPIConfigOwner(ctx, accountCenterStore, owner)
+		if err != nil {
+			return nil, err
+		}
 		settings, err := novelFetchStore.GetConfig(ctx, owner)
 		if err != nil {
 			return nil, err
@@ -412,10 +417,10 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	memberProfiles := httpapi.NewMemberProfileStore(cfg.MemberSystemDir)
 	memberProfiles.UsageReader = usageStore.ReadSummary
 	memberProfiles.TeamTokenReader = usageStore.TeamMonthTokens
-	novelCreationService := novelcreation.NewService(novelCreationStore, novelCreationRuntime, novelcreation.NewPipeline(novelcreation.ProviderResolver(httpapi.NovelCreationTextResolver(authStore, memberProfiles, textProviderForModel))))
+	novelCreationService := novelcreation.NewService(novelCreationStore, novelCreationRuntime, novelcreation.NewPipeline(novelcreation.ProviderResolver(httpapi.NovelCreationTextResolver(authStore, memberProfiles, textProviderForModel, accountCenterStore))))
 	novelCreationService.ConfigureSystemPrompts(prompt.NewCatalog(cfg.PresetPath))
-	novelCreationService.ConfigureCoverGenerator(httpapi.NewNovelCoverGenerator(store, novelFetchStore))
-	novelCreationService.ConfigurePlayText(httpapi.NewNovelPlayText(novelcreation.ProviderResolver(httpapi.NovelCreationTextResolver(authStore, memberProfiles, textProviderForModel))))
+	novelCreationService.ConfigureCoverGenerator(httpapi.NewNovelCoverGenerator(store, novelFetchStore, accountCenterStore))
+	novelCreationService.ConfigurePlayText(httpapi.NewNovelPlayText(novelcreation.ProviderResolver(httpapi.NovelCreationTextResolver(authStore, memberProfiles, textProviderForModel, accountCenterStore))))
 	if cfg.AgentAssetTOSBucket != "" {
 		documentObjects, documentErr := novelcreation.NewTOSDocumentStore(novelcreation.DocumentTOSConfig{Endpoint: cfg.AgentAssetTOSEndpoint, Region: cfg.AgentAssetTOSRegion, Bucket: cfg.AgentAssetTOSBucket, AccessKey: cfg.AgentAssetTOSAccessKey, SecretKey: cfg.AgentAssetTOSSecretKey})
 		if documentErr != nil {
@@ -488,8 +493,14 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 		return imageCapacityController.WrapTransportWithTimeout(usageTracker.Wrap(base), timeout)
 	})
 	imagecapacity.SetEnabled(true)
-	userConfigStore = httpapi.NewUserConfigStore(cfg.ScriptHistoryDir)
-	usageTracker.ResolveCredential = httpapi.YZCMUsageCredentialResolver(userConfigStore, memberProfiles, authStore, novelFetchStore.GetConfig)
+	usageCredential := httpapi.YZCMUsageCredentialResolver(userConfigStore, nil, nil, novelFetchStore.GetConfig)
+	usageTracker.ResolveCredential = func(ctx context.Context, subject, fingerprint string) (string, error) {
+		owner, err := httpapi.ResolveAPIConfigOwner(ctx, accountCenterStore, subject)
+		if err != nil {
+			return "", err
+		}
+		return usageCredential(ctx, owner, fingerprint)
+	}
 
 	var aiCutASRService *aicut.ASRService
 	if strings.TrimSpace(cfg.RedisURL) != "" && agentAssetObjects != nil {

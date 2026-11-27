@@ -25,6 +25,7 @@ const (
 	GrantScopeTeam                  = "team"
 	GrantScopePlatform              = "platform"
 	GrantCapabilityTeamCreate       = "team:create"
+	GrantCapabilityCustomAPI        = "api:custom"
 	GrantCapabilityPlatformBusiness = "business:run"
 	GrantCapabilityPlatformAdmin    = "admin:access"
 )

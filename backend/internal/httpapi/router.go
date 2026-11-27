@@ -148,8 +148,9 @@ func managedTextProviderResolver(resolver func(context.Context, string, string) 
 	}
 	return func(ctx context.Context, owner, modelID string) (batchfactoryv11.DirectorProvider, error) {
 		if resolveOwner != nil {
-			if resolved := strings.TrimSpace(resolveOwner(owner)); resolved != "" {
-				owner = resolved
+			owner = strings.TrimSpace(resolveOwner(owner))
+			if owner == "" {
+				return nil, accountcenter.ErrForbidden
 			}
 		}
 		return resolver(ctx, owner, modelID)
@@ -158,6 +159,10 @@ func managedTextProviderResolver(resolver func(context.Context, string, string) 
 
 func NewRouter(options RouterOptions) http.Handler {
 	resolveRuntimeModelOwner := func(owner string) string {
+		if options.AccountCenterStore != nil {
+			resolved, _ := ResolveAPIConfigOwner(context.Background(), options.AccountCenterStore, owner)
+			return resolved
+		}
 		return effectiveModelCatalogOwner(BridgeIdentity{Username: owner}, options.MemberProfileStore, options.AuthStore)
 	}
 	runtimeCatalogStore := runtimeModelCatalogStore(options.NovelFetchStore, resolveRuntimeModelOwner)
@@ -586,7 +591,7 @@ func NewRouter(options RouterOptions) http.Handler {
 	RegisterReferenceAssetRoutes(root, auth, options.UserDataDir)
 	registerReferenceAssetImageGenerateRoute(root, auth, options.UserConfigStore, runtimeCatalogStore, options.LocalExecutors)
 	registerUserConfigRoutes(root, auth, options.UserConfigStore, options.AuthStore, options.NovelFetchStore, options.MemberProfileStore)
-	registerAPIIntegrationRoutes(root, auth, options.UserConfigStore, options.AuthStore, options.MemberProfileStore)
+	registerAPIIntegrationRoutes(root, auth, options.UserConfigStore, options.AuthStore, options.NovelFetchStore)
 	registerImageCapacityRoutes(root, auth, options)
 	RegisterStorageRoutes(root, auth, options.UserConfigStore, options.ScriptHistoryStore)
 	RegisterPlatformProjectsRoute(root, auth, options.ScriptHistoryStore, options.Store)
@@ -1016,7 +1021,7 @@ func NewRouter(options RouterOptions) http.Handler {
 		root.Handle("/api/web-submit/", sessionOnlyNovelAuth.Middleware(http.HandlerFunc(legacyWebSubmitAlias)))
 		RegisterNovelFetchIntegrations(root, sessionOnlyCompatAuth, options.NovelFetchStore, options.NovelFetchQueue)
 		registerCanonicalNovelFetchWebSubmitAliases(root, auth)
-		registerModelCatalogRoutes(root, novelAuth, options.NovelFetchStore, options.UserConfigStore, options.AuthStore, options.MemberProfileStore)
+		registerModelCatalogRoutes(root, novelAuth, auth, options.NovelFetchStore, options.UserConfigStore, options.AuthStore, options.MemberProfileStore, options.YZCMModelCatalog)
 	}
 	root.HandleFunc("GET /health", func(w http.ResponseWriter, req *http.Request) {
 		if options.Health != nil && options.Health(req.Context()) != nil {
@@ -1028,7 +1033,7 @@ func NewRouter(options RouterOptions) http.Handler {
 	// Compress JSON responses at the outermost layer so every registered route
 	// benefits without touching individual handlers. Non-JSON streams (images,
 	// ServeContent Range/304) are passed through untouched.
-	business := withAccountCenterBusinessAccess(withAICutTimelineScope(root, auth), auth)
+	business := withAccountCenterBusinessAccess(withAICutTimelineScope(withAPIConfigCompatibility(root, auth), auth), auth)
 	return withWorkshopSubmitQueue(withJSONCompression(impersonation.middleware(root, business)), options.NovelFetchQueue)
 }
 

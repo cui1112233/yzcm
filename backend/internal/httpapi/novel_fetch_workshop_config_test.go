@@ -134,7 +134,7 @@ func TestNovelFetchWorkshopConfigHidesCredentialsAndPreservesOnEdit(t *testing.T
 		t.Fatalf("unexpected public ai config: %#v", ai)
 	}
 	put := doNovelFetchRequest(t, handler, http.MethodPost, "/api/novel-fetch-workshop/config", map[string]any{
-		"appConfig": map[string]any{"ai": map[string]any{"model": "new-model", "api_key": ""}},
+		"appConfig": map[string]any{"ai": map[string]any{"model": "new-model"}},
 	}, now, secret)
 	if put.Code != http.StatusOK {
 		t.Fatalf("put status=%d body=%s", put.Code, put.Body.String())
@@ -148,7 +148,7 @@ func TestNovelFetchWorkshopConfigHidesCredentialsAndPreservesOnEdit(t *testing.T
 		t.Fatalf("edit should preserve credential: %#v", savedAI)
 	}
 	put = doNovelFetchRequest(t, handler, http.MethodPut, "/api/novel-fetch-workshop/config", map[string]any{
-		"appConfig": map[string]any{"ai": map[string]any{"model": "put-model", "api_key": ""}},
+		"appConfig": map[string]any{"ai": map[string]any{"model": "put-model"}},
 	}, now, secret)
 	if put.Code != http.StatusOK {
 		t.Fatalf("put status=%d body=%s", put.Code, put.Body.String())

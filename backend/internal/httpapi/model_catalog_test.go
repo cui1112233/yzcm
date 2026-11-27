@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/auth"
 	"qiantie/backend/internal/novelfetchworkshop"
 	"qiantie/backend/internal/storage"
@@ -18,6 +19,29 @@ import (
 )
 
 type yzcmCatalogReaderFixture func(context.Context, yzcmmodels.Query) (yzcmmodels.Page, error)
+
+func newFormalModelCatalogTestRouter(options RouterOptions) http.Handler {
+	options.AccountCenterStore = &impersonationTestStore{identities: map[string]accountcenter.Identity{
+		"tester": {Username: "tester", Role: accountcenter.RoleFounder, Active: true},
+	}}
+	options.SessionResolver = func(context.Context, string) (BridgeIdentity, error) {
+		return BridgeIdentity{Username: "tester", IsOwner: true}, nil
+	}
+	return NewRouter(options)
+}
+
+func doFormalModelCatalogRequest(t *testing.T, handler http.Handler, method, path string, body any, _ time.Time, _ string) *httptest.ResponseRecorder {
+	t.Helper()
+	var raw string
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw = string(encoded)
+	}
+	return impersonationRequest(handler, method, path, "tester", raw, nil)
+}
 
 func (f yzcmCatalogReaderFixture) Search(ctx context.Context, query yzcmmodels.Query) (yzcmmodels.Page, error) {
 	return f(ctx, query)
@@ -177,8 +201,8 @@ func TestModelTestReusesSavedCredentialWhenEditing(t *testing.T) {
 	}}}); err != nil {
 		t.Fatal(err)
 	}
-	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
-	response := doNovelFetchRequest(t, handler, http.MethodPost, "/api/config/models/test", map[string]any{
+	handler := newFormalModelCatalogTestRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
+	response := doFormalModelCatalogRequest(t, handler, http.MethodPost, "/api/config/models/test", map[string]any{
 		"kind": "text", "existingModelId": "text-saved", "baseUrl": upstream.URL, "modelId": "saved-model",
 	}, now, secret)
 	if response.Code != http.StatusOK {
@@ -190,8 +214,8 @@ func TestModelCatalogCRUDHidesCredential(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	secret := "test-secret"
 	store := novelfetchworkshop.NewMemoryStore()
-	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
-	create := doNovelFetchRequest(t, handler, http.MethodPost, "/api/config/models", map[string]any{
+	handler := newFormalModelCatalogTestRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
+	create := doFormalModelCatalogRequest(t, handler, http.MethodPost, "/api/config/models", map[string]any{
 		"id": "text-demo", "kind": "text", "displayName": "测试文本", "modelId": "demo", "baseUrl": "https://example.com/v1/chat/completions", "credential": "secret-value", "enabled": true,
 	}, now, secret)
 	if create.Code != http.StatusCreated {
@@ -311,9 +335,9 @@ func TestLegacyModelTestRoutesAreServedByGo(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	secret := "test-secret"
 	store := novelfetchworkshop.NewMemoryStore()
-	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
+	handler := newFormalModelCatalogTestRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
 	for _, path := range []string{"/api/test/text", "/api/test/image"} {
-		response := doNovelFetchRequest(t, handler, http.MethodPost, path, map[string]any{"baseUrl": "ftp://invalid", "model": "demo", "apiKey": "secret"}, now, secret)
+		response := doFormalModelCatalogRequest(t, handler, http.MethodPost, path, map[string]any{"baseUrl": "ftp://invalid", "model": "demo", "apiKey": "secret"}, now, secret)
 		if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "Base URL 格式不正确") {
 			t.Fatalf("%s should be Go-owned validation, status=%d body=%s", path, response.Code, response.Body.String())
 		}
@@ -329,8 +353,8 @@ func TestModelCatalogPatchPreservesCredentialAndValidatesWorkflow(t *testing.T) 
 	}}}); err != nil {
 		t.Fatal(err)
 	}
-	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
-	response := doNovelFetchRequest(t, handler, http.MethodPatch, "/api/config/models/minimax-h3-video", map[string]any{"enabled": true, "workflowId": "new-workflow"}, now, secret)
+	handler := newFormalModelCatalogTestRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
+	response := doFormalModelCatalogRequest(t, handler, http.MethodPatch, "/api/config/models/minimax-h3-video", map[string]any{"enabled": true, "workflowId": "new-workflow"}, now, secret)
 	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "saved-secret") {
 		t.Fatalf("patch status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -348,16 +372,16 @@ func TestModelCatalogH3ConfigRequiresKeyAndSavesWorkflowTogether(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	secret := "test-secret"
 	store := novelfetchworkshop.NewMemoryStore()
-	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
+	handler := newFormalModelCatalogTestRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
 
-	missingKey := doNovelFetchRequest(t, handler, http.MethodPost, "/api/config/models", map[string]any{
+	missingKey := doFormalModelCatalogRequest(t, handler, http.MethodPost, "/api/config/models", map[string]any{
 		"id": "minimax-h3-video", "kind": "video", "displayName": "H3", "workflowId": "saved-workflow", "enabled": false,
 	}, now, secret)
 	if missingKey.Code != http.StatusBadRequest || !strings.Contains(missingKey.Body.String(), "API Key") {
 		t.Fatalf("H3 save without key must be rejected, status=%d body=%s", missingKey.Code, missingKey.Body.String())
 	}
 
-	withKey := doNovelFetchRequest(t, handler, http.MethodPost, "/api/config/models", map[string]any{
+	withKey := doFormalModelCatalogRequest(t, handler, http.MethodPost, "/api/config/models", map[string]any{
 		"id": "minimax-h3-video", "kind": "video", "displayName": "H3", "workflowId": "saved-workflow", "credential": "h3-secret", "enabled": false,
 	}, now, secret)
 	if withKey.Code != http.StatusCreated || strings.Contains(withKey.Body.String(), "h3-secret") {
@@ -401,8 +425,8 @@ func TestModelCatalogPatchAcceptsLegacyH3ApiKeyAlias(t *testing.T) {
 	}}}); err != nil {
 		t.Fatal(err)
 	}
-	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
-	response := doNovelFetchRequest(t, handler, http.MethodPatch, "/api/config/models/minimax-h3-video", map[string]any{
+	handler := newFormalModelCatalogTestRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
+	response := doFormalModelCatalogRequest(t, handler, http.MethodPatch, "/api/config/models/minimax-h3-video", map[string]any{
 		"workflowId": "new-workflow",
 	}, now, secret)
 	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "legacy-secret") {
@@ -477,9 +501,9 @@ func TestModelCatalogPatchKeepsAdminExtensionFields(t *testing.T) {
 	}}}); err != nil {
 		t.Fatal(err)
 	}
-	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
+	handler := newFormalModelCatalogTestRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
 	// 个人中心平台预设卡只改 Key：不能丢管理端写入的 name / adapterKind / credentialRef。
-	response := doNovelFetchRequest(t, handler, http.MethodPatch, "/api/config/models/yd2-mini-video", map[string]any{
+	response := doFormalModelCatalogRequest(t, handler, http.MethodPatch, "/api/config/models/yd2-mini-video", map[string]any{
 		"credential": "sk-new",
 	}, now, secret)
 	if response.Code != http.StatusOK {
@@ -515,7 +539,7 @@ func TestModelCatalogListsEnabledIntegrationChannels(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store, UserConfigStore: userConfig})
+	handler := newFormalModelCatalogTestRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store, UserConfigStore: userConfig})
 
 	list := doNovelFetchRequest(t, handler, http.MethodGet, "/api/models?kind=text", nil, now, secret)
 	if list.Code != http.StatusOK {
@@ -538,7 +562,7 @@ func TestModelCatalogListsEnabledIntegrationChannels(t *testing.T) {
 		t.Fatalf("channel without key must stay hidden: %#v", payload.Models)
 	}
 
-	managed := doNovelFetchRequest(t, handler, http.MethodGet, "/api/config/models?kind=text", nil, now, secret)
+	managed := doFormalModelCatalogRequest(t, handler, http.MethodGet, "/api/config/models?kind=text", nil, now, secret)
 	if managed.Code != http.StatusOK {
 		t.Fatalf("managed list status=%d body=%s", managed.Code, managed.Body.String())
 	}
@@ -559,8 +583,8 @@ func TestManagedAudioModelConnectionTestAcceptsAudioResponse(t *testing.T) {
 	}))
 	defer upstream.Close()
 	store := novelfetchworkshop.NewMemoryStore()
-	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
-	response := doNovelFetchRequest(t, handler, http.MethodPost, "/api/config/models/test-audio", map[string]any{
+	handler := newFormalModelCatalogTestRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
+	response := doFormalModelCatalogRequest(t, handler, http.MethodPost, "/api/config/models/test-audio", map[string]any{
 		"kind": "audio", "endpoint": upstream.URL, "credential": "audio-secret",
 		"requestTemplate": `{"method":"POST","body":{"text":"{{input}}"}}`, "responseMapping": `{}`,
 	}, now, secret)

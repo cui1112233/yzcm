@@ -17,6 +17,9 @@ func RegisterShuihuoAccountAIConfigCompat(root *http.ServeMux, middleware Bridge
 		return
 	}
 	root.Handle("PUT /api/shuihuo-production/account-ai-config", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if !apiConfigPolicy(req.Context(), middleware.AccountCenterStore).authorize(w, true, true) {
+			return
+		}
 		identity, ok := BridgeIdentityFromContext(req.Context())
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
