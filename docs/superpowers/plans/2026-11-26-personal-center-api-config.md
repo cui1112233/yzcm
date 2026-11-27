@@ -29,6 +29,8 @@
 - Modify: `backend/internal/storage/local_executor_schema.go`
 - Modify: `backend/internal/httpapi/model_catalog.go`
 - Modify: `backend/internal/httpapi/model_catalog_test.go`
+- Modify: `backend/internal/httpapi/api_config_policy.go`
+- Modify: `backend/internal/httpapi/api_config_policy_test.go`
 
 **Interfaces:**
 - Migration version `8800406` creates `yzcm_model_catalog` and `yzcm_model_sync_runs`.
@@ -72,10 +74,15 @@ git commit -m "feat(models): enforce role-aware API configuration"
 ### Task 3: Adapt the existing page and modal without replacing them
 
 **Files:**
+- Modify: `backend/internal/httpapi/model_catalog.go`
+- Modify: `backend/internal/httpapi/model_catalog_test.go`
 - Modify: `frontend/src/user/pages/ApiConfigPage.jsx`
+- Modify: `frontend/src/user/pages/ApiIntegrationSettings.jsx`
 - Modify: `frontend/src/user/pages/ApiPresetSelectionModal.jsx`
 - Modify: `frontend/src/user/pages/ApiCustomModelModal.jsx`
 - Modify: `frontend/src/user/pages/apiConfigCatalogMerge.js`
+- Modify: `frontend/src/shared/api/modelCatalog.js`
+- Modify: `frontend/src/shared/api/modelCatalog.test.js`
 - Create: `frontend/src/user/pages/api-config-role-policy.js`
 - Create: `frontend/src/user/pages/api-config-role-policy.test.js`
 - Modify: `frontend/src/user/pages/ApiConfigPage.source.test.js`
@@ -84,13 +91,15 @@ git commit -m "feat(models): enforce role-aware API configuration"
 **Interfaces:**
 - `projectApiConfigCapabilities(center)` controls rendering only; server remains authoritative.
 - Manager modal searches the YZCM catalog, selects on the left, removes on the right, and returns selected IDs. Inline cards own Key editing/autosave.
+- Restricted-role selection is the JSON boolean `selectedForConfigPage` on an existing managed YZCM row; absence means `true`. Deselecting hides the card but never deletes the row, clears the Key, or changes runtime availability. Restricted capability actions expose `update_model_selection` and do not expose `remove_model`; full accounts retain `remove_model`.
 
 - [ ] **Step 1: Add failing tests** asserting manager-only YZCM results, no external providers, no address/add button, modal hidden until click, and one independent inline Key field per selected model.
+- [ ] **Step 1a: Add failing Go tests** proving restricted-role selection can hide and re-show a YZCM row without changing its credential or runtime availability; forged address/provider fields and restricted DELETE remain forbidden.
 - [ ] **Step 2: Run the targeted Node tests and verify failure.**
 
 Run: `node --test src/user/pages/api-config-role-policy.test.js src/user/pages/apiPresetSelection.test.js src/user/pages/ApiConfigPage.source.test.js` from `frontend`
 
-- [ ] **Step 3: Implement minimal UI changes** around the existing page. Do not remove platform presets, autosave delay, quota refresh, text/video/image/audio groups, or auxiliary settings.
+- [ ] **Step 3: Implement the selection contract and minimal UI changes** around the existing page. Do not remove platform presets, autosave delay, quota refresh, text/video/image/audio/asr groups, or auxiliary settings. The actual UI owner is `ApiIntegrationSettings.jsx`; the shared YZCM search client belongs in `modelCatalog.js`.
 - [ ] **Step 4: Run targeted tests and `npm run build`; expect PASS.**
 - [ ] **Step 5: Commit.**
 

@@ -46,7 +46,7 @@ func (a apiConfigAccess) response(payload map[string]any) map[string]any {
 	source, actions := "none", []string{}
 	if a.allowed {
 		source = "yzcm_saved"
-		actions = []string{"select_yzcm_model", "update_model_key", "remove_model"}
+		actions = []string{"select_yzcm_model", "update_model_key", "update_model_selection"}
 		if a.identity.ImpersonationID == "" {
 			actions = append(actions, "reveal_model_key")
 		} else {
@@ -56,7 +56,7 @@ func (a apiConfigAccess) response(payload map[string]any) map[string]any {
 	if a.custom {
 		source = "full"
 		if a.identity.ImpersonationID == "" {
-			actions = append(actions, "add_custom_model", "edit_model_address")
+			actions = append(actions, "add_custom_model", "edit_model_address", "remove_model")
 		}
 	}
 	payload["catalogSource"], payload["actions"] = source, actions
@@ -116,10 +116,20 @@ func publicRestrictedModel(model map[string]any) map[string]any {
 	item := publicRuntimeModel(model)
 	item["hasCredential"] = managedModelHasCredential(model) || model["hasCredential"] == true
 	item["catalogSource"] = managedYZCMSource
+	item["selectedForConfigPage"] = modelSelectedForConfigPage(model)
 	if model["credentialStatus"] == "needs_reentry" {
 		item["credentialStatus"] = "needs_reentry"
 	}
 	return item
+}
+
+func modelSelectedForConfigPage(model map[string]any) bool {
+	raw, present := model["selectedForConfigPage"]
+	if !present {
+		return true
+	}
+	selected, _ := raw.(bool)
+	return selected
 }
 
 func publicRuntimeModel(model map[string]any) map[string]any {
@@ -502,7 +512,8 @@ func newRestrictedYZCMModel(ctx context.Context, reader yzcmmodels.Reader, input
 	for _, row := range page.Models {
 		if row.ModelID == modelID && row.Kind == kind && row.Adapted && row.Allowed {
 			return map[string]any{"id": "yzcm:" + kind + ":" + modelID, "modelId": modelID, "kind": kind, "displayName": row.DisplayName,
-				"baseUrl": yzcmusage.Origin + "/v1", "provider": "yzcm", "credential": credential, "enabled": true, "catalogSource": managedYZCMSource}, nil
+				"baseUrl": yzcmusage.Origin + "/v1", "provider": "yzcm", "credential": credential, "enabled": true, "catalogSource": managedYZCMSource,
+				"selectedForConfigPage": true}, nil
 		}
 	}
 	return nil, accountcenter.ErrForbidden

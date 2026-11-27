@@ -444,9 +444,120 @@ func TestAPIConfigPolicyRestrictedSelectionsAndSingleKey(t *testing.T) {
 	reveal(second, "fixture-key-two")
 	request("PATCH", path+"/"+first, `{"clearCredential":true}`, 200)
 	reveal(first, "")
-	request("DELETE", path+"/"+first, "", 204)
+	request("DELETE", path+"/"+first, "", 403)
 	reveal(second, "fixture-key-two")
 	if len(center.audits) == 0 || ctx.Err() != nil {
 		t.Fatal("successful reveal must leave an audit event")
 	}
+}
+
+func TestAPIConfigPolicyRestrictedDisplaySelectionPreservesRuntimeAndCredential(t *testing.T) {
+	ctx := context.Background()
+	accounts := &authTestStore{account: auth.Account{Username: "founder", Active: true, IsOwner: true}}
+	workshop := novelfetchworkshop.NewMemoryStore()
+	if err := workshop.PutConfig(ctx, "manager", map[string]any{"modelCatalog": []any{map[string]any{
+		"id": "yzcm:text:legacy", "kind": "text", "modelId": "legacy", "displayName": "旧模型",
+		"provider": "yzcm", "baseUrl": "http://newapi.yzcm.site/v1", "catalogSource": "yzcm_saved",
+		"credential": "fixture-legacy-key", "enabled": true,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	h, _, _ := newImpersonationTestRouter(t, func(options *RouterOptions) {
+		options.AuthStore = accounts
+		options.NovelFetchStore = workshop
+		options.UserConfigStore = NewUserConfigStore(t.TempDir())
+		options.YZCMModelCatalog = yzcmCatalogReaderFixture(func(_ context.Context, query yzcmmodels.Query) (yzcmmodels.Page, error) {
+			return yzcmmodels.Page{Status: "available", Models: []yzcmmodels.CatalogRow{{Model: yzcmmodels.Model{
+				ModelID: query.Q, DisplayName: "新模型", Kind: query.Kind, Adapted: true, Allowed: true,
+			}}}}, nil
+		})
+	})
+	request := func(username, verb, path, body string, status int) map[string]any {
+		t.Helper()
+		response := impersonationRequest(h, verb, path, username, body, nil)
+		if response.Code != status {
+			t.Fatalf("%s %s as %s: want %d, got %d %s", verb, path, username, status, response.Code, response.Body)
+		}
+		var payload map[string]any
+		if response.Body.Len() > 0 {
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("decode response: %v: %s", err, response.Body)
+			}
+		}
+		return payload
+	}
+	modelFrom := func(payload map[string]any) map[string]any {
+		t.Helper()
+		model, ok := payload["model"].(map[string]any)
+		if !ok {
+			t.Fatalf("missing model response: %+v", payload)
+		}
+		return model
+	}
+	assertSelection := func(model map[string]any, selected, hasCredential bool) {
+		t.Helper()
+		if model["selectedForConfigPage"] != selected || model["hasCredential"] != hasCredential {
+			t.Fatalf("selection projection = %+v, want selected=%v credential=%v", model, selected, hasCredential)
+		}
+		if _, leaked := model["credential"]; leaked || strings.Contains(fmt.Sprint(model), "fixture-") {
+			t.Fatalf("credential leaked in public model: %+v", model)
+		}
+	}
+
+	// Existing rows predate the presentation flag and must remain visible.
+	listed := request("manager", http.MethodGet, "/api/config/models?kind=text", "", http.StatusOK)
+	models, ok := listed["models"].([]any)
+	if !ok || len(models) != 1 {
+		t.Fatalf("unexpected restricted list: %+v", listed)
+	}
+	assertSelection(models[0].(map[string]any), true, true)
+	actions := map[string]bool{}
+	for _, value := range listed["actions"].([]any) {
+		actions[fmt.Sprint(value)] = true
+	}
+	if !actions["update_model_selection"] || actions["remove_model"] {
+		t.Fatalf("restricted actions do not match the write contract: %+v", listed["actions"])
+	}
+
+	created := modelFrom(request("manager", http.MethodPost, "/api/config/models", `{"kind":"text","modelId":"fresh"}`, http.StatusCreated))
+	assertSelection(created, true, false)
+	createdID := fmt.Sprint(created["id"])
+
+	hidden := modelFrom(request("manager", http.MethodPatch, "/api/config/models/yzcm:text:legacy", `{"selectedForConfigPage":false}`, http.StatusOK))
+	assertSelection(hidden, false, true)
+	raw, err := workshop.GetConfig(ctx, "manager")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := shuihuoModelCredential(modelCatalog(raw)[0]); got != "fixture-legacy-key" {
+		t.Fatalf("display selection changed credential: %q", got)
+	}
+	runtime := request("manager", http.MethodGet, "/api/models?kind=text", "", http.StatusOK)
+	runtimeModels, ok := runtime["models"].([]any)
+	if !ok || len(runtimeModels) != 1 || runtimeModels[0].(map[string]any)["id"] != "yzcm:text:legacy" {
+		t.Fatalf("hidden config card changed runtime catalog: %+v", runtime)
+	}
+
+	shown := modelFrom(request("manager", http.MethodPatch, "/api/config/models/yzcm:text:legacy", `{"selectedForConfigPage":true}`, http.StatusOK))
+	assertSelection(shown, true, true)
+	request("manager", http.MethodPatch, "/api/config/models/yzcm:text:legacy", `{"selectedForConfigPage":false,"baseUrl":"https://forged.invalid"}`, http.StatusForbidden)
+	request("manager", http.MethodPatch, "/api/config/models/yzcm:text:legacy", `{"selectedForConfigPage":"false"}`, http.StatusBadRequest)
+	request("manager2", http.MethodPatch, "/api/config/models/yzcm:text:legacy", `{"selectedForConfigPage":false}`, http.StatusNotFound)
+	request("manager", http.MethodDelete, "/api/config/models/yzcm:text:legacy", "", http.StatusForbidden)
+	request("manager", http.MethodDelete, "/api/config/models/"+createdID, "", http.StatusForbidden)
+
+	// Full custom-model accounts keep physical deletion and advertise it.
+	founder := request("founder", http.MethodPost, "/api/config/models", `{"id":"founder-custom","kind":"text","modelId":"custom","baseUrl":"https://custom.invalid/v1","credential":"fixture-founder"}`, http.StatusCreated)
+	if founder["model"].(map[string]any)["selectedForConfigPage"] != true {
+		t.Fatalf("full model public projection must default selected: %+v", founder)
+	}
+	founderList := request("founder", http.MethodGet, "/api/config/models", "", http.StatusOK)
+	founderActions := map[string]bool{}
+	for _, value := range founderList["actions"].([]any) {
+		founderActions[fmt.Sprint(value)] = true
+	}
+	if !founderActions["remove_model"] {
+		t.Fatalf("full account lost delete capability: %+v", founderList["actions"])
+	}
+	request("founder", http.MethodDelete, "/api/config/models/founder-custom", "", http.StatusNoContent)
 }

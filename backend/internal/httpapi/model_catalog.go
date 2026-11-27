@@ -475,7 +475,7 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求内容无效"})
 			return
 		}
-		if rejectsCredentialReference(patch) || !access.custom && !allowedInputFields(patch, "credential", "clearCredential") {
+		if rejectsCredentialReference(patch) || !access.custom && !allowedInputFields(patch, "credential", "clearCredential", "selectedForConfigPage") {
 			writeAccountCenterForbidden(w)
 			return
 		}
@@ -486,6 +486,12 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 		if _, _, err := modelCredentialPatch(patch); err != nil {
 			writeAPIConfigError(w, err)
 			return
+		}
+		if raw, present := patch["selectedForConfigPage"]; present {
+			if _, ok := raw.(bool); !ok {
+				writeAPIConfigError(w, accountcenter.ErrInvalid)
+				return
+			}
 		}
 		owner := access.identity.Subject.Username
 		repairPatch := patch
@@ -516,9 +522,10 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			repairPatch = cloneAnyMap(patch)
 			repairPatch[novelfetchworkshop.ConfigRevisionKey] = firstText(current[novelfetchworkshop.ConfigRevisionKey], "0")
 		}
+		_, selectionPatch := patch["selectedForConfigPage"]
 		if repair, ok := store.(interface {
 			TryPatchBoundTextCredential(context.Context, string, string, map[string]any) (map[string]any, bool, error)
-		}); ok {
+		}); ok && !selectionPatch {
 			model, handled, err := repair.TryPatchBoundTextCredential(req.Context(), owner, req.PathValue("modelId"), repairPatch)
 			if err != nil {
 				if errors.Is(err, novelfetchworkshop.ErrConfigConflict) {
@@ -546,7 +553,7 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 				continue
 			}
 			if isManagedYZCMModel(current) {
-				if !allowedInputFields(patch, "credential", "clearCredential") {
+				if !allowedInputFields(patch, "credential", "clearCredential", "selectedForConfigPage") {
 					writeAccountCenterForbidden(w)
 					return
 				}
@@ -555,6 +562,9 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 					current["credential"] = credential
 					delete(current, "apiKey")
 					delete(current, "credentialStatus")
+				}
+				if selected, present := patch["selectedForConfigPage"].(bool); present {
+					current["selectedForConfigPage"] = selected
 				}
 				updated, found = current, true
 				break
@@ -629,7 +639,7 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 		if !access.authorize(w, true, false) {
 			return
 		}
-		if !access.custom && !strings.HasPrefix(req.PathValue("modelId"), "yzcm:") {
+		if !access.custom {
 			writeAccountCenterForbidden(w)
 			return
 		}
@@ -1111,6 +1121,9 @@ func normalizeManagedModel(input map[string]any) (map[string]any, error) {
 		credential = ""
 	}
 	model := map[string]any{"id": id, "kind": kind, "displayName": strings.TrimSpace(fmt.Sprint(input["displayName"])), "modelId": strings.TrimSpace(fmt.Sprint(input["modelId"])), "baseUrl": strings.TrimSpace(fmt.Sprint(input["baseUrl"])), "endpoint": strings.TrimSpace(fmt.Sprint(input["endpoint"])), "provider": strings.TrimSpace(fmt.Sprint(input["provider"])), "requestTemplate": strings.TrimSpace(fmt.Sprint(input["requestTemplate"])), "responseMapping": strings.TrimSpace(fmt.Sprint(input["responseMapping"])), "voiceCloneRequestTemplate": strings.TrimSpace(fmt.Sprint(input["voiceCloneRequestTemplate"])), "voiceCloneResponseMapping": strings.TrimSpace(fmt.Sprint(input["voiceCloneResponseMapping"])), "credential": credential, "workflowId": workflowID, "enabled": normalizedModelEnabled(input["enabled"])}
+	if selected, ok := input["selectedForConfigPage"].(bool); ok {
+		model["selectedForConfigPage"] = selected
+	}
 	if model["displayName"] == "<nil>" || model["displayName"] == "" {
 		if name := strings.TrimSpace(fmt.Sprint(input["name"])); name != "" && name != "<nil>" {
 			model["displayName"] = name
@@ -1147,6 +1160,7 @@ func publicManagedModel(model map[string]any) map[string]any {
 	result := redactAPIConfig(model).(map[string]any)
 	result["hasCredential"] = managedModelHasCredential(model)
 	result["available"] = managedModelAvailable(model)
+	result["selectedForConfigPage"] = modelSelectedForConfigPage(model)
 	setVideoExecutionAvailability(result, model)
 	result["capabilities"] = publicModelCapabilities(model)
 	return result
