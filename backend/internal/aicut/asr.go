@@ -54,6 +54,11 @@ func ASRProviderFromCatalog(settings map[string]any, selection string, client *h
 		if !enabled {
 			return nil, errors.New("选择的 ASR 模型未启用")
 		}
+		key, _ := model["credential"].(string)
+		modelID, _ := model["modelId"].(string)
+		if strings.TrimSpace(key) == "" || model["credentialStatus"] == "needs_reentry" {
+			return nil, errors.New("选择的 ASR 模型需要重新填写 Key")
+		}
 		endpoint := strings.TrimSpace(fmt.Sprint(model["endpoint"]))
 		if endpoint == "<nil>" {
 			endpoint = ""
@@ -64,7 +69,7 @@ func ASRProviderFromCatalog(settings map[string]any, selection string, client *h
 				endpoint = base + "/audio/transcriptions"
 			}
 		}
-		return NewOpenAICompatibleASRProvider(ASRProviderConfig{Endpoint: endpoint, APIKey: strings.TrimSpace(fmt.Sprint(model["credential"])), Model: strings.TrimSpace(fmt.Sprint(model["modelId"]))}, client)
+		return NewOpenAICompatibleASRProvider(ASRProviderConfig{Endpoint: endpoint, APIKey: key, Model: modelID}, client)
 	}
 	return nil, errors.New("选择的 ASR 模型不存在")
 }

@@ -211,7 +211,7 @@ func TestSensitiveStageUsesSavedDraftForSegmentation(t *testing.T) {
 		return "{}", nil
 	})}
 	now := time.Unix(1700000000, 0)
-	api := NewRouter(RouterOptions{BridgeSecret: "secret", Now: func() time.Time { return now }, Slice: 2, Store: store, NovelFetchStore: rules, Director: director})
+	api := NewRouter(RouterOptions{AccountCenterStore: activeModelTestAccounts("alice"), BridgeSecret: "secret", Now: func() time.Time { return now }, Slice: 2, Store: store, NovelFetchStore: rules, Director: director})
 	rec := signedJSONRequest(t, api, now, "alice", "PUT", "/api/batch-factory/v12/drafts", batchfactoryv11.Draft{Key: "working-front:" + bookID, Kind: "working-front-content", Scope: b.ID, Content: draft})
 	if rec.Code != 200 {
 		t.Fatalf("save draft returned %d %s", rec.Code, rec.Body.String())

@@ -260,12 +260,13 @@ func TestComicPageGenerationRejectsARecentDurableGenerationTask(t *testing.T) {
 	catalog := novelfetchworkshop.NewMemoryStore()
 	prepareComicPageSourceForGeneration(t, store, catalog, batch.ID, book.ID, video.ID)
 	api := NewRouter(RouterOptions{
-		BridgeSecret:    "secret",
-		Now:             func() time.Time { return now },
-		Slice:           1,
-		Store:           store,
-		LocalArtifacts:  localartifact.NewStore(t.TempDir(), 1024),
-		NovelFetchStore: catalog,
+		AccountCenterStore: activeModelTestAccounts("alice"),
+		BridgeSecret:       "secret",
+		Now:                func() time.Time { return now },
+		Slice:              1,
+		Store:              store,
+		LocalArtifacts:     localartifact.NewStore(t.TempDir(), 1024),
+		NovelFetchStore:    catalog,
 	})
 	path := "/api/batch-factory/v12/batches/" + batch.ID + "/books/" + book.ID + "/comic-pages/" + video.ID + "/generate"
 	response := signedJSONRequest(t, api, now, "alice", http.MethodPost, path, map[string]any{
@@ -609,12 +610,13 @@ func TestComicPageGenerateUsesPagePromptAndStoresCandidateOutsideAssets(t *testi
 	}
 	prepareComicPageSourceForGeneration(t, store, catalog, batch.ID, book.ID, video.ID)
 	api := NewRouter(RouterOptions{
-		BridgeSecret:    "secret",
-		Now:             func() time.Time { return now },
-		Slice:           1,
-		Store:           store,
-		LocalArtifacts:  localartifact.NewStore(t.TempDir(), 1<<20),
-		NovelFetchStore: catalog,
+		AccountCenterStore: activeModelTestAccounts("alice"),
+		BridgeSecret:       "secret",
+		Now:                func() time.Time { return now },
+		Slice:              1,
+		Store:              store,
+		LocalArtifacts:     localartifact.NewStore(t.TempDir(), 1<<20),
+		NovelFetchStore:    catalog,
 	})
 	path := "/api/batch-factory/v12/batches/" + batch.ID + "/books/" + book.ID + "/comic-pages/" + video.ID + "/generate"
 	generated := signedJSONRequest(t, api, now, "alice", http.MethodPost, path, map[string]any{
@@ -1324,12 +1326,13 @@ func TestComicPageManualPromptEditInvalidatesRepairedPromptAndGenerationUsesNewP
 	}
 	prepareComicPageSourceForGeneration(t, store, catalog, batch.ID, book.ID, video.ID)
 	api := NewRouter(RouterOptions{
-		BridgeSecret:    "secret",
-		Now:             func() time.Time { return now },
-		Slice:           1,
-		Store:           store,
-		LocalArtifacts:  localartifact.NewStore(t.TempDir(), 1<<20),
-		NovelFetchStore: catalog,
+		AccountCenterStore: activeModelTestAccounts("alice"),
+		BridgeSecret:       "secret",
+		Now:                func() time.Time { return now },
+		Slice:              1,
+		Store:              store,
+		LocalArtifacts:     localartifact.NewStore(t.TempDir(), 1<<20),
+		NovelFetchStore:    catalog,
 	})
 	key := comicPageRepairKey(batch.ID, book.ID, video.ID)
 	storeShuihuoRepairedPrompt(key, shuihuoRepairedPrompt{Prompt: "旧修复版：复视室对峙，旧气泡「最后没钱治病，抱憾绝望离世」", PromptRevision: comicPromptRevision("旧画面"), PageRevision: 1})

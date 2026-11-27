@@ -236,7 +236,7 @@ func scheduleBookDisposition(ctx context.Context, store novelfetchworkshop.Store
 // An interrupted preparation is repeatable: it retains the schedule ID and
 // never overwrites prose, AI versions or submission receipts on an existing book.
 func prepareNovelFetchScheduleTasks(ctx context.Context, store novelfetchworkshop.Store, owner string, item map[string]any, now time.Time) error {
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return err
 	}
@@ -328,7 +328,7 @@ func prepareNovelFetchScheduleTasks(ctx context.Context, store novelfetchworksho
 		}
 	}
 	item["updatedAt"] = now.UTC().Format(time.RFC3339Nano)
-	if err := saveNovelFetchScheduleItem(ctx, store, owner, item); err != nil {
+	if err := saveNovelFetchScheduleItem(ctx, store, owner, item, true); err != nil {
 		return fmt.Errorf("保存待执行书籍失败: %w", err)
 	}
 	return nil

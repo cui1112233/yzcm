@@ -2,16 +2,25 @@ package novelfetchworkshop
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
 func TestMemoryStoreDocumentPreservesBodyRefs(t *testing.T) {
 	store := NewMemoryStore()
+	var saved BodyRef
+	for i := 0; i < 2; i++ {
+		var err error
+		saved, err = store.PutBody(context.Background(), "alice", BodyRecord{BookID: "123", BodyRef: BodyRef{VersionID: "original"}, Content: strings.Repeat("a", 100)})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	document := Document{
 		BookID: "123",
 		Meta:   map[string]any{"bookName": "test"},
 		BodyRefs: map[string]BodyRef{
-			"original": {VersionID: "original", Revision: 2, ContentHash: "hash", CharCount: 100, State: "ready"},
+			"original": saved,
 		},
 	}
 	if err := store.PutDocument(context.Background(), "alice", document); err != nil {

@@ -6,7 +6,7 @@ import test from 'node:test';
 const source = readFileSync(new URL('./modelCatalog.js', import.meta.url), 'utf8')
   .replace(/from '\.\/client(?:\.js)?'/, `from '${new URL('./client.js', import.meta.url).href}'`);
 const modelCatalogModule = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
-const { isModelKind, modelKindLabel, modelSelectOptions } = modelCatalogModule;
+const { isModelKind, modelKindLabel, modelSelectOptions, searchSavedYZCMModels } = modelCatalogModule;
 
 test('uses backend displayName for typed model choices', () => {
   assert.deepEqual(modelSelectOptions([
@@ -74,4 +74,36 @@ test('failures retain readable reasons without caching a failed request', async 
   const result = await modelCatalogModule.getAvailableModelCatalog({ kinds: ['video'], loadKind: async () => { throw Object.assign(new Error('unauthorized'), {status:401}); } });
   assert.match(modelCatalogModule.describeModelCatalogFailure(result), /视频：登录已失效/);
   assert.equal(modelCatalogModule.peekAvailableModelCatalog(['video']), null);
+});
+
+test('saved YZCM search sends only supported filters and preserves page metadata', async () => {
+  const calls = [];
+  const expected = {
+    status: 'available', reason: '', stale: true, catalogUpdatedAt: '2026-11-27T12:00:00Z',
+    snapshotId: '55', hasMore: true, nextOffset: 60,
+    models: [{ kind: 'text', modelId: 'deepseek-chat', displayName: 'DeepSeek' }]
+  };
+  const page = await searchSavedYZCMModels({ kind: 'text', q: '深度 探索', limit: 20, offset: 40, snapshotId: '55', ignored: 'no' }, async (path, options) => {
+    calls.push({ path, options });
+    return expected;
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, '/api/config/models/yzcm?kind=text&q=%E6%B7%B1%E5%BA%A6+%E6%8E%A2%E7%B4%A2&limit=20&offset=40&snapshotId=55');
+  assert.deepEqual(calls[0].options, { suppressGlobalError: true });
+  assert.deepEqual(page, expected);
+});
+
+test('saved YZCM search restarts at page one once after a snapshot conflict', async () => {
+  const paths = [];
+  const page = await searchSavedYZCMModels({ kind: 'video', q: 'seed', limit: 10, offset: 20, snapshotId: '99' }, async path => {
+    paths.push(path);
+    if (paths.length === 1) throw Object.assign(new Error('changed'), { status: 409 });
+    return { status: 'available', stale: false, models: [], hasMore: false, offset: 0, limit: 10 };
+  });
+  assert.equal(paths.length, 2);
+  assert.match(paths[0], /offset=20/);
+  assert.match(paths[0], /snapshotId=99/);
+  assert.match(paths[1], /offset=0/);
+  assert.doesNotMatch(paths[1], /snapshotId=/);
+  assert.equal(page.offset, 0);
 });

@@ -39,6 +39,45 @@ func TestSplitIntoBatchesByEpisodesFallback(t *testing.T) {
 	}
 }
 
+func TestSplitIntoBatchesRecognizesLuoshuiChapterUnits(t *testing.T) {
+	content := strings.Join([]string{
+		"前言文字",
+		"第一章 开场", "甲",
+		"第十二回 回目", "乙",
+		"第三节 一节", "丙",
+		"第四篇 一篇", "丁",
+		"第五卷 一卷", "戊",
+		"第六部 一部", "己",
+		"## Chapter 7 英文", "庚",
+	}, "\n")
+	chunks := SplitIntoBatches(content, 1)
+	if len(chunks) != 7 {
+		t.Fatalf("chunks = %d, want 7: %+v", len(chunks), chunks)
+	}
+	if !strings.HasPrefix(chunks[0], "前言文字") || !strings.Contains(chunks[0], "第一章 开场") {
+		t.Fatalf("前言丢失: %q", chunks[0])
+	}
+	for index, want := range []string{"第十二回", "第三节", "第四篇", "第五卷", "第六部", "Chapter 7"} {
+		if !strings.Contains(chunks[index+1], want) {
+			t.Errorf("chunk %d missing %q: %q", index+1, want, chunks[index+1])
+		}
+	}
+}
+
+func TestSplitIntoBatchesRecognizesEpisodeUnits(t *testing.T) {
+	content := "前言。\n第三集 A\n正文一\nEpisode 2 B\n正文二"
+	chunks := SplitIntoBatches(content, 1)
+	if len(chunks) != 2 {
+		t.Fatalf("chunks = %d, want 2: %+v", len(chunks), chunks)
+	}
+	if !strings.HasPrefix(chunks[0], "前言。") || !strings.Contains(chunks[0], "第三集 A") {
+		t.Fatalf("chunk0 = %q", chunks[0])
+	}
+	if !strings.Contains(chunks[1], "Episode 2 B") || !strings.Contains(chunks[1], "正文二") {
+		t.Fatalf("chunk1 = %q", chunks[1])
+	}
+}
+
 const charactersJSON = `{
   "characters": [
     {"name": "顾苒苒", "颜值定位": "甜美毒舌女主", "出现集数": "第01-03集", "identity": "主角，倔强", "prompt": "甜美毒舌女主的完整提示词", "voice": "清亮少女音【标签：甜妹音】", "tag": "主角"},
@@ -54,6 +93,34 @@ func newAssetService(t *testing.T, mode PermissionMode) (*AssetService, *MemoryS
 	}
 	generator := &fakeGenerator{responses: []string{charactersJSON}}
 	return &AssetService{Store: store, Generator: generator}, store, generator
+}
+
+func TestAssetServiceResolveChunksFallsBackToAuthoringAndProjectSource(t *testing.T) {
+	ctx := context.Background()
+	s, store, _ := newAssetService(t, PermissionBypass)
+	if _, err := store.CreateProject(ctx, Project{ID: "p2", OwnerUsername: "alice", SourceText: "项目原文", ModelID: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	authors := &AuthoringService{Store: store, Repository: NewMemoryAuthoringRepository()}
+	if _, err := authors.Save(ctx, "alice", "p1", AuthoringState{Chapters: []Chapter{
+		{ID: "c1", Title: "第一章", ScriptText: "第一剧本"},
+		{ID: "c2", Title: "第二章", SourceText: "第二原文"},
+	}}, 0); err != nil {
+		t.Fatal(err)
+	}
+	s.Authoring = authors
+	chunks, err := s.resolveChunks(ctx, AssetRequest{Owner: "alice", ProjectID: "p1"})
+	if err != nil || len(chunks) != 2 || chunks[0] != "第一剧本" || chunks[1] != "第二原文" {
+		t.Fatalf("authoring fallback chunks=%q err=%v", chunks, err)
+	}
+	chunks, err = s.resolveChunks(ctx, AssetRequest{Owner: "alice", ProjectID: "p2"})
+	if err != nil || len(chunks) != 1 || chunks[0] != "项目原文" {
+		t.Fatalf("project source fallback chunks=%q err=%v", chunks, err)
+	}
+	chunks, err = s.resolveChunks(ctx, AssetRequest{Owner: "alice", ProjectID: "p1", Content: "显式正文"})
+	if err != nil || len(chunks) != 1 || chunks[0] != "显式正文" {
+		t.Fatalf("explicit content chunks=%q err=%v", chunks, err)
+	}
 }
 
 func TestExtractMissingOnlyPreservesExistingAsset(t *testing.T) {
@@ -209,13 +276,13 @@ func TestExtractAllChunksFailedReturnsError(t *testing.T) {
 	}
 }
 
-func TestExtractNoSourceAndNoDocument(t *testing.T) {
+func TestExtractNoSourceReturnsEmptyContent(t *testing.T) {
 	service, _, _ := newAssetService(t, PermissionBypass)
 	_, err := service.Extract(context.Background(), AssetRequest{
 		Owner: "alice", ProjectID: "p1", Type: AssetCharacter, Degree: DegreeStandard,
 	})
-	if !errors.Is(err, ErrNoActiveScript) {
-		t.Fatalf("err = %v, want ErrNoActiveScript", err)
+	if !errors.Is(err, ErrEmptyContent) {
+		t.Fatalf("err = %v, want ErrEmptyContent", err)
 	}
 }
 

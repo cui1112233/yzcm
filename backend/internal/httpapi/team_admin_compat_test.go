@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	ac "qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/auth"
 )
 
@@ -62,7 +63,7 @@ func (s *teamAdminTestStore) ListAccounts(context.Context) ([]auth.Account, erro
 	return rows, nil
 }
 
-func TestTeamAdminCoManagerSeesDelegatedTeam(t *testing.T) {
+func TestTeamAdminCompatReadsCanonicalTeamScope(t *testing.T) {
 	profiles := NewMemberProfileStore(t.TempDir())
 	teamState := `{"teams":[{"id":"team-a","managerUsername":"owner","name":"A队","coManagers":["co1"]}],"invites":[],"notifications":[],"archives":[]}`
 	if err := os.WriteFile(filepath.Join(profiles.SystemDir, "team-collaboration.json"), []byte(teamState), 0o600); err != nil {
@@ -77,15 +78,26 @@ func TestTeamAdminCoManagerSeesDelegatedTeam(t *testing.T) {
 		"co1":   {Username: "co1", Active: true},
 	}}
 	now := time.Unix(1700000000, 0)
-	api := NewRouter(RouterOptions{BridgeSecret: "secret", Now: func() time.Time { return now }, AuthStore: store, MemberProfileStore: profiles})
+	directory := &directoryTestStore{directory: ac.AdminDirectory{
+		People: []ac.Identity{{Username: "owner", Role: ac.RoleManager, Active: true}, {Username: "co1", Role: ac.RoleManager, Active: true}},
+		Teams:  []ac.Team{{ID: "team-a", Name: "A队", ManagerUsername: "owner"}},
+	}}
+	directory.resolve = func(_ context.Context, name string) (ac.Identity, error) {
+		return (adminSnapshot{AdminDirectory: directory.directory}).person(name), nil
+	}
+	api := NewRouter(RouterOptions{BridgeSecret: "secret", Now: func() time.Time { return now }, AuthStore: store, MemberProfileStore: profiles, AccountCenterStore: directory})
 
 	response := signedJSONRequest(t, api, now, "co1", "GET", "/api/team-admin/teams", nil)
-	if response.Code != 200 || !containsAll(response.Body.String(), `"team-a"`, `"coManagers"`) {
-		t.Fatalf("co-manager should see delegated team: %d %s", response.Code, response.Body.String())
+	if response.Code != 200 || !strings.Contains(response.Body.String(), `"teams":[]`) {
+		t.Fatalf("legacy JSON co-manager cannot read another team's accounts: %d %s", response.Code, response.Body.String())
+	}
+	response = signedJSONRequest(t, api, now, "owner", "GET", "/api/team-admin/teams", nil)
+	if response.Code != 200 || !strings.Contains(response.Body.String(), `"team-a"`) {
+		t.Fatalf("canonical manager sees own team: %d %s", response.Code, response.Body.String())
 	}
 }
 
-func TestTeamAdminResetPasswordRevokesMemberSessions(t *testing.T) {
+func TestTeamAdminCompatDoesNotWriteLegacyPassword(t *testing.T) {
 	profiles := NewMemberProfileStore(t.TempDir())
 	teamState := `{"teams":[{"id":"team-a","managerUsername":"owner","name":"A队","coManagers":[]}],"invites":[],"notifications":[],"archives":[]}`
 	if err := os.WriteFile(filepath.Join(profiles.SystemDir, "team-collaboration.json"), []byte(teamState), 0o600); err != nil {
@@ -102,14 +114,11 @@ func TestTeamAdminResetPasswordRevokesMemberSessions(t *testing.T) {
 	api := NewRouter(RouterOptions{BridgeSecret: "secret", Now: func() time.Time { return now }, AuthStore: store, MemberProfileStore: profiles})
 
 	response := signedJSONRequest(t, api, now, "owner", "POST", "/api/team-admin/teams/team-a/members/m1/reset-password", map[string]any{"password": "new-password-1"})
-	if response.Code != 200 {
+	if response.Code != 403 || !strings.Contains(response.Body.String(), "无权执行此操作") {
 		t.Fatalf("reset password: %d %s", response.Code, response.Body.String())
 	}
-	if store.revoked != 1 {
-		t.Fatalf("member sessions should be revoked, got %d", store.revoked)
-	}
-	if !containsAll(response.Body.String(), `"revokedSessions":1`) {
-		t.Fatalf("response should report revoked sessions: %s", response.Body.String())
+	if store.revoked != 0 || store.accounts["m1"].PasswordHash != "old" {
+		t.Fatalf("legacy reset changed the member credential or sessions")
 	}
 }
 

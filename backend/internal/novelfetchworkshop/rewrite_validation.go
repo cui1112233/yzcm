@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/prompt/batchbook"
 	"regexp"
 	"sort"
@@ -265,7 +266,11 @@ func completeValidatedRewrite(ctx context.Context, provider RewriteProvider, req
 	}
 	base := request.UserPrompt
 	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
+	maxAttempts := 3
+	if batchfactoryv11.SingleAttempt(ctx) {
+		maxAttempts = 1
+	}
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
@@ -335,7 +340,7 @@ func completeValidatedRewrite(ctx context.Context, provider RewriteProvider, req
 			request.UserPrompt = base + fmt.Sprintf(batchbook.Repair, err.Error())
 		}
 	}
-	return "", fmt.Errorf("%w，已停止（最多 3 次）：%v", ErrRewriteValidation, lastErr)
+	return "", fmt.Errorf("%w，已停止（最多 %d 次）：%v", ErrRewriteValidation, maxAttempts, lastErr)
 }
 
 var providerRejectionMarkers = []string{

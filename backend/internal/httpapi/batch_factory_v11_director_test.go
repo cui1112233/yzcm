@@ -210,7 +210,7 @@ func TestPaidAssetImagesRequireCurrentPromptVersion(t *testing.T) {
 	}
 	prepare()
 	now := time.Unix(1700000000, 0)
-	api := NewRouter(RouterOptions{BridgeSecret: "secret", Slice: 2, Now: func() time.Time { return now }, Store: store, NovelFetchStore: catalog, LocalArtifacts: localartifact.NewStore(t.TempDir(), 1<<20)})
+	api := NewRouter(RouterOptions{AccountCenterStore: activeModelTestAccounts("alice"), BridgeSecret: "secret", Slice: 2, Now: func() time.Time { return now }, Store: store, NovelFetchStore: catalog, LocalArtifacts: localartifact.NewStore(t.TempDir(), 1<<20)})
 	path := "/api/batch-factory/v12/batches/" + batch.ID + "/books/" + bookID + "/assets"
 	newAsset := func() batchfactoryv11.BookAsset {
 		t.Helper()

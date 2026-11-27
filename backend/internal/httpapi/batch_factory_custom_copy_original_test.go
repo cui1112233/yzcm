@@ -21,9 +21,12 @@ type customCopyConcurrentStore struct {
 func TestCustomCopyLegacyTextRequiresAuthoritativeReselection(t *testing.T) {
 	ctx := context.Background()
 	s := batchfactoryv11.NewMemoryStore()
-	b, err := s.CreateBatch(ctx, "alice", batchfactoryv11.CreateBatchInput{Title: "批次", Books: []batchfactoryv11.CreateBookInput{{Title: "书", SourceText: "处理稿", TxtText: "处理稿", SourceMetadata: map[string]any{"sourceMode": "custom_copy", "customCopyRecordId": "999"}}}})
+	b, err := s.CreateBatch(ctx, "alice", batchfactoryv11.CreateBatchInput{Title: "批次", Books: []batchfactoryv11.CreateBookInput{{Title: "书", SourceText: "处理稿", TxtText: "处理稿", SourceMetadata: map[string]any{"sourceMode": "custom_copy", "customCopyRecordId": "999", "rawSourceStatus": "unverified"}}}})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if b.Books[0].SourceMetadata["rawSourceStatus"] != "unverified" {
+		t.Fatal("legacy fixture accidentally became authoritative raw")
 	}
 	if _, err = reuseCustomCopyOriginal(ctx, s, "alice", b.ID, b.Books[0]); err == nil {
 		t.Fatal("should require reselecting unverified original")

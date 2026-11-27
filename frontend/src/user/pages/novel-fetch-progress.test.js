@@ -1,6 +1,51 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { novelFetchProgressLines } from './novel-fetch-progress.js';
+import { novelFetchLatestJob, novelFetchProgressLines, novelFetchJobFinished, novelFetchActionNotice } from './novel-fetch-progress.js';
+
+test('failed retry admission exposes the reason and never reports success', () => {
+  const notice = novelFetchActionNotice({ requested: 1, queued: 0, updated: 0, failed: 1, ok: false, errors: { '7705784637234105369': 'redis nil' } }, '重试请求：成功 0，失败 1');
+  assert.equal(notice.type, 'error');
+  assert.match(notice.message, /redis nil/);
+  const partial = novelFetchActionNotice({ queued: 1, failed: 1, errors: { other: '任务信息已变化' } }, '重试请求');
+  assert.equal(partial.type, 'warning');
+  assert.match(partial.message, /任务信息已变化/);
+});
+
+test('numeric retry admission is queued rather than completed', () => {
+  const notice = novelFetchActionNotice({ queued: 1, updated: 1, failed: 0, ok: true }, '处理完成');
+  assert.equal(notice.type, 'info');
+  assert.match(notice.message, /队列/);
+  assert.doesNotMatch(notice.message, /完成/);
+});
+
+test('stopped and cancelled jobs end waiting without pretending completion', () => {
+  for (const status of ['done', 'failed', 'stopped', 'cancelled', 'canceled', 'completed', ' STOPPED ', 'waiting_retry', 'waiting_classification', 'waiting_configuration', 'waiting_login', 'pending_confirmation', 'manual_only']) {
+    assert.equal(novelFetchJobFinished({ status }), true, status);
+  }
+  for (const status of ['queued', 'running', 'processing', '']) {
+    assert.equal(novelFetchJobFinished({ status }), false, status);
+  }
+});
+
+test('background generation reports queued rather than generated', () => {
+  assert.deepEqual(novelFetchActionNotice({ queued: true, job_id: 'job-1' }, '缺少的 AI 版本已生成'), {
+    type: 'info', message: '已进入后台生成队列'
+  });
+  assert.deepEqual(novelFetchActionNotice({ queued: true, message: '已进入后台生成队列' }, '操作完成'), {
+    type: 'info', message: '已进入后台生成队列'
+  });
+  assert.deepEqual(novelFetchActionNotice({ message: '所需版本已齐' }, '操作完成'), {
+    type: 'success', message: '所需版本已齐'
+  });
+});
+
+test('one deferred book does not finish a batch whose queue is still running', () => {
+  assert.equal(novelFetchJobFinished({ status: 'waiting_retry', queue_state: 'running' }), false);
+  assert.equal(novelFetchJobFinished({ status: 'failed', queue_state: 'running' }), false);
+  assert.equal(novelFetchJobFinished({ status: 'done', queue_state: 'processing' }), false);
+  assert.equal(novelFetchJobFinished({ status: 'running', queue_state: 'waiting_retry' }), true);
+  assert.equal(novelFetchJobFinished({ status: 'waiting_retry', queue_state: 'waiting_retry' }), true);
+});
 
 test('formats live progress with time, book name, id and message', () => {
   const lines = novelFetchProgressLines({
@@ -19,6 +64,27 @@ test('formats live progress with time, book name, id and message', () => {
 test('falls back to job state when no progress entries exist', () => {
   assert.deepEqual(novelFetchProgressLines({ status: 'queued' }), ['任务已进入队列，等待执行。']);
   assert.deepEqual(novelFetchProgressLines(null), ['暂无正在处理的任务。']);
+});
+
+test('shows queue verification failures instead of stale running progress', () => {
+  const stale = { status: 'failed', status_reason: 'queue_missing', error: '原队列任务已不存在，请手动重试。', progress: [{ message: '正在处理旧任务' }] };
+  assert.deepEqual(novelFetchProgressLines(stale), ['原队列任务已不存在，请手动重试。']);
+  assert.deepEqual(novelFetchProgressLines({ status: 'queued', queue_check_error: '队列状态暂时无法核对，请稍后刷新。' }), ['队列状态暂时无法核对，请稍后刷新。']);
+});
+
+test('an empty latest response clears the previous live job', () => {
+  assert.equal(novelFetchLatestJob({ latest: {}, jobs: [] }), null);
+  assert.equal(novelFetchLatestJob({}), null);
+  assert.deepEqual(novelFetchLatestJob({ latest: { id: 'live', status: 'running' } }), { id: 'live', status: 'running' });
+});
+
+test('older interrupted history never hides the latest live progress', () => {
+  const lines = novelFetchProgressLines([
+    { id: 'live', status: 'running', progress: [{ message: '当前书籍正在处理' }] },
+    { id: 'old', status: 'failed', status_reason: 'queue_missing', error: '旧任务已中断' }
+  ]);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /当前书籍正在处理/);
 });
 
 test('aggregates live logs for every book in the current batch', () => {

@@ -32,8 +32,10 @@ type BodyCleanupRecord struct {
 }
 
 type BodyCleanupResult struct {
-	Deleted int                 `json:"deleted"`
-	Results []BodyCleanupRecord `json:"results"`
+	Deleted        int                 `json:"deleted"`
+	ObjectsPending int                 `json:"objectsPending"`
+	ObjectsHeld    int                 `json:"objectsHeld"`
+	Results        []BodyCleanupRecord `json:"results"`
 }
 
 func NormalizeBodyRetentionDays(days int) int {
@@ -187,9 +189,9 @@ func (s *MemoryStore) CleanupBodies(_ context.Context, owner string, request Bod
 			delete(s.bodies[owner], candidate.bookID)
 		}
 		if document, ok := s.docs[owner][candidate.bookID]; ok {
-			document = normalizeDocument(document)
-			delete(document.BodyRefs, candidate.versionID)
-			s.docs[owner][candidate.bookID] = cloneDocument(document)
+			document = stripDocumentBodyVersion(cloneDocument(document), candidate.versionID)
+			document.UpdatedAt = nextDocumentWriteTime(previousDocumentTime(document.UpdatedAt)).Format(time.RFC3339Nano)
+			s.docs[owner][candidate.bookID] = document
 		}
 		result.Deleted++
 		result.Results = append(result.Results, BodyCleanupRecord{

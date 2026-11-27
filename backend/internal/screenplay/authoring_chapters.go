@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-var chapterEpisodeHeading = regexp.MustCompile(`(?m)^#\s*第\s*\d+\s*集[^\n]*\n?`)
+var chapterEpisodeHeading = regexp.MustCompile(`(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:第[ \t]*[0-9〇零一二三四五六七八九十百千万两]+[ \t]*集|Episode[ \t]+[0-9]+)[^\n]*\n?`)
 var chapterSceneHeading = regexp.MustCompile(`(?m)^##\s*\d+\s*-\s*(\d+)\s*[:：]`)
 
 func chapterCollectionText(chapters []Chapter) (string, error) {
@@ -32,16 +32,22 @@ func ValidateChapterCollection(chapters []Chapter) error {
 	if err != nil {
 		return err
 	}
-	parsed := ParseScreenplayMarkdown(content)
-	if len(parsed.Shots) == 0 || len(parsed.Episodes) == 0 {
+	if _, err = parsePublishableScreenplay(content); err != nil {
 		return fmt.Errorf("%w: 剧本缺少可识别的集/场标题，请检查“# 第1集”和“## 1-1：日 内 场景”的格式后重试", ErrArtifactInvalid)
 	}
 	return nil
 }
 func PublishChapterCollection(ctx context.Context, s Store, o, p string, chapters []Chapter) (Document, error) {
-	content, err := chapterCollectionText(chapters)
+	content, err := publishableChapterCollectionText(chapters)
 	if err != nil {
 		return Document{}, err
 	}
 	return PublishChapterScripts(ctx, s, o, p, content)
+}
+
+func publishableChapterCollectionText(chapters []Chapter) (string, error) {
+	if !ScriptCollectionReady(chapters) {
+		return "", fmt.Errorf("%w: 分批章节尚未全部完成", ErrInvalidState)
+	}
+	return chapterCollectionText(chapters)
 }

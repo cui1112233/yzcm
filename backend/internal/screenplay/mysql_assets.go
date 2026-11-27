@@ -97,17 +97,10 @@ FROM screenplay_assets WHERE project_id = ? AND owner_username = ?`
 }
 
 func (s *MySQLStore) CreateAsset(ctx context.Context, asset Asset) (Asset, error) {
-	asset.OwnerUsername = strings.TrimSpace(asset.OwnerUsername)
-	asset.ProjectID = strings.TrimSpace(asset.ProjectID)
-	asset.Name = strings.TrimSpace(asset.Name)
-	if !validAssetType(asset.Type) || asset.Name == "" {
-		return Asset{}, fmt.Errorf("%w: 资产类型和名称不能为空", ErrInvalidArgument)
-	}
-	if asset.Degree == "" {
-		asset.Degree = DegreeStandard
-	}
-	if asset.ID == "" {
-		asset.ID = newScreenplayID("asset")
+	var err error
+	asset, err = prepareAssetForCreate(asset)
+	if err != nil {
+		return Asset{}, err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -115,9 +108,25 @@ func (s *MySQLStore) CreateAsset(ctx context.Context, asset Asset) (Asset, error
 	}
 	defer tx.Rollback()
 	var projectID string
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM screenplay_projects WHERE id = ? AND owner_username = ? AND deleted_at IS NULL FOR UPDATE`, asset.ProjectID, asset.OwnerUsername).Scan(&projectID); errors.Is(err, sql.ErrNoRows) {
-		return Asset{}, fmt.Errorf("%w: 项目 %s", ErrNotFound, asset.ProjectID)
+	if err = tx.QueryRowContext(ctx, `SELECT id FROM screenplay_projects WHERE id = ? AND owner_username = ? AND deleted_at IS NULL FOR UPDATE`, asset.ProjectID, asset.OwnerUsername).Scan(&projectID); errors.Is(err, sql.ErrNoRows) {
+		return Asset{}, ErrNotFound
 	} else if err != nil {
+		return Asset{}, err
+	}
+	saved, err := createAssetInTx(ctx, tx, asset)
+	if err != nil {
+		return Asset{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return Asset{}, err
+	}
+	return saved, nil
+}
+
+func createAssetInTx(ctx context.Context, tx *sql.Tx, asset Asset) (Asset, error) {
+	var err error
+	asset, err = prepareAssetForCreate(asset)
+	if err != nil {
 		return Asset{}, err
 	}
 	var duplicate int
@@ -141,9 +150,6 @@ func (s *MySQLStore) CreateAsset(ctx context.Context, asset Asset) (Asset, error
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`, asset.ID, asset.ProjectID, asset.OwnerUsername, string(asset.Type), string(asset.Degree), asset.Name, nullString(asset.Identity), nullString(asset.Description), nullString(asset.Prompt), nullString(asset.Voice), asset.Episodes, asset.Tag, nullableBytes(extra), asset.SortOrder, asset.SourceBatch, now, now); err != nil {
 		return Asset{}, err
 	}
-	if err := tx.Commit(); err != nil {
-		return Asset{}, err
-	}
 	return asset, nil
 }
 
@@ -157,8 +163,23 @@ func (s *MySQLStore) UpdateAsset(ctx context.Context, owner, projectID, assetID 
 		return Asset{}, err
 	}
 	defer tx.Rollback()
+	saved, err := updateAssetInTx(ctx, tx, owner, projectID, assetID, changes, expectedRevision)
+	if err != nil {
+		return Asset{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return Asset{}, err
+	}
+	return saved, nil
+}
+
+func updateAssetInTx(ctx context.Context, tx *sql.Tx, owner, projectID, assetID string, changes Asset, expectedRevision int64) (Asset, error) {
+	changes.Name = strings.TrimSpace(changes.Name)
+	if !validAssetType(changes.Type) || changes.Name == "" {
+		return Asset{}, fmt.Errorf("%w: 资产类型和名称不能为空", ErrInvalidArgument)
+	}
 	var current Asset
-	err = tx.QueryRowContext(ctx, `SELECT degree, revision, created_at, sort_order, source_batch FROM screenplay_assets WHERE id = ? AND project_id = ? AND owner_username = ? FOR UPDATE`, assetID, projectID, owner).Scan(&current.Degree, &current.Revision, &current.CreatedAt, &current.SortOrder, &current.SourceBatch)
+	err := tx.QueryRowContext(ctx, `SELECT degree, revision, created_at, sort_order, source_batch FROM screenplay_assets WHERE id = ? AND project_id = ? AND owner_username = ? FOR UPDATE`, assetID, projectID, owner).Scan(&current.Degree, &current.Revision, &current.CreatedAt, &current.SortOrder, &current.SourceBatch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Asset{}, fmt.Errorf("%w: 资产 %s", ErrNotFound, assetID)
 	}
@@ -190,9 +211,6 @@ func (s *MySQLStore) UpdateAsset(ctx context.Context, owner, projectID, assetID 
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return Asset{}, ErrRevisionConflict
 	}
-	if err := tx.Commit(); err != nil {
-		return Asset{}, err
-	}
 	changes.ID = assetID
 	changes.ProjectID = projectID
 	changes.OwnerUsername = owner
@@ -213,4 +231,20 @@ func (s *MySQLStore) DeleteAsset(ctx context.Context, owner, projectID, assetID 
 		return fmt.Errorf("%w: 资产 %s", ErrNotFound, assetID)
 	}
 	return nil
+}
+
+func prepareAssetForCreate(asset Asset) (Asset, error) {
+	asset.OwnerUsername = strings.TrimSpace(asset.OwnerUsername)
+	asset.ProjectID = strings.TrimSpace(asset.ProjectID)
+	asset.Name = strings.TrimSpace(asset.Name)
+	if !validAssetType(asset.Type) || asset.Name == "" {
+		return Asset{}, fmt.Errorf("%w: 资产类型和名称不能为空", ErrInvalidArgument)
+	}
+	if asset.Degree == "" {
+		asset.Degree = DegreeStandard
+	}
+	if asset.ID == "" {
+		asset.ID = newScreenplayID("asset")
+	}
+	return asset, nil
 }

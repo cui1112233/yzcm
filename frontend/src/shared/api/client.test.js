@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { API_TIMEOUT_CODE, DEFAULT_API_TIMEOUT_MS, isApiTimeoutError, apiRequest, getToken, isSessionAuthFailure, setToken } from './client.js';
+import { API_TIMEOUT_CODE, DEFAULT_API_TIMEOUT_MS, isApiTimeoutError, apiRequest, getToken, isSessionAuthFailure, setToken, setVerifiedImpersonation } from './client.js';
 
 function responseWithHeader(value) {
   return {
@@ -40,6 +40,45 @@ test('reads and clears the Go application session token from local storage', () 
     assert.equal(getToken(), '');
   } finally {
     globalThis.localStorage = previousStorage;
+  }
+});
+
+test('business writes use the tab-confirmed actor and explicit switch state even if another tab changes the token', async () => {
+  const storage = new Map([['auth_token', 'actor-session'], ['expectedActor', 'spoofed-local-actor'], ['impersonationId', 'spoofed-local-id']]);
+  const sent = [];
+  const previousStorage = globalThis.localStorage;
+  const previousFetch = globalThis.fetch;
+  globalThis.localStorage = { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) };
+  globalThis.fetch = (path, init) => {
+    sent.push([path, init.headers.get('X-Qiantie-Expected-Actor'), init.headers.get('X-Qiantie-Expected-Impersonation'), init.headers.get('Authorization')]);
+    return Promise.resolve(new Response('{}', { headers: { 'Content-Type': 'application/json' } }));
+  };
+  try {
+    setVerifiedImpersonation({ actorUsername: 'actor', username: 'actor', impersonationId: 'none' }, 'actor-session');
+    await apiRequest('/api/business', { method: 'POST', headers: { 'X-Qiantie-Expected-Actor': 'spoofed-actor', 'X-Qiantie-Expected-Impersonation': 'spoofed-id' } });
+    assert.equal(setVerifiedImpersonation({ actorUsername: 'actor', username: 'subject', impersonationId: 'other-tab-switch' }), false);
+    storage.set('auth_token', 'other-tab-session');
+    assert.equal(setVerifiedImpersonation({ actorUsername: 'other-actor', username: 'other-actor', impersonationId: 'none' }), false);
+    await apiRequest('/api/business', { method: 'PATCH' });
+    storage.set('auth_token', 'actor-session');
+    setVerifiedImpersonation(null);
+    setVerifiedImpersonation({ actorUsername: 'actor', username: 'subject', impersonationId: 'verified-id' }, 'actor-session');
+    await apiRequest('/api/business', { method: 'POST' });
+    storage.set('auth_token', 'other-tab-session');
+    await apiRequest('/api/business', { method: 'PATCH' });
+    await apiRequest('/api/business');
+    await apiRequest('/api/account-impersonation/current', { method: 'DELETE' });
+    assert.deepEqual(sent, [
+      ['/api/business', 'actor', 'none', 'Bearer actor-session'],
+      ['/api/business', 'actor', 'none', 'Bearer other-tab-session'],
+      ['/api/business', 'actor', 'verified-id', 'Bearer actor-session'],
+      ['/api/business', 'actor', 'verified-id', 'Bearer other-tab-session'],
+      ['/api/business', null, null, 'Bearer other-tab-session'],
+      ['/api/account-impersonation/current', 'actor', 'verified-id', 'Bearer other-tab-session']
+    ]);
+  } finally {
+    globalThis.localStorage = previousStorage;
+    globalThis.fetch = previousFetch;
   }
 });
 

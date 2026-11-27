@@ -98,6 +98,20 @@ func TestStaticHandlerServesReactNovelFetchOnly(t *testing.T) {
 	}
 }
 
+func TestStaticHandlerRedirectsRetainedBatchRewriteDocument(t *testing.T) {
+	handler := StaticHandler(fstest.MapFS{
+		"index.html":               &fstest.MapFile{Data: []byte("<html>react-shell</html>")},
+		"batch-rewrite/index.html": &fstest.MapFile{Data: []byte("<html>legacy-page</html>")},
+	})
+	for _, entry := range []string{"/batch-rewrite", "/batch-rewrite/", "/batch-rewrite/index.html"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, entry+"?view=tasks&mode=one", nil))
+		if response.Code != http.StatusFound || response.Header().Get("Location") != "/novel-fetch?view=tasks&mode=one" || strings.Contains(response.Body.String(), "legacy-page") {
+			t.Errorf("legacy entry %s = %d location %q, body %q", entry, response.Code, response.Header().Get("Location"), response.Body.String())
+		}
+	}
+}
+
 func TestStaticHandlerRejectsRemovedNovelPanelWorkbench(t *testing.T) {
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html>shell</html>")}}
 	res := httptest.NewRecorder()

@@ -353,7 +353,25 @@ func V12Migrations() []Migration {
 ) ENGINE=InnoDB`}, CallbackChecksum: "batch-factory-v12-text-publish-keys-v1"},
 		{Version: 1200115, Adopt: adoptTextPublishReceipts, CallbackChecksum: "batch-factory-v12-text-receipt-backfill-v1"},
 		{Version: 1200116, Adopt: correctTextPublishHistory, CallbackChecksum: "batch-factory-v12-text-history-correction-v1"},
+		{Version: 1200117, SQL: []string{`ALTER TABLE batch_factory_v12_production_tasks ADD COLUMN video_execution_binding JSON NULL`},
+			Adopt: adoptV12VideoExecutionBinding, CallbackChecksum: "batch-factory-v12-video-execution-binding-v1"},
 	}
+}
+
+func adoptV12VideoExecutionBinding(ctx context.Context, tx *sql.Tx) (bool, error) {
+	var typ, nullable string
+	err := tx.QueryRowContext(ctx, `SELECT DATA_TYPE, IS_NULLABLE FROM information_schema.columns
+WHERE table_schema=DATABASE() AND table_name='batch_factory_v12_production_tasks' AND column_name='video_execution_binding'`).Scan(&typ, &nullable)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if typ != "json" || nullable != "YES" {
+		return false, fmt.Errorf("video_execution_binding must be nullable JSON")
+	}
+	return true, nil
 }
 
 // V12BatchRetentionStatements moves the retention clock from individual books to

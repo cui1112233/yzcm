@@ -20,7 +20,7 @@ func TestAuditRound2ChangedAICountRetry(t *testing.T) {
 		t.Run(status, func(t *testing.T) {
 			ctx := context.Background()
 			store := novelfetchworkshop.NewMemoryStore()
-			queue := &uniqueRecordingNovelFetchQueue{}
+			queue := &admissionRecordingOnlyQueue{control: novelfetchworkshop.NewMemoryQueue()}
 			doc := novelfetchworkshop.Document{BookID: "12345678901", Original: "已保存原文", Versions: map[string]any{"ai1": "已完成AI1"}, Meta: map[string]any{"status": status, "originalStatus": "done", "aiStatus": "done", "aiCount": 1, "siteSubmitStatus": "submitted", "processSnapshot": map[string]any{"platform_id": "15", "max_txt": 4000, "selected_versions": []any{"ai1"}, "auto_submit": false}}}
 			store.PutDocument(ctx, "tester", doc)
 			now := time.Now()
@@ -196,7 +196,7 @@ func TestAuditRound2StopDuringDispatchRemainsAuthoritative(t *testing.T) {
 func TestAuditRound2RetryKeepsExplicitGenerateOnlyChoice(t *testing.T) {
 	ctx := context.Background()
 	store := novelfetchworkshop.NewMemoryStore()
-	queue := &uniqueRecordingNovelFetchQueue{}
+	queue := &admissionRecordingOnlyQueue{control: novelfetchworkshop.NewMemoryQueue()}
 	store.PutConfig(ctx, "tester", map[string]any{novelFetchAutomationConfigKey: map[string]any{"enabled": true}})
 	doc := novelfetchworkshop.Document{BookID: "12345678901", Original: "已有原文", Meta: map[string]any{"status": "failed", "originalStatus": "done", "aiStatus": "failed", "processSnapshot": map[string]any{"platform_id": "15", "max_txt": 4000, "selected_versions": []any{"ai1"}, "auto_submit": false}}}
 	store.PutDocument(ctx, "tester", doc)

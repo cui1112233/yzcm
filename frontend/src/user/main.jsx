@@ -13,9 +13,8 @@ import '../shared/styles/member-center.css';
 import '../shared/styles/team-governance.css';
 import '../shared/styles/team-collaboration.css';
 import '../shared/styles/login-card.css';
-// Final visual contract for all account-center routes. Keep this import last so
-// legacy workspace and 01-04 incremental styles cannot override the unified UI.
-import '../shared/styles/account-center-visual-rebuild.css';
+// Single visual authority for the nine approved personal-center screens.
+import '../shared/styles/account-center-pixel-parity.css';
 import '../shared/styles/cinematic-glass.css';
 import '../shared/styles/frosted-surfaces.css';
 import { installClientErrorReporting } from '../shared/error-reporting';

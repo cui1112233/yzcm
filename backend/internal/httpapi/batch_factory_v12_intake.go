@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"strings"
@@ -62,6 +63,13 @@ func registerV12IntakeRoutes(mux *http.ServeMux, store batchfactoryv11.Store, so
 				item["coverMedia"] = map[string]any{"kind": "image", "url": batch.ProjectCoverImageURL}
 			}
 			item["productionMode"] = batchProductionMode(batch)
+			kind := batch.OutputKind
+			if kind == "" {
+				_ = json.Unmarshal(batch.SettingsState.Patch["outputKind"], &kind)
+			}
+			if item["productionMode"] == "comic" && kind == "illustrated_text" {
+				item["outputKind"] = kind
+			}
 			if item["productionMode"] == "text" && len(batch.Books) > 0 {
 				item["coverMedia"] = map[string]any{"kind": "image", "url": "/api/batch-factory/v12/batches/" + url.PathEscape(batch.ID) + "/books/" + url.PathEscape(batch.Books[0].ID) + "/text-cover/display"}
 			}

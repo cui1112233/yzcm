@@ -60,6 +60,10 @@ func documentKey(owner, projectID, documentID string) string {
 func (m *MemoryStore) SaveScreenplay(_ context.Context, doc Document, shots []Shot, characters []Character, scenes []Scene) (Document, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.saveScreenplayLocked(doc, shots, characters, scenes)
+}
+
+func (m *MemoryStore) saveScreenplayLocked(doc Document, shots []Shot, characters []Character, scenes []Scene) (Document, error) {
 	key := projectKey(doc.OwnerUsername, doc.ProjectID)
 	if _, ok := m.projects[key]; !ok {
 		return Document{}, fmt.Errorf("%w: 项目 %s", ErrNotFound, doc.ProjectID)
@@ -92,6 +96,10 @@ func (m *MemoryStore) SaveScreenplay(_ context.Context, doc Document, shots []Sh
 func (m *MemoryStore) ActiveDocument(_ context.Context, owner, projectID string) (Document, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.activeDocumentLocked(owner, projectID)
+}
+
+func (m *MemoryStore) activeDocumentLocked(owner, projectID string) (Document, error) {
 	documents := m.documents[projectKey(owner, projectID)]
 	for i := len(documents) - 1; i >= 0; i-- {
 		if documents[i].Status == "active" {

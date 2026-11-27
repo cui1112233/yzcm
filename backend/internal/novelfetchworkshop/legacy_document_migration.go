@@ -155,6 +155,12 @@ func (s *MySQLStore) MigrateLegacyDocumentBodies(ctx context.Context, owner, boo
 
 	lightweight := lightweightLegacyDocument(document, bodies)
 	lightweight.BodyRefs = bodyRefs
+	// INSERT IGNORE may have preserved a newer independent body. Its actual
+	// revision/hash/count must win over the legacy inline migration candidate.
+	lightweight, err = canonicalDocumentBodyRefs(ctx, tx, owner, lightweight)
+	if err != nil {
+		return err
+	}
 	lightweightRaw, err := json.Marshal(lightweight)
 	if err != nil {
 		return err

@@ -162,8 +162,7 @@ export function TtsPage({ theme = 'dark' }) {
   async function saveDefaults() {
     setSavingDefaults(true);
     try {
-      const config = await getConfig();
-      await saveConfig({ ...config, apiKey: '', tts: defaults });
+      await saveConfig({ tts: defaults });
       message.success('默认配音已保存');
     } catch (error) {
       message.error(error.message || '保存默认配音失败');

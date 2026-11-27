@@ -19,6 +19,7 @@ import (
 	"unicode"
 
 	"qiantie/backend/internal/auth"
+	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/mergeworker"
 	"qiantie/backend/internal/novelfetchworkshop"
 	"qiantie/backend/internal/prompt"
@@ -100,6 +101,9 @@ func novelFetchSignature(secret, payload string) string {
 }
 
 func (a NovelFetchBridgeAuth) authenticate(req *http.Request) (BridgeIdentity, error) {
+	if identity, ok := switchedBridgeIdentity(req); ok {
+		return identity, nil
+	}
 	if token := bearerToken(req); token != "" && a.AuthStore != nil {
 		now := time.Now
 		if a.Now != nil {
@@ -185,14 +189,16 @@ func (a NovelFetchBridgeAuth) Middleware(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
 		}
-		if a.IdentityScope != nil {
+		if _, switched := switchedBridgeIdentity(req); a.IdentityScope != nil && !switched {
 			identity, err = a.IdentityScope(req.Context(), identity, req.Header.Get(HeaderNovelFetchAccount))
 			if err != nil {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 				return
 			}
 		}
-		next.ServeHTTP(w, req.WithContext(context.WithValue(req.Context(), bridgeIdentityKey{}, identity)))
+		ctx := context.WithValue(req.Context(), bridgeIdentityKey{}, identity)
+		ctx = withBridgeUsageAttribution(ctx, identity.Username, usageFeature(req.URL.Path))
+		next.ServeHTTP(w, req.WithContext(ctx))
 	})
 }
 
@@ -395,6 +401,7 @@ func newNovelFetchOriginalCheckpointFailure(fetchErr error, now time.Time) *nove
 }
 
 type workshopProcessWorker struct {
+	now                    func() time.Time
 	leaseHeartbeat         time.Duration
 	store                  novelfetchworkshop.Store
 	queue                  novelfetchworkshop.ProcessQueue
@@ -405,16 +412,35 @@ type workshopProcessWorker struct {
 	autoSubmit             func(context.Context, novelfetchworkshop.ProcessJob) error
 }
 
+func (worker *workshopProcessWorker) processNow() time.Time {
+	if worker.now != nil {
+		return worker.now()
+	}
+	return time.Now()
+}
 func (worker *workshopProcessWorker) run(ctx context.Context) {
+	claimFailures := 0
 	for ctx.Err() == nil {
 		job, err := worker.queue.Claim(ctx, 30*time.Second)
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if errors.Is(err, novelfetchworkshop.ErrQueueEmpty) || mergeworker.IsRedisNil(err) {
+				claimFailures = 0
+				continue
+			}
+			claimFailures++
+			if !waitWorkshopClaimBackoff(ctx, workshopClaimBackoff(claimFailures)) {
+				return
+			}
 			continue
 		}
+		claimFailures = 0
 		if err := worker.process(ctx, job); err != nil && ctx.Err() == nil {
 			log.Printf("novel fetch: process job %s: %v", job.ID, err)
 		}
-		if strings.HasPrefix(job.LastError, novelFetchPersistenceCheckpointPrefix) {
+		if strings.HasPrefix(job.LastError, novelFetchPersistenceCheckpointPrefix) || strings.HasPrefix(job.LastError, workshopStageSaveCheckpointPrefix) {
 			// Avoid spinning the queue while document storage is unavailable.
 			select {
 			case <-time.After(time.Second):
@@ -467,7 +493,7 @@ func (worker workshopProcessWorker) process(parent context.Context, job novelfet
 		return err
 	}
 	job.Attempts++
-	startedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	startedAt := worker.processNow().UTC().Format(time.RFC3339Nano)
 	progress := []any{workshopProgressItem("info", "任务开始", "", "")}
 	activeBookIDs := make([]string, 0, len(job.BookIDs))
 	for _, bookID := range job.BookIDs {
@@ -480,6 +506,41 @@ func (worker workshopProcessWorker) process(parent context.Context, job novelfet
 		_ = updateNovelFetchScheduleRuntimeStatus(ctx, worker.store, job.Owner, job.ScheduleID, "stopped", "")
 		worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": "stopped", "queue_state": "stopped", "started_at": startedAt, "updated_at": startedAt, "attempts": job.Attempts, "steps": []any{}, "progress": []any{}})
 		return finish(job, ackWorkshopJob)
+	}
+	if strings.HasPrefix(job.LastError, workshopStageSaveCheckpointPrefix) {
+		checkpoint := map[string]workshopStageSaveFailure{}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(job.LastError, workshopStageSaveCheckpointPrefix)), &checkpoint); err != nil {
+			for _, id := range activeBookIDs {
+				_ = markNovelFetchAIManualRetry(ctx, worker.store, job.Owner, id, errors.New("AI 结果未知，重试状态恢复记录无效，请核对后手动重试"), worker.processNow().UTC())
+			}
+			return finish(job, failWorkshopJob)
+		}
+		remaining := map[string]workshopStageSaveFailure{}
+		for _, id := range activeBookIDs {
+			failure, ok := checkpoint[id]
+			if !ok {
+				continue
+			}
+			guarded := workshopBookExecutionStore{Store: worker.store, queue: worker.queue, owner: job.Owner, bookID: id}
+			if err := saveWorkshopStageFailure(ctx, guarded, job.Owner, id, failure); err != nil {
+				remaining[id] = failure
+			}
+		}
+		if len(remaining) > 0 {
+			payload, _ := json.Marshal(remaining)
+			job.LastError = workshopStageSaveCheckpointPrefix + string(payload)
+			return finish(job, retryWorkshopJob)
+		}
+		checkpointStatus := "waiting_retry"
+		for id, failure := range checkpoint {
+			doc, err := worker.store.GetDocument(ctx, job.Owner, id)
+			if failure.Manual || (err == nil && novelFetchRetryScheduleHasManualHold(doc.Meta)) {
+				checkpointStatus = "failed"
+			}
+		}
+		_ = updateWorkshopRunContext(ctx, worker.store, job, checkpointStatus, "处理失败状态已保存，等待到期重试或人工核对", startedAt, true)
+		worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": checkpointStatus, "queue_state": checkpointStatus, "message": "处理失败状态已保存，等待到期重试或人工核对"})
+		return finish(job, failWorkshopJob)
 	}
 	pendingOriginalFailures, checkpointErr := readNovelFetchPersistenceCheckpoint(job)
 	if checkpointErr != nil {
@@ -502,6 +563,8 @@ func (worker workshopProcessWorker) process(parent context.Context, job novelfet
 	classificationPendingCount := 0
 	originalFetchConfigurationCount := 0
 	originalSaveRetries := map[string]*novelFetchOriginalFailure{}
+	stageSaveRetries := map[string]workshopStageSaveFailure{}
+	deferredStageRetry := false
 	failureMessages := make([]string, 0)
 	stopped := false
 	completed := 0
@@ -548,7 +611,7 @@ func (worker workshopProcessWorker) process(parent context.Context, job novelfet
 			results <- bookProcessResult{bookID: bookID, bookName: bookName, err: err, stopped: worker.bookCancelled(ctx, job.Owner, bookID)}
 		}()
 	}
-	worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": "running", "queue_state": "running", "started_at": startedAt, "updated_at": time.Now().UTC().Format(time.RFC3339Nano), "attempts": job.Attempts, "steps": progress, "progress": progress})
+	worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": "running", "queue_state": "running", "started_at": startedAt, "updated_at": worker.processNow().UTC().Format(time.RFC3339Nano), "attempts": job.Attempts, "steps": progress, "progress": progress})
 	go func() {
 		processing.Wait()
 		close(results)
@@ -558,6 +621,11 @@ func (worker workshopProcessWorker) process(parent context.Context, job novelfet
 			return err
 		}
 		bookID, bookName := result.bookID, result.bookName
+		if result.stopped {
+			stopped = true
+			_ = updateWorkshopTaskRuntimeState(ctx, worker.store, job.Owner, bookID, "stopped", "")
+			continue
+		}
 		if result.err != nil || result.originalFailure != nil {
 			failedBookIDs = append(failedBookIDs, bookID)
 			message := ""
@@ -565,17 +633,20 @@ func (worker workshopProcessWorker) process(parent context.Context, job novelfet
 				message = result.err.Error()
 			}
 			status := "failed"
-			if errors.Is(result.err, novelfetchworkshop.ErrRewriteValidation) {
-				_ = updateWorkshopTaskRuntimeState(ctx, worker.store, job.Owner, bookID, "failed", result.err.Error())
+			if errors.Is(result.err, errWorkshopRetryDeferred) {
+				status = "waiting_retry"
+				deferredStageRetry = true
+			} else if errors.Is(result.err, errWorkshopRetryHeld) {
+				status = "failed"
 			} else if errors.Is(result.err, errNovelFetchClassificationPending) {
 				classificationPendingCount++
 				status = "waiting_classification"
 				// 记录分类阶段的等待状态，确认分类后由重试队列统一清理。
-				_ = scheduleNovelFetchDocumentRetry(ctx, worker.store, job.Owner, bookID, novelFetchRetryStageClassify, result.err, time.Now().UTC())
+				_ = scheduleNovelFetchDocumentRetry(ctx, worker.store, job.Owner, bookID, novelFetchRetryStageClassify, result.err, worker.processNow().UTC())
 			} else if result.originalFailure != nil || errors.Is(result.err, errNovelFetchOriginalFetch) {
 				failure := result.originalFailure
 				if failure == nil {
-					failure = newNovelFetchOriginalCheckpointFailure(result.err, time.Now().UTC())
+					failure = newNovelFetchOriginalCheckpointFailure(result.err, worker.processNow().UTC())
 				}
 				message = failure.Message
 				persistedStatus, markErr := saveNovelFetchOriginalFailure(ctx, worker.store, job.Owner, bookID, job.ID, *failure)
@@ -594,26 +665,40 @@ func (worker workshopProcessWorker) process(parent context.Context, job novelfet
 						originalFetchConfigurationCount++
 					}
 				}
-			} else if novelFetchAIManualRetryRequired(result.err) {
-				// 对照参考实现：模型确定性失败写 manual_ai_retry_required，
-				// 不再自动重试。同一段超长文本反复提交只会重复截断。
-				if markErr := markNovelFetchAIManualRetry(ctx, worker.store, job.Owner, bookID, result.err, time.Now().UTC()); markErr != nil {
-					_ = updateWorkshopTaskRuntimeState(ctx, worker.store, job.Owner, bookID, status, result.err.Error())
-				}
-			} else if retry {
-				retryBookIDs = append(retryBookIDs, bookID)
-				status = "waiting_retry"
-				_ = scheduleNovelFetchDocumentRetry(ctx, worker.store, job.Owner, bookID, novelFetchRetryStageForError(result.err), result.err, time.Now().UTC())
-				_ = updateWorkshopTaskRuntimeState(ctx, worker.store, job.Owner, bookID, status, result.err.Error())
 			} else {
-				// 队列自身重试次数用尽后仍然写阶段退避时间，交给自动扫描器在
-				// 到期后重新接管；否则状态 failed 会被立刻重新入队，形成死循环。
-				_ = scheduleNovelFetchDocumentRetry(ctx, worker.store, job.Owner, bookID, novelFetchRetryStageForError(result.err), result.err, time.Now().UTC())
-				_ = updateWorkshopTaskRuntimeState(ctx, worker.store, job.Owner, bookID, status, result.err.Error())
+				failure := workshopStageSaveFailure{Stage: novelFetchRetryStageForError(result.err), Message: result.err.Error(), Manual: novelFetchAIManualRetryRequired(result.err) || errors.Is(result.err, novelfetchworkshop.ErrRewritePersistence), FailureID: fmt.Sprintf("%s:%s:%d", job.ID, bookID, job.Attempts)}
+				guarded := workshopBookExecutionStore{Store: worker.store, queue: worker.queue, owner: job.Owner, bookID: bookID}
+				var sensitiveFailure *novelFetchSensitiveStageError
+				alreadySaved := errors.As(result.err, &sensitiveFailure) && sensitiveFailure.persisted
+				var saveErr error
+				if !alreadySaved {
+					saveErr = saveWorkshopStageFailure(ctx, guarded, job.Owner, bookID, failure)
+				}
+				if saveErr != nil {
+					stageSaveRetries[bookID] = failure
+					retryBookIDs = append(retryBookIDs, bookID)
+					status = "waiting_retry"
+					message = "保存失败状态失败，仅重试保存，不重复调用模型"
+				} else {
+					saved, readErr := worker.store.GetDocument(ctx, job.Owner, bookID)
+					manual := failure.Manual
+					if readErr == nil {
+						for _, state := range novelFetchRetrySchedule(saved.Meta) {
+							manual = manual || novelFetchRetryStateIsManual(state)
+						}
+					}
+					if manual {
+						status = "failed"
+					} else {
+						status = "waiting_retry"
+						deferredStageRetry = true
+					}
+					_ = updateWorkshopTaskRuntimeState(ctx, guarded, job.Owner, bookID, status, result.err.Error())
+				}
 			}
 			failureMessages = append(failureMessages, bookID+"："+message)
 			progress = append(progress, workshopProgressItem("error", "处理失败："+message, bookID, bookName))
-			worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": status, "queue_state": "running", "started_at": startedAt, "updated_at": time.Now().UTC().Format(time.RFC3339Nano), "attempts": job.Attempts, "steps": progress, "progress": progress})
+			worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": status, "queue_state": "running", "started_at": startedAt, "updated_at": worker.processNow().UTC().Format(time.RFC3339Nano), "attempts": job.Attempts, "steps": progress, "progress": progress})
 			continue
 		}
 		if result.stopped {
@@ -622,11 +707,13 @@ func (worker workshopProcessWorker) process(parent context.Context, job novelfet
 			continue
 		}
 		completed++
-		_ = clearNovelFetchOriginalFetchRetry(ctx, worker.store, job.Owner, bookID)
+		if job.GenerateOnly {
+			_ = clearWorkshopSuccessfulRetryStages(ctx, worker.store, job.Owner, bookID, novelFetchRetryStageRewrite)
+		}
 		_ = updateWorkshopTaskRuntimeState(ctx, worker.store, job.Owner, bookID, "completed", "")
 		progress = append(progress, workshopProgressItem("success", "处理完成", bookID, bookName))
-		worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": "running", "queue_state": "running", "started_at": startedAt, "updated_at": time.Now().UTC().Format(time.RFC3339Nano), "attempts": job.Attempts, "steps": progress, "progress": progress})
-		if job.AutoSubmit && worker.autoSubmit != nil && !worker.bookCancelled(ctx, job.Owner, bookID) {
+		worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": "running", "queue_state": "running", "started_at": startedAt, "updated_at": worker.processNow().UTC().Format(time.RFC3339Nano), "attempts": job.Attempts, "steps": progress, "progress": progress})
+		if job.AutoSubmit && (job.SelectedVersions == nil || len(job.SelectedVersions) > 0) && worker.autoSubmit != nil && !worker.bookCancelled(ctx, job.Owner, bookID) {
 			if err := checkOwnership(); err != nil {
 				return err
 			}
@@ -648,7 +735,7 @@ func (worker workshopProcessWorker) process(parent context.Context, job novelfet
 			}
 			_ = appendWorkshopTaskLog(ctx, worker.store, job.Owner, bookID, "auto_submit_started", "本书处理完成，开始提交到视频管理系统")
 			progress = append(progress, workshopProgressItem("processing", "本书开始上传", bookID, bookName))
-			worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": "running", "queue_state": "running", "started_at": startedAt, "updated_at": time.Now().UTC().Format(time.RFC3339Nano), "attempts": job.Attempts, "steps": progress, "progress": progress})
+			worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": "running", "queue_state": "running", "started_at": startedAt, "updated_at": worker.processNow().UTC().Format(time.RFC3339Nano), "attempts": job.Attempts, "steps": progress, "progress": progress})
 			if err := checkOwnership(); err != nil {
 				return err
 			}
@@ -665,7 +752,15 @@ func (worker workshopProcessWorker) process(parent context.Context, job novelfet
 					blockedUploadState = blockedStatus
 					_ = updateWorkshopTaskRuntimeState(ctx, worker.store, job.Owner, bookID, blockedStatus, err.Error())
 				} else if retry {
-					retryBookIDs = append(retryBookIDs, bookID)
+					current, readErr := worker.store.GetDocument(ctx, job.Owner, bookID)
+					state := novelFetchRetrySchedule(current.Meta)[novelFetchRetryStageUpload]
+					if readErr == nil && state != nil {
+						if !novelFetchRetryStateIsManual(state) && !novelFetchRetryStateExhausted(novelFetchRetryStageUpload, state, worker.processNow().UTC()) {
+							deferredStageRetry = true
+						}
+					} else {
+						retryBookIDs = append(retryBookIDs, bookID)
+					}
 				}
 				if workshopSubmitBlockedStatus(err) == "" {
 					_ = updateWorkshopTaskRuntimeState(ctx, worker.store, job.Owner, bookID, "upload_pending", err.Error())
@@ -682,7 +777,7 @@ func (worker workshopProcessWorker) process(parent context.Context, job novelfet
 	if err := context.Cause(ctx); err != nil {
 		return err
 	}
-	finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	finishedAt := worker.processNow().UTC().Format(time.RFC3339Nano)
 	if len(failedBookIDs) > 0 {
 		errorMessage := strings.Join(failureMessages, "；")
 		job.LastError = errorMessage
@@ -692,14 +787,18 @@ func (worker workshopProcessWorker) process(parent context.Context, job novelfet
 			status = "waiting_classification"
 			queueState = "waiting_classification"
 		}
-		if deferredOriginalFetchRetry && len(originalSaveRetries) == 0 {
+		if (deferredOriginalFetchRetry || deferredStageRetry) && len(originalSaveRetries) == 0 && len(stageSaveRetries) == 0 {
 			status = "waiting_retry"
 			queueState = "waiting_retry"
 			_ = updateWorkshopRunContext(ctx, worker.store, job, status, errorMessage, startedAt, true)
 			_ = updateNovelFetchScheduleRuntimeStatus(ctx, worker.store, job.Owner, job.ScheduleID, status, errorMessage)
 			documents, _ := worker.store.ListDocuments(ctx, job.Owner)
 			result := map[string]any{"batch_id": job.BatchID, "current_batch_id": job.BatchID, "tasks": documents, "completed": completed, "failed": len(failedBookIDs), "failed_book_ids": failedBookIDs}
-			progress = append(progress, workshopProgressItem("warning", "原文未抓到，等待下次自动抓取", "", ""))
+			message := "本轮处理未完成，等待下次到期重试"
+			if deferredOriginalFetchRetry && !deferredStageRetry {
+				message = "原文未抓到，等待下次自动抓取"
+			}
+			progress = append(progress, workshopProgressItem("warning", message, "", ""))
 			worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": status, "queue_state": queueState, "started_at": startedAt, "updated_at": finishedAt, "attempts": job.Attempts, "error": errorMessage, "result": result, "steps": progress, "progress": progress})
 			return finish(job, failWorkshopJob)
 		}
@@ -744,6 +843,25 @@ func (worker workshopProcessWorker) process(parent context.Context, job novelfet
 		worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": status, "queue_state": queueState, "started_at": startedAt, "updated_at": finishedAt, "attempts": job.Attempts, "error": errorMessage, "result": result, "steps": progress, "progress": progress})
 		retryJob := job
 		retryJob.BookIDs = retryBookIDs
+		if len(stageSaveRetries) > 0 {
+			for id, failure := range originalSaveRetries {
+				if failure != nil {
+					stageSaveRetries[id] = workshopStageSaveFailure{Original: failure, JobID: job.ID}
+				}
+			}
+			// The queue retains only persistence work. Never replay a model
+			// because saving its failure/backoff record was unavailable.
+			payload, err := json.Marshal(stageSaveRetries)
+			if err != nil {
+				return err
+			}
+			retryJob.BookIDs = nil
+			for id := range stageSaveRetries {
+				retryJob.BookIDs = append(retryJob.BookIDs, id)
+			}
+			retryJob.LastError = workshopStageSaveCheckpointPrefix + string(payload)
+			return finish(retryJob, retryWorkshopJob)
+		}
 		if len(originalSaveRetries) > 0 {
 			for _, bookID := range retryBookIDs {
 				if _, saving := originalSaveRetries[bookID]; !saving {
@@ -848,7 +966,7 @@ func workshopProgressItem(level, message, bookID, bookName string) map[string]an
 
 func novelFetchConfiguredConcurrency(ctx context.Context, store novelfetchworkshop.Store, owner string, taskCount int) int {
 	concurrency := 4
-	if settings, err := store.GetConfig(ctx, owner); err == nil {
+	if settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner); err == nil {
 		if configured := toInt(mapOrEmpty(settings["fetch"])["concurrency"]); configured > 0 {
 			concurrency = configured
 		}
@@ -880,7 +998,96 @@ func (worker *workshopProcessWorker) bookCancelled(ctx context.Context, owner, b
 }
 
 func (worker *workshopProcessWorker) execute(ctx context.Context, job novelfetchworkshop.ProcessJob) error {
-	ctx = novelfetchworkshop.WithProcessTextModel(ctx, job.TextModelID)
+	ctx = batchfactoryv11.WithSingleAttempt(novelfetchworkshop.WithProcessTextModel(ctx, job.TextModelID))
+	if len(job.BookIDs) > 1 {
+		for _, id := range job.BookIDs {
+			one := job
+			one.BookIDs = []string{id}
+			if err := worker.execute(ctx, one); err != nil {
+				if errors.Is(err, novelfetchworkshop.ErrRewriteValidation) {
+					return fmt.Errorf("AI 返回异常: %w", err)
+				}
+				return err
+			}
+		}
+		return nil
+	}
+	if len(job.BookIDs) == 1 {
+		copy := *worker
+		copy.store = workshopBookExecutionStore{Store: worker.store, queue: worker.queue, owner: job.Owner, bookID: job.BookIDs[0]}
+		worker = &copy
+	}
+	if len(job.BookIDs) == 1 {
+		doc, err := worker.store.GetDocument(ctx, job.Owner, job.BookIDs[0])
+		if err != nil {
+			return err
+		}
+		if err := workshopSensitiveManualRepairHold(doc); err != nil {
+			return err
+		}
+		if doc.Meta["manualOnly"] == true || novelFetchRetryScheduleHasManualHold(doc.Meta) {
+			return errWorkshopRetryHeld
+		}
+		if doc.Meta["rewritePersistenceHold"] == true {
+			return novelfetchworkshop.ErrRewritePersistence
+		}
+		if err := checkWorkshopRetryBudget(ctx, worker.store, job.Owner, doc, worker.processNow()); err != nil {
+			return err
+		}
+	}
+	if job.GenerateOnly {
+		if worker.resolveRewriteProvider == nil {
+			return errors.New("未配置文本模型")
+		}
+		provider, providerErr := worker.resolveRewriteProvider(ctx, job.Owner)
+		classificationProvider := workshopClassificationProviderForResult(provider, providerErr)
+		for _, bookID := range job.BookIDs {
+			if worker.bookCancelled(ctx, job.Owner, bookID) {
+				continue
+			}
+			doc, err := worker.store.GetDocument(ctx, job.Owner, bookID)
+			if err != nil {
+				return err
+			}
+			pending, err := missingWorkshopAIBodies(ctx, worker.store, job.Owner, doc, job.SelectedVersions)
+			if err != nil {
+				return err
+			}
+			if len(pending) == 0 {
+				continue
+			}
+			if err := holdWorkshopGenerateSensitiveFailure(ctx, worker.store, job.Owner, doc); err != nil {
+				return err
+			}
+			original, readErr := novelfetchworkshop.ReadBodyText(ctx, worker.store, job.Owner, doc, "original")
+			if readErr != nil {
+				return readErr
+			}
+			if strings.TrimSpace(original) == "" {
+				return errors.New("请先抓取原文，再生成 AI 改文")
+			}
+			var judge novelfetchworkshop.AIGenderJudge
+			if worker.resolveGenderJudge != nil {
+				judge = worker.resolveGenderJudge(ctx, job.Owner)
+			}
+			if err := prepareWorkshopDocumentClassification(ctx, worker.store, job.Owner, bookID, judge, classificationProvider); err != nil {
+				return err
+			}
+			if providerErr != nil {
+				return providerErr
+			}
+			if err := reserveWorkshopAI(ctx, worker.store, job, bookID); err != nil {
+				return err
+			}
+			if _, err := novelfetchworkshop.GenerateAIRewritesForVersionsProcessed(ctx, worker.store, job.Owner, bookID, pending, provider, workshopRewriteProcessor(worker.store, job.Owner, bookID, job.SensitiveAIEnabled, provider), job.RewriteMethods); err != nil {
+				if errors.Is(err, novelfetchworkshop.ErrRewriteValidation) {
+					return fmt.Errorf("AI 返回异常: %w", err)
+				}
+				return err
+			}
+		}
+		return nil
+	}
 	if job.AutoSubmit && len(job.BookIDs) == 1 {
 		if document, err := worker.store.GetDocument(ctx, job.Owner, job.BookIDs[0]); err == nil && document.Meta["autoSubmitReady"] == true {
 			versions := job.SelectedVersions
@@ -892,11 +1099,16 @@ func (worker *workshopProcessWorker) execute(ctx context.Context, job novelfetch
 			if coversRetry {
 				versions = saved
 			}
-			if firstText(document.Meta["autoSubmitReadyFingerprint"]) == novelFetchUploadReadyFingerprint(ctx, worker.store, job.Owner, document, versions) {
+			if firstText(document.Meta["autoSubmitReadyFingerprint"]) == novelFetchUploadReadyFingerprint(ctx, worker.store, job.Owner, document, versions) && novelFetchVersionsGenerated(ctx, worker.store, job.Owner, document, versions) {
 				_ = appendWorkshopTaskLog(ctx, worker.store, job.Owner, job.BookIDs[0], "upload_resume", "正文已完成，跳过原文和改文生成，仅继续上传")
 				return nil
 			}
 		}
+	}
+	var classificationProvider novelfetchworkshop.RewriteProvider
+	if worker.resolveRewriteProvider != nil {
+		provider, err := worker.resolveRewriteProvider(ctx, job.Owner)
+		classificationProvider = workshopClassificationProviderForResult(provider, err)
 	}
 	var sensitiveProvider novelfetchworkshop.RewriteProvider
 	if job.SensitiveAIEnabled && worker.resolveRewriteProvider != nil {
@@ -912,9 +1124,20 @@ func (worker *workshopProcessWorker) execute(ctx context.Context, job novelfetch
 			continue
 		}
 		document, documentErr := worker.store.GetDocument(ctx, job.Owner, bookID)
-		originalReady := documentErr == nil && strings.EqualFold(firstText(document.Meta["originalStatus"], document.Meta["original_status"]), "done") && strings.TrimSpace(firstText(document.ProcessedText, document.Original)) != ""
+		if documentErr != nil {
+			return documentErr
+		}
+		originalText, bodyErr := novelfetchworkshop.ReadBodyText(ctx, worker.store, job.Owner, document, "original")
+		if bodyErr != nil {
+			return bodyErr
+		}
+		originalReady := strings.EqualFold(firstText(document.Meta["originalStatus"], document.Meta["original_status"]), "done") && strings.TrimSpace(originalText) != ""
 		if !originalReady {
-			if worker.fetcher == nil && strings.TrimSpace(document.OriginalRaw) == "" {
+			rawText, rawErr := novelfetchworkshop.ReadBodyText(ctx, worker.store, job.Owner, document, "original_raw")
+			if rawErr != nil {
+				return rawErr
+			}
+			if worker.fetcher == nil && strings.TrimSpace(rawText) == "" {
 				// Preserve the legacy no-fetch worker behaviour used by recovery
 				// jobs; a ready original still proceeds to classification below.
 				continue
@@ -923,7 +1146,7 @@ func (worker *workshopProcessWorker) execute(ctx context.Context, job novelfetch
 			if worker.resolveGenderJudge != nil {
 				judge = worker.resolveGenderJudge(ctx, job.Owner)
 			}
-			if err := executeWorkshopDocumentFetch(ctx, worker.store, job.Owner, bookID, worker.fetcher, job.MaxTxt, job.SensitiveAIEnabled, sensitiveProvider, judge, sensitiveProvider); err != nil {
+			if err := executeWorkshopDocumentFetch(ctx, worker.store, job.Owner, bookID, worker.fetcher, job.MaxTxt, job.SensitiveAIEnabled, sensitiveProvider, judge, classificationProvider); err != nil {
 				return err
 			}
 		}
@@ -935,22 +1158,10 @@ func (worker *workshopProcessWorker) execute(ctx context.Context, job novelfetch
 		if worker.resolveGenderJudge != nil {
 			judge = worker.resolveGenderJudge(ctx, job.Owner)
 		}
-		var classificationProvider novelfetchworkshop.RewriteProvider
-		if worker.resolveRewriteProvider != nil {
-			classificationProvider, _ = worker.resolveRewriteProvider(ctx, job.Owner)
+		if err := prepareWorkshopDocumentClassification(ctx, worker.store, job.Owner, bookID, judge, classificationProvider); err != nil {
+			return err
 		}
-		if document, getErr := worker.store.GetDocument(ctx, job.Owner, bookID); getErr == nil && novelFetchClassificationResolved(document) {
-			if originalReady {
-				_ = appendWorkshopTaskLog(ctx, worker.store, job.Owner, bookID, "classification_skipped", "已有分类信息，跳过判断")
-			}
-		} else {
-			_ = appendWorkshopTaskLog(ctx, worker.store, job.Owner, bookID, "classification_started", "开始判断男女频和题材风格")
-			if err := ensureWorkshopDocumentClassification(ctx, worker.store, job.Owner, bookID, judge, classificationProvider); err != nil {
-				_ = appendWorkshopTaskLog(ctx, worker.store, job.Owner, bookID, "classification_failed", err.Error())
-				return err
-			}
-			_ = appendWorkshopTaskLog(ctx, worker.store, job.Owner, bookID, "classification_completed", "男女频和题材风格判断完成")
-		}
+
 		if worker.bookCancelled(ctx, job.Owner, bookID) {
 			continue
 		}
@@ -963,10 +1174,11 @@ func (worker *workshopProcessWorker) execute(ctx context.Context, job novelfetch
 		}
 		pendingAI := make([]string, 0, len(selectedAI))
 		for _, versionID := range selectedAI {
-			if strings.TrimSpace(toString(document.Versions[versionID])) != "" {
-				continue
+			ready, bodyErr := novelfetchworkshop.AIRewriteVersionReady(ctx, worker.store, job.Owner, document, versionID)
+			if bodyErr != nil {
+				return bodyErr
 			}
-			if body, bodyErr := worker.store.GetBody(ctx, job.Owner, bookID, versionID); bodyErr == nil && strings.TrimSpace(body.Content) != "" {
+			if ready {
 				continue
 			}
 			pendingAI = append(pendingAI, versionID)
@@ -991,10 +1203,24 @@ func (worker *workshopProcessWorker) execute(ctx context.Context, job novelfetch
 			return err
 		}
 		_ = appendWorkshopTaskLog(ctx, worker.store, job.Owner, bookID, "rewrite_started", "开始生成 AI 改写版本")
-		if _, err := novelfetchworkshop.GenerateAIRewritesForVersionsProcessed(ctx, worker.store, job.Owner, bookID, pendingAI, provider, workshopRewriteProcessor(worker.store, job.Owner, bookID, job.SensitiveAIEnabled, provider), job.RewriteMethods); err != nil {
-			_ = appendWorkshopTaskLog(ctx, worker.store, job.Owner, bookID, "rewrite_failed", err.Error())
+		original, readErr := novelfetchworkshop.ReadBodyText(ctx, worker.store, job.Owner, document, "original")
+		if readErr != nil {
+			return readErr
+		}
+		if strings.TrimSpace(original) == "" {
+			return errors.New("请先抓取原文，再生成 AI 改文")
+		}
+		if err := reserveWorkshopAI(ctx, worker.store, job, bookID); err != nil {
 			return err
 		}
+		if _, err := novelfetchworkshop.GenerateAIRewritesForVersionsProcessed(ctx, worker.store, job.Owner, bookID, pendingAI, provider, workshopRewriteProcessor(worker.store, job.Owner, bookID, job.SensitiveAIEnabled, provider), job.RewriteMethods); err != nil {
+			_ = appendWorkshopTaskLog(ctx, worker.store, job.Owner, bookID, "rewrite_failed", err.Error())
+			if errors.Is(err, novelfetchworkshop.ErrRewriteValidation) {
+				return fmt.Errorf("AI 返回异常: %w", err)
+			}
+			return err
+		}
+		_ = clearWorkshopSuccessfulRetryStages(ctx, worker.store, job.Owner, bookID, novelFetchRetryStageRewrite)
 		_ = appendWorkshopTaskLog(ctx, worker.store, job.Owner, bookID, "rewrite_completed", "AI 改写版本已保存")
 	}
 	return nil
@@ -1023,29 +1249,17 @@ func ensureWorkshopDocumentClassification(ctx context.Context, store novelfetchw
 	if document.Meta == nil {
 		document.Meta = map[string]any{}
 	}
-	text := strings.TrimSpace(firstText(document.ProcessedText, document.Original))
+	text, bodyErr := novelfetchworkshop.ReadBodyText(ctx, store, owner, document, "original")
+	if bodyErr != nil {
+		return bodyErr
+	}
+	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil
 	}
-	needsGender := genderNeedsResolution(document.Gender)
-	needsStyle := styleNeedsResolution(document.Meta)
-	var classification novelfetchworkshop.ClassificationResult
-	if needsGender || needsStyle {
-		info := document.BookInfo
-		info.Text = text
-		classification = novelfetchworkshop.ClassifyBook(ctx, "", info, genderJudge, styleProvider)
-	}
-	if needsGender {
-		decision := classification.Gender
-		document.Gender, document.GenderSource, document.GenderReason = decision.Gender, decision.Source, decision.Reason
-		document.GenderConfidence = decision.Confidence
-	}
-	if needsStyle {
-		document.Meta["styleStatus"] = "processing"
-		recordNovelFetchStyleDecision(document.Meta, classification.Style, nil)
-	}
-	syncNovelFetchClassificationMetadata(&document)
-	return store.PutDocument(ctx, owner, document)
+	info := document.BookInfo
+	info.Text = text
+	return runWorkshopClassification(ctx, store, owner, &document, info, genderJudge, styleProvider)
 }
 
 func updateWorkshopTaskRuntimeState(ctx context.Context, store novelfetchworkshop.Store, owner, bookID, status, message string) error {
@@ -1078,6 +1292,8 @@ type novelFetchBookAdmission struct {
 	cancelled []string
 }
 
+// Start/schedule never clear cancellation markers, so the queue atomic fence
+// and document CAS suffice. Do not hold retry/stop admission across enqueue.
 // A rejected atomic enqueue writes nothing. Identify the stopped books, then let
 // the caller retry the survivors through the same atomic queue operation.
 func tryNovelFetchBookAdmission(ctx context.Context, store novelfetchworkshop.Store, queue novelfetchworkshop.ProcessQueue, unique novelfetchworkshop.ProcessBookDedupQueue, job novelfetchworkshop.ProcessJob, ttl time.Duration) (novelFetchBookAdmission, error) {
@@ -1384,7 +1600,7 @@ func updateNovelFetchScheduleRuntimeStatus(ctx context.Context, store novelfetch
 	if strings.TrimSpace(scheduleID) == "" {
 		return nil
 	}
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return err
 	}
@@ -1416,7 +1632,7 @@ func updateNovelFetchScheduleRuntimeStatus(ctx context.Context, store novelfetch
 		return nil
 	}
 	settings["novel_fetch_schedules"] = schedules
-	return store.PutConfig(ctx, owner, settings)
+	return novelfetchworkshop.WriteWorkflowConfig(ctx, store, owner, settings)
 }
 
 const (
@@ -1480,7 +1696,7 @@ func dispatchDueNovelFetchSchedules(ctx context.Context, store novelfetchworksho
 	if len(readbacks) > 0 {
 		readback = readbacks[0]
 	}
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return err
 	}
@@ -1873,7 +2089,10 @@ func workshopProcessResult(ctx context.Context, store novelfetchworkshop.Store, 
 // 再在保存阶段重复解析和查库。手工导入沿用已有任务的跳过规则：
 // 已取消的书只能由明确的重试操作恢复。普通失败且缺正文的书仍可导入。
 func workshopProcessParsedResult(ctx context.Context, store novelfetchworkshop.Store, queue novelfetchworkshop.ProcessQueue, owner string, documents []novelfetchworkshop.Document, parsed, emptyIDs, duplicates int, platformID, batchID string, metadata workshopInputMetadata, selectedVersions ...[]string) (map[string]any, []string, []string, error) {
-	settings, _ := store.GetConfig(ctx, owner)
+	settings, configErr := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
+	if configErr != nil {
+		return nil, nil, nil, fmt.Errorf("读取批次设置失败: %w", configErr)
+	}
 	if settings == nil {
 		settings = map[string]any{}
 	}
@@ -1947,9 +2166,10 @@ func workshopProcessParsedResult(ctx context.Context, store novelfetchworkshop.S
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	settings["novel_fetch_current_batch_id"] = batchID
-	settings["novel_fetch_current_batch_at"] = time.Now().UTC().Format(time.RFC3339Nano)
-	_ = store.PutConfig(ctx, owner, settings)
+	settings, err = saveNovelFetchCurrentBatch(ctx, store, owner, batchID, time.Now().UTC())
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("保存当前批次失败: %w", err)
+	}
 	result := map[string]any{
 		"batch_id": batchID, "current_batch_id": batchID,
 		"auto_queue_enabled": novelFetchAutomationEnabled(settings),
@@ -1966,6 +2186,24 @@ func workshopProcessParsedResult(ctx context.Context, store novelfetchworkshop.S
 	return result, processBookIDs, skippedBookIDs, nil
 }
 
+// Import can race a stop/settings save. Merge only batch identity into the
+// latest preference revision, preserving newer pause, schedule and rule edits.
+func saveNovelFetchCurrentBatch(ctx context.Context, store novelfetchworkshop.Store, owner, batchID string, at time.Time) (map[string]any, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		current, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
+		if err != nil {
+			return nil, err
+		}
+		current["novel_fetch_current_batch_id"] = batchID
+		current["novel_fetch_current_batch_at"] = at.UTC().Format(time.RFC3339Nano)
+		err = novelfetchworkshop.WriteWorkflowConfig(ctx, store, owner, current)
+		if errors.Is(err, novelfetchworkshop.ErrConfigConflict) {
+			continue
+		}
+		return current, err
+	}
+	return nil, novelfetchworkshop.ErrConfigConflict
+}
 func novelFetchProcessingFingerprint(settings map[string]any) string {
 	app := mapOrEmpty(settings["appConfig"])
 	rules := map[string]any{
@@ -2111,6 +2349,81 @@ func sensitiveServiceUnavailable(err error) bool {
 // model then refines each hit line and the audit item records the source,
 // model and attempt count shown by the workbench.
 func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.RewriteProvider, settings map[string]any, bookID, text string, items []map[string]any, bookVars map[string]any) (string, []map[string]any) {
+	ai := mapOrEmpty(settings["sensitive_ai"])
+	if len(ai) == 0 {
+		ai = mapOrEmpty(mapOrEmpty(settings["appConfig"])["sensitive_ai"])
+	}
+	if ai["enabled"] != true || len(items) == 0 {
+		return text, items
+	}
+	planned, records, err := novelfetchworkshop.PrepareSensitiveAIRepairItems(text, items, toInt(ai["context_chars"]), toInt(ai["max_hits_per_task"]))
+	if err != nil {
+		failed := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			copy := cloneAnyMap(item)
+			copy["status"] = "failed"
+			copy["ai_status"] = "failed"
+			copy["error_code"] = "location_mismatch"
+			copy["error"] = err.Error()
+			failed = append(failed, copy)
+		}
+		return text, failed
+	}
+	if len(planned) == 0 {
+		return text, records
+	}
+	processed, repaired := applySensitiveAIRepairPrepared(ctx, provider, settings, bookID, text, planned, bookVars)
+	for _, group := range repaired {
+		members, _ := group["repair_member_indices"].([]int)
+		for _, index := range members {
+			record := records[index]
+			for _, key := range []string{"status", "source", "model", "attempt", "error", "error_code", "fallback_used", "masked", "after"} {
+				if value, ok := group[key]; ok {
+					record[key] = value
+				}
+			}
+			record["ai_before"], record["ai_after"] = group["repair_text"], group["after"]
+			if group["status"] == "failed" || strings.Contains(firstText(group["source"]), "fallback") {
+				record["ai_status"] = "failed"
+				if group["status"] == "done" {
+					record["fallback_used"] = true
+				}
+			} else if group["status"] == "done" {
+				record["ai_status"] = "done"
+			}
+		}
+	}
+	return processed, records
+}
+
+func sensitivePreparedSnippet(item map[string]any) string {
+	if text, ok := item["repair_text"].(string); ok {
+		return text
+	}
+	text, _ := item["before"].(string)
+	return text
+}
+func sensitiveRepairTokenBudget(groups []map[string]any) int {
+	hits := 0
+	for _, group := range groups {
+		members, _ := group["repair_member_indices"].([]int)
+		if len(members) == 0 {
+			hits++
+		} else {
+			hits += len(members)
+		}
+	}
+	budget := hits * 300
+	if budget < 1200 {
+		budget = 1200
+	}
+	if budget > 8000 {
+		budget = 8000
+	}
+	return budget
+}
+
+func applySensitiveAIRepairPrepared(ctx context.Context, provider novelfetchworkshop.RewriteProvider, settings map[string]any, bookID, text string, items []map[string]any, bookVars map[string]any) (string, []map[string]any) {
 	if len(items) == 0 {
 		return text, items
 	}
@@ -2132,15 +2445,14 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 		promptTemplate = "你是内容合规改写助手。只改写下面命中敏感词的小段内容，保留原剧情、人物关系和情绪，不增加新剧情。只返回改写后的小段，不要解释。\n\n任务ID：{book_id}\n命中词：{keyword}\n\n原片段：\n{snippet}"
 	}
 	maxAttempts := toInt(ai["retries"]) + 1
+	if batchfactoryv11.SingleAttempt(ctx) {
+		maxAttempts = 1
+	}
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
 	if maxAttempts > 3 {
 		maxAttempts = 3
-	}
-	contextChars := toInt(ai["context_chars"])
-	if contextChars < 0 {
-		contextChars = 0
 	}
 	maxHits := toInt(ai["max_hits_per_task"])
 	if maxHits <= 0 {
@@ -2167,7 +2479,7 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 			item["source"] = "ai_group"
 			item["model"] = model
 			keyword := strings.TrimSpace(fmt.Sprint(item["keyword"]))
-			snippet := sensitiveContextSnippet(strings.TrimSpace(fmt.Sprint(item["before"])), keyword, contextChars)
+			snippet := sensitivePreparedSnippet(item)
 			outputs = append(outputs, fmt.Sprintf("%d. 命中词：%s\n原片段：%s", len(outputs)+1, keyword, snippet))
 		}
 		userPrompt := strings.NewReplacer(
@@ -2190,7 +2502,7 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 		} else {
 			// 源码的敏感词整组请求不限制输出长度；这里按命中数估算，并在
 			// 上游报长度截断时翻倍，避免命中较多时整组结果必然失败。
-			maxTokens := len(active) * 300
+			maxTokens := sensitiveRepairTokenBudget(active)
 			if maxTokens < 1200 {
 				maxTokens = 1200
 			}
@@ -2203,7 +2515,7 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 				output = strings.TrimSpace(output)
 				if lastErr != nil {
 					// 服务不可用时立即停止，避免同一故障连续烧掉全部重试次数。
-					if sensitiveServiceUnavailable(lastErr) {
+					if novelFetchRetryResultUnknown(lastErr) || sensitiveServiceUnavailable(lastErr) {
 						break
 					}
 					if strings.Contains(lastErr.Error(), "长度截断") && maxTokens < 8000 {
@@ -2237,7 +2549,7 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 				}
 				unsafe := false
 				for index, repairedText := range repaired {
-					if strings.TrimSpace(repairedText) == "" || containsSensitiveKeyword(repairedText, strings.TrimSpace(fmt.Sprint(active[index]["keyword"]))) {
+					if strings.TrimSpace(repairedText) == "" || containsSensitiveRepairKeyword(repairedText, active[index]) {
 						unsafe = true
 						break
 					}
@@ -2252,11 +2564,10 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 			}
 		}
 		if lastErr != nil {
-			fallbackSafe := strings.TrimSpace(output) != ""
+			fallbackSafe := strings.TrimSpace(output) != "" && !(batchfactoryv11.SingleAttempt(ctx) && novelFetchRetryResultUnknown(lastErr))
 			for _, item := range active {
 				after := strings.TrimSpace(fmt.Sprint(item["after"]))
-				keyword := strings.TrimSpace(fmt.Sprint(item["keyword"]))
-				if after == "" || containsSensitiveKeyword(after, keyword) {
+				if after == "" || containsSensitiveRepairKeyword(after, item) {
 					fallbackSafe = false
 					break
 				}
@@ -2266,14 +2577,14 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 					item["attempt"] = attempts
 					item["source"] = "deterministic_fallback"
 					item["status"] = "done"
-					item["error"] = lastErr.Error()
+					item["error"] = safeSensitiveModelFailure(lastErr)
 				}
 				return text, items
 			}
 			for _, item := range active {
 				item["attempt"] = attempts
 				item["status"] = "failed"
-				item["error"] = lastErr.Error()
+				item["error"] = safeSensitiveModelFailure(lastErr)
 			}
 			return text, items
 		}
@@ -2283,7 +2594,6 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 			item["status"] = "done"
 			item["error"] = ""
 			text, searchCursor = replaceSensitiveHit(text, searchCursor, item, repaired[index])
-			item["after"] = repaired[index]
 		}
 		return text, items
 	}
@@ -2303,8 +2613,7 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 		item["source"] = "ai"
 		item["model"] = model
 		keyword := strings.TrimSpace(fmt.Sprint(item["keyword"]))
-		before := strings.TrimSpace(fmt.Sprint(item["before"]))
-		before = sensitiveContextSnippet(before, keyword, contextChars)
+		before := sensitivePreparedSnippet(item)
 		userPrompt := strings.NewReplacer(
 			"{book_id}", bookID,
 			"{book_name}", firstText(bookVars["book_name"], bookVars["bookName"]),
@@ -2322,11 +2631,11 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 		} else {
 			for attempts < maxAttempts {
 				attempts++
-				output, lastErr = provider.Complete(ctx, novelfetchworkshop.RewriteRequest{SystemPrompt: prompt.BatchFactorySensitiveSystemPrompt(), UserPrompt: userPrompt, Temperature: temperature, MaxTokens: 1200})
+				output, lastErr = provider.Complete(ctx, novelfetchworkshop.RewriteRequest{SystemPrompt: prompt.BatchFactorySensitiveSystemPrompt(), UserPrompt: userPrompt, Temperature: temperature, MaxTokens: sensitiveRepairTokenBudget([]map[string]any{item})})
 				output = strings.TrimSpace(output)
 				if lastErr != nil {
 					// 服务不可用时立即停止，避免同一故障连续烧掉全部重试次数。
-					if sensitiveServiceUnavailable(lastErr) {
+					if novelFetchRetryResultUnknown(lastErr) || sensitiveServiceUnavailable(lastErr) {
 						break
 					}
 					continue
@@ -2342,7 +2651,7 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 					userPrompt += "\n\n上次返回不合格。只返回改写后的短片段或 {\"fixed_text\":\"...\"}，不要解释。"
 					continue
 				}
-				if containsSensitiveKeyword(output, keyword) {
+				if containsSensitiveRepairKeyword(output, item) {
 					userPrompt += "\n\n上次返回仍包含命中词。必须彻底改写该词，只返回改写后的短片段。"
 					continue
 				}
@@ -2350,12 +2659,12 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 			}
 		}
 		item["attempt"] = attempts
-		if lastErr != nil || output == "" || containsSensitiveKeyword(output, keyword) {
+		if lastErr != nil || output == "" || containsSensitiveRepairKeyword(output, item) {
 			item["status"] = "failed"
 			// firstText 只识别字符串，error 必须显式取文本，否则真实失败原因会被吞掉。
 			message := "AI 返回为空或仍包含命中敏感词"
 			if lastErr != nil {
-				message = lastErr.Error()
+				message = safeSensitiveModelFailure(lastErr)
 			}
 			item["error"] = message
 			return
@@ -2389,13 +2698,31 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 			continue
 		}
 		text, searchCursor = replaceSensitiveHit(text, searchCursor, item, outputs[index])
-		item["after"] = outputs[index]
 	}
 	return text, items
 }
 
 func containsSensitiveKeyword(output, keyword string) bool {
 	return strings.TrimSpace(keyword) != "" && strings.Contains(strings.ToLower(output), strings.ToLower(keyword))
+}
+func containsSensitiveRepairKeyword(output string, item map[string]any) bool {
+	switch keywords := item["repair_keywords"].(type) {
+	case []string:
+		for _, keyword := range keywords {
+			if containsSensitiveKeyword(output, keyword) {
+				return true
+			}
+		}
+		return false
+	case []any:
+		for _, keyword := range keywords {
+			if containsSensitiveKeyword(output, firstText(keyword)) {
+				return true
+			}
+		}
+		return false
+	}
+	return containsSensitiveKeyword(output, firstText(item["keyword"]))
 }
 
 func sensitiveContextSnippet(text, keyword string, contextChars int) string {
@@ -2419,20 +2746,15 @@ func sensitiveContextSnippet(text, keyword string, contextChars int) string {
 	return string(runes[start:end])
 }
 
-func replaceSensitiveHit(text string, cursor int, item map[string]any, output string) (string, int) {
-	target := fmt.Sprint(item["after"])
-	if target == "" {
-		target = fmt.Sprint(item["before"])
+func replaceSensitiveHit(text string, delta int, item map[string]any, output string) (string, int) {
+	processed, next, err := novelfetchworkshop.ApplySensitiveAIRepairItem(text, delta, item, output)
+	if err != nil {
+		item["status"] = "failed"
+		item["ai_status"] = "failed"
+		item["error_code"] = "location_mismatch"
+		item["error"] = err.Error()
 	}
-	index := strings.Index(text[cursor:], target)
-	if index >= 0 {
-		index += cursor
-		return text[:index] + output + text[index+len(target):], index + len(output)
-	}
-	if index := strings.Index(text, target); index >= 0 {
-		return text[:index] + output + text[index+len(target):], index + len(output)
-	}
-	return text, cursor
+	return processed, next
 }
 
 func sensitiveMinInt(a, b int) int {
@@ -2443,11 +2765,27 @@ func sensitiveMinInt(a, b int) int {
 }
 
 func processWorkshopConfiguredText(ctx context.Context, store novelfetchworkshop.Store, owner, bookID, text, scope string, sensitiveAIEnabled bool, provider novelfetchworkshop.RewriteProvider) (string, []map[string]any, []map[string]any, error) {
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return text, nil, nil, err
 	}
-	processed, trace, sensitiveItems := novelfetchworkshop.ProcessConfiguredText(text, scope, settings)
+	var processed string
+	var trace, sensitiveItems []map[string]any
+	if sensitiveAIEnabled {
+		processed, trace, sensitiveItems = novelfetchworkshop.ProcessSensitiveTextBeforeFormatting(text, scope, settings)
+	} else {
+		processed, trace, sensitiveItems = novelfetchworkshop.ProcessConfiguredText(text, scope, settings)
+	}
+	finish := func() (string, []map[string]any, []map[string]any, error) {
+		if sensitiveAIEnabled {
+			formatted, stages := novelfetchworkshop.FormatConfiguredTextAfterSensitive(processed, scope, settings)
+			processed = formatted
+			if len(stages) > 1 {
+				trace = append(trace, stages[1:]...)
+			}
+		}
+		return processed, trace, sensitiveItems, nil
+	}
 	if sensitiveAIEnabled && len(sensitiveItems) > 0 {
 		ai := mapOrEmpty(settings["sensitive_ai"])
 		if len(ai) == 0 {
@@ -2474,6 +2812,21 @@ func processWorkshopConfiguredText(ctx context.Context, store novelfetchworkshop
 		}
 		trace = append(trace, map[string]any{"stage": "sensitive_ai", "title": "敏感词 AI 修复", "changed": before != processed, "chars": len([]rune(processed)), "failed": failed})
 		if failed > 0 {
+			for _, item := range sensitiveItems {
+				if item["error_code"] == "location_mismatch" {
+					return processed, trace, sensitiveItems, errors.New(firstText(item["error"]))
+				}
+			}
+			if batchfactoryv11.SingleAttempt(ctx) {
+				for _, item := range sensitiveItems {
+					if firstText(item["status"]) == "failed" {
+						cause := errors.New(firstText(item["error"]))
+						if novelFetchRetryResultUnknown(cause) {
+							return processed, trace, sensitiveItems, cause
+						}
+					}
+				}
+			}
 			resolved := 0
 			masked := 0
 			for _, item := range sensitiveItems {
@@ -2493,16 +2846,18 @@ func processWorkshopConfiguredText(ctx context.Context, store novelfetchworkshop
 					item["source"] = "fallback"
 				}
 				item["status"] = "done"
+				item["ai_status"] = "failed"
+				item["fallback_used"] = true
 				resolved++
 			}
 			if resolved == failed {
 				trace = append(trace, map[string]any{"stage": "sensitive_fallback", "title": "敏感词自动兜底", "changed": true, "chars": len([]rune(processed)), "resolved": resolved, "masked": masked})
-				return processed, trace, sensitiveItems, nil
+				return finish()
 			}
 			return processed, trace, sensitiveItems, fmt.Errorf("敏感词 AI 修复失败 %d 处，已停止后续处理", failed)
 		}
 	}
-	return processed, trace, sensitiveItems, nil
+	return finish()
 }
 
 func workshopRewriteProcessor(store novelfetchworkshop.Store, owner, bookID string, sensitiveAIEnabled bool, provider novelfetchworkshop.RewriteProvider) novelfetchworkshop.RewriteTextProcessor {
@@ -2540,7 +2895,7 @@ func stageNovelFetchRaw(ctx context.Context, store novelfetchworkshop.Store, own
 }
 
 func novelFetchShortOriginalLimit(ctx context.Context, store novelfetchworkshop.Store, owner string) (int, bool) {
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return 0, false
 	}
@@ -2591,7 +2946,7 @@ func fetchNovelWithSettings(ctx context.Context, store novelfetchworkshop.Store,
 	}
 	configured := *fetcher
 	retries := 0
-	if settings, err := store.GetConfig(ctx, owner); err == nil {
+	if settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner); err == nil {
 		fetchConfig := mapOrEmpty(settings["fetch"])
 		if len(fetchConfig) == 0 {
 			fetchConfig = mapOrEmpty(mapOrEmpty(settings["appConfig"])["fetch"])
@@ -2637,9 +2992,14 @@ func fetchNovelWithSettings(ctx context.Context, store novelfetchworkshop.Store,
 
 // novelFetchSensitiveStageError 标记失败发生在敏感词处理阶段，
 // 让上层按 sensitive 阶段记录退避，而不是重复记成原文抓取失败。
-type novelFetchSensitiveStageError struct{ err error }
+type novelFetchSensitiveStageError struct {
+	err       error
+	persisted bool
+}
 
-func (e *novelFetchSensitiveStageError) Error() string { return e.err.Error() }
+func (e *novelFetchSensitiveStageError) Error() string {
+	return "敏感词处理失败: " + e.err.Error()
+}
 func (e *novelFetchSensitiveStageError) Unwrap() error { return e.err }
 
 func executeWorkshopDocumentFetch(ctx context.Context, store novelfetchworkshop.Store, owner, bookID string, fetcher *novelfetchworkshop.UpstreamFetcher, maxTxt int, sensitiveAIEnabled bool, sensitiveProvider novelfetchworkshop.RewriteProvider, genderJudge novelfetchworkshop.AIGenderJudge, styleProvider novelfetchworkshop.RewriteProvider) error {
@@ -2647,6 +3007,11 @@ func executeWorkshopDocumentFetch(ctx context.Context, store novelfetchworkshop.
 	if err != nil {
 		return err
 	}
+	rawText, rawErr := novelfetchworkshop.ReadBodyText(ctx, store, owner, document, "original_raw")
+	if rawErr != nil {
+		return rawErr
+	}
+	document.OriginalRaw = rawText
 	if maxTxt <= 0 {
 		maxTxt = document.MaxTxt
 	}
@@ -2666,7 +3031,7 @@ func executeWorkshopDocumentFetch(ctx context.Context, store novelfetchworkshop.
 		_ = appendWorkshopTaskLog(ctx, store, owner, bookID, "fetch_started", "开始获取原文")
 		// 平台 ID 可能只以名称形式存在（历史导入/批量工厂），这里按平台目录
 		// 自动换算，避免把任务发到默认书城后拿到错误的 400。
-		fetchSettings, _ := store.GetConfig(ctx, owner)
+		fetchSettings, _ := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 		platformID := novelFetchResolvedPlatformID(fetchSettings, document.Meta)
 		result, err = fetchNovelWithSettings(ctx, store, owner, fetcher, bookID, platformID, maxTxt)
 		if err != nil {
@@ -2690,8 +3055,8 @@ func executeWorkshopDocumentFetch(ctx context.Context, store novelfetchworkshop.
 		_ = appendWorkshopTaskLog(ctx, store, owner, bookID, "sensitive_processing_failed", err.Error())
 		// 与源码一致：敏感词处理失败单独记在 sensitive 阶段，
 		// 不和原文抓取失败共用同一段退避时间。
-		_ = scheduleNovelFetchDocumentRetry(ctx, store, owner, bookID, novelFetchRetryStageSensitive, err, time.Now().UTC())
-		return &novelFetchSensitiveStageError{err: err}
+		saveErr := scheduleNovelFetchDocumentRetry(ctx, store, owner, bookID, novelFetchRetryStageSensitive, err, time.Now().UTC())
+		return &novelFetchSensitiveStageError{err: err, persisted: saveErr == nil}
 	}
 	_ = appendWorkshopTaskLog(ctx, store, owner, bookID, "rules_processing_completed", "正文规则处理完成")
 	sensitiveCount := len(sensitiveItems)
@@ -2705,6 +3070,7 @@ func executeWorkshopDocumentFetch(ctx context.Context, store novelfetchworkshop.
 	document.Meta["originalRawChars"] = result.OriginalRawChars
 	document.Meta["processedChars"] = document.ProcessedChars
 	document.Meta["sensitiveStatus"] = "done"
+	clearNovelFetchTaskRetry(document.Meta, novelFetchRetryStageSensitive)
 	document.Meta["sensitiveReplaced"] = sensitiveCount
 	document.Meta["rulesTrace"] = rulesTrace
 	document.Meta["rulesTraceByVersion"] = map[string]any{"original": rulesTrace}
@@ -2715,26 +3081,12 @@ func executeWorkshopDocumentFetch(ctx context.Context, store novelfetchworkshop.
 	_ = appendWorkshopTaskLog(ctx, store, owner, bookID, "sensitive_processing_completed", "敏感词处理结果已保存")
 	needsGender := genderNeedsResolution(document.Gender)
 	needsStyle := styleNeedsResolution(document.Meta)
-	var classification novelfetchworkshop.ClassificationResult
 	if needsGender || needsStyle {
 		_ = appendWorkshopTaskLog(ctx, store, owner, bookID, "classification_started", "开始判断男女频和题材风格")
-		classificationInfo := result.BookInfo
-		classificationInfo.Text = processedText
-		classification = novelfetchworkshop.ClassifyBook(ctx, "", classificationInfo, genderJudge, styleProvider)
 	}
-	if needsGender {
-		decision := classification.Gender
-		document.Gender, document.GenderSource, document.GenderReason = decision.Gender, decision.Source, decision.Reason
-		document.GenderConfidence = decision.Confidence
-	}
-	if needsStyle {
-		document.Meta["styleStatus"] = "processing"
-		recordNovelFetchStyleDecision(document.Meta, classification.Style, nil)
-	}
-	if latest, latestErr := store.GetDocument(ctx, owner, bookID); latestErr == nil {
-		document.Logs = append([]any(nil), latest.Logs...)
-	}
-	if err := store.PutDocument(ctx, owner, document); err != nil {
+	classificationInfo := result.BookInfo
+	classificationInfo.Text = processedText
+	if err := runWorkshopClassification(ctx, store, owner, &document, classificationInfo, genderJudge, styleProvider, true); err != nil {
 		return err
 	}
 	if needsGender || needsStyle {
@@ -2742,6 +3094,7 @@ func executeWorkshopDocumentFetch(ctx context.Context, store novelfetchworkshop.
 	} else {
 		_ = appendWorkshopTaskLog(ctx, store, owner, bookID, "classification_skipped", "已有分类信息，跳过判断")
 	}
+	_ = clearNovelFetchOriginalFetchRetry(ctx, store, owner, bookID)
 	return nil
 }
 
@@ -2786,7 +3139,11 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			return aiJudge
 		}
 		resolved, err := aiJudgeResolver(ctx, owner)
-		if err == nil && resolved != nil {
+		if err != nil {
+			// Preserve configuration failures without falling back to a different model.
+			return func(context.Context, novelfetchworkshop.BookInfo) (string, error) { return "", err }
+		}
+		if resolved != nil {
 			return resolved
 		}
 		return aiJudge
@@ -2816,7 +3173,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		worker := &workshopProcessWorker{store: store, queue: queue, registry: registry, fetcher: fetcher, resolveGenderJudge: resolveGenderJudgeFor, resolveRewriteProvider: resolveRewriteProviderFor}
 		worker.autoSubmit = func(ctx context.Context, job novelfetchworkshop.ProcessJob) error {
 			store := workshopStoreForProcess(ctx, store)
-			settings, err := store.GetConfig(ctx, job.Owner)
+			settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, job.Owner)
 			if err != nil {
 				return err
 			}
@@ -2887,7 +3244,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			now := time.Now().UTC().Format(time.RFC3339Nano)
 			registry.put(identity.Username, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": "queued", "queue_state": "queued", "started_at": now, "updated_at": now, "steps": []any{}, "progress": []any{}})
 		}
-		status, err := novelFetchAutomationStatus(req.Context(), store, registry, identity.Username)
+		status, err := novelFetchAutomationStatus(req.Context(), store, registry, identity.Username, queue)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取全自动状态失败"})
 			return
@@ -2900,7 +3257,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存全自动状态失败"})
 			return
 		}
-		status, err := novelFetchAutomationStatus(req.Context(), store, registry, identity.Username)
+		status, err := novelFetchAutomationStatus(req.Context(), store, registry, identity.Username, queue)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取全自动状态失败"})
 			return
@@ -3137,7 +3494,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusOK, jobView)
 			return
 		}
-		processJob := novelfetchworkshop.ProcessJob{ID: id, Owner: identity.Username, BatchID: batchID, BookIDs: bookIDs, PlatformID: input.PlatformID, MaxTxt: input.MaxTxt, SensitiveAIEnabled: input.SensitiveAIEnabled, AutoSubmit: true, SelectedVersions: input.SelectedVersions, RewriteMethods: input.RewriteMethods, TextModelID: textModelID}
+		processJob := novelfetchworkshop.ProcessJob{ID: id, Owner: identity.Username, BatchID: batchID, BookIDs: bookIDs, PlatformID: input.PlatformID, MaxTxt: input.MaxTxt, SensitiveAIEnabled: input.SensitiveAIEnabled, AutoSubmit: input.SelectedVersions == nil || len(input.SelectedVersions) > 0, SelectedVersions: input.SelectedVersions, RewriteMethods: input.RewriteMethods, TextModelID: textModelID}
 		bookIDs = nil
 		for _, bookID := range processJob.BookIDs {
 			snapshot := processJob
@@ -3323,7 +3680,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			}
 		}
 		for i, job := range jobs {
-			jobs[i] = manualWorkshopJobView(req.Context(), store, identity.Username, job)
+			jobs[i] = verifiedWorkshopJobView(req.Context(), store, queue, identity.Username, job)
 		}
 		latest := map[string]any{}
 		if len(jobs) > 0 {
@@ -3349,7 +3706,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 				return
 			}
 		}
-		writeJSON(w, http.StatusOK, manualWorkshopJobView(req.Context(), store, identity.Username, job))
+		writeJSON(w, http.StatusOK, verifiedWorkshopJobView(req.Context(), store, queue, identity.Username, job))
 	})
 
 	mux.HandleFunc("GET /api/novel-fetch-workshop/runs", func(w http.ResponseWriter, req *http.Request) {
@@ -3397,7 +3754,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			BatchID: strings.TrimSpace(query.Get("batch_id")),
 			Date:    strings.TrimSpace(query.Get("date")),
 		}
-		status, err := novelFetchAutomationStatusScoped(req.Context(), store, registry, identity.Username, scope)
+		status, err := novelFetchAutomationStatusScoped(req.Context(), store, registry, identity.Username, scope, queue)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取任务队列失败"})
 			return
@@ -3572,6 +3929,9 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			}
 		}
 		syncNovelFetchClassificationMetadata(&document)
+		if novelFetchClassificationResolved(document) {
+			clearNovelFetchTaskRetry(document.Meta, novelFetchRetryStageClassify)
+		}
 		writeJSON(w, http.StatusOK, novelFetchTaskDetailPayload(document))
 	})
 
@@ -3645,6 +4005,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		document.Meta["originalRawChars"] = result.OriginalRawChars
 		document.Meta["processedChars"] = document.ProcessedChars
 		document.Meta["sensitiveStatus"] = "done"
+		clearNovelFetchTaskRetry(document.Meta, novelFetchRetryStageSensitive)
 		document.Meta["sensitiveReplaced"] = sensitiveCount
 		document.Meta["rulesTrace"] = rulesTrace
 		document.Meta["rulesTraceByVersion"] = map[string]any{"original": rulesTrace}
@@ -3673,6 +4034,9 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			}
 		}
 		syncNovelFetchClassificationMetadata(&document)
+		if novelFetchClassificationResolved(document) {
+			clearNovelFetchTaskRetry(document.Meta, novelFetchRetryStageClassify)
+		}
 		if err := store.PutDocument(req.Context(), identity.Username, document); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存原文失败"})
 			return
@@ -3727,7 +4091,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 	})
 
 	mux.HandleFunc("POST /api/novel-fetch-workshop/tasks/{bookId}/generate-ai", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
+
 		bookID := strings.TrimSpace(req.PathValue("bookId"))
 		if !novelFetchBookIDPattern.MatchString(bookID) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "非法的书籍ID"})
@@ -3744,40 +4108,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "AI 数量须为 1 到 20"})
 			return
 		}
-		if activeNovelFetchJobForBooks(req.Context(), store, identity.Username, []string{bookID}) != nil {
-			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "该书已有任务在运行，请完成后再生成；已保存的数量会在下次生成时生效"})
-			return
-		}
-		existing, err := store.GetDocument(req.Context(), identity.Username, bookID)
-		if err != nil {
-			writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "任务不存在或无法读取"})
-			return
-		}
-		cfg, err := store.GetConfig(req.Context(), identity.Username)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取 AI 数量配置失败"})
-			return
-		}
-		versions := workshopMissingAIVersions(existing, workshopAIRequestedCount(existing, cfg, input.Count))
-		if len(versions) == 0 {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "task": existing, "message": "所需 AI 版本已齐，无需重复生成"})
-			return
-		}
-		provider, providerErr := resolveRewriteProvider(req)
-		if providerErr != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": providerErr.Error()})
-			return
-		}
-		document, err := novelfetchworkshop.GenerateAIRewritesForVersionsProcessed(req.Context(), store, identity.Username, bookID, versions, provider, workshopRewriteProcessor(store, identity.Username, bookID, false, provider))
-		if err != nil {
-			status := http.StatusBadRequest
-			if rewriteProvider == nil || strings.Contains(err.Error(), "模型未配置") {
-				status = http.StatusServiceUnavailable
-			}
-			writeJSON(w, status, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "task": document})
+		queueWorkshopGenerate(w, req, store, queue, input.Count)
 	})
 
 	mux.HandleFunc("POST /api/novel-fetch-workshop/ai/test", func(w http.ResponseWriter, req *http.Request) {
@@ -3886,7 +4217,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			return
 		}
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取预览规则失败"})
 			return
@@ -3932,14 +4263,14 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 
 	mux.HandleFunc("POST /api/novel-fetch-workshop/knowledge/repair-imported-sensitive", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, 500, map[string]any{"error": "读取规则失败"})
 			return
 		}
 		count, err := novelfetchworkshop.RepairImportedSensitive(settings)
 		if err == nil && count > 0 {
-			err = store.PutConfig(req.Context(), identity.Username, settings)
+			err = novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, settings)
 		}
 		if err != nil {
 			writeJSON(w, 409, map[string]any{"error": err.Error()})
@@ -3957,7 +4288,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			return
 		}
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, 500, map[string]any{"error": "读取资料失败"})
 			return
@@ -3968,7 +4299,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		}
 		report := novelfetchworkshop.RepairImportedKnowledge(settings, body.Apply)
 		if body.Apply && report.Repaired > 0 {
-			if err = store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+			if err = novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, settings); err != nil {
 				writeJSON(w, 409, map[string]any{"error": "保存修复失败，请重新检查：" + err.Error()})
 				return
 			}
@@ -3977,7 +4308,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 	})
 	mux.HandleFunc("GET /api/novel-fetch-workshop/knowledge/summary", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取知识库失败"})
 			return
@@ -3987,7 +4318,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 
 	mux.HandleFunc("GET /api/novel-fetch-workshop/knowledge/{kind}", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取知识库失败"})
 			return
@@ -4011,7 +4342,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		if item == nil {
 			item = input
 		}
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取知识库失败"})
 			return
@@ -4024,7 +4355,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+		if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, settings); err != nil {
 			writeWorkshopConfigSaveError(w, err, "保存知识库失败")
 			return
 		}
@@ -4033,7 +4364,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 
 	mux.HandleFunc("DELETE /api/novel-fetch-workshop/knowledge/{kind}/{id}", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取知识库失败"})
 			return
@@ -4046,7 +4377,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+		if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, settings); err != nil {
 			writeWorkshopConfigSaveError(w, err, "保存知识库失败")
 			return
 		}
@@ -4067,7 +4398,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": providerErr.Error()})
 			return
 		}
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取知识库失败"})
 			return
@@ -4084,7 +4415,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, status, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+		if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, settings); err != nil {
 			writeWorkshopConfigSaveError(w, err, "保存知识库失败")
 			return
 		}
@@ -4136,7 +4467,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		if item == nil {
 			item = input
 		}
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取开头词库失败"})
 			return
@@ -4146,7 +4477,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+		if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, settings); err != nil {
 			writeWorkshopConfigSaveError(w, err, "保存开头词库失败")
 			return
 		}
@@ -4155,7 +4486,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 
 	mux.HandleFunc("POST /api/novel-fetch-workshop/opening/normalize", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取开头词库失败"})
 			return
@@ -4181,7 +4512,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		libraries["opening_phrases"] = library
 		settings["knowledgeLibraries"] = libraries
 		novelfetchworkshop.SyncKnowledgeConfigViews(settings, map[string]any{"knowledgeLibraries": map[string]any{"opening_phrases": library}})
-		if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+		if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, settings); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "保存规范化开头词失败"})
 			return
 		}
@@ -4252,6 +4583,9 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			}
 		}
 		syncNovelFetchClassificationMetadata(&document)
+		if novelFetchClassificationResolved(document) {
+			clearNovelFetchTaskRetry(document.Meta, novelFetchRetryStageClassify)
+		}
 		if err := store.PutDocument(req.Context(), identity.Username, document); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存任务失败"})
 			return
@@ -4310,7 +4644,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 
 	mux.HandleFunc("GET /api/novel-fetch-workshop/platforms", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取平台表失败"})
 			return
@@ -4334,7 +4668,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 
 	mux.HandleFunc("GET /api/novel-fetch-workshop/config", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadRuntimeConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取设置失败"})
 			return
@@ -4346,19 +4680,14 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		if nested, ok := settings["settings"].(map[string]any); ok {
 			publicSource = nested
 		}
-		publicSource = novelfetchworkshop.EnsureWorkshopDefaults(publicSource)
-		// 普通成员只读所属管理员的模型目录：成员自己保存的旧副本不再展示，
-		// 避免“页面看到旧 Key、预检按管理员目录判断”的配置漂移。
-		if canManage, _ := configManagementState(identity, profiles, accounts); !canManage {
-			if owner := effectiveModelCatalogOwner(identity, profiles, accounts); owner != "" {
-				if managed, err := store.GetConfig(req.Context(), owner); err == nil {
-					if catalog, ok := managed["modelCatalog"].([]any); ok && len(catalog) > 0 {
-						publicSource["modelCatalog"] = catalog
-					}
-				}
-			}
+		publicSource = novelfetchworkshop.EnsureWorkshopDefaults(cloneAnyMap(publicSource))
+		if _, guarded := req.Context().Value(apiConfigCompatKey{}).(BridgeAuth); guarded {
+			publicSource["modelCatalog"] = formalCompatibilityCatalog(req, store, identity.Username, settings)
 		}
 		appConfig := novelFetchAppConfig(publicSource)
+		if catalog, exists := publicSource["modelCatalog"]; exists {
+			appConfig["modelCatalog"] = catalog
+		}
 		platforms := novelFetchPlatformCatalog(publicSource)
 		publicSource["platforms"] = platforms
 		styles, ok := publicSource["styles"].([]any)
@@ -4373,9 +4702,6 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 				aiConfig = map[string]any{}
 			}
 		}
-		publicAppConfig := publicNovelFetchConfig(appConfig)
-		publicAIConfig := publicNovelFetchConfig(aiConfig)
-		publicSettings := publicNovelFetchConfig(publicSource)
 		// The legacy embedded workbench reads the catalog and its counters from
 		// the top-level response.  Keep that view in the same response as the
 		// canonical appConfig so both pages consume one Go-owned configuration
@@ -4386,26 +4712,20 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		}
 		knowledge = publicNovelFetchConfig(knowledge)
 		knowledgeSummary := batchKnowledgeSummary(knowledge, false)
-		writeJSON(w, http.StatusOK, map[string]any{
-			"appConfig":         publicAppConfig,
+		writeJSON(w, http.StatusOK, publicCompatibilityConfig(req, map[string]any{
+			"appConfig":         appConfig,
 			"platforms":         platforms,
 			"styles":            styles,
-			"aiConfig":          publicAIConfig,
-			"settings":          publicSettings,
+			"aiConfig":          aiConfig,
+			"settings":          publicSource,
 			"knowledge":         knowledge,
 			"knowledge_loaded":  true,
 			"knowledge_summary": knowledgeSummary,
-		})
+		}))
 	})
 
 	saveWorkshopConfig := func(w http.ResponseWriter, req *http.Request) {
-		stripCatalog := false
-		if identity, ok := BridgeIdentityFromContext(req.Context()); ok {
-			if canManage, _ := configManagementState(identity, profiles, accounts); !canManage {
-				stripCatalog = true
-			}
-		}
-		saveNovelFetchConfig(w, req, store, stripCatalog, func(merged map[string]any) map[string]any {
+		saveNovelFetchConfig(w, req, store, func(merged map[string]any) map[string]any {
 			return map[string]any{"ok": true, "settings": merged}
 		})
 	}
@@ -4430,7 +4750,7 @@ func novelFetchSubmitChunks(bookIDs []string, batchSize int) [][]string {
 	return chunks
 }
 
-func saveNovelFetchConfig(w http.ResponseWriter, req *http.Request, store novelfetchworkshop.Store, stripModelCatalog bool, response func(map[string]any) map[string]any) {
+func saveNovelFetchConfig(w http.ResponseWriter, req *http.Request, store novelfetchworkshop.Store, response func(map[string]any) map[string]any) {
 	identity, ok := BridgeIdentityFromContext(req.Context())
 	if !ok || identity.Username == "" {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
@@ -4439,6 +4759,22 @@ func saveNovelFetchConfig(w http.ResponseWriter, req *http.Request, store novelf
 	var patch map[string]any
 	if err := decodeNovelFetchJSON(w, req, &patch); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求内容无效"})
+		return
+	}
+	echoed, allowed := prepareCompatibilitySettingsPatch(req, patch, nil)
+	if !allowed {
+		writeAccountCenterForbidden(w)
+		return
+	}
+	if echoed {
+		current, err := compatibilityConfigForEcho(req, store, identity.Username)
+		if _, valid := prepareCompatibilitySettingsPatch(req, patch, current); err != nil || !valid {
+			writeAccountCenterForbidden(w)
+			return
+		}
+	}
+	if patch == nil {
+		writeAuthError(w, http.StatusBadRequest, "设置内容无效")
 		return
 	}
 	settings, _ := patch["settings"].(map[string]any)
@@ -4460,12 +4796,7 @@ func saveNovelFetchConfig(w http.ResponseWriter, req *http.Request, store novelf
 		}
 	}
 	settings["appConfig"] = appPatch
-	// 普通成员不能覆盖模型目录：目录统一由所属管理员维护，成员侧只读。
-	if stripModelCatalog {
-		delete(settings, "modelCatalog")
-		delete(settings, "modelCatalogVersion")
-	}
-	current, err := store.GetConfig(req.Context(), identity.Username)
+	current, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取设置失败"})
 		return
@@ -4495,7 +4826,7 @@ func saveNovelFetchConfig(w http.ResponseWriter, req *http.Request, store novelf
 	// a restart and are visible from either workbench.
 	novelfetchworkshop.SyncKnowledgeConfigViews(merged, settings)
 	novelfetchworkshop.EnsureSensitiveRuleReplacements(merged)
-	if err := store.PutConfig(req.Context(), identity.Username, merged); err != nil {
+	if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, merged); err != nil {
 		if errors.Is(err, novelfetchworkshop.ErrConfigConflict) {
 			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "code": "CONFIG_CONFLICT"})
 			return
@@ -4503,7 +4834,13 @@ func saveNovelFetchConfig(w http.ResponseWriter, req *http.Request, store novelf
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存设置失败"})
 		return
 	}
-	writeJSON(w, http.StatusOK, response(merged))
+	if _, guarded := req.Context().Value(apiConfigCompatKey{}).(BridgeAuth); guarded {
+		merged["modelCatalog"] = formalCompatibilityCatalog(req, store, identity.Username, merged)
+		if app, ok := merged["appConfig"].(map[string]any); ok {
+			app["modelCatalog"] = merged["modelCatalog"]
+		}
+	}
+	writeJSON(w, http.StatusOK, publicCompatibilityConfig(req, response(merged)))
 }
 
 func genderNeedsResolution(value string) bool {
@@ -4520,7 +4857,7 @@ func novelFetchClassificationResolved(document novelfetchworkshop.Document) bool
 }
 
 // canonicalNovelFetchAIVersion maps aliases such as ai01/ai001 to the
-// canonical ai1..ai5 identifier. Anything outside that range is rejected so a
+// canonical ai1..ai20 identifier. Anything outside that range is rejected so a
 // single job cannot request an unbounded number of AI rewrites per book.
 func canonicalNovelFetchAIVersion(value string) (string, bool) {
 	name := strings.ToLower(strings.TrimSpace(value))
@@ -4528,7 +4865,7 @@ func canonicalNovelFetchAIVersion(value string) (string, bool) {
 		return "", false
 	}
 	index, err := strconv.Atoi(strings.TrimPrefix(name, "ai"))
-	if err != nil || index < 1 || index > 5 {
+	if err != nil || index < 1 || index > 20 {
 		return "", false
 	}
 	return "ai" + strconv.Itoa(index), true
@@ -4537,6 +4874,9 @@ func canonicalNovelFetchAIVersion(value string) (string, bool) {
 // normalizeNovelFetchAIVersions validates user supplied versions and collapses
 // zero-padded aliases (ai01, ai001, ...) to the same canonical version.
 func normalizeNovelFetchAIVersions(values []string) ([]string, error) {
+	if values == nil {
+		return nil, nil
+	}
 	normalized := make([]string, 0, len(values))
 	seen := map[string]bool{}
 	for _, raw := range values {
@@ -4553,7 +4893,7 @@ func normalizeNovelFetchAIVersions(values []string) ([]string, error) {
 		}
 		canonical, ok := canonicalNovelFetchAIVersion(value)
 		if !ok {
-			return nil, fmt.Errorf("不支持的AI版本：%s（仅支持 ai1 到 ai5）", value)
+			return nil, fmt.Errorf("不支持的AI版本：%s（仅支持 ai1 到 ai20）", value)
 		}
 		if seen[canonical] {
 			continue
@@ -4614,7 +4954,25 @@ func syncNovelFetchClassificationMetadata(document *novelfetchworkshop.Document)
 	if document.Meta == nil {
 		document.Meta = map[string]any{}
 	}
+	if genderNeedsResolution(document.Gender) && strings.TrimSpace(document.GenderReason) != "" {
+		// The detail view reads these metadata fields even while gender is pending.
+		// Keep the failed diagnosis without replacing a saved gender/style label.
+		priorError := firstText(document.Meta["genderError"])
+		if currentError := firstText(document.Meta["classifyError"]); currentError == "" ||
+			(priorError != "" && currentError == priorError && firstText(document.Meta["genderReason"]) == priorError) {
+			document.Meta["classifyError"] = document.GenderReason
+		}
+		document.Meta["genderReason"] = document.GenderReason
+		document.Meta["genderError"] = document.GenderReason
+	}
 	if strings.TrimSpace(document.Gender) != "" && !genderNeedsResolution(document.Gender) {
+		// Clear only the error this helper previously recorded for unresolved gender.
+		// A newer style/other classification error must survive gender resolution.
+		if genderError := firstText(document.Meta["genderError"]); genderError != "" &&
+			firstText(document.Meta["classifyError"]) == genderError && firstText(document.Meta["genderReason"]) == genderError {
+			delete(document.Meta, "classifyError")
+		}
+		delete(document.Meta, "genderError")
 		if document.GenderConfidence <= 0 && (document.GenderSource == novelfetchworkshop.GenderManual || document.GenderSource == novelfetchworkshop.GenderBookInfo) {
 			document.GenderConfidence = 1
 		}
@@ -4697,7 +5055,7 @@ func applyNovelFetchSensitiveRulesDetailed(ctx context.Context, store novelfetch
 	if store == nil {
 		return text, 0, []map[string]any{}, nil
 	}
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return text, 0, []map[string]any{}, err
 	}
@@ -5391,4 +5749,11 @@ func decodeNovelFetchJSON(w http.ResponseWriter, req *http.Request, target any) 
 	req.Body = http.MaxBytesReader(w, req.Body, 64<<20)
 	decoder := json.NewDecoder(req.Body)
 	return decoder.Decode(target)
+}
+
+func (s manualImportStore) GetWorkflowConfig(ctx context.Context, owner string) (map[string]any, error) {
+	return novelfetchworkshop.ReadWorkflowConfig(ctx, s.Store, owner)
+}
+func (s manualImportStore) PutWorkflowConfig(ctx context.Context, owner string, cfg map[string]any) error {
+	return novelfetchworkshop.WriteWorkflowConfig(ctx, s.Store, owner, cfg)
 }

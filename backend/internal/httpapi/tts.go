@@ -19,11 +19,12 @@ import (
 )
 
 type ttsRequest struct {
-	Input string  `json:"input"`
-	Voice string  `json:"voice,omitempty"`
-	Speed float64 `json:"speed,omitempty"`
-	Pitch any     `json:"pitch,omitempty"`
-	Style string  `json:"style,omitempty"`
+	Input   string  `json:"input"`
+	ModelID string  `json:"modelId,omitempty"`
+	Voice   string  `json:"voice,omitempty"`
+	Speed   float64 `json:"speed,omitempty"`
+	Pitch   any     `json:"pitch,omitempty"`
+	Style   string  `json:"style,omitempty"`
 }
 
 // defaultTTSEndpoint is kept as a variable so the shared fallback path can be
@@ -33,6 +34,41 @@ var defaultTTSEndpoint = shuihuoDefaultTTSServiceURL
 var ttsHTTPProxyURL string
 
 const builtInTTSModelID = "builtin-default-tts"
+
+type ttsResolutionState string
+
+const (
+	ttsBuiltin      ttsResolutionState = "builtin"
+	ttsCustom       ttsResolutionState = "custom"
+	ttsNeedsReentry ttsResolutionState = "needs_reentry"
+	ttsUnavailable  ttsResolutionState = "unavailable"
+)
+
+type ttsResolution struct {
+	state ttsResolutionState
+	model map[string]any
+}
+
+func (r ttsResolution) err() error {
+	switch r.state {
+	case ttsNeedsReentry:
+		return errors.New("所选音频模型不可用，请在 API 配置中核对模型并重新填写 Key")
+	case ttsUnavailable:
+		return errors.New("音频模型配置暂不可用")
+	}
+	return nil
+}
+
+func requestTTSBytes(ctx context.Context, owner string, input ttsRequest, catalog novelfetchworkshop.Store) ([]byte, string, error) {
+	resolved := resolveTTS(ctx, catalog, owner, input.ModelID)
+	if err := resolved.err(); err != nil {
+		return nil, "", err
+	}
+	if resolved.state == ttsCustom {
+		return requestConfiguredTTSBytes(ctx, input, resolved.model)
+	}
+	return requestDefaultTTSBytes(ctx, input)
+}
 
 func configuredTTSProxyURL() string {
 	if strings.TrimSpace(ttsHTTPProxyURL) != "" {
@@ -96,11 +132,19 @@ func registerTTSRoute(root *http.ServeMux, auth BridgeAuth, catalogStore novelfe
 		if input.Style == "" {
 			input.Style = "general"
 		}
-		if identity, ok := BridgeIdentityFromContext(r.Context()); ok && catalogStore != nil {
-			if model, found := configuredTTSModel(r.Context(), catalogStore, identity.Username); found {
-				serveConfiguredTTS(w, r, input, model)
-				return
-			}
+		identity, ok := BridgeIdentityFromContext(r.Context())
+		if !ok || catalogStore == nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "音频模型配置暂不可用")
+			return
+		}
+		resolved := resolveTTS(r.Context(), catalogStore, identity.Username, input.ModelID)
+		if err := resolved.err(); err != nil {
+			writeAuthError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		if resolved.state == ttsCustom {
+			serveConfiguredTTS(w, r, input, resolved.model)
+			return
 		}
 		body, contentType, err := requestDefaultTTSBytes(r.Context(), input)
 		if err != nil {
@@ -155,24 +199,46 @@ func requestDefaultTTSBytes(ctx context.Context, input ttsRequest) ([]byte, stri
 	return body, contentType, nil
 }
 
-func configuredTTSModel(ctx context.Context, store novelfetchworkshop.Store, owner string) (map[string]any, bool) {
+func resolveTTS(ctx context.Context, store novelfetchworkshop.Store, owner, selection string) ttsResolution {
+	if store == nil || strings.TrimSpace(owner) == "" {
+		return ttsResolution{state: ttsUnavailable}
+	}
 	config, err := store.GetConfig(ctx, owner)
 	if err != nil {
-		return nil, false
+		return ttsResolution{state: ttsUnavailable}
+	}
+	return resolveTTSConfig(config, selection)
+}
+
+func resolveTTSConfig(config map[string]any, selection string) ttsResolution {
+	if config == nil {
+		return ttsResolution{state: ttsUnavailable}
+	}
+	selection = firstText(selection, config["ttsModelId"])
+	if selection == builtInTTSModelID {
+		return ttsResolution{state: ttsBuiltin}
 	}
 	for _, model := range modelCatalog(config) {
-		if !strings.EqualFold(modelString(model, "kind"), "audio") || model["enabled"] != true {
+		if !strings.EqualFold(modelString(model, "kind"), "audio") {
 			continue
 		}
-		if modelString(model, "endpoint") == "" && modelString(model, "baseUrl") == "" {
+		if selection != "" && modelString(model, "id") != selection {
 			continue
 		}
-		if shuihuoModelCredential(model) == "" || modelString(model, "requestTemplate") == "" {
+		enabled, set := model["enabled"]
+		if selection == "" && set && !normalizedModelEnabled(enabled) {
 			continue
 		}
-		return model, true
+		if set && !normalizedModelEnabled(enabled) || model["credentialStatus"] == string(ttsNeedsReentry) ||
+			novelfetchworkshop.ModelCredentialDestination(model).Endpoint == "" || shuihuoModelCredential(model) == "" || modelString(model, "requestTemplate") == "" {
+			return ttsResolution{state: ttsNeedsReentry}
+		}
+		return ttsResolution{state: ttsCustom, model: model}
 	}
-	return nil, false
+	if selection != "" {
+		return ttsResolution{state: ttsNeedsReentry}
+	}
+	return ttsResolution{state: ttsBuiltin}
 }
 
 func serveConfiguredTTS(w http.ResponseWriter, r *http.Request, input ttsRequest, model map[string]any) {
@@ -190,10 +256,7 @@ func serveConfiguredTTS(w http.ResponseWriter, r *http.Request, input ttsRequest
 }
 
 func requestConfiguredTTSBytes(ctx context.Context, input ttsRequest, model map[string]any) ([]byte, string, error) {
-	endpoint := modelString(model, "endpoint")
-	if endpoint == "" {
-		endpoint = modelString(model, "baseUrl")
-	}
+	endpoint := novelfetchworkshop.ModelCredentialDestination(model).Endpoint
 	method, headers, body, err := configuredTTSRequest(modelString(model, "requestTemplate"), input, shuihuoModelCredential(model))
 	if err != nil {
 		return nil, "", fmt.Errorf("请求模板无效: %w", err)

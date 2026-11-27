@@ -43,16 +43,12 @@ func TestMySQLStoreExpiredCleanupSelectsOnlyExpiredReleasableBodies(t *testing.T
 	now := time.Date(2026, 9, 9, 10, 0, 0, 0, time.UTC)
 	released := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
 
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT book_id, version_id, content_encoding, content_blob, releasable_at FROM novel_fetch_workshop_bodies WHERE owner_username=? AND state='releasable' AND releasable_at IS NOT NULL AND expires_at IS NOT NULL AND expires_at<=? ORDER BY releasable_at ASC, book_id ASC, version_id ASC LIMIT ?`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT owner_username, book_id, version_id, revision, content_encoding, content_blob, releasable_at FROM novel_fetch_workshop_bodies WHERE owner_username=? AND state='releasable' AND releasable_at IS NOT NULL AND expires_at IS NOT NULL AND expires_at<=? ORDER BY releasable_at ASC, owner_username ASC, book_id ASC, version_id ASC LIMIT ?`)).
 		WithArgs("alice", now, 10).
-		WillReturnRows(sqlmock.NewRows([]string{"book_id", "version_id", "content_encoding", "content_blob", "releasable_at"}).AddRow("123", "ai3", "inline", nil, released))
+		WillReturnRows(sqlmock.NewRows([]string{"owner_username", "book_id", "version_id", "revision", "content_encoding", "content_blob", "releasable_at"}).AddRow("alice", "123", "ai3", 1, "inline", []byte(""), released))
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM novel_fetch_workshop_bodies WHERE owner_username=? AND book_id=? AND version_id=? AND state='releasable' AND releasable_at=?`)).
-		WithArgs("alice", "123", "ai3", released).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(regexp.QuoteMeta(`UPDATE novel_fetch_workshop_documents SET document_json=JSON_REMOVE(document_json, ?), updated_at=CURRENT_TIMESTAMP(6) WHERE owner_username=? AND book_id=?`)).
-		WithArgs(`$.bodyRefs."ai3"`, "alice", "123").
-		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectLockedBody(mock, "alice", "123", "ai3", 1, "inline", []byte(""), "releasable", released, now)
+	expectBodyRemoval(mock, "alice", "123", "ai3", 1, "inline", []byte(""))
 	mock.ExpectCommit()
 
 	result, err := store.CleanupBodies(ctx, "alice", BodyCleanupRequest{Now: now, Reason: BodyCleanupReasonExpired, Limit: 10})
@@ -73,16 +69,12 @@ func TestMySQLStoreCapacityCleanupUsesOldestReleasableBodiesOnly(t *testing.T) {
 	now := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
 	oldest := time.Date(2026, 9, 2, 8, 0, 0, 0, time.UTC)
 
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT book_id, version_id, content_encoding, content_blob, releasable_at FROM novel_fetch_workshop_bodies WHERE owner_username=? AND state='releasable' AND releasable_at IS NOT NULL ORDER BY releasable_at ASC, book_id ASC, version_id ASC LIMIT ?`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT owner_username, book_id, version_id, revision, content_encoding, content_blob, releasable_at FROM novel_fetch_workshop_bodies WHERE owner_username=? AND state='releasable' AND releasable_at IS NOT NULL ORDER BY releasable_at ASC, owner_username ASC, book_id ASC, version_id ASC LIMIT ?`)).
 		WithArgs("alice", 1).
-		WillReturnRows(sqlmock.NewRows([]string{"book_id", "version_id", "content_encoding", "content_blob", "releasable_at"}).AddRow("456", "ai1", "inline", nil, oldest))
+		WillReturnRows(sqlmock.NewRows([]string{"owner_username", "book_id", "version_id", "revision", "content_encoding", "content_blob", "releasable_at"}).AddRow("alice", "456", "ai1", 1, "inline", []byte(""), oldest))
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM novel_fetch_workshop_bodies WHERE owner_username=? AND book_id=? AND version_id=? AND state='releasable' AND releasable_at=?`)).
-		WithArgs("alice", "456", "ai1", oldest).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(regexp.QuoteMeta(`UPDATE novel_fetch_workshop_documents SET document_json=JSON_REMOVE(document_json, ?), updated_at=CURRENT_TIMESTAMP(6) WHERE owner_username=? AND book_id=?`)).
-		WithArgs(`$.bodyRefs."ai1"`, "alice", "456").
-		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectLockedBody(mock, "alice", "456", "ai1", 1, "inline", []byte(""), "releasable", oldest, nil)
+	expectBodyRemoval(mock, "alice", "456", "ai1", 1, "inline", []byte(""))
 	mock.ExpectCommit()
 
 	result, err := store.CleanupBodies(ctx, "alice", BodyCleanupRequest{Now: now, Reason: BodyCleanupReasonCapacity, Limit: 1})

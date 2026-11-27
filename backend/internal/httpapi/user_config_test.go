@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/auth"
 	"qiantie/backend/internal/novelfetchworkshop"
 )
@@ -24,7 +25,8 @@ func TestUserConfigReportsModelManagementForOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	registerUserConfigRoutes(mux, BridgeAuth{Secret: "test-secret", Now: func() time.Time { return now }, AuthStore: store}, NewUserConfigStore(t.TempDir()), store, catalogStore)
+	center := &impersonationTestStore{identities: map[string]accountcenter.Identity{"tester": {Username: "tester", Active: true, Role: accountcenter.RoleFounder}}}
+	registerUserConfigRoutes(mux, BridgeAuth{Secret: "test-secret", Now: func() time.Time { return now }, AuthStore: store, AccountCenterStore: center}, NewUserConfigStore(t.TempDir()), store, catalogStore)
 	handler := mux
 	request := httptest.NewRequest(http.MethodGet, "/api/config", nil)
 	SignBridgeRequest(request, "tester", true, now, "test-secret")
@@ -60,7 +62,7 @@ func TestUserConfigReportsModelManagementForOwner(t *testing.T) {
 	}
 }
 
-func TestMemberUserConfigUsesBoundManagerModelCatalog(t *testing.T) {
+func TestMemberUserConfigKeepsPreferencesWithoutManagerConfiguration(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	accounts := &applicationTestStore{accounts: map[string]auth.Account{
 		"manager": {Username: "manager", Active: true},
@@ -92,12 +94,8 @@ func TestMemberUserConfigUsesBoundManagerModelCatalog(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	catalog, _ := payload["modelCatalog"].([]any)
-	if len(catalog) != 1 || catalog[0].(map[string]any)["id"] != "image-primary" {
-		t.Fatalf("组员配置应继承绑定组长的模型目录：%#v", payload["modelCatalog"])
-	}
-	if payload["canManageApi"] != false || payload["managedBy"] != "manager" {
-		t.Fatalf("组员只能使用、不能管理组长模型：%#v", payload)
+	if payload["modelCatalog"] != nil || payload["canConfigureAPI"] != false || payload["notifications"] == nil {
+		t.Fatalf("组员仅能读取自己的通用设置：%#v", payload)
 	}
 	if strings.Contains(response.Body.String(), "manager-secret") {
 		t.Fatalf("组长密钥不能返回给组员：%s", response.Body.String())

@@ -59,7 +59,10 @@ func RegisterWebSubmitPreviewCompat(root *http.ServeMux, middleware BridgeAuth, 
 // requested/planned/deferred/missing 与 plan_complete，调用方可以据此判断
 // 计划是否丢项，而不是只从 groups 是否为空猜测。
 func buildWebSubmitPlanPayload(ctx context.Context, store novelfetchworkshop.Store, owner string, taskIDs, requestedVersions []string, force bool) (map[string]any, int, string) {
-	settings, err := store.GetConfig(ctx, owner)
+	if requestedVersions != nil && len(cleanStrings(requestedVersions)) == 0 {
+		return nil, http.StatusBadRequest, "请至少选择一个正文版本"
+	}
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return nil, http.StatusInternalServerError, "读取提交配置失败"
 	}
@@ -109,6 +112,10 @@ func buildWebSubmitPlanPayload(ctx context.Context, store novelfetchworkshop.Sto
 			}
 			if containsVersion(executing, version) {
 				skipped = append(skipped, map[string]any{"id": id, "version": version, "status": "executing", "reason": "submission_in_progress", "deferred": true, "error": "该版本已有提交正在执行，已阻止重复派发"})
+				continue
+			}
+			if meta["sensitiveManualRetryRequired"] == true {
+				skipped = append(skipped, map[string]any{"id": id, "version": version, "status": "waiting_sensitive_ai", "reason": "sensitive_repair_required", "deferred": true, "error": "敏感词 AI 修复尚未完成，请先重新处理失败的正文版本"})
 				continue
 			}
 			profile := webSubmitProfile(web, version)

@@ -1,4 +1,5 @@
 import { apiRequest, getToken } from './client';
+import { setImpersonationExpectation } from './accountImpersonationState.js';
 
 // Workspaces / sessions / messages for the conversational Agent workspace.
 // Read endpoints go through apiRequest so timeout and auth-failure handling
@@ -93,12 +94,13 @@ function parseSSEChunk(chunk) {
 // streamAgentChatMessage reads the SSE response and forwards each named event
 // to handlers[event](data). Returns when the stream closes.
 export async function streamAgentChatMessage(sessionId, body, handlers = {}, signal) {
-  const response = await fetch(`/api/agent/sessions/${sessionId}/messages`, {
+  const path = `/api/agent/sessions/${sessionId}/messages`;
+  const token = getToken();
+  const headers = new Headers({ 'Content-Type': 'application/json', Authorization: `Bearer ${token}` });
+  setImpersonationExpectation(headers, path, 'POST', token);
+  const response = await fetch(path, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${getToken()}`
-    },
+    headers,
     body: JSON.stringify(body),
     signal
   });

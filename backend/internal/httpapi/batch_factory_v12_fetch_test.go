@@ -49,7 +49,7 @@ func TestFailedProcessingRetriesOnlyVerifiedRawAndKeepsCaptureSize(t *testing.T)
 			store := batchfactoryv11.NewMemoryStore()
 			old := strings.Repeat("旧", 850)
 			up := strings.Repeat("新", 850)
-			meta := map[string]any{"processingStatus": "failed", "contentCaptureCharacters": 150}
+			meta := map[string]any{"processingStatus": "failed", "contentCaptureCharacters": 150, "rawSourceStatus": "unverified"}
 			if verified {
 				meta["rawSourceStatus"] = "verified"
 				meta["rawSourceOrigin"] = "bookstore_raw"
@@ -57,6 +57,9 @@ func TestFailedProcessingRetriesOnlyVerifiedRawAndKeepsCaptureSize(t *testing.T)
 			b, err := store.CreateBatch(ctx, "alice", batchfactoryv11.CreateBatchInput{Title: "批次", Books: []batchfactoryv11.CreateBookInput{{Title: "甲", BookID: "777777", Platform: "3", TxtText: old, SourceMetadata: meta}}})
 			if err != nil {
 				t.Fatal(err)
+			}
+			if (b.Books[0].SourceMetadata["rawSourceStatus"] == "verified") != verified {
+				t.Fatal("raw-source fixture classification does not match test case")
 			}
 			calls := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -24,16 +24,17 @@ const AICutPage = lazy(() => import('./pages/AICutPage'));
 const AICutLibraryPage = lazy(() => import('./pages/AICutLibraryPage'));
 const ComicScreenplayPage = lazy(() => import('./pages/ComicScreenplayPage'));
 const NovelCreationPage = lazy(() => import('./pages/NovelCreationPage'));
+const ScriptEditorPage = lazy(() => import('./pages/ScriptEditorPage'));
 const PluginRewritePage = lazy(() => import('./pages/PluginRewritePage'));
 const PluginToolPage = lazy(() => import('./pages/PluginToolPage'));
-const MemberCenterPage = lazy(() => import('./pages/MemberCenterPage'));
+const AccountOverviewPage = lazy(() => import('./pages/AccountOverviewPage'));
 const ProfilePage = lazy(() => import('./pages/ProfilePage'));
 const SecurityPage = lazy(() => import('./pages/SecurityPage'));
 const AdvancedTeamAdminPage = lazy(() => import('./pages/AdvancedTeamAdminPage'));
 const AccountRolePage = lazy(() => import('./pages/AccountRolePage'));
 const TeamPage = lazy(() => import('./pages/TeamPage'));
 const ApiConfigPage = lazy(() => import('./pages/ApiConfigPage'));
-const UsageStatsPage = lazy(() => import('./pages/UsageStatsPage'));
+const EnergyBillingPage = lazy(() => import('./pages/EnergyBillingPage'));
 const HistoryPage = lazy(() => import('./pages/HistoryPage'));
 const IssueLogPage = lazy(() => import('./pages/IssueLogPage'));
 const InviteAcceptPage = lazy(() => import('./pages/InviteAcceptPage'));
@@ -47,6 +48,15 @@ function CanonicalBatchFactoryRedirect() {
   return <div className="route-loading" role="status">正在打开批量工厂</div>;
 }
 
+function AccountOverviewRedirect() {
+  useEffect(() => {
+    const { search, hash } = window.location;
+    window.history.replaceState(window.history.state, '', `/account${search}${hash}`);
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  }, []);
+  return <div className="route-loading" role="status">正在打开账户总览</div>;
+}
+
 function usePathname() {
   const canonicalPathname = () => {
     const pathname = window.location.pathname;
@@ -57,6 +67,7 @@ function usePathname() {
   useEffect(() => {
     const handlePopState = () => setPathname(canonicalPathname());
     window.addEventListener('popstate', handlePopState);
+    handlePopState();
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
@@ -79,6 +90,7 @@ function getPage(pathname) {
     '/novel-fetch-react': NovelFetchPage,
     '/novel-fetch-workshop': NovelFetchPage,
     '/novel-creation': NovelCreationPage,
+    '/script-editor': ScriptEditorPage,
     // The cover-based project library is the only Batch Factory entry.
     '/batch-factory': ShuihuoProductionPage,
     '/agent': AgentPage,
@@ -96,11 +108,11 @@ function getPage(pathname) {
     '/comic-screenplay': ComicScreenplayPage,
     '/plugins/ai-rewrite': PluginRewritePage,
     '/api-config': ApiConfigPage,
-    '/usage': UsageStatsPage,
+    '/usage': EnergyBillingPage,
     '/history': HistoryPage,
     '/issues': IssueLogPage,
     '/team': TeamPage,
-    '/member': MemberCenterPage,
+    '/account': AccountOverviewPage,
     '/profile': ProfilePage,
     '/security': SecurityPage,
     '/advanced-team-admin': AdvancedTeamAdminPage,
@@ -129,6 +141,7 @@ export function UserApp() {
     return () => { window.removeEventListener('error', recoverChunk); window.removeEventListener('unhandledrejection', recoverChunk); };
   }, []);
   const pathname = usePathname();
+  if (pathname === '/member') return <AccountOverviewRedirect />;
   if (pathname === '/giant-material-test') return <GiantMaterialTestPage />;
   if (/^\/invite\/[^/]+$/.test(pathname)) {
     return <Suspense fallback={<div className="route-loading" role="status">正在加载团队邀请</div>}><InviteAcceptPage /></Suspense>;

@@ -106,7 +106,8 @@ func TestAICutCaptionCorrectionRouteIsMountedByApplicationRouter(t *testing.T) {
 	_, _ = store.SaveTimeline(t.Context(), "alice", "cut-1", aicut.Timeline{Tracks: []aicut.Track{{ID: "subtitle-1", Kind: aicut.TrackSubtitle, Clips: []aicut.Clip{{ID: "sub-1", Kind: aicut.ClipSubtitle, DurationMS: 1000, SourceDurationMS: 1000, Text: "字幕"}}}}}, 0, now)
 	provider := &aicutCaptionProvider{result: `{"corrections":[]}`}
 	api := NewRouter(RouterOptions{
-		BridgeSecret: "secret", Now: func() time.Time { return now }, AICut: store,
+		AccountCenterStore: activeModelTestAccounts("alice"),
+		BridgeSecret:       "secret", Now: func() time.Time { return now }, AICut: store,
 		TextProviderResolver: func(context.Context, string, string) (batchfactoryv11.DirectorProvider, error) { return provider, nil },
 	})
 	response := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/ai-cut/projects/cut-1/captions/correct", map[string]any{"script": "剧本", "expectedRevision": 1})

@@ -1,4 +1,4 @@
-import { apiRequest, getToken, setToken } from './client';
+import { apiRequest, getToken, getVerifiedImpersonation, setToken, setVerifiedImpersonation } from './client';
 import { getPasskeyAssertion } from '../webauthn';
 import { createAccountSessionCache } from './account-session-cache.js';
 
@@ -6,11 +6,13 @@ const accountSession = createAccountSessionCache({
   storage: { getItem: key => localStorage.getItem(key), setItem: (key, value) => localStorage.setItem(key, value), removeItem: key => localStorage.removeItem(key) },
   request: () => apiRequest('/api/login/session', { suppressGlobalError: true })
 });
+export const setEffectiveImpersonationAccount = setVerifiedImpersonation;
 
 export function getCachedAccount() { return accountSession.readPreview(); }
 
 function persistSession(data) {
   accountSession.invalidate();
+  setVerifiedImpersonation(null);
   setToken(data.token);
   localStorage.setItem('auth_username', data.username);
   accountSession.savePreview(data);
@@ -48,6 +50,7 @@ export function getCurrentAccount(options) {
 export async function logout() {
   const token = getToken();
   accountSession.invalidate();
+  setVerifiedImpersonation(null);
   setToken('');
   localStorage.removeItem('auth_username');
   if (token) {
@@ -55,6 +58,10 @@ export async function logout() {
   }
 }
 
+export function getCurrentActorUsername() {
+  return getVerifiedImpersonation()?.actorUsername || (getToken() ? localStorage.getItem('auth_username') || '' : '');
+}
+
 export function getCurrentUsername() {
-  return getToken() ? localStorage.getItem('auth_username') || '' : '';
+  return getVerifiedImpersonation()?.username || getCurrentActorUsername();
 }

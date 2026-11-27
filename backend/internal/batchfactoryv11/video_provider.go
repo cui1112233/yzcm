@@ -2,6 +2,10 @@ package batchfactoryv11
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -40,20 +44,75 @@ func wrapNotConfigured(err error) error {
 }
 
 type VideoProviderConfig struct {
-	ConfigID   string `json:"configId,omitempty"`
-	Provider   string
-	APIKey     string
-	Model      string
-	CreateURL  string
-	TasksURL   string
-	ResultURL  string
-	WorkflowID string
+	ConfigID    string `json:"configId,omitempty"`
+	ConfigOwner string `json:"-"`
+	Provider    string
+	APIKey      string
+	Model       string
+	CreateURL   string
+	TasksURL    string
+	ResultURL   string
+	WorkflowID  string
 }
 
 type VideoProviderRegistry interface {
 	Put(context.Context, string, VideoProviderConfig) error
 	Resolve(context.Context, string, string) (VideoProviderConfig, error)
 	View(context.Context, string, string) (VideoProviderConfigView, error)
+}
+
+// VideoModelResolver resolves a concrete account catalog entry on demand.
+type VideoModelResolver interface {
+	ResolveModel(context.Context, string, string, string) (VideoProviderConfig, error)
+}
+
+var ErrVideoModelNotFound = errors.New("video model selection is not in the current catalog")
+
+// ExactVideoModelResolver resolves only an internal model row ID.
+type ExactVideoModelResolver interface {
+	ResolveExactVideoModel(context.Context, string, string) (VideoProviderConfig, error)
+}
+
+type VideoExecutionBinding struct {
+	Owner        string `json:"owner,omitempty"`
+	RowID        string `json:"rowId,omitempty"`
+	Adapter      string `json:"adapter"`
+	Model        string `json:"model"`
+	TargetDigest string `json:"targetDigest"`
+}
+
+const videoSelectionBindingKey = "videoModelSelectionBinding"
+
+type savedVideoSelection struct {
+	Selection   string `json:"selection"`
+	RowID       string `json:"rowId"`
+	ScopeDigest string `json:"scopeDigest"`
+}
+
+func (binding VideoExecutionBinding) selectionDigest() string {
+	raw, _ := json.Marshal(binding)
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:])
+}
+
+func (config VideoProviderConfig) ExecutionBinding(owner string) *VideoExecutionBinding {
+	if config.ConfigID == "" {
+		return nil
+	}
+	if config.ConfigOwner != "" {
+		owner = config.ConfigOwner
+	}
+	parts, _ := json.Marshal([]string{config.Provider, config.Model, config.CreateURL, config.TasksURL, config.ResultURL, config.WorkflowID})
+	digest := sha256.Sum256(parts)
+	return &VideoExecutionBinding{Owner: owner, RowID: config.ConfigID, Adapter: config.Provider, Model: config.Model, TargetDigest: hex.EncodeToString(digest[:])}
+}
+
+func isLocalVideoModel(selection string) bool {
+	return VideoProviderForModel(selection, VideoProviderPersonalAPI) == VideoProviderDoubaoLocal
+}
+
+func NormalizeVideoProviderConfig(cfg VideoProviderConfig) (VideoProviderConfig, error) {
+	return normalizeVideoProviderConfig(cfg)
 }
 
 type VideoProviderConfigView struct {
@@ -100,9 +159,6 @@ func normalizeVideoProviderConfig(cfg VideoProviderConfig) (VideoProviderConfig,
 			cfg.Model = DefaultPersonalVideoModel
 		}
 		cfg.APIKey = strings.TrimSpace(cfg.APIKey)
-		if cfg.APIKey == "" {
-			return cfg, fmt.Errorf("%w: personal video API key is required", ErrInvalid)
-		}
 		if strings.TrimSpace(cfg.CreateURL) == "" {
 			cfg.CreateURL = DefaultPersonalVideoCreateURL
 		}
@@ -112,6 +168,9 @@ func normalizeVideoProviderConfig(cfg VideoProviderConfig) (VideoProviderConfig,
 		if strings.TrimSpace(cfg.ResultURL) == "" {
 			cfg.ResultURL = strings.TrimRight(cfg.TasksURL, "/") + "/{id}/result"
 		}
+		if cfg.APIKey == "" {
+			return cfg, fmt.Errorf("%w: personal video API key is required", ErrInvalid)
+		}
 	case VideoProviderDoubaoLocal:
 		cfg.APIKey = ""
 		cfg.Model = strings.TrimSpace(cfg.Model)
@@ -120,9 +179,6 @@ func normalizeVideoProviderConfig(cfg VideoProviderConfig) (VideoProviderConfig,
 		}
 	case VideoProviderAutoDLH3:
 		cfg.APIKey = strings.TrimSpace(cfg.APIKey)
-		if cfg.APIKey == "" {
-			return cfg, fmt.Errorf("%w: AutoDL H3 API key is required", ErrInvalid)
-		}
 		cfg.Model = strings.TrimSpace(cfg.Model)
 		if cfg.Model == "" {
 			cfg.Model = AutoDLH3Model
@@ -134,20 +190,23 @@ func normalizeVideoProviderConfig(cfg VideoProviderConfig) (VideoProviderConfig,
 			cfg.TasksURL = DefaultAutoDLH3TasksURL
 		}
 		cfg.WorkflowID = strings.TrimSpace(cfg.WorkflowID)
+		if cfg.APIKey == "" {
+			return cfg, fmt.Errorf("%w: AutoDL H3 API key is required", ErrInvalid)
+		}
 		if cfg.WorkflowID != "" && !validAutoDLH3WorkflowID(cfg.WorkflowID) {
 			return cfg, fmt.Errorf("%w: AutoDL H3 workflow id is invalid", ErrInvalid)
 		}
 	case VideoProviderYFAISeedance:
 		cfg.APIKey = strings.TrimSpace(cfg.APIKey)
-		if cfg.APIKey == "" {
-			return cfg, fmt.Errorf("%w: YFAI Seedance API key is required", ErrInvalid)
-		}
 		cfg.Model = strings.TrimSpace(cfg.Model)
 		if cfg.Model == "" {
 			cfg.Model = "seedance-2-0-official"
 		}
 		if strings.TrimSpace(cfg.CreateURL) == "" {
 			cfg.CreateURL = "https://yf.token6688.com"
+		}
+		if cfg.APIKey == "" {
+			return cfg, fmt.Errorf("%w: YFAI Seedance API key is required", ErrInvalid)
 		}
 	default:
 		return cfg, fmt.Errorf("%w: unsupported video provider", ErrInvalid)
@@ -348,54 +407,4 @@ func catalogIDForProvider(provider string) string {
 	default:
 		return ""
 	}
-}
-
-// ResolveVideoProviderSetting derives the effective provider setting from an
-// account config document using the same priority as the runtime registry:
-// explicitly saved videoProviders > managed model catalog > legacy video keys.
-// It is read-only and never exposes credentials.
-func ResolveVideoProviderSetting(config map[string]any, rawProvider string) VideoProviderConfig {
-	provider := normalizeVideoProvider(rawProvider)
-	cfg := VideoProviderConfig{Provider: provider, Model: DefaultVideoModelFor(provider)}
-	if config == nil {
-		return cfg
-	}
-	if providers, ok := config["videoProviders"].(map[string]any); ok {
-		if entry, ok := providers[provider].(map[string]any); ok {
-			cfg.APIKey = configString(entry, "apiKey")
-			if model := configString(entry, "model"); model != "" {
-				cfg.Model = model
-			}
-			return cfg
-		}
-	}
-	catalogVersion := configNumber(config["modelCatalogVersion"])
-	if catalogID := catalogIDForProvider(provider); catalogID != "" && catalogVersion >= 1 {
-		models, _ := config["modelCatalog"].([]any)
-		for _, item := range models {
-			entry, ok := item.(map[string]any)
-			if !ok || configString(entry, "id") != catalogID {
-				continue
-			}
-			cfg.APIKey = configString(entry, "credential")
-			if model := configString(entry, "modelId"); model != "" {
-				cfg.Model = model
-			}
-			return cfg
-		}
-	}
-	video, _ := config["video"].(map[string]any)
-	switch provider {
-	case VideoProviderPersonalAPI:
-		cfg.APIKey = configString(video, "ydApiKey")
-		if cfg.APIKey == "" {
-			cfg.APIKey = configString(video, "apiKey")
-		}
-	case VideoProviderAutoDLH3:
-		cfg.APIKey = configString(video, "h3ApiKey")
-		if cfg.APIKey == "" {
-			cfg.APIKey = configString(video, "apiKey")
-		}
-	}
-	return cfg
 }

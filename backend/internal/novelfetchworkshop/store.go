@@ -14,23 +14,24 @@ var ErrNotFound = errors.New("novel fetch workshop record not found")
 var ErrDocumentChanged = errors.New("novel fetch document changed")
 
 type Document struct {
-	BookID           string             `json:"bookId"`
-	Gender           string             `json:"gender,omitempty"`
-	GenderSource     GenderSource       `json:"genderSource,omitempty"`
-	GenderReason     string             `json:"genderReason,omitempty"`
-	GenderConfidence float64            `json:"genderConfidence,omitempty"`
-	BookInfo         BookInfo           `json:"bookInfo,omitempty"`
-	Meta             map[string]any     `json:"meta"`
-	BodyRefs         map[string]BodyRef `json:"bodyRefs,omitempty"`
-	Original         string             `json:"original,omitempty"`
-	OriginalRaw      string             `json:"originalRaw,omitempty"`
-	ProcessedText    string             `json:"processedText,omitempty"`
-	OriginalRawChars int                `json:"originalRawChars,omitempty"`
-	ProcessedChars   int                `json:"processedChars,omitempty"`
-	MaxTxt           int                `json:"maxTxt,omitempty"`
-	Versions         map[string]any     `json:"versions,omitempty"`
-	Logs             []any              `json:"logs"`
-	UpdatedAt        string             `json:"updatedAt,omitempty"`
+	BookID               string             `json:"bookId"`
+	Gender               string             `json:"gender,omitempty"`
+	GenderSource         GenderSource       `json:"genderSource,omitempty"`
+	GenderReason         string             `json:"genderReason,omitempty"`
+	GenderConfidence     float64            `json:"genderConfidence,omitempty"`
+	BookInfo             BookInfo           `json:"bookInfo,omitempty"`
+	Meta                 map[string]any     `json:"meta"`
+	BodyRefs             map[string]BodyRef `json:"bodyRefs,omitempty"`
+	Original             string             `json:"original,omitempty"`
+	OriginalRaw          string             `json:"originalRaw,omitempty"`
+	OriginalRawAvailable bool               `json:"-"` // Read-only candidate presence; never body text or persisted JSON.
+	ProcessedText        string             `json:"processedText,omitempty"`
+	OriginalRawChars     int                `json:"originalRawChars,omitempty"`
+	ProcessedChars       int                `json:"processedChars,omitempty"`
+	MaxTxt               int                `json:"maxTxt,omitempty"`
+	Versions             map[string]any     `json:"versions,omitempty"`
+	Logs                 []any              `json:"logs"`
+	UpdatedAt            string             `json:"updatedAt,omitempty"`
 }
 
 type BodyRef struct {
@@ -246,6 +247,15 @@ func (s *MemoryStore) putDocument(owner string, document Document, conditional b
 	if conditional && current != document.UpdatedAt {
 		return "", ErrDocumentChanged
 	}
+	document = cloneDocument(document)
+	active := map[string]bool{}
+	for version := range s.bodies[owner][document.BookID] {
+		active[version] = true
+	}
+	document = pruneMissingBodyReferences(document, active)
+	for _, body := range s.bodies[owner][document.BookID] {
+		document = applyDocumentBodyRef(document, body.BodyRef)
+	}
 	previous, _ := time.Parse(time.RFC3339Nano, current)
 	document.UpdatedAt = nextDocumentWriteTime(previous).Format(time.RFC3339Nano)
 	if s.docs[owner] == nil {
@@ -366,6 +376,12 @@ func (s *MemoryStore) PutBody(_ context.Context, owner string, body BodyRecord) 
 	body.ReleasableAt = ""
 	body.ExpiresAt = ""
 	s.bodies[owner][body.BookID][body.VersionID] = cloneBodyRecord(body)
+	if document, ok := s.docs[owner][body.BookID]; ok {
+		document = documentWithBodyRef(document, body.BodyRef)
+		delete(document.Meta, "autoSubmitReadyFingerprint")
+		document.UpdatedAt = nextDocumentWriteTime(previousDocumentTime(document.UpdatedAt)).Format(time.RFC3339Nano)
+		s.docs[owner][body.BookID] = document
+	}
 	return body.BodyRef, nil
 }
 
@@ -405,9 +421,9 @@ func (s *MemoryStore) DeleteBody(_ context.Context, owner, bookID, versionID str
 	}
 	delete(versions, versionID)
 	if document, ok := s.docs[owner][bookID]; ok {
-		document = normalizeDocument(document)
-		delete(document.BodyRefs, versionID)
-		s.docs[owner][bookID] = cloneDocument(document)
+		document = stripDocumentBodyVersion(cloneDocument(document), versionID)
+		document.UpdatedAt = nextDocumentWriteTime(previousDocumentTime(document.UpdatedAt)).Format(time.RFC3339Nano)
+		s.docs[owner][bookID] = document
 	}
 	return true, nil
 }

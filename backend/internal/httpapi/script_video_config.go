@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"qiantie/backend/internal/batchfactoryv11"
+	"qiantie/backend/internal/novelfetchworkshop"
 )
 
 func syncScriptVideoModelConfig(ctx context.Context, registry batchfactoryv11.VideoProviderRegistry, owner string, config map[string]any, modelKey string) error {
@@ -62,6 +63,9 @@ func scriptVideoModelConfig(_ context.Context, _ batchfactoryv11.Store, _ string
 		if modelString(model, "modelId") != modelKey && modelString(model, "id") != modelKey {
 			continue
 		}
+		if isManagedYZCMModel(model) {
+			return batchfactoryv11.VideoProviderConfig{}, fmt.Errorf("%w: 当前视频工具暂未接入该目录适配器", batchfactoryv11.ErrUnavailable)
+		}
 		provider := modelString(model, "provider")
 		if !isNativeScriptVideoProvider(provider) {
 			if !ok {
@@ -76,9 +80,11 @@ func scriptVideoModelConfig(_ context.Context, _ batchfactoryv11.Store, _ string
 			return batchfactoryv11.VideoProviderConfig{}, fmt.Errorf("原生视频配置缺少真实modelId")
 		}
 		apiKey := shuihuoModelCredential(model)
-		createURL := firstText(model["endpoint"], model["baseUrl"])
-		tasksURL := firstText(model["tasksEndpoint"])
-		resultURL := firstText(model["resultEndpoint"])
+		if apiKey == "" || model["credentialStatus"] == "needs_reentry" {
+			return batchfactoryv11.VideoProviderConfig{}, fmt.Errorf("%w: 视频模型需要重新填写 Key", batchfactoryv11.ErrUnavailable)
+		}
+		target := novelfetchworkshop.ModelCredentialDestination(model)
+		createURL, tasksURL, resultURL := target.Endpoint, target.TasksEndpoint, target.ResultEndpoint
 		if provider == batchfactoryv11.VideoProviderAutoDLH3 {
 			if createURL == "" {
 				createURL = batchfactoryv11.DefaultAutoDLH3CreateURL

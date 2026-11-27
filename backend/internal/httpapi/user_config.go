@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"sync"
 
+	"qiantie/backend/internal/accountcenter"
+	"qiantie/backend/internal/apisecrets"
 	"qiantie/backend/internal/auth"
 	"qiantie/backend/internal/novelfetchworkshop"
 )
@@ -54,12 +57,22 @@ type UserConfigStore struct {
 	BaseDir string
 	mu      sync.Mutex
 	secrets *configSecretProvider
+	journal *novelfetchworkshop.MySQLStore
 }
 
 func NewUserConfigStore(baseDir string) *UserConfigStore {
 	trimmed := strings.TrimSpace(baseDir)
 	return &UserConfigStore{BaseDir: trimmed, secrets: newConfigSecretProvider(trimmed)}
 }
+
+// Bind the journal before background workers can request effective preferences.
+func (s *UserConfigStore) UseLegacySettingJournal(journal *novelfetchworkshop.MySQLStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.journal = journal
+}
+
+func (s *UserConfigStore) LegacyModelFileLocker() sync.Locker { return &s.mu }
 
 func cloneConfigMap(source map[string]any) map[string]any {
 	result := make(map[string]any, len(source))
@@ -98,37 +111,108 @@ func (s *UserConfigStore) configPath(username string) (string, error) {
 	return UserScopedPath(s.BaseDir, username, "api-config.json")
 }
 
-func (s *UserConfigStore) read(username string) map[string]any {
-	config := cloneConfigMap(defaultUserConfig)
-	if s == nil || s.BaseDir == "" {
-		return config
-	}
-	path, err := s.configPath(username)
-	if err != nil {
-		return config
-	}
+func (s *UserConfigStore) readStandardFile(path string) (map[string]any, error) {
 	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		return config
+		return nil, err
 	}
 	var saved map[string]any
-	if json.Unmarshal(raw, &saved) != nil {
-		return config
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		return nil, err
 	}
-	merged := mergeConfigMap(config, saved)
-	// 兼容读取：历史明文原样可用，密文在这里还原成明文，调用方无需感知。
-	s.secrets.decrypt(merged)
-	return merged
+	if saved == nil {
+		return nil, errors.New("invalid standard configuration")
+	}
+	if encryptedConfigSecretCount(saved) > 0 {
+		cipher, err := s.secrets.secrets.ReadCipher()
+		if err != nil {
+			return nil, err
+		}
+		if cipher == nil {
+			return nil, errors.New("missing configuration encryption key")
+		}
+		transformConfigSecrets(saved, func(value string) string {
+			if err != nil || !apisecrets.IsEncrypted(value) {
+				return value
+			}
+			var plain string
+			plain, err = cipher.Decrypt(value)
+			return plain
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return saved, nil
 }
-
-// GetConfig exposes the same owner-scoped effective configuration used by the
-// Go settings routes. Callers must still redact secrets before returning data
-// to a browser.
-func (s *UserConfigStore) GetConfig(_ context.Context, username string) (map[string]any, error) {
-	return s.read(username), nil
+func (s *UserConfigStore) GetConfig(ctx context.Context, username string) (map[string]any, error) {
+	if s == nil || s.BaseDir == "" {
+		return cloneConfigMap(defaultUserConfig), nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.effectiveConfig(ctx, username)
 }
-
+func (s *UserConfigStore) effectiveConfig(ctx context.Context, owner string) (map[string]any, error) {
+	path, err := s.configPath(owner)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.secrets.importDeferredSettings(ctx, owner, path, s.journal, true); err != nil {
+		return nil, err
+	}
+	var edits settingsEdits
+	var active bool
+	if s.journal != nil {
+		edits, _, active, err = s.journal.LoadLegacySettingEdits(ctx, owner)
+		if err != nil {
+			return nil, err
+		}
+	}
+	saved, err := s.readStandardFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if saved["ciphertext"] != nil || saved["fingerprint"] != nil {
+		if !active && s.journal != nil {
+			state, found, err := s.journal.DiscoverLegacyConfigMigration(ctx, owner)
+			if err != nil {
+				return nil, err
+			}
+			active = found && state.Phase != novelfetchworkshop.LegacyComplete
+		}
+		if !active {
+			return nil, errors.New("standard configuration contains a migration envelope")
+		}
+		saved = nil
+	}
+	// A default shown by the UI is not a value restored from disk.
+	if saved == nil {
+		saved = map[string]any{}
+	}
+	snapshotEnd := 0
+	for snapshotEnd < len(edits) && edits[snapshotEnd].OnlyIfMissing {
+		snapshotEnd++
+	}
+	if err := edits[:snapshotEnd].apply(saved); err != nil {
+		return nil, err
+	}
+	edits = edits[snapshotEnd:]
+	config := mergeConfigMap(defaultUserConfig, saved)
+	return config, edits.apply(config)
+}
 func (s *UserConfigStore) write(username string, config map[string]any) error {
+	return s.writeConfig(username, config, false)
+}
+
+func (s *UserConfigStore) writeAuthenticatedConfig(username string, config map[string]any) error {
+	return s.writeConfig(username, config, true)
+}
+
+func (s *UserConfigStore) writeConfig(username string, config map[string]any, strict bool) error {
 	if s == nil || s.BaseDir == "" {
 		return fmt.Errorf("用户配置存储未配置")
 	}
@@ -136,15 +220,24 @@ func (s *UserConfigStore) write(username string, config map[string]any) error {
 	if err != nil {
 		return fmt.Errorf("用户名不合法")
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
 	// 落盘加密：在深拷贝上转换，避免把调用方内存里的明文替换成密文。
 	persisted := config
 	if cloned, ok := deepCloneConfigValue(config).(map[string]any); ok {
-		s.secrets.encrypt(cloned)
+		if strict {
+			if err := s.secrets.encryptStrict(cloned); err != nil {
+				return err
+			}
+		} else {
+			s.secrets.encrypt(cloned)
+		}
 		persisted = cloned
+	}
+	return writeUserConfigDocument(path, persisted)
+}
+
+func writeUserConfigDocument(path string, persisted any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
 	}
 	raw, err := json.MarshalIndent(persisted, "", "  ")
 	if err != nil {
@@ -157,8 +250,34 @@ func (s *UserConfigStore) write(username string, config map[string]any) error {
 	return os.Rename(tmp, path)
 }
 
+func internalPreferenceField(key string) bool {
+	key = apiConfigField(key)
+	return strings.HasPrefix(key, "modelcataloglegacy") || strings.HasPrefix(key, "migration") || strings.HasSuffix(key, "ciphertext") || strings.HasSuffix(key, "fingerprint") || key == "revision" || key == "configrevision" || key == "patchenvelope" || key == "candidateenvelope"
+}
+func stripInternalPreferenceFields(value any) {
+	switch v := value.(type) {
+	case map[string]any:
+		for k, item := range v {
+			if internalPreferenceField(k) {
+				delete(v, k)
+			} else {
+				stripInternalPreferenceFields(item)
+			}
+		}
+	case []map[string]any:
+		for _, item := range v {
+			stripInternalPreferenceFields(item)
+		}
+	case []any:
+		for _, item := range v {
+			stripInternalPreferenceFields(item)
+		}
+	}
+}
 func publicUserConfig(config map[string]any) map[string]any {
-	result := cloneConfigMap(config)
+	result, _ := deepCloneConfigValue(config).(map[string]any)
+	stripInternalPreferenceFields(result)
+
 	// 接口配置只暴露「已配置/未配置」，密钥（含自定义渠道 apiKey）永不下发。
 	if stored, ok := result[apiIntegrationsSettingKey].(map[string]any); ok {
 		result[apiIntegrationsSettingKey] = apiIntegrationsView(stored)
@@ -232,30 +351,17 @@ func configManagementState(identity BridgeIdentity, profiles *MemberProfileStore
 	return false, nil
 }
 
-func managedPublicUserConfig(config map[string]any, managedBy any) map[string]any {
-	result := publicUserConfig(config)
-	result["provider"] = "managed"
-	result["baseUrl"] = ""
-	result["model"] = ""
-	result["hasApiKey"] = false
-	if image, ok := result["image"].(map[string]any); ok {
-		image["baseUrl"], image["model"], image["displayName"], image["hasApiKey"] = "", "", "", false
-	}
-	if video, ok := result["video"].(map[string]any); ok {
-		video["baseUrl"], video["model"], video["displayName"], video["hasApiKey"] = "", "", "", false
-	}
-	result["canManageApi"] = false
-	result["managedBy"] = managedBy
-	return result
-}
-
-func mergeManagedModelCatalog(ctx context.Context, config map[string]any, catalogStore novelfetchworkshop.Store, username string) {
+func mergeManagedModelCatalog(ctx context.Context, config map[string]any, catalogStore novelfetchworkshop.Store, username string) error {
 	if catalogStore == nil || strings.TrimSpace(username) == "" {
-		return
+		return nil
 	}
-	settings, err := catalogStore.GetConfig(ctx, username)
+	settings, err := novelfetchworkshop.ReadRuntimeConfig(ctx, catalogStore, username)
+	if errors.Is(err, novelfetchworkshop.ErrCatalogAwaitingMigration) {
+		// Preference saves can finish while the original model file is offline.
+		return nil
+	}
 	if err != nil {
-		return
+		return err
 	}
 	if catalog, ok := settings["modelCatalog"].([]any); ok {
 		config["modelCatalog"] = catalog
@@ -263,6 +369,7 @@ func mergeManagedModelCatalog(ctx context.Context, config map[string]any, catalo
 	if version, ok := settings["modelCatalogVersion"]; ok {
 		config["modelCatalogVersion"] = version
 	}
+	return nil
 }
 
 // applyManagedTextModelPublic keeps the old top-level config fields useful for
@@ -295,9 +402,40 @@ func registerUserConfigRoutes(root *http.ServeMux, middleware BridgeAuth, store 
 	if root == nil || middleware.AuthStore == nil || store == nil || accounts == nil {
 		return
 	}
-	var profileStore *MemberProfileStore
-	if len(profiles) > 0 {
-		profileStore = profiles[0]
+	if journal, ok := catalogStore.(*novelfetchworkshop.MySQLStore); ok {
+		store.UseLegacySettingJournal(journal)
+	}
+	view := func(w http.ResponseWriter, req *http.Request, identity BridgeIdentity, config map[string]any) {
+		// Only a catalog returned by its verified reader belongs in the response.
+		// Old standard files can carry it in several nested containers.
+		for _, container := range novelfetchworkshop.LegacyCatalogContainers(config) {
+			for key := range container {
+				if isManagedModelField(key) {
+					delete(container, key)
+				}
+			}
+		}
+		access := apiConfigPolicy(req.Context(), middleware.AccountCenterStore)
+		if !access.custom {
+			result := preferenceOnlyPatch(config)
+			stripInternalPreferenceFields(result)
+			if middleware.AccountCenterStore != nil && access.identity.Subject.Role == accountcenter.RoleMember {
+				if owner, err := ResolveAPIConfigOwner(req.Context(), middleware.AccountCenterStore, identity.Username); err == nil {
+					result["managedBy"] = owner
+				}
+			}
+			writeJSON(w, http.StatusOK, access.response(redactAPIConfig(result).(map[string]any)))
+			return
+		}
+		if err := mergeManagedModelCatalog(req.Context(), config, catalogStore, identity.Username); err != nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "读取模型配置失败")
+			return
+		}
+		result := publicUserConfig(config)
+		applyManagedTextModelPublic(result)
+		result["managedBy"] = nil
+		writeJSON(w, http.StatusOK, access.response(redactAPIConfig(result).(map[string]any)))
+		return
 	}
 	root.Handle("GET /api/config", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		identity, ok := BridgeIdentityFromContext(req.Context())
@@ -306,20 +444,14 @@ func registerUserConfigRoutes(root *http.ServeMux, middleware BridgeAuth, store 
 			return
 		}
 		store.mu.Lock()
-		config := store.read(identity.Username)
+		config, err := store.effectiveConfig(req.Context(), identity.Username)
 		store.mu.Unlock()
-		canManageAPI, managedBy := configManagementState(identity, profileStore, accounts)
-		modelOwner := effectiveModelCatalogOwner(identity, profileStore, accounts)
-		mergeManagedModelCatalog(req.Context(), config, catalogStore, modelOwner)
-		if !canManageAPI {
-			writeJSON(w, http.StatusOK, managedPublicUserConfig(config, managedBy))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "配置读取失败"})
 			return
 		}
-		result := publicUserConfig(config)
-		applyManagedTextModelPublic(result)
-		result["canManageApi"] = true
-		result["managedBy"] = nil
-		writeJSON(w, http.StatusOK, result)
+		w.Header().Set("Cache-Control", "no-store")
+		view(w, req, identity, config)
 	})))
 	root.Handle("POST /api/config", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		identity, ok := BridgeIdentityFromContext(req.Context())
@@ -332,29 +464,43 @@ func registerUserConfigRoutes(root *http.ServeMux, middleware BridgeAuth, store 
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求内容无效"})
 			return
 		}
-		canManageAPI, managedBy := configManagementState(identity, profileStore, accounts)
-		if !canManageAPI {
-			patch = preferenceOnlyPatch(patch)
+		access := apiConfigPolicy(req.Context(), middleware.AccountCenterStore)
+		if !access.custom {
+			if len(preferenceOnlyPatch(patch)) != len(patch) || containsAPIConfig(patch) {
+				writeAccountCenterForbidden(w)
+				return
+			}
+		}
+		if containsConfigField(patch, isManagedModelField) || containsConfigField(patch, internalPreferenceField) {
+			writeAccountCenterForbidden(w)
+			return
 		}
 		store.mu.Lock()
-		config := mergeConfigMap(store.read(identity.Username), patch)
-		err := store.write(identity.Username, config)
+		config, err := store.effectiveConfig(req.Context(), identity.Username)
+		if err == nil {
+			var changes settingsEdits
+			if section, ok := patch[apiIntegrationsSettingKey]; ok {
+				obj, ok := section.(map[string]any)
+				if ok {
+					changes, err = integrationRequestEdits(config, obj)
+				}
+				if !ok || err != nil {
+					store.mu.Unlock()
+					writeAuthError(w, http.StatusBadRequest, "接口设置无效")
+					return
+				}
+				delete(patch, apiIntegrationsSettingKey)
+			}
+			changes = append(changes, fieldEdits(nil, patch)...)
+			if err = changes.apply(config); err == nil {
+				err = store.writeSettingsPatch(req.Context(), identity.Username, config, changes)
+			}
+		}
 		store.mu.Unlock()
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "配置保存失败"})
 			return
 		}
-		if !canManageAPI {
-			modelOwner := effectiveModelCatalogOwner(identity, profileStore, accounts)
-			mergeManagedModelCatalog(req.Context(), config, catalogStore, modelOwner)
-			writeJSON(w, http.StatusOK, managedPublicUserConfig(config, managedBy))
-			return
-		}
-		mergeManagedModelCatalog(req.Context(), config, catalogStore, identity.Username)
-		result := publicUserConfig(config)
-		applyManagedTextModelPublic(result)
-		result["canManageApi"] = true
-		result["managedBy"] = nil
-		writeJSON(w, http.StatusOK, result)
+		view(w, req, identity, config)
 	})))
 }

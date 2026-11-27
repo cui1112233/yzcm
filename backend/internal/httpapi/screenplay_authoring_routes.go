@@ -5,13 +5,85 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/prompt"
 	"qiantie/backend/internal/screenplay"
+	"sort"
 	"strconv"
 	"strings"
 )
+
+type assistantWire struct {
+	Reply       string                       `json:"reply"`
+	Summary     string                       `json:"summary"`
+	ActionInput []json.RawMessage            `json:"actions"`
+	Actions     []screenplay.AuthoringAction `json:"-"`
+	Question    string                       `json:"question"`
+	Suggestions []assistantSuggestion        `json:"suggestions"`
+	Tool        string                       `json:"tool"`
+	ToolArgs    json.RawMessage              `json:"tool_args"`
+}
+
+// assistantReadStoryboardFailures 读取最近一次
+// 分镜生成尝试的失败场次，不触发新请求、不计费、不改作品。
+func assistantReadStoryboardFailures(ctx context.Context, store screenplay.Store, owner, projectID string) (screenplay.AssistantToolRun, map[string]any) {
+	run := screenplay.AssistantToolRun{Name: "storyboard_failures", OK: true}
+	generations, ok := store.(screenplay.StoryboardGenerationStore)
+	if !ok {
+		run.OK, run.Summary = false, "当前存储不支持读取分镜尝试"
+		return run, map[string]any{"error": run.Summary}
+	}
+	state, err := generations.LoadStoryboardGenerations(ctx, owner, projectID)
+	if err != nil {
+		run.OK, run.Summary = false, "分镜尝试读取失败"
+		return run, map[string]any{"error": err.Error()}
+	}
+	var latest *screenplay.StoryboardGenerationAttempt
+	for _, attempt := range state.Attempts {
+		if attempt != nil && (latest == nil || attempt.CreatedAt.After(latest.CreatedAt)) {
+			latest = attempt
+		}
+	}
+	if latest == nil {
+		run.Summary = "还没有分镜生成记录"
+		return run, map[string]any{"attempts": 0, "failed_scenes": []any{}}
+	}
+	failures := []map[string]any{}
+	for episodeNo, episode := range latest.Episodes {
+		if episode == nil {
+			continue
+		}
+		for phase, call := range episode.Calls {
+			if call.Status != "invalid" && call.Status != "failed" {
+				continue
+			}
+			if !strings.HasPrefix(phase, "storyboard_scene_") {
+				continue
+			}
+			scene, _ := strconv.Atoi(strings.TrimPrefix(phase, "storyboard_scene_"))
+			failures = append(failures, map[string]any{"episode": episodeNo, "scene": scene, "error": call.Error})
+		}
+	}
+	sort.Slice(failures, func(i, j int) bool {
+		left, right := failures[i], failures[j]
+		if left["episode"] != right["episode"] {
+			return left["episode"].(int) < right["episode"].(int)
+		}
+		return left["scene"].(int) < right["scene"].(int)
+	})
+	if len(failures) == 0 {
+		run.Summary = "最近一次分镜没有失败场景"
+	} else {
+		parts := make([]string, 0, len(failures))
+		for _, failure := range failures {
+			parts = append(parts, fmt.Sprintf("第%d集第%d场", failure["episode"], failure["scene"]))
+		}
+		run.Summary = "最近一次分镜失败场景：" + strings.Join(parts, "、")
+	}
+	return run, map[string]any{"request_key": latest.RequestKey, "status": latest.Status, "failed_scenes": failures}
+}
 
 // ResolveScreenplayAccess never returns an owner's identity before checking a specific right.
 func ResolveScreenplayAccess(ctx context.Context, store screenplay.Store, repo screenplay.AuthoringRepository, actor, id, right string) (string, error) {
@@ -21,9 +93,14 @@ func ScreenplayProjectArchived(ctx context.Context, repo screenplay.AuthoringRep
 	st, e := repo.Load(ctx, o, id)
 	return e == nil && st.Archived
 }
+
 // mediaStore 为可选：作品助手用它生成链路能力清单（只读媒体状态）。
 // 用可变参数是为了兼容既有调用点（测试与 workflow 注册），未提供时媒体环节按未就绪展示。
 func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, store screenplay.Store, repo screenplay.AuthoringRepository, resolver func(context.Context, string, string) (batchfactoryv11.DirectorProvider, error), mediaStore ...screenplay.MediaStore) {
+	registerScreenplayAuthoringRoutesWithReceipts(mux, auth, store, repo, resolver, screenplay.NewMemoryScriptBatchReceipts(), mediaStore...)
+}
+
+func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth BridgeAuth, store screenplay.Store, repo screenplay.AuthoringRepository, resolver func(context.Context, string, string) (batchfactoryv11.DirectorProvider, error), receipts screenplay.ScriptBatchReceipts, mediaStore ...screenplay.MediaStore) {
 	var media screenplay.MediaStore
 	if len(mediaStore) > 0 {
 		media = mediaStore[0]
@@ -31,7 +108,7 @@ func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, stor
 	if mux == nil || store == nil || repo == nil {
 		return
 	}
-	svc := screenplay.AuthoringService{Store: store, Repository: repo}
+	svc := screenplay.AuthoringService{Store: store, Repository: repo, Receipts: receipts}
 	handle := func(pattern, right string, fn func(http.ResponseWriter, *http.Request, string, string)) {
 		mux.Handle(pattern, auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ident, ok := BridgeIdentityFromContext(r.Context())
@@ -67,6 +144,9 @@ func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, stor
 		}
 		return true
 	}
+	if sessionRepo, ok := repo.(*screenplay.MySQLAuthoringRepository); ok {
+		registerAssistantSessionManagement(sessionRepo, handle, decode)
+	}
 	respond := func(w http.ResponseWriter, st screenplay.AuthoringState, e error, actor string) {
 		if e != nil {
 			authoringError(w, e)
@@ -90,8 +170,12 @@ func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, stor
 	}
 	base := "/api/comic-screenplays/projects/{id}"
 	for _, path := range []string{"chapters", "display", "assistant/chat", "team"} {
+		path := path
 		handle("GET "+base+"/"+path, "read", func(w http.ResponseWriter, r *http.Request, o, a string) {
 			st, e := svc.Load(r.Context(), o, r.PathValue("id"))
+			if e == nil && path == "assistant/chat" {
+				e = svc.RefreshAssistantContentProposals(r.Context(), &st)
+			}
 			respond(w, st, e, a)
 		})
 	}
@@ -114,6 +198,10 @@ func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, stor
 			}
 			switch path {
 			case "chapters":
+				if e = screenplay.PreserveScriptGeneration(in.Chapters, st.Chapters); e != nil {
+					authoringError(w, e)
+					return
+				}
 				st.Chapters = in.Chapters
 			case "display":
 				if e = validateAuthoringDisplay(in.Display); e != nil {
@@ -157,7 +245,7 @@ func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, stor
 				}
 			}
 			st, e = svc.Save(r.Context(), o, st.ProjectID, st, in.Expected)
-			if e == nil && path == "chapters" {
+			if e == nil && path == "chapters" && screenplay.ScriptCollectionReady(st.Chapters) {
 				for _, c := range st.Chapters {
 					if strings.TrimSpace(c.ScriptText) != "" {
 						_, e = screenplay.PublishChapterCollection(r.Context(), store, o, st.ProjectID, st.Chapters)
@@ -227,6 +315,117 @@ func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, stor
 			writeJSON(w, 200, map[string]any{"projects": projects})
 		})
 	}
+	// Read permissions suffice: this inspector never resolves or calls a model.
+	handle("POST "+base+"/assistant/read-tool", "read", func(w http.ResponseWriter, r *http.Request, o, a string) {
+		var in struct {
+			Tool string          `json:"tool"`
+			Args json.RawMessage `json:"tool_args"`
+		}
+		if !decode(w, r, &in) {
+			return
+		}
+		run, data, e := assistantReadScopedTool(r.Context(), svc, o, r.PathValue("id"), in.Tool, in.Args)
+		if e != nil {
+			authoringError(w, e)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"tool_run": run, "data": data})
+	})
+	handle("POST "+base+"/assistant/prepare-asset-edit", "edit", func(w http.ResponseWriter, r *http.Request, o, a string) {
+		var in struct {
+			Expected int64           `json:"expected_revision"`
+			Tool     string          `json:"tool"`
+			Args     json.RawMessage `json:"tool_args"`
+		}
+		if !decode(w, r, &in) {
+			return
+		}
+		st, e := svc.Load(r.Context(), o, r.PathValue("id"))
+		if e != nil {
+			authoringError(w, e)
+			return
+		}
+		if st.Revision != in.Expected {
+			authoringError(w, screenplay.ErrRevisionConflict)
+			return
+		}
+		action, summary, e := screenplay.PrepareAssistantAssetEdit(r.Context(), store, o, st.ProjectID, in.Tool, in.Args)
+		if e != nil {
+			authoringError(w, e)
+			return
+		}
+		st.Proposals = append(st.Proposals, screenplay.AssistantProposal{ID: newAgentID("proposal"), Summary: summary, Actions: []screenplay.AuthoringAction{action}, Status: "pending", Revision: st.Revision + 1})
+		st, e = svc.Save(r.Context(), o, st.ProjectID, st, in.Expected)
+		respond(w, st, e, a)
+	})
+	handle("POST "+base+"/assistant/prepare-shot-edit", "edit", func(w http.ResponseWriter, r *http.Request, o, a string) {
+		var in struct {
+			Expected int64           `json:"expected_revision"`
+			Tool     string          `json:"tool"`
+			Args     json.RawMessage `json:"tool_args"`
+		}
+		if !decode(w, r, &in) {
+			return
+		}
+		st, e := svc.Load(r.Context(), o, r.PathValue("id"))
+		if e != nil {
+			authoringError(w, e)
+			return
+		}
+		if st.Revision != in.Expected {
+			authoringError(w, screenplay.ErrRevisionConflict)
+			return
+		}
+		action, summary, e := screenplay.PrepareAssistantShotEdit(r.Context(), store, o, st.ProjectID, in.Tool, in.Args)
+		if e != nil {
+			authoringError(w, e)
+			return
+		}
+		st.Proposals = append(st.Proposals, screenplay.AssistantProposal{ID: newAgentID("proposal"), Summary: summary, Actions: []screenplay.AuthoringAction{action}, Status: "pending", Revision: st.Revision + 1})
+		st, e = svc.Save(r.Context(), o, st.ProjectID, st, in.Expected)
+		respond(w, st, e, a)
+	})
+	handle("POST "+base+"/assistant/prepare-content-edit", "edit", func(w http.ResponseWriter, r *http.Request, o, actor string) {
+		ctx := r.Context()
+		p := r.PathValue("id")
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, screenplayJSONLimit))
+		if err != nil {
+			authoringError(w, screenplay.ErrInvalidArgument)
+			return
+		}
+		owner, err := svc.Resolve(ctx, actor, p, "edit")
+		if err != nil {
+			authoringError(w, err)
+			return
+		}
+		if owner != o {
+			authoringError(w, screenplay.ErrAccessDenied)
+			return
+		}
+		st, err := svc.Load(ctx, o, p)
+		if err != nil {
+			authoringError(w, err)
+			return
+		}
+		project, err := store.GetProject(ctx, o, p)
+		if err != nil {
+			authoringError(w, err)
+			return
+		}
+		active, err := screenplay.ReadAssistantActiveDocument(ctx, store, o, p)
+		if err != nil {
+			authoringError(w, err)
+			return
+		}
+		action, summary, err := screenplay.PrepareAssistantContentEdit(project, st, active, body, false)
+		if err != nil {
+			authoringError(w, err)
+			return
+		}
+		st.Proposals = append(st.Proposals, screenplay.AssistantProposal{ID: newAgentID("proposal"), Summary: summary, Actions: []screenplay.AuthoringAction{action}, Status: "pending", Revision: st.Revision + 1})
+		st, err = svc.Save(ctx, o, p, st, st.Revision)
+		respond(w, st, err, actor)
+	})
 	handle("POST "+base+"/assistant/apply", "edit", func(w http.ResponseWriter, r *http.Request, o, a string) {
 		var in struct {
 			Expected   int64  `json:"expected_revision"`
@@ -236,7 +435,7 @@ func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, stor
 		if !decode(w, r, &in) {
 			return
 		}
-		st, e := svc.Apply(r.Context(), o, r.PathValue("id"), in.ProposalID, in.Expected, in.Confirmed)
+		st, e := svc.ApplyAs(r.Context(), a, o, r.PathValue("id"), in.ProposalID, in.Expected, in.Confirmed)
 		respond(w, st, e, a)
 	})
 	for _, path := range []string{"chapters/plan", "chapters/{chapter}/script", "assistant/chat"} {
@@ -246,9 +445,59 @@ func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, stor
 				Expected    int64  `json:"expected_revision"`
 				Instruction string `json:"instruction"`
 				Message     string `json:"message"`
+				Action      string `json:"action"`
+				Confirmed   bool   `json:"confirmed"`
 			}
 			if !decode(w, r, &in) {
 				return
+			}
+			if path == "chapters/{chapter}/script" {
+				authoring, err := svc.Load(r.Context(), o, r.PathValue("id"))
+				if err != nil {
+					authoringError(w, err)
+					return
+				}
+				hasGeneration := false
+				for _, chapter := range authoring.Chapters {
+					if chapter.ID == r.PathValue("chapter") && chapter.ScriptGeneration != nil {
+						hasGeneration = true
+					}
+				}
+				if hasGeneration {
+					batchSvc := svc
+					batchSvc.Generator = screenplayTextGenerator{owner: o, resolver: resolver}
+					st, err := batchSvc.GenerateScriptBatch(r.Context(), o, r.PathValue("id"), r.PathValue("chapter"), in.Action, in.Instruction, in.Expected, in.Confirmed)
+					respond(w, st, err, a)
+					return
+				}
+				project, err := store.GetProject(r.Context(), o, r.PathValue("id"))
+				if err != nil {
+					authoringError(w, err)
+					return
+				}
+				id := project.PromptID
+				if project.CreativeConfig != nil && project.CreativeConfig.ScriptPromptID != "" {
+					id = project.CreativeConfig.ScriptPromptID
+				}
+				if id != "" {
+					selected, err := screenplay.ResolveProjectPrompt(project, id, "script")
+					if err != nil {
+						authoringError(w, err)
+						return
+					}
+					id = selected.ID
+				}
+				if id == screenplay.ScriptBatchPromptID {
+					batchSvc := svc
+					batchSvc.Generator = screenplayTextGenerator{owner: o, resolver: resolver}
+					st, err := batchSvc.GenerateScriptBatch(r.Context(), o, project.ID, r.PathValue("chapter"), in.Action, in.Instruction, in.Expected, in.Confirmed)
+					respond(w, st, err, a)
+					return
+				}
+				if in.Action != "" && in.Action != "start" {
+					authoringError(w, screenplay.ErrInvalidArgument)
+					return
+				}
 			}
 			var out screenplay.AuthoringState
 			e := svc.WithLock(r.Context(), o, r.PathValue("id"), func() error {
@@ -275,13 +524,16 @@ func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, stor
 				}
 				contextData := map[string]any{"project": project, "chapters": st.Chapters, "conversation": conversation}
 				var shots []screenplay.Shot
-				var hasDoc bool
-				if active, er := store.ActiveDocument(r.Context(), o, st.ProjectID); er == nil {
-					hasDoc = true
+				active, activeErr := screenplay.ReadAssistantActiveDocument(r.Context(), store, o, st.ProjectID)
+				if activeErr != nil && path == "assistant/chat" {
+					return activeErr
+				}
+				hasDoc := active.ID != ""
+				if hasDoc && activeErr == nil {
 					contextData["document"] = active
-					shots, er = store.ListShots(r.Context(), o, st.ProjectID, active.ID)
-					if er != nil {
-						return er
+					shots, e = store.ListShots(r.Context(), o, st.ProjectID, active.ID)
+					if e != nil {
+						return e
 					}
 					contextData["shots"] = shots
 				}
@@ -297,7 +549,7 @@ func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, stor
 					}
 					contextData["capabilities"] = caps
 					contextData["coverage"] = cov
-					system += "\n\n" + screenplay.FormatCapabilitiesForPrompt(caps, cov)
+					system += "\n\n" + screenplay.FormatCapabilitiesForPrompt(caps, cov) + prompt.ScreenplayAuthoringReadTools + prompt.ScreenplayAuthoringAssetEditTools + prompt.ScreenplayAuthoringShotEditTools
 				}
 				switch path {
 				case "chapters/plan":
@@ -359,37 +611,109 @@ func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, stor
 						return e
 					}
 				default:
-					var parsed struct {
-						Reply       string                       `json:"reply"`
-						Summary     string                       `json:"summary"`
-						Actions     []screenplay.AuthoringAction `json:"actions"`
-						Question    string                       `json:"question"`
-						Suggestions []assistantSuggestion        `json:"suggestions"`
-					}
+					var parsed assistantWire
 					if json.Unmarshal([]byte(raw), &parsed) != nil || strings.TrimSpace(parsed.Reply) == "" {
 						return screenplay.ErrAIInvalidJSON
 					}
-					if len(parsed.Actions) > 0 {
-						if len(parsed.Actions) > 1 {
+					toolRuns := []screenplay.AssistantToolRun{}
+					if strings.TrimSpace(parsed.Tool) != "" && !screenplay.IsAssistantAssetEditTool(parsed.Tool) && !screenplay.IsAssistantShotEditTool(parsed.Tool) {
+						if len(parsed.ActionInput) > 0 {
 							return screenplay.ErrInvalidArgument
 						}
+						run, detail, toolErr := assistantReadScopedTool(r.Context(), svc, o, st.ProjectID, parsed.Tool, parsed.ToolArgs)
+						if toolErr != nil {
+							return toolErr
+						}
+						toolRuns = append(toolRuns, run)
+						review := screenplay.IsAssistantReviewReadTool(parsed.Tool)
+						responseSystem := system
+						responseData := contextData
+						if review {
+							responseSystem = prompt.ScreenplayAuthoringReviewReply
+							responseData = map[string]any{"review_tool": parsed.Tool}
+						}
+						responseData["tool_result"] = detail
+						payload, err := json.Marshal(responseData)
+						if err != nil {
+							return err
+						}
+						retry, retryErr := (screenplayTextGenerator{owner: o, resolver: resolver}).Generate(r.Context(), screenplay.TextRequest{Model: project.ModelID, SystemPrompt: responseSystem, UserPrompt: string(payload) + "\n用户要求：" + user, JSONResponse: true, MaxOutputTokens: 16000, Temperature: 0.4})
+						if retryErr != nil {
+							return retryErr
+						}
+						raw = strings.TrimSpace(retry.Content)
+						raw = strings.TrimPrefix(raw, "```json")
+						raw = strings.TrimSuffix(raw, "```")
+						parsed = assistantWire{}
+						if json.Unmarshal([]byte(raw), &parsed) != nil || strings.TrimSpace(parsed.Reply) == "" {
+							return screenplay.ErrAIInvalidJSON
+						}
+						if review && (parsed.Tool != "" || len(parsed.ActionInput) > 0) {
+							return fmt.Errorf("%w: 审核数据只供回答，本轮不能继续调用工具或准备修改", screenplay.ErrInvalidArgument)
+						}
+						if strings.TrimSpace(parsed.Tool) != "" && !screenplay.IsAssistantAssetEditTool(parsed.Tool) && !screenplay.IsAssistantShotEditTool(parsed.Tool) {
+							return fmt.Errorf("%w: 本轮工具读取后必须直接回答", screenplay.ErrInvalidArgument)
+						}
+					}
+					if screenplay.IsAssistantAssetEditTool(parsed.Tool) {
+						if len(parsed.ActionInput) > 0 {
+							return screenplay.ErrInvalidArgument
+						}
+						action, summary, editErr := screenplay.PrepareAssistantAssetEdit(r.Context(), store, o, st.ProjectID, parsed.Tool, parsed.ToolArgs)
+						if editErr != nil {
+							return editErr
+						}
+						parsed = assistantWire{Reply: "已准备" + summary + "的方案，请核对后确认应用；当前资产尚未修改。", Summary: summary, Actions: []screenplay.AuthoringAction{action}}
+					}
+
+					if screenplay.IsAssistantShotEditTool(parsed.Tool) {
+						if len(parsed.ActionInput) > 0 {
+							return screenplay.ErrInvalidArgument
+						}
+						action, summary, editErr := screenplay.PrepareAssistantShotEdit(r.Context(), store, o, st.ProjectID, parsed.Tool, parsed.ToolArgs)
+						if editErr != nil {
+							return editErr
+						}
+						parsed = assistantWire{Reply: "已准备" + summary + "的方案，请核对后确认应用；当前分镜尚未修改。", Summary: summary, Actions: []screenplay.AuthoringAction{action}}
+					}
+					if len(parsed.ActionInput) > 0 {
+						if len(parsed.ActionInput) != 1 {
+							return screenplay.ErrInvalidArgument
+						}
+						owner, err := svc.Resolve(r.Context(), a, st.ProjectID, "edit")
+						if err != nil {
+							return err
+						}
+						if owner != o {
+							return screenplay.ErrAccessDenied
+						}
+						action, summary, err := screenplay.PrepareAssistantContentEdit(project, st, active, parsed.ActionInput[0], true)
+						if err != nil {
+							return err
+						}
+						if err = screenplay.CheckAssistantContentContext(r.Context(), store, project, active); err != nil {
+							return err
+						}
+						parsed = assistantWire{Reply: "修改方案已准备，请核对后确认应用。", Summary: summary, Actions: []screenplay.AuthoringAction{action}}
+					}
+					if len(parsed.Actions) > 0 {
 						if e = screenplay.ValidateAuthoringActions(parsed.Actions); e != nil {
 							return e
 						}
 						st.Proposals = append(st.Proposals, screenplay.AssistantProposal{ID: newAgentID("proposal"), Summary: parsed.Summary, Actions: parsed.Actions, Status: "pending", Revision: st.Revision + 1})
 					}
 					assistantContent := parsed.Reply
-					content := assistantContent
+					reply := screenplay.AssistantMessage{Role: "assistant", Content: assistantContent, Tools: toolRuns}
 					if strings.TrimSpace(parsed.Question) != "" {
 						// 主动追问落为独立消息，前端据此渲染追问卡片；不改任何作品数据。
 						st.Messages = append(st.Messages,
 							screenplay.AssistantMessage{Role: "user", Content: user},
-							screenplay.AssistantMessage{Role: "assistant", Content: assistantContent},
+							reply,
 							screenplay.AssistantMessage{Role: "assistant", Content: strings.TrimSpace(parsed.Question), Kind: screenplay.AssistantMessageKindQuestion})
 					} else {
 						st.Messages = append(st.Messages,
 							screenplay.AssistantMessage{Role: "user", Content: user},
-							screenplay.AssistantMessage{Role: "assistant", Content: content})
+							reply)
 					}
 					// 导航建议：校验入口标识后附加到最近一条普通助手消息，供前端点击跳转。
 					if safe := sanitizeAssistantSuggestions(parsed.Suggestions); len(safe) > 0 {
@@ -437,11 +761,11 @@ func authoringError(w http.ResponseWriter, e error) {
 	switch {
 	case errors.Is(e, screenplay.ErrAccessDenied):
 		status = 403
-	case errors.Is(e, screenplay.ErrNotFound):
+	case errors.Is(e, screenplay.ErrNotFound), errors.Is(e, screenplay.ErrNoActiveScript):
 		status = 404
 	case errors.Is(e, screenplay.ErrRevisionConflict), errors.Is(e, screenplay.ErrLockBusy):
 		status = 409
-	case errors.Is(e, screenplay.ErrInvalidArgument), errors.Is(e, screenplay.ErrEmptyContent), errors.Is(e, screenplay.ErrArtifactInvalid):
+	case errors.Is(e, screenplay.ErrInvalidArgument), errors.Is(e, screenplay.ErrEmptyContent), errors.Is(e, screenplay.ErrArtifactInvalid), errors.Is(e, screenplay.ErrAIInvalidJSON):
 		status = 400
 	case errors.Is(e, screenplay.ErrAPIKeyMissing), errors.Is(e, screenplay.ErrInvalidState):
 		status = 422

@@ -1,10 +1,53 @@
-import { Alert, Button, Checkbox, Empty, Input, InputNumber, message, Modal, Popconfirm, Select, Space, Spin, Switch } from 'antd';
+import { Alert, Button, Checkbox, Empty, Input, InputNumber, message, Modal, Popconfirm, Select, Space, Spin, Switch, Tag } from 'antd';
 import { BookOpen, Check, Download, Plus, Save, Send, Sparkles, Trash2, Users } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { comicStageLocation } from './comic-screenplay-stages.js';
 import { exportChapterText } from './comic-screenplay-chapter-export.js';
+import { chapterHeadingMatches, splitSourceChapters } from './comic-screenplay-episode-headings.js';
+import { loadComicScreenplayWorkspace } from '../../shared/api/comicScreenplay.js';
 import { applyComicProposal, generateComicChapter, getComicAssistant, getComicChapters, getComicDisplay, getComicTeam, planComicChapters, saveComicChapters, saveComicDisplay, saveComicTeam, sendComicAssistant } from '../../shared/api/comicScreenplayWorkflow.js';
 
+const assistantReadToolLabels={storyboard_failures:'分镜失败核对',get_current_screenplay:'读取当前剧本',analyze_screenplay:'分析剧本',get_editor_status:'读取编辑状态',get_shot_numbers:'读取镜头序号',get_shot_detail:'读取镜头详情',read_assets:'读取资产',read_shot_video_prompts:'读取视频提示词',read_shot_image_prompts:'读取图片提示词',get_all_shots_voicetext:'读取镜头台词',compare_original_vs_voicetext:'对比原文与台词',review_voice_emotions:'审查配音情绪',review_image_prompts:'检查画面提示词',review_video_prompts:'检查视频提示词',review_asset_bindings:'检查资产绑定'};
+function AssistantShotPreview({edit}) {
+  if(!edit)return null;
+  const labels={character_ids:'绑定人物',scene_id:'绑定场景',prop_ids:'绑定道具',image_prompt:'画面提示词',video_desc:'视频提示词',line:'台词/旁白',voice_actor:'配音角色',emotion:'情绪'};
+  return <div className="comic-assistant-shot-preview"><p>第{edit.episode_no}集 · {edit.engine} · 镜头{edit.before?.seq} · {edit.before?.id}</p>{(edit.changes||[]).map(change=><div key={change.field}><b>{Object.hasOwn(labels,change.field)?labels[change.field]:change.field}</b><small> 修改前</small><pre>{change.before||'（空）'}</pre><small>修改后</small><pre>{change.after||'（空）'}</pre></div>)}</div>;
+}
+function AssistantShotStructurePreview({edit}) {
+  if(!edit)return null;
+  const adding=edit.operation==='add';
+  return <div className="comic-assistant-shot-preview"><p>{adding?'新增镜头':'删除镜头'} · 第{edit.episode_no}集 · {edit.engine}</p><p>修改前：{edit.before?.length||0}个镜头 · 修改后：{edit.after?.length||0}个镜头</p>{(edit.targets||[]).map(shot=><div key={shot.id}><b>镜头{shot.seq} · {shot.id}</b><pre>{[shot.video_desc,shot.image_prompt,shot.line,shot.voice_actor,shot.emotion].filter(Boolean).join('\n')||'（空）'}</pre></div>)}<small>{adding?'来源未核验；不自动绑定资产':'仅删除以上镜头记录，保留原素材文件'}</small><p>保存后顺序：{(edit.after||[]).map(shot=>`镜头${shot.seq} · ${shot.id}`).join('；')||'（空分镜）'}</p></div>;
+}
+function AssistantContentPreview({action}) {
+  const edit = action.content_edit;
+  const version = edit.document
+    ? <>目标正文 · 第{edit.document.version}版 · {edit.document.id}</>
+    : '当前没有活动正文，确认后会保存新版本';
+  if (action.kind === 'document') {
+    return <div className="comic-assistant-shot-preview">
+      <p>{version}</p>
+      <small>待替换正文</small>
+      <pre>{action.content}</pre>
+    </div>;
+  }
+  const labels = { title: '章节标题', source_text: '章节原文', script_text: '本章剧本' };
+  return <div className="comic-assistant-shot-preview">
+    <p>{edit.chapter_title} · {edit.chapter.id} · 章节版本 {edit.author_revision}</p>
+    {edit.publish && <p>{version}</p>}
+    {Object.entries(labels).filter(([key]) => Object.hasOwn(edit.chapter, key)).map(([key, label]) => (
+      <div key={key}><small>{label}</small><pre>{edit.chapter[key] || '（清空）'}</pre></div>
+    ))}
+  </div>;
+}
+function AssistantActionPreview({action}) {
+  if (action.content_edit && (action.kind === 'document' || action.content_edit.chapter)) {
+    return <AssistantContentPreview action={action}/>;
+  }
+  if (action.kind === 'creative_shot') return <AssistantShotPreview edit={action.creative_shot}/>;
+  if (action.kind === 'creative_shot_structure') return <AssistantShotStructurePreview edit={action.creative_structure}/>;
+  const details = action.chapter || action.asset || action.shot;
+  return <pre>{action.content || (details ? JSON.stringify(details, null, 2) : '')}</pre>;
+}
 function errorMessage(error){message.error(error.message||'操作失败，请稍后重试');}
 function useAuthoringResource(projectId,load){
   const [data,setData]=useState(null),[loading,setLoading]=useState(true),[error,setError]=useState('');
@@ -20,16 +63,37 @@ export function ComicChaptersPanel({projectId,onSaved,readOnly=false,canGenerate
   const [chapters,setChapters]=useState([]),[selected,setSelected]=useState(''),[busy,setBusy]=useState(''),[instruction,setInstruction]=useState(''),[dirty,setDirty]=useState(false);
   useEffect(()=>{if(!data)return;const rows=data.state?.chapters||[];setChapters(rows);setSelected(current=>rows.some(item=>item.id===current)?current:rows[0]?.id||'');setDirty(false);},[data]);
   const active=chapters.find(item=>item.id===selected);
+	const actionPending=useRef(false);
+	const generation=active?.script_generation;
+	const generationStatus=generation?.status==='running'&&new Date(generation.deadline).getTime()<=Date.now()?'unknown':generation?.status;
+	useEffect(()=>{setInstruction(active?.script_generation?.instruction||'');},[active?.id,active?.script_generation?.id]);
   const patch=values=>{setChapters(rows=>rows.map(item=>item.id===selected?{...item,...values}:item));setDirty(true);};
-  async function act(kind,action){if(busy)return;setBusy(kind);try{const next=await action();setData(next);setDirty(false);await onSaved?.();message.success(kind==='save'?'章节已保存':'处理完成，结果已保存');}catch(err){errorMessage(err);}finally{setBusy('');}}
+  async function act(kind,action){if(actionPending.current)return;actionPending.current=true;setBusy(kind);try{const next=await action();setData(next);setDirty(false);await onSaved?.();const status=next.state?.chapters?.find(item=>item.id===selected)?.script_generation?.status;message.success(kind==='save'?'章节已保存':status==='awaiting_continue'?'本批已保存，待继续':status==='unknown'?'结果不确定，已保存记录，请核对后再重新开始':status==='invalid'||status==='stale'?'回包已保存，请查看提示':'处理完成，结果已保存');}catch(err){errorMessage(err);if(kind==='script')await refresh();}finally{actionPending.current=false;setBusy('');}}
+	const generate=(action='start',confirmed=false)=>act('script',()=>generateComicChapter(projectId,selected,{expected_revision:data?.state?.revision||0,instruction,action,confirmed}));
   const save=()=>!readOnly&&act('save',()=>saveComicChapters(projectId,{expected_revision:data?.state?.revision||0,chapters}));
   function exportCurrent(){if(!active)return;try{const fileName=exportChapterText(active,chapters.findIndex(item=>item.id===selected));message.success(`已导出：${fileName}`);}catch(err){errorMessage(err);}}
+  async function splitByHeading(){
+    if(readOnly||busy||dirty||loading||error)return;
+    setBusy('split');
+    try{
+      const workspace=await loadComicScreenplayWorkspace(projectId);
+      const source=String(workspace?.project?.source_text||'');
+      if(!source.trim()){message.warning('项目还没有保存原文，请先在剧本页保存原文');return;}
+      if(!chapterHeadingMatches(source).length){message.warning('没有识别到章节标题（第N章/回/节/篇/卷/部/集、Chapter/Episode）');return;}
+      const rows=splitSourceChapters(source).map((row,index)=>({id:`chapter_${Date.now()}_${index}_${Math.random().toString(36).slice(2,6)}`,title:row.title||`第${index+1}章`,source_text:row.sourceText,script_text:''}));
+      Modal.confirm({title:`按标题拆分 ${rows.length} 章`,content:'将用项目原文替换当前章节列表，未保存的章节修改会丢失。拆分后仍需点击「保存章节」。',okText:'替换并拆分',cancelText:'取消',onOk:()=>{setChapters(rows);setSelected(rows[0]?.id||'');setDirty(true);message.success(`已识别 ${rows.length} 章，请检查后保存`);}});
+    }catch(err){errorMessage(err);}finally{setBusy('');}
+  }
   return <div className="comic-chapters-panel"><ResourceError error={error} retry={refresh}/><Spin spinning={loading}>
-    <div className="comic-panel-heading"><div><h3>章节与分集</h3><p>分别管理原文和剧本，生成结果会保存为工作台的新剧本版本。</p></div><Space><Button icon={<Download size={14}/>} disabled={!active||!String(active.source_text||'').trim()||!!busy} title={active?.source_text?.trim()?'导出本章原文为 TXT（剧本不走本章导出，剧本用复制或剧本合集导出）':'本章还没有原文，没有可导出的内容'} onClick={exportCurrent}>导出本章</Button><Button icon={<Plus size={14}/>} disabled={readOnly||!!busy} onClick={()=>{const id=`chapter_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;setChapters(rows=>[...rows,{id,title:`第${rows.length+1}章`,source_text:'',script_text:''}]);setSelected(id);setDirty(true);}}>新增章节</Button><Button onClick={refresh} disabled={!!busy||dirty}>刷新章节</Button><Button type="primary" icon={<Save size={14}/>} disabled={readOnly||!dirty||!!busy||loading||!!error} loading={busy==='save'} onClick={save}>保存章节</Button></Space></div>
+    <div className="comic-panel-heading"><div><h3>章节与分集</h3><p>分别管理原文和剧本，生成结果会保存为工作台的新剧本版本。</p></div><Space><Button icon={<Download size={14}/>} disabled={!active||!String(active.source_text||'').trim()||!!busy} title={active?.source_text?.trim()?'导出本章原文为 TXT（剧本不走本章导出，剧本用复制或剧本合集导出）':'本章还没有原文，没有可导出的内容'} onClick={exportCurrent}>导出本章</Button><Button icon={<Plus size={14}/>} disabled={readOnly||!!busy} onClick={()=>{const id=`chapter_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;setChapters(rows=>[...rows,{id,title:`第${rows.length+1}章`,source_text:'',script_text:''}]);setSelected(id);setDirty(true);}}>新增章节</Button><Button icon={<BookOpen size={14}/>} disabled={readOnly||!!busy||dirty||loading||!!error} loading={busy==='split'} onClick={splitByHeading} title="用项目已保存原文按章节标题拆分">按标题拆分</Button><Button onClick={refresh} disabled={!!busy||dirty}>刷新章节</Button><Button type="primary" icon={<Save size={14}/>} disabled={readOnly||!dirty||!!busy||loading||!!error} loading={busy==='save'} onClick={save}>保存章节</Button></Space></div>
     <div className="comic-chapter-layout"><aside>{chapters.map((item,index)=><button type="button" key={item.id} className={selected===item.id?'is-active':''} onClick={()=>setSelected(item.id)}><BookOpen size={15}/><span>{item.title||`第${index+1}章`}</span><small>{[...String(item.source_text||'')].length} 字</small></button>)}{!chapters.length?<Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有章节"/>:null}</aside><section>{active?<>
       <div className="comic-chapter-title"><Input value={active.title} disabled={readOnly} placeholder="章节标题" onChange={event=>patch({title:event.target.value})}/><Popconfirm title="移除此章节？保存后生效" onConfirm={()=>{setChapters(rows=>rows.filter(item=>item.id!==selected));setSelected(chapters.find(item=>item.id!==selected)?.id||'');setDirty(true);}}><Button aria-label="移除当前章节" danger disabled={readOnly} icon={<Trash2 size={15}/>}/></Popconfirm></div>
       <div className="comic-chapter-editors"><label>章节原文<Input.TextArea rows={15} disabled={readOnly} value={active.source_text||''} onChange={event=>patch({source_text:event.target.value})} placeholder="输入或粘贴这一章的原文"/></label><label>本章剧本<Input.TextArea rows={15} disabled={readOnly} value={active.script_text||''} onChange={event=>patch({script_text:event.target.value})} placeholder="可以手工编辑，也可以生成后继续修改"/></label></div>
-      <Button icon={<Sparkles size={14}/>} disabled={!canGenerate||dirty||!!busy||loading||!!error} title={dirty?'请先保存章节':undefined} loading={busy==='script'} onClick={()=>act('script',()=>generateComicChapter(projectId,selected,{expected_revision:data?.state?.revision||0,instruction}))}>生成本章剧本</Button>
+      {generation?<Alert showIcon type={['unknown','invalid','stale'].includes(generationStatus)?'warning':'info'} message={({running:'本批正在生成，请勿重复提交',awaiting_continue:'本批已保存，待继续',completed:'本章剧本已全部生成',unknown:'结果不确定，不会自动重发；重新开始可能再次扣费',invalid:'本批回包未通过检查，旧成功剧本已保留',stale:'原文或配置已变更，请重新开始'})[generationStatus]||'生成记录已保存'} description={<span>已保存 {generation.batches?.length||0} 批{generation.error?` · ${generation.error}`:''}</span>}/>:null}
+      <Button icon={<Sparkles size={14}/>} disabled={!canGenerate||dirty||!!busy||loading||!!error||!!generation&&generationStatus!=='awaiting_continue'} title={dirty?'请先保存章节':undefined} loading={busy==='script'} onClick={()=>generate(generationStatus==='awaiting_continue'?'continue':'start')}>{generationStatus==='awaiting_continue'?'继续生成剩余剧本':'生成本章剧本'}</Button>
+      {generation&&generationStatus!=='running'?<Popconfirm title="重新开始本章剧本？" description="将保留已有批次和旧成功剧本；重新调用模型可能再次扣费。" okText="确认重新开始" cancelText="取消" onConfirm={()=>generate('restart',true)}><Button disabled={!canGenerate||dirty||!!busy||loading||!!error}>重新开始</Button></Popconfirm>:null}
+			{generation&&['running','unknown'].includes(generationStatus)?<Button disabled={!canGenerate||dirty||!!busy||loading||!!error} onClick={()=>generate('recover')}>恢复已返回批次（不调用模型）</Button>:null}
+			{generationStatus==='completed'&&(generation.publication_error||!generation.published_document_id)?<Alert type={generation.publication_error?'warning':'info'} showIcon message={generation.publication_error?'剧本已完整保存，写入合集失败':'剧本已完整保存，待确认合集保存结果'} description={generation.publication_error||undefined} action={<Button disabled={!canGenerate||dirty||!!busy||loading||!!error} onClick={()=>generate('publish')}>{generation.publication_error?'重试保存合集（不调用模型）':'保存到剧本合集（不调用模型）'}</Button>}/>:null}
     </>:<Empty description="新增章节，或使用下方章节计划整理内容"/>}</section></div>
     <div className="comic-plan-box"><b>AI 章节计划</b><Input.TextArea value={instruction} onChange={event=>setInstruction(event.target.value)} rows={2} placeholder="例如：根据已保存的原文，按情节划分为 8 集，保留完整事件。" disabled={!canGenerate}/><Button icon={<Sparkles size={14}/>} disabled={!canGenerate||dirty||!!busy||loading||!!error} loading={busy==='plan'} onClick={()=>act('plan',()=>planComicChapters(projectId,{expected_revision:data?.state?.revision||0,instruction}))}>生成并保存章节计划</Button><small>会使用项目已保存的文本模型；先保存当前修改。</small></div>
   </Spin></div>;
@@ -42,16 +106,16 @@ export function ComicAssistantPanel({projectId,onSaved,onNavigate,readOnly=false
   const state=data?.state||{};const messages=state.messages||state.conversation||[];const proposals=state.proposals||[];
   const navigateLabel={source:'剧本',script:'剧本',assets:'资产',storyboard:'分镜',media:'媒体'};
   async function send(){if(!canGenerate||!text.trim()||busy||loading||error)return;setBusy('chat');try{setData(await sendComicAssistant(projectId,{message:text.trim(),expected_revision:state.revision||0}));setText('');}catch(err){errorMessage(err);}finally{setBusy('');}}
-  async function apply(proposal){if(readOnly||busy||proposal.status!=='pending')return;setBusy(proposal.id);try{setData(await applyComicProposal(projectId,{proposal_id:proposal.id,expected_revision:state.revision||0,confirmed:true}));await onSaved?.();message.success('修改已应用并保存');}catch(err){errorMessage(err);}finally{setBusy('');}}
+  async function apply(proposal){if(readOnly||busy||proposal.status!=='pending')return;setBusy(proposal.id);try{setData(await applyComicProposal(projectId,{proposal_id:proposal.id,expected_revision:state.revision||0,confirmed:true}));await onSaved?.();message.success('修改已应用并保存');}catch(err){errorMessage(err);if(err.status===409)await refresh();}finally{setBusy('');}}
   return <div className="comic-assistant-panel"><ResourceError error={error} retry={refresh}/><div className="comic-panel-heading"><div><h3>作品助手</h3><p>读取当前作品与章节，提出可查看、可确认的修改。不会自行启动图片或视频生产。</p></div><Button onClick={refresh}>刷新会话</Button></div><Spin spinning={loading}>
     <div className="comic-assistant-messages">{messages.length?messages.map((item,index)=>{
       const kind=item.kind||'';
       if(kind==='compacted')return <article key={item.id||index} className="comic-assistant-compacted"><div>{item.content||''}</div></article>;
       if(kind==='question')return <article key={item.id||index} className="comic-assistant-question"><b>作品助手想确认</b><div>{item.content||item.text||''}</div><small className="comic-assistant-question-tip">在下方输入框回答，助手会据此继续。</small></article>;
       const suggestions=Array.isArray(item.suggestions)?item.suggestions:[];
-      return <article key={item.id||index} className={`role-${item.role}`}><b>{item.role==='user'?'你':'作品助手'}</b><div>{item.content||item.text||''}</div>{suggestions.length?<div className="comic-assistant-suggestions">{suggestions.map((s,i)=><Button key={i} size="small" onClick={()=>onNavigate?.(s.entry)} title={s.reason||undefined}>{s.label||navigateLabel[s.entry]||'前往面板'}</Button>)}</div>:null}</article>;
+      return <article key={item.id||index} className={`role-${item.role}`}><b>{item.role==='user'?'你':'作品助手'}</b><div>{item.content||item.text||''}</div>{Array.isArray(item.tools)&&item.tools.length?<div className="comic-assistant-tools">{item.tools.map((tool,toolIndex)=><Tag key={toolIndex} color={tool.ok===false?'error':'blue'}>{(Object.hasOwn(assistantReadToolLabels,tool.name)?assistantReadToolLabels[tool.name]:'只读工具')}{tool.summary?` · ${tool.summary}`:''}</Tag>)}</div>:null}{suggestions.length?<div className="comic-assistant-suggestions">{suggestions.map((s,i)=><Button key={i} size="small" onClick={()=>onNavigate?.(s.entry)} title={s.reason||undefined}>{s.label||navigateLabel[s.entry]||'前往面板'}</Button>)}</div>:null}</article>;
     }):<Empty description="说明你想修改的章节、人物或分镜"/>}</div>
-    {proposals.map(proposal=><article key={proposal.id} className="comic-assistant-proposal"><b>{proposal.summary||'建议修改'}</b>{Array.isArray(proposal.actions)?<ul>{proposal.actions.map((action,index)=><li key={index}>{action.summary||action.title||action.description||({replace_chapters:'更新章节',save_document:'保存剧本新版本',update_asset:'修改资产设定',update_shot:'修改分镜'}[action.kind])||({document:'更新剧本',chapter:'修改章节',asset:'修改资产',shot:'修改场次'}[action.kind])||'作品内容修改'}{action.target_id?<small> · {action.target_id}</small>:null}<pre>{action.content||(action.chapter?JSON.stringify(action.chapter,null,2):'')||(action.asset?JSON.stringify(action.asset,null,2):'')||(action.shot?JSON.stringify(action.shot,null,2):'')||''}</pre></li>)}</ul>:null}<Popconfirm title="确认应用这些修改？" description="应用后会保存到当前作品，请先核对上述内容。" onConfirm={()=>apply(proposal)}><Button icon={<Check size={14}/>} type="primary" loading={busy===proposal.id} disabled={readOnly||!!busy||proposal.status!=='pending'||proposal.applied}> {proposal.status==='applied'||proposal.applied?'已应用':proposal.status==='stale'?'内容已变更，请重新询问':'应用修改'}</Button></Popconfirm></article>)}
+    {proposals.map(proposal=><article key={proposal.id} className="comic-assistant-proposal"><b>{proposal.summary||'建议修改'}</b>{Array.isArray(proposal.actions)?<ul>{proposal.actions.map((action,index)=><li key={index}>{(action.kind==='asset'?({add:'新增资产',delete:'删除资产',update:'修改资产'}[action.asset_operation]||'修改资产'):null)||action.summary||action.title||action.description||({replace_chapters:'更新章节',save_document:'保存剧本新版本',update_asset:'修改资产设定',update_shot:'修改分镜'}[action.kind])||({document:'更新剧本',chapter:'修改章节',asset:'修改资产',shot:'修改场次',creative_shot:action.creative_shot?.binding?'绑定分镜资产':'修改分镜文字'}[action.kind])||'作品内容修改'}{action.kind==='asset'&&action.asset?.name?<small> · {action.asset.name}</small>:null}{action.kind==='asset'&&action.asset_operation==='delete'?<small> · 保留原素材文件</small>:null}{action.target_id&&!action.content_edit?<small> · {action.target_id}</small>:null}<AssistantActionPreview action={action}/></li>)}</ul>:null}<Popconfirm title="确认应用这些修改？" description="应用后会保存到当前作品，请先核对上述内容。" onConfirm={()=>apply(proposal)}><Button icon={<Check size={14}/>} type="primary" loading={busy===proposal.id} disabled={readOnly||!!busy||proposal.status!=='pending'||proposal.applied}> {proposal.status==='applied'||proposal.applied?'已应用':proposal.status==='stale'?'方案已过期，请重新准备':'应用修改'}</Button></Popconfirm></article>)}
     <div className="comic-assistant-compose"><Input.TextArea value={text} onChange={event=>setText(event.target.value)} rows={3} maxLength={10000} placeholder="例如：检查第一集节奏，给出修改建议；或把人物称呼统一。" disabled={!canGenerate}/><Button type="primary" icon={<Send size={14}/>} loading={busy==='chat'} disabled={!canGenerate||!text.trim()||!!busy||loading||!!error} onClick={send}>发送</Button></div>
   </Spin></div>;
 }

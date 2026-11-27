@@ -1,5 +1,16 @@
 const publicAssetFields = ['assetId', 'id', 'kind', 'mediaType', 'name', 'width', 'height', 'duration'];
 
+export function normalizeCanvasCollections(canvas) {
+  const source = canvas && typeof canvas === 'object' ? canvas : {};
+  return {
+    version: 1,
+    revision: 0,
+    ...source,
+    nodes: Array.isArray(source.nodes) ? source.nodes : [],
+    edges: Array.isArray(source.edges) ? source.edges : []
+  };
+}
+
 function publicAssetRef(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const output = {};

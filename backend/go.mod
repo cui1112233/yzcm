@@ -10,6 +10,7 @@ require (
 	github.com/volcengine/ve-tos-golang-sdk/v2 v2.9.8
 	golang.org/x/crypto v0.17.0
 	golang.org/x/image v0.20.0
+	golang.org/x/sys v0.48.0
 )
 
 require (
@@ -26,6 +27,5 @@ require (
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/tetratelabs/wazero v1.12.0
 	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 )

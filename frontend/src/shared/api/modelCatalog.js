@@ -132,6 +132,30 @@ export async function refreshAvailableModels(kind, request = apiRequest) {
   }
 }
 
+function savedYZCMSearchPath(query = {}, restart = false) {
+  const params = new URLSearchParams();
+  const kind = query.kind ? assertModelKind(query.kind) : '';
+  if (kind) params.set('kind', kind);
+  const q = String(query.q ?? '').trim();
+  if (q) params.set('q', q);
+  const limit = Number(query.limit || 50);
+  params.set('limit', String(Number.isInteger(limit) && limit > 0 ? limit : 50));
+  const offset = restart ? 0 : Number(query.offset || 0);
+  params.set('offset', String(Number.isInteger(offset) && offset >= 0 ? offset : 0));
+  const snapshotId = restart ? '' : String(query.snapshotId ?? '').trim();
+  if (snapshotId) params.set('snapshotId', snapshotId);
+  return `/api/config/models/yzcm?${params.toString()}`;
+}
+
+export async function searchSavedYZCMModels(query = {}, request = apiRequest) {
+  try {
+    return await request(savedYZCMSearchPath(query, false), { suppressGlobalError: true });
+  } catch (error) {
+    if (Number(error?.status || 0) !== 409) throw error;
+    return request(savedYZCMSearchPath(query, true), { suppressGlobalError: true });
+  }
+}
+
 export async function listManagedModels() {
   const groups = await Promise.all(['text', 'video', 'image', 'audio', 'asr'].map(kind => listManagedModelsByKind(kind)));
   return groups.flat();

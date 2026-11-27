@@ -17,8 +17,11 @@ package apisecrets
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -28,7 +31,8 @@ import (
 
 const (
 	// Prefix 是密文的固定前缀，用于区分历史明文。
-	Prefix = "enc:v1:"
+	Prefix      = "enc:v1:"
+	BoundPrefix = "enc:v2:"
 	// KeySize 是 AES-256 要求的密钥长度。
 	KeySize = 32
 	// KeyEnvVar 是首选的密钥来源，值是 base64 或 32 字节原文。
@@ -49,7 +53,7 @@ var (
 
 // IsEncrypted 判断值是否为本包产生的密文。
 func IsEncrypted(value string) bool {
-	return strings.HasPrefix(value, Prefix)
+	return strings.HasPrefix(value, Prefix) || strings.HasPrefix(value, BoundPrefix)
 }
 
 // Cipher 是 AES-256-GCM 的加解密器。
@@ -64,6 +68,17 @@ func (c *Cipher) Source() string {
 		return ""
 	}
 	return c.source
+}
+
+// BoundFingerprint compares durable recovery evidence without keeping a
+// public hash of the credential. The binding is the same scope as its AEAD.
+func (c *Cipher) BoundFingerprint(plain string, binding []byte) []byte {
+	mac := hmac.New(sha256.New, c.key)
+	_, _ = mac.Write([]byte("qiantie:v88:api-config:bound-fingerprint:v1"))
+	_, _ = mac.Write(binary.BigEndian.AppendUint64(nil, uint64(len(binding))))
+	_, _ = mac.Write(binding)
+	_, _ = mac.Write([]byte(plain))
+	return mac.Sum(nil)
 }
 
 // NewCipher 用 32 字节密钥构造加解密器。
@@ -142,6 +157,22 @@ func (c *Cipher) Encrypt(plain string) (string, error) {
 	if plain == "" || IsEncrypted(plain) {
 		return plain, nil
 	}
+	return c.seal(plain, Prefix, []byte(aad))
+}
+
+// SealBound authenticates the owner, configuration scope, model and field
+// supplied by the caller. Bound ciphertext never falls back to legacy AAD.
+func (c *Cipher) SealBound(plain string, binding []byte) (string, error) {
+	if plain == "" {
+		return "", nil
+	}
+	if len(binding) == 0 || IsEncrypted(plain) {
+		return "", ErrBadCiphertext
+	}
+	return c.seal(plain, BoundPrefix, binding)
+}
+
+func (c *Cipher) seal(plain, prefix string, binding []byte) (string, error) {
 	if c == nil || len(c.key) != KeySize {
 		return "", ErrNoKey
 	}
@@ -153,9 +184,9 @@ func (c *Cipher) Encrypt(plain string) (string, error) {
 	if _, err := rand.Read(nonce); err != nil {
 		return "", err
 	}
-	sealed := gcm.Seal(nil, nonce, []byte(plain), []byte(aad))
+	sealed := gcm.Seal(nil, nonce, []byte(plain), binding)
 	payload := append(nonce, sealed...)
-	return Prefix + base64.StdEncoding.EncodeToString(payload), nil
+	return prefix + base64.StdEncoding.EncodeToString(payload), nil
 }
 
 // Decrypt 解开密文；不带前缀的值按历史明文原样返回。
@@ -163,10 +194,27 @@ func (c *Cipher) Decrypt(value string) (string, error) {
 	if !IsEncrypted(value) {
 		return value, nil
 	}
+	return c.open(value, Prefix, []byte(aad))
+}
+
+func (c *Cipher) OpenBound(value string, binding []byte) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	if len(binding) == 0 {
+		return "", ErrBadCiphertext
+	}
+	return c.open(value, BoundPrefix, binding)
+}
+
+func (c *Cipher) open(value, prefix string, binding []byte) (string, error) {
+	if !strings.HasPrefix(value, prefix) {
+		return "", ErrBadCiphertext
+	}
 	if c == nil || len(c.key) != KeySize {
 		return "", ErrNoKey
 	}
-	payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(value, Prefix))
+	payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(value, prefix))
 	if err != nil {
 		return "", ErrBadCiphertext
 	}
@@ -178,7 +226,7 @@ func (c *Cipher) Decrypt(value string) (string, error) {
 	if len(payload) <= nonceSize {
 		return "", ErrBadCiphertext
 	}
-	plain, err := gcm.Open(nil, payload[:nonceSize], payload[nonceSize:], []byte(aad))
+	plain, err := gcm.Open(nil, payload[:nonceSize], payload[nonceSize:], binding)
 	if err != nil {
 		return "", ErrBadCiphertext
 	}

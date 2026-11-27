@@ -198,7 +198,7 @@ export function ProjectsView({ projects, loadError, health, onCreate, onImported
   }
 
   function batchKindLabel(project) {
-    return {comic:'漫画',text:'文本',video:'视频'}[project?.factoryMode] || '视频';
+    return project?.factoryMode==='comic' && project?.factoryOutputKind==='illustrated_text' ? '文字插画' : ({comic:'漫画',text:'文本',video:'视频'}[project?.factoryMode] || '视频');
   }
 
   function projectCover(project) {

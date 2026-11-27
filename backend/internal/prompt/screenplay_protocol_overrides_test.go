@@ -30,10 +30,26 @@ func TestStoryboard139ExplicitRefreshPinsActualBodyAndLeavesOtherFrozenContracts
 		t.Fatal(required)
 	}
 	other, _ := ResolveCreativePrompt("138", "storyboard")
-	if other.Supported {
-		t.Fatal("138 enabled without continuation implementation")
+	if !Storyboard138SupportsBatch(other) {
+		t.Fatal("138 source continuation adapter missing")
 	}
 	if _, ok := RefreshStoryboard139ForExplicitSelection(other); ok {
 		t.Fatal("138 refreshed")
+	}
+}
+func TestStoryboard138ExplicitRefreshRequiresExactFrozenBody(t *testing.T) {
+	p, e := ResolveCreativePrompt("138", "storyboard")
+	if e != nil {
+		t.Fatal(e)
+	}
+	p.Supported = false
+	p.ParserVersion = "storyboard_image_voice_v1"
+	updated, ok := RefreshStoryboard138ForExplicitSelection(p)
+	if !ok || !Storyboard138SupportsBatch(updated) || updated.Body != p.Body {
+		t.Fatal("exact frozen adapter not refreshed")
+	}
+	p.Body += "\n"
+	if _, ok := RefreshStoryboard138ForExplicitSelection(p); ok {
+		t.Fatal("modified body enabled")
 	}
 }

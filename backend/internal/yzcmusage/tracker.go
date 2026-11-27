@@ -6,13 +6,31 @@ import (
 	"encoding/hex"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 )
 
 type identityKey struct{}
-type identity struct{ Owner, Feature string }
+type identity struct{ Owner, Feature, TeamID, ActorUsername string }
+
+// WithAttribution snapshots the authoritative subject, team and actor before
+// executing a paid request. Legacy credential selection cannot replace them.
+func WithAttribution(ctx context.Context, owner, teamID, actorUsername string) context.Context {
+	previous, _ := ctx.Value(identityKey{}).(identity)
+	previous.Owner, previous.TeamID, previous.ActorUsername = owner, teamID, actorUsername
+	return context.WithValue(ctx, identityKey{}, previous)
+}
+
+// AttributionForOwner reads the accepted attribution only for the same subject.
+func AttributionForOwner(ctx context.Context, owner string) (teamID, actorUsername string) {
+	i, _ := ctx.Value(identityKey{}).(identity)
+	if i.Owner == owner {
+		return i.TeamID, i.ActorUsername
+	}
+	return "", ""
+}
 
 func WithIdentity(ctx context.Context, owner, feature string) context.Context {
 	previous, _ := ctx.Value(identityKey{}).(identity)
@@ -30,14 +48,28 @@ func Fingerprint(key string) string {
 }
 
 type Tracker struct {
-	ReceiptDir        string
-	Store             Store
-	Client            Client
-	ResolveCredential func(context.Context, string, string) (string, error)
-	wake              chan struct{}
-	once              sync.Once
-	credentialMu      sync.Mutex
-	credentials       map[string]cachedCredential
+	ReceiptDir string
+	// DBOnly is explicit and exclusive to installations without local receipt claims.
+	DBOnly             bool
+	Store              Store
+	Client             Client
+	ResolveCredential  func(context.Context, string, string) (string, error)
+	wake               chan struct{}
+	once               sync.Once
+	credentialMu       sync.Mutex
+	credentials        map[string]cachedCredential
+	receiptBindingMu   sync.Mutex
+	receiptBindingSync func(*os.File) error // Used to inject disk failures during binding tests.
+	receiptBound       *receiptBinding
+	receiptDBOnlyBound bool
+	receiptScanMu      sync.Mutex
+	receiptScan        *os.File
+	receiptScanInfo    os.FileInfo
+	receiptScanNext    os.DirEntry
+	receiptProbeMu     sync.Mutex
+	receiptProbe       *receiptProbe
+	receiptProbeErr    error
+	receiptProbeRetry  time.Time
 }
 
 type cachedCredential struct {
@@ -81,6 +113,7 @@ func (t *Tracker) Run(ctx context.Context) {
 	t.once.Do(func() {
 		t.wake = make(chan struct{}, 1)
 		go func() {
+			defer t.closeReceiptScan()
 			t.flushReceipts(ctx)
 			timer := time.NewTicker(20 * time.Second)
 			defer timer.Stop()
@@ -182,13 +215,21 @@ func (t *trackedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if r.URL.Hostname() != "newapi.yzcm.site" || !paid || i.Owner == "" {
 		return t.base.RoundTrip(r)
 	}
+	key := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	if key == "" {
+		return t.base.RoundTrip(r)
+	}
+	binding, err := t.t.preflightReceipt(r.Context())
+	if err != nil {
+		return nil, err
+	}
+	at := time.Now().UTC()
 	response, err := t.base.RoundTrip(r)
 	if err != nil {
 		return response, err
 	}
 	id := strings.TrimSpace(response.Header.Get("X-Oneapi-Request-Id"))
-	key := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-	if id == "" || key == "" || len(id) > 64 {
+	if id == "" || len(id) > 64 {
 		return response, nil
 	}
 	feature := i.Feature
@@ -202,9 +243,10 @@ func (t *trackedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		feature = "audio"
 	}
 	t.t.remember(key)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	t.t.recordReceipt(ctx, Request{ID: id, Owner: i.Owner, Feature: feature}, Fingerprint(key), response.StatusCode, time.Now().UTC())
-	cancel()
+	captured := receipt{Request: Request{ID: id, Owner: i.Owner, TeamID: i.TeamID, ActorUsername: i.ActorUsername, Feature: feature}, CredentialHash: Fingerprint(key), Status: response.StatusCode, At: at}
+	if err := t.t.recordBoundReceipt(context.Background(), binding, captured); err != nil {
+		logReceiptError(id, err)
+	}
 	// A bounded worker, rather than a goroutine per response, performs lookups.
 	return response, nil
 }

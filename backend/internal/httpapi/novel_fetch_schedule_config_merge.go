@@ -9,9 +9,9 @@ import (
 // Scheduling may create documents and update the current batch in between
 // writes. Persist only runtime fields on its own schedule, never the old full
 // settings snapshot. A cancelled/deleted schedule must not be resurrected.
-func saveNovelFetchScheduleItem(ctx context.Context, store novelfetchworkshop.Store, owner string, item map[string]any) error {
+func saveNovelFetchScheduleItem(ctx context.Context, store novelfetchworkshop.Store, owner string, item map[string]any, preparing ...bool) error {
 	for attempt := 0; attempt < 3; attempt++ {
-		current, err := store.GetConfig(ctx, owner)
+		current, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 		if err != nil {
 			return err
 		}
@@ -20,6 +20,19 @@ func saveNovelFetchScheduleItem(ctx context.Context, store novelfetchworkshop.St
 			row := mapOrEmpty(raw)
 			if firstText(row["id"]) != firstText(item["id"]) {
 				continue
+			}
+			// Preparation is a one-time checkpoint. A concurrent dispatcher may
+			// already have saved it and advanced the schedule. Adopt that row
+			// instead of retrying a stale write or resetting its status.
+			if len(preparing) > 0 && preparing[0] && (row["tasks_prepared"] == true || firstText(row["status"]) == "cancelled") {
+				latest := cloneAnyMap(row)
+				for key := range item {
+					delete(item, key)
+				}
+				for key, value := range latest {
+					item[key] = value
+				}
+				return nil
 			}
 			if firstText(row["status"]) == "cancelled" {
 				return nil
@@ -46,7 +59,7 @@ func saveNovelFetchScheduleItem(ctx context.Context, store novelfetchworkshop.St
 		if !found {
 			return nil
 		}
-		if err = store.PutConfig(ctx, owner, current); !errors.Is(err, novelfetchworkshop.ErrConfigConflict) {
+		if err = novelfetchworkshop.WriteWorkflowConfig(ctx, store, owner, current); !errors.Is(err, novelfetchworkshop.ErrConfigConflict) {
 			return err
 		}
 	}

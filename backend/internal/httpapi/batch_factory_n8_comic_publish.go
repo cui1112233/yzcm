@@ -537,6 +537,9 @@ func registerN8ComicPublishRoutes(mux *http.ServeMux, publisher *BatchFactoryN8C
 	if mux == nil || publisher == nil {
 		return
 	}
+	handleComic := func(pattern string, handler http.HandlerFunc) {
+		mux.HandleFunc(pattern, comicStyleHandler(publisher.Store, handler))
+	}
 	mux.HandleFunc("GET /api/batch-factory/v12/comic-publish/status", func(w http.ResponseWriter, r *http.Request) {
 		// 这几个目录来自同一个 N8 后台，但不能串行读取。制作者账号目录
 		// 偶尔会慢到 20 秒以上；串行读取会让音频分类也跟着一直转圈。
@@ -625,7 +628,7 @@ func registerN8ComicPublishRoutes(mux *http.ServeMux, publisher *BatchFactoryN8C
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"works": works})
 	})
-	mux.HandleFunc("POST /api/batch-factory/v12/batches/{batchId}/books/{bookId}/comic-collections/{collectionId}/publish", func(w http.ResponseWriter, r *http.Request) {
+	handleComic("POST /api/batch-factory/v12/batches/{batchId}/books/{bookId}/comic-collections/{collectionId}/publish", func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -653,7 +656,7 @@ func registerN8ComicPublishRoutes(mux *http.ServeMux, publisher *BatchFactoryN8C
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"publish": record})
 	})
-	mux.HandleFunc("GET /api/batch-factory/v12/batches/{batchId}/books/{bookId}/comic-collections/{collectionId}/publish", func(w http.ResponseWriter, r *http.Request) {
+	handleComic("GET /api/batch-factory/v12/batches/{batchId}/books/{bookId}/comic-collections/{collectionId}/publish", func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -661,6 +664,10 @@ func registerN8ComicPublishRoutes(mux *http.ServeMux, publisher *BatchFactoryN8C
 		}
 		if publisher.Store == nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "漫画发布记录存储尚未配置"})
+			return
+		}
+		if err := publisher.validateComicStyleCollection(r.Context(), owner, r.PathValue("batchId"), r.PathValue("bookId"), r.PathValue("collectionId")); err != nil {
+			writeStoreError(w, err)
 			return
 		}
 		record, found, err := publisher.collectionService().Status(r.Context(), collectionpublish.PublishRequest{Kind: collectionpublish.CollectionKindComic, Owner: owner, BatchID: r.PathValue("batchId"), BookID: r.PathValue("bookId"), CollectionID: r.PathValue("collectionId")})
@@ -981,6 +988,9 @@ func (p *BatchFactoryN8ComicPublisher) Publish(ctx context.Context, owner, batch
 	if p == nil || p.Store == nil {
 		return N8ComicPublishRecord{}, fmt.Errorf("N8 漫画发布接口尚未配置")
 	}
+	if err := p.validateComicStyleCollection(ctx, owner, batchID, bookID, collectionID); err != nil {
+		return N8ComicPublishRecord{}, err
+	}
 	rec, err := p.collectionService().Publish(ctx, req, func(ctx context.Context, r *collectionpublish.PublishRequest) (collectionpublish.Collection, error) {
 		var out collectionpublish.Collection
 		if p.LocalFiles == nil || p.Client == nil || !p.Client.Configured() {
@@ -1011,7 +1021,7 @@ func (p *BatchFactoryN8ComicPublisher) Publish(ctx context.Context, owner, batch
 			}
 			out.Kind = req.Kind
 			out.ID = c.ID
-			out.Name, err = p.collectionName(r.Producer, book.Title)
+			out.Name, err = p.collectionName(r.Producer, comicStyleCollectionTitle(ctx, book.Title))
 			if err != nil {
 				return out, err
 			}
@@ -1066,7 +1076,7 @@ func n8ComicCollectionName(producer, title string, now time.Time) (string, error
 		return "", batchfactoryv11.ErrInvalid
 	}
 	chinaTime := now.In(time.FixedZone("CST", 8*60*60))
-	prefix := producer + chinaTime.Format("0102") + "-"
+	prefix := "AIGC-" + producer + chinaTime.Format("0102") + "-"
 	prefixRunes := []rune(prefix)
 	if len(prefixRunes) >= 64 {
 		return "", fmt.Errorf("制作者账号过长，无法生成漫画合集名称")
@@ -1077,4 +1087,25 @@ func n8ComicCollectionName(producer, title string, now time.Time) (string, error
 		titleRunes = titleRunes[:remaining]
 	}
 	return prefix + string(titleRunes), nil
+}
+
+// Validate the selected scope before the service can reuse a saved receipt.
+func (p *BatchFactoryN8ComicPublisher) validateComicStyleCollection(ctx context.Context, owner, batchID, bookID, collectionID string) error {
+	if batchfactoryv11.ComicStyleOutputID(ctx) == "" {
+		return nil
+	}
+	store, ok := p.Store.(batchfactoryv11.ComicPageStore)
+	if !ok {
+		return batchfactoryv11.ErrUnavailable
+	}
+	collections, err := store.ListComicCollections(ctx, owner, batchID, bookID)
+	if err != nil {
+		return err
+	}
+	for _, collection := range collections {
+		if collection.ID == collectionID {
+			return nil
+		}
+	}
+	return batchfactoryv11.ErrNotFound
 }

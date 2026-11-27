@@ -1,12 +1,13 @@
 import { Button, Input, InputNumber, Select, Skeleton, Switch, message } from 'antd';
-import { ChevronDown, Eye, EyeOff, HelpCircle, KeyRound, Plus, ShieldCheck, Trash2 } from 'lucide-react';
+import { ChevronDown, Eye, EyeOff, HelpCircle, KeyRound, Plus, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ApiCustomModelModal from './ApiCustomModelModal';
 import ApiPresetSelectionModal from './ApiPresetSelectionModal';
 import { API_CHANNEL_PRESETS, API_INTEGRATION_GROUPS } from './apiIntegrationSchema';
-import { buildPresetSelectionPayload, filterPresetsBySelection, selectedPresetIds } from './apiPresetSelection';
+import { channelEdits, mergeChannelEdit } from './apiIntegrationChannelEdits';
+import { buildPresetSelectionPayload, catalogKeySubmissionStatus, filterPresetsBySelection, selectedPresetIds, setCatalogKeyRequestState } from './apiPresetSelection';
 import { createRevisionTracker, sameText } from './hydrationGuard';
-import { isCatalogModelAvailable, isPlatformManagedModel, isUserManagedCatalogModel, mergeGroupEntries, modelIdentity } from './apiConfigCatalogMerge';
+import { isCatalogModelVisibleForManagement, isUserManagedCatalogModel, mergeGroupEntries, modelIdentity } from './apiConfigCatalogMerge';
 import { getApiIntegrations, revealApiIntegration, saveApiIntegrations } from '../../shared/api/apiIntegrations';
 import { invalidateAvailableModelCatalog } from '../../shared/api/modelCatalog';
 import '../../shared/styles/api-integrations.css';
@@ -16,21 +17,7 @@ const AUTOSAVE_DELAY = 800;
 
 const SAVE_STATUS_TEXT = { idle: '修改后自动保存', saving: '保存中…', saved: '已保存', error: '保存失败' };
 
-function channelPayload(list) {
-  return list.map(channel => ({
-    ...(channel.id ? { id: channel.id } : {}),
-    name: channel.name,
-    group: channel.group || '',
-    baseUrl: channel.baseUrl,
-    model: channel.model,
-    concurrency: channel.concurrency ?? null,
-    apiFormat: channel.apiFormat || 'openai_compatible',
-    fullUrl: channel.fullUrl === true,
-    ...(channel.apiKey ? { apiKey: channel.apiKey } : {}),
-    // 显式清空 Key 才发这个标记，避免部分保存（例如只改名字）误删已存 Key。
-    ...(channel.clearApiKey ? { clearApiKey: true } : {})
-  }));
-}
+
 
 function isSecret(field) {
   return field.control === 'password';
@@ -180,7 +167,215 @@ function legacyChannelGroup(channelId, channelSelection) {
   return '';
 }
 
-export default function ApiIntegrationSettings({
+const RESTRICTED_KIND_META = [
+  ['text', '文本模型'],
+  ['image', '图片模型'],
+  ['video', '视频模型'],
+  ['audio', '配音模型'],
+  ['asr', '语音识别模型']
+];
+
+function RestrictedApiIntegrationSettings({
+  models = [],
+  quotas = [],
+  onSaveCatalogCredential,
+  onSearchYZCMModels,
+  onSaveYZCMSelection,
+  onRefreshQuotas,
+  quotaLoading = false
+}) {
+  const [presetOpen, setPresetOpen] = useState(false);
+  const [presetSaving, setPresetSaving] = useState(false);
+  const [drafts, setDrafts] = useState({});
+  const [keyRequests, setKeyRequests] = useState({});
+  const touchedRef = useRef(new Set());
+  const focusedRef = useRef(new Set());
+  const draftsRef = useRef({});
+  const revisionRef = useRef({});
+  const keyEpochRef = useRef({});
+  const selectionEpochRef = useRef(0);
+  const mountedRef = useRef(false);
+  const epochRef = useRef(0);
+  useEffect(() => {
+    mountedRef.current = true;
+    const epoch = ++epochRef.current;
+    return () => {
+      if (epochRef.current === epoch) mountedRef.current = false;
+      epochRef.current += 1;
+    };
+  }, []);
+  const isActive = epoch => mountedRef.current && epochRef.current === epoch;
+  const selected = useMemo(
+    () => (Array.isArray(models) ? models : []).filter(model => model?.selectedForConfigPage !== false),
+    [models]
+  );
+  const quotaByModelId = useMemo(() => {
+    const map = new Map();
+    for (const quota of Array.isArray(quotas) ? quotas : []) {
+      if (quota?.modelId) map.set(quota.modelId, quota);
+      if (quota?.id) map.set(quota.id, quota);
+    }
+    return map;
+  }, [quotas]);
+
+  async function commitKey(model) {
+    if (!touchedRef.current.has(model.id) || !onSaveCatalogCredential) return;
+    const submitted = String(draftsRef.current[model.id] || '');
+    const submittedRevision = revisionRef.current[model.id] || 0;
+    const componentEpoch = epochRef.current;
+    const requestEpoch = (keyEpochRef.current[model.id] || 0) + 1;
+    keyEpochRef.current[model.id] = requestEpoch;
+    const requestIsActive = () => isActive(componentEpoch) && keyEpochRef.current[model.id] === requestEpoch;
+    const value = submitted.trim();
+    if (!value && model.hasCredential !== true) {
+      touchedRef.current.delete(model.id);
+      return;
+    }
+    setKeyRequests(current => setCatalogKeyRequestState(current, model.id, { saving: true, error: '' }));
+    try {
+      await onSaveCatalogCredential(model, value, !value, { isActive: requestIsActive });
+      if (!requestIsActive()) return;
+      const status = catalogKeySubmissionStatus({
+        submitted,
+        currentDraft: draftsRef.current[model.id],
+        submittedRevision,
+        currentRevision: revisionRef.current[model.id] || 0,
+        focused: focusedRef.current.has(model.id),
+        succeeded: true
+      });
+      if (status.clearDraft) {
+        draftsRef.current = { ...draftsRef.current, [model.id]: '' };
+        setDrafts(current => ({ ...current, [model.id]: '' }));
+      }
+      if (status.clearTouched) touchedRef.current.delete(model.id);
+    } catch (error) {
+      if (!requestIsActive()) return;
+      const status = catalogKeySubmissionStatus({
+        submitted,
+        currentDraft: draftsRef.current[model.id],
+        submittedRevision,
+        currentRevision: revisionRef.current[model.id] || 0,
+        focused: focusedRef.current.has(model.id),
+        succeeded: false
+      });
+      if (status.showError) setKeyRequests(current => setCatalogKeyRequestState(current, model.id, {
+          error: error?.message || '模型 Key 保存失败'
+        }));
+      // 草稿按模型 ID 保留，方便原地重试。
+    } finally {
+      if (requestIsActive()) setKeyRequests(current => setCatalogKeyRequestState(current, model.id, { saving: false }));
+    }
+  }
+
+  async function confirmSelection(nextSelected) {
+    if (!onSaveYZCMSelection) return;
+    const componentEpoch = epochRef.current;
+    const requestEpoch = ++selectionEpochRef.current;
+    const requestIsActive = () => isActive(componentEpoch) && selectionEpochRef.current === requestEpoch;
+    setPresetSaving(true);
+    try {
+      await onSaveYZCMSelection(nextSelected, { isActive: requestIsActive });
+      if (!requestIsActive()) return;
+      setPresetOpen(false);
+      message.success('展示模型已更新；已有 Key 和业务可用状态保持不变');
+    } catch (error) {
+      if (requestIsActive()) message.error(error?.message || '模型选择保存失败');
+    } finally {
+      if (requestIsActive()) setPresetSaving(false);
+    }
+  }
+
+  return (
+    <section className="settings-section settings-api-section" aria-labelledby="settings-api-title" id="api-integrations">
+      <div>
+        <h2 id="settings-api-title">YZCM API 模型</h2>
+        <p>这里只显示 YZCM 已保存目录。选择模型后分别填写 Key；隐藏卡片不会删除 Key，也不会改变业务下拉中的可用状态。</p>
+      </div>
+      <div className="api-integration-toolbar pc-api-manager-toolbar">
+        <span className="api-integration-count"><ShieldCheck size={14} aria-hidden="true" />已展示 {selected.length} 个模型</span>
+        <Button className="api-channel-open api-preset-open" size="small" onClick={() => setPresetOpen(true)}>自定义预设</Button>
+        <Button size="small" icon={<RefreshCw size={14} />} loading={quotaLoading} onClick={() => {
+          const componentEpoch = epochRef.current;
+          void onRefreshQuotas?.({ isActive: () => isActive(componentEpoch) });
+        }}>刷新额度</Button>
+      </div>
+      <div className="api-integration-groups">
+        {RESTRICTED_KIND_META.map(([kind, title]) => {
+          const rows = selected.filter(model => model.kind === kind);
+          return (
+            <section className="api-group" key={kind}>
+              <div className="api-group-head" aria-label={title}>
+                <span className="api-group-badge is-violet">{title}</span>
+                <span className="api-group-meta">已选 {rows.length}</span>
+              </div>
+              <div className="api-group-body">
+                {rows.length ? <div className="api-channel-cards pc-api-manager-cards">{rows.map(model => {
+                  const requestState = keyRequests[model.id] || {};
+                  const saving = requestState.saving === true;
+                  const quota = quotaByModelId.get(model.id) || quotaByModelId.get(model.modelId);
+                  return (
+                    <div className="api-channel-card is-catalog" key={model.id}>
+                      <div className="api-channel-card-head">
+                        <strong>{model.displayName || model.modelId || model.id}</strong>
+                        <span className="api-channel-tag is-catalog">YZCM</span>
+                        {model.hasCredential ? <span className="api-channel-tag is-on">已配置 Key</span> : <span className="api-channel-tag">未填 Key</span>}
+                        <span className={`api-channel-tag${model.available ? ' is-on' : ''}`}>{model.available ? '业务可用' : '等待 Key'}</span>
+                      </div>
+                      <p className="api-channel-preset-meta">模型 <code>{model.modelId || model.id}</code>{quota?.status ? ` · 额度状态 ${quota.status}` : ''}</p>
+                      <label className="api-channel-preset-line api-catalog-credential">
+                        <span>模型 Key</span>
+                        <Input.Password
+                          value={drafts[model.id] || ''}
+                          prefix={<KeyRound size={15} />}
+                          disabled={saving}
+                          placeholder={model.hasCredential ? '已保存；输入新 Key 覆盖，清空后离开即停用' : '填写这个模型自己的 API Key'}
+                          aria-label={`${model.displayName || model.id} API Key`}
+                          onChange={event => {
+                            touchedRef.current.add(model.id);
+                            revisionRef.current[model.id] = (revisionRef.current[model.id] || 0) + 1;
+                            draftsRef.current = { ...draftsRef.current, [model.id]: event.target.value };
+                            setDrafts(draftsRef.current);
+                            setKeyRequests(current => setCatalogKeyRequestState(current, model.id, { error: '' }));
+                          }}
+                          onFocus={() => {
+                            focusedRef.current.add(model.id);
+                            revisionRef.current[model.id] = (revisionRef.current[model.id] || 0) + 1;
+                          }}
+                          onBlur={() => {
+                            focusedRef.current.delete(model.id);
+                            void commitKey(model);
+                          }}
+                        />
+                      </label>
+                      {requestState.error ? <p className="api-preset-picker-error" role="alert">{requestState.error}</p> : null}
+                    </div>
+                  );
+                })}</div> : <p className="api-preset-picker-empty">这一类还没有展示模型，请点击“自定义预设”从 YZCM 目录选择。</p>}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+      <ApiPresetSelectionModal
+        mode="restricted"
+        open={presetOpen}
+        selectedModels={selected}
+        saving={presetSaving}
+        onSearch={onSearchYZCMModels}
+        onCancel={() => setPresetOpen(false)}
+        onConfirm={confirmSelection}
+      />
+    </section>
+  );
+}
+
+export default function ApiIntegrationSettings(props) {
+  if (props.mode === 'restricted') return <RestrictedApiIntegrationSettings {...props} />;
+  if (props.mode !== 'full') return null;
+  return <FullApiIntegrationSettings {...props} />;
+}
+
+function FullApiIntegrationSettings({
   visibleGroupIds = null,
   models = [],
   quotas = [],
@@ -207,9 +402,11 @@ export default function ApiIntegrationSettings({
   const queueRef = useRef(Promise.resolve());
   const timersRef = useRef({});
   const editsRef = useRef({});
+  const pendingChannelEdits = useRef(new Map());
+  const deletedChannelIdsRef = useRef(new Set());
   const channelsRef = useRef([]);
   const channelTimerRef = useRef(null);
-  // 渠道整表保存的版本号：请求飞行期间用户又改过渠道，旧回包直接丢弃，避免把刚删的渠道复活。
+  // 渠道保存的版本号：请求飞行期间用户又改过渠道，旧回包直接丢弃，避免把刚删的渠道复活。
   const channelsTrackerRef = useRef(null);
   if (!channelsTrackerRef.current) channelsTrackerRef.current = createRevisionTracker();
   const channelsTracker = channelsTrackerRef.current;
@@ -223,6 +420,9 @@ export default function ApiIntegrationSettings({
   // 所有本地渠道变更都走这里：递增版本号，异步回包才知道自己是否过期。
   function applyLocalChannels(next) {
     channelsTracker.bump();
+    for (const edit of channelEdits(channelsRef.current, next)) {
+      pendingChannelEdits.current.set(edit.id, mergeChannelEdit(pendingChannelEdits.current.get(edit.id), edit));
+    }
     channelsRef.current = next;
     setChannels(next);
   }
@@ -234,8 +434,8 @@ export default function ApiIntegrationSettings({
 
   const platformPresetIdSet = useMemo(() => new Set(platformPresetIds), [platformPresetIds]);
 
-  // 模型目录条目按 kind 归到文本/视频/图片三组，只有「可用」的才进入页面。
-  // 可用性由服务端 available 字段给出，与 /api/models 下拉完全同一口径。
+  // 模型目录按 kind 分组；管理者还能看见缺 Key 的已有自定义模型，便于补填。
+  // 业务下拉仍以 available 判断可用性，不受这里的修复入口影响。
   // 平台托管的模型（预设面板里的条目、本地执行器）在上方面板或引擎设置里维护，
   // 这里按归属过滤，不写死 id 清单；以后预设面板新增条目会自动去重。
   const catalogByGroup = useMemo(() => {
@@ -243,11 +443,10 @@ export default function ApiIntegrationSettings({
     (Array.isArray(models) ? models : []).forEach(model => {
       const kind = model?.kind;
       if (!map[kind]) return;
-      if (isPlatformManagedModel(model, platformPresetIdSet)) return;
-      if (isCatalogModelAvailable(model)) map[kind].push(model);
+      if (isCatalogModelVisibleForManagement(model, platformPresetIdSet, typeof onUpdateCatalogModel === 'function')) map[kind].push(model);
     });
     return map;
-  }, [models, platformPresetIdSet]);
+  }, [models, platformPresetIdSet, onUpdateCatalogModel]);
 
   const quotaByModelId = useMemo(
     () => new Map((Array.isArray(quotas) ? quotas : []).map(quota => [quota?.modelId, quota])),
@@ -269,7 +468,8 @@ export default function ApiIntegrationSettings({
         });
         setChannels(repaired);
         if (repaired.some((channel, index) => channel.group !== (next?.customChannels || [])[index]?.group)) {
-          channelsRef.current = repaired;
+          channelsRef.current = next.customChannels;
+          applyLocalChannels(repaired);
           channelTimerRef.current = setTimeout(() => {
             channelTimerRef.current = null;
             saveChannels();
@@ -394,11 +594,17 @@ export default function ApiIntegrationSettings({
       channelTimerRef.current = null;
     }
     const list = channelsRef.current;
+    const deletedChannelIds = [...deletedChannelIdsRef.current];
+    const submitted = [...pendingChannelEdits.current.values()];
+    if (!submitted.length && !deletedChannelIds.length) return;
     const revision = channelsTracker.current();
     enqueue(async () => {
       setSaveStatus('saving');
-      // customChannels 是整表提交；服务端只在显式传该键时才替换，不影响 values。
-      const next = await saveApiIntegrations({ customChannels: channelPayload(list) });
+      const next = await saveApiIntegrations({ customChannels: submitted, deletedChannelIds });
+      for (const edit of submitted) {
+        if (pendingChannelEdits.current.get(edit.id) === edit) pendingChannelEdits.current.delete(edit.id);
+      }
+      deletedChannelIds.forEach(id => deletedChannelIdsRef.current.delete(id));
       // 请求飞行期间用户又改过渠道：这份回包已经过期，不能拿它覆盖本地新状态。
       if (channelsTracker.isCurrent(revision)) {
         const nextChannels = Array.isArray(next?.customChannels) ? next.customChannels : list;
@@ -540,6 +746,8 @@ export default function ApiIntegrationSettings({
   }
 
   function deleteCustomChannel(channel) {
+    pendingChannelEdits.current.delete(channel.id);
+    deletedChannelIdsRef.current.add(channel.id);
     applyLocalChannels(channelsRef.current.filter(item => item.id !== channel.id));
     scheduleChannelSave();
     message.success(`已删除渠道「${channel.name}」`);
@@ -828,7 +1036,7 @@ export default function ApiIntegrationSettings({
         <span className="api-integration-hint" role="status" aria-live="polite">{SAVE_STATUS_TEXT[saveStatus]}</span>
         <span className="api-integration-hint">文本 / 视频 / 图片组里同时列出「目录模型」与「渠道」；渠道填了 Key 就可用，清空 Key 就不出现</span>
       </div>
-      <div className="api-integration-groups">
+      <div className="api-integration-groups pc-api-founder-groups">
         {groups.map(group => {
           const channelDef = API_CHANNEL_PRESETS[group.id];
           // 渠道组默认展开；非渠道组是纯配置项，默认收起。

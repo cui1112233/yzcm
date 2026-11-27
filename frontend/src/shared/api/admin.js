@@ -14,56 +14,6 @@ export function listAdminPresetSlots(module) {
   return apiRequest(`${base}/preset-slots?module=${encodeURIComponent(module)}`);
 }
 
-export function listAdminAccounts() {
-  return apiRequest(`${base}/accounts`);
-}
-
-export function createAdminAccount(input) {
-  return apiRequest(`${base}/accounts`, {
-    method: 'POST',
-    body: JSON.stringify(input)
-  });
-}
-
-export function setAdminAccountStatus(username, active) {
-  return apiRequest(`${base}/accounts/${encodeURIComponent(username)}/status`, {
-    method: 'POST',
-    body: JSON.stringify({ active })
-  });
-}
-
-export function resetAdminAccountPassword(username, password) {
-  return apiRequest(`${base}/accounts/${encodeURIComponent(username)}/reset-password`, {
-    method: 'POST',
-    body: JSON.stringify({ password })
-  });
-}
-
-export function listAdminApplications() {
-  return apiRequest(`${base}/applications`);
-}
-
-export function reviewAdminApplication(id, approved) {
-  return apiRequest(`${base}/applications/${encodeURIComponent(id)}/${approved ? 'approve' : 'reject'}`, {
-    method: 'POST'
-  });
-}
-
-export function listAdminGrants() {
-  return apiRequest(`${base}/grants`);
-}
-
-export function createAdminGrant(input) {
-  return apiRequest(`${base}/grants`, {
-    method: 'POST',
-    body: JSON.stringify(input)
-  });
-}
-
-export function revokeAdminGrant(id) {
-  return apiRequest(`${base}/grants/${encodeURIComponent(id)}`, { method: 'DELETE' });
-}
-
 export function getAdminPreset(id, version) {
   return apiRequest(`${base}/presets/${encodeURIComponent(id)}/${encodeURIComponent(version)}`);
 }

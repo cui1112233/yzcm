@@ -65,7 +65,7 @@ func TestComicChannelQueueUsesSharedCapacityIdentityAcrossAccounts(t *testing.T)
 		}
 	}
 	controller := imagecapacity.NewController(&imageRouteRepo{}, func(context.Context, ...string) (any, error) { return "0", nil }, "test-book-groups")
-	options := RouterOptions{ImageCapacity: controller, UserConfigStore: config, Store: batchfactoryv11.NewMemoryStore()}
+	options := RouterOptions{AccountCenterStore: activeModelTestAccounts("alice", "bob", "carol"), ImageCapacity: controller, UserConfigStore: config, Store: batchfactoryv11.NewMemoryStore()}
 	settings := batchfactoryv11.SettingsPatch{"imageModelId": json.RawMessage(`"custom:image"`)}
 	groups := make(map[string]string)
 	for _, owner := range []string{"alice", "bob", "carol"} {

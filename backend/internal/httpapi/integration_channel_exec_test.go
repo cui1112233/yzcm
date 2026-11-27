@@ -125,7 +125,7 @@ func TestAgentImageGeneratorRunsCustomChannel(t *testing.T) {
 		"channelSelection": map[string]any{"image": map[string]any{"enabled": []any{"ch_img"}}},
 	})
 
-	generator := newAgentImageGenerator(nil, nil, userConfig, nil, nil, nil, nil)
+	generator := newAgentImageGenerator(nil, nil, userConfig, nil, nil, nil, nil, activeModelTestAccounts("tester"))
 	images, status, err := generator(context.Background(), "tester", AgentImageGenerationInput{
 		ModelID: "custom:ch_img", Prompt: "一只猫", Count: 1, AspectRatio: "1:1",
 	})

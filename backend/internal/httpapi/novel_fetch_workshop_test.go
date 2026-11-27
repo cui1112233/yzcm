@@ -593,7 +593,11 @@ func TestRecoverStaleNovelFetchTaskMakesItRetryableAndClosesRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	staleDocument.UpdatedAt = old
+	storedAt, parseErr := time.Parse(time.RFC3339Nano, staleDocument.UpdatedAt)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	now = storedAt.Add(10 * time.Minute)
 	recoverStaleNovelFetchTasks(context.Background(), store, "tester", map[string]any{"workflow": map[string]any{"auto_queue_task_timeout_seconds": 180}}, []novelfetchworkshop.Document{staleDocument}, now)
 	document, err := store.GetDocument(context.Background(), "tester", "stale-book")
 	if err != nil {
@@ -629,7 +633,11 @@ func TestRecoverStaleNovelFetchTaskReleasesItsOldQueueJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	document.UpdatedAt = old
+	storedAt, parseErr := time.Parse(time.RFC3339Nano, document.UpdatedAt)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	now = storedAt.Add(10 * time.Minute)
 	queue := &staleRecoveryRecordingQueue{}
 	recoverStaleNovelFetchTasks(ctx, store, "tester", map[string]any{"workflow": map[string]any{"auto_queue_task_timeout_seconds": 180}}, []novelfetchworkshop.Document{document}, now, queue)
 	if len(queue.jobIDs) != 1 || queue.jobIDs[0] != "stale-job-id" {
@@ -775,7 +783,7 @@ func TestNovelFetchAutomationTemporarySubmitFailureKeepsBackoffRetry(t *testing.
 	if err := store.PutDocument(context.Background(), owner, novelfetchworkshop.Document{BookID: bookID, Meta: map[string]any{"status": "completed"}}); err != nil {
 		t.Fatal(err)
 	}
-	markNovelFetchAutomationSubmitResult(context.Background(), store, owner, []string{bookID}, errors.New("上传连接暂时超时"))
+	markNovelFetchAutomationSubmitResult(context.Background(), store, owner, []string{bookID}, errors.New("HTTP 429 暂时限流，尚未受理上传"))
 	document, err := store.GetDocument(context.Background(), owner, bookID)
 	if err != nil {
 		t.Fatal(err)
@@ -951,7 +959,7 @@ func TestNovelFetchWorkshopBatchRetryUsesGoStore(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
+	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store, NovelFetchQueue: &admissionRecordingOnlyQueue{control: novelfetchworkshop.NewMemoryQueue()}})
 	response := doNovelFetchRequest(t, handler, http.MethodPost, "/api/novel-fetch-workshop/tasks/batch-retry", map[string]any{"ids": []string{"already-done"}}, now, secret)
 	if response.Code != http.StatusOK {
 		t.Fatalf("batch retry status=%d body=%s", response.Code, response.Body.String())
@@ -976,7 +984,7 @@ func TestNovelFetchWorkshopBatchRetryReturnsAffectedTaskIDs(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
+	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store, NovelFetchQueue: &admissionRecordingOnlyQueue{control: novelfetchworkshop.NewMemoryQueue()}})
 	response := doNovelFetchRequest(t, handler, http.MethodPost, "/api/novel-fetch-workshop/tasks/batch-retry", map[string]any{"ids": []string{"already-done", "already-done"}}, now, secret)
 	if response.Code != http.StatusOK {
 		t.Fatalf("batch retry status=%d body=%s", response.Code, response.Body.String())
@@ -1352,7 +1360,7 @@ func TestWorkshopProcessWorkerIsolatesFailedBookAndDefersOnlyThatBook(t *testing
 			http.Error(w, "temporary failure", http.StatusBadGateway)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "data": "可正常处理的正文", "bookinfo": map[string]any{"book_name": "成功书"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "data": "可正常处理的正文", "bookinfo": map[string]any{"book_name": "成功书", "category": "女频", "genre": "现代甜文"}})
 	}))
 	defer upstream.Close()
 	worker := &workshopProcessWorker{store: store, queue: queue, registry: newWorkshopProcessRegistry(), fetcher: &novelfetchworkshop.UpstreamFetcher{Client: upstream.Client(), Endpoint: upstream.URL}}
@@ -1598,7 +1606,8 @@ func TestNovelFetchWorkerExecutesFiveScheduledOriginalRetries(t *testing.T) {
 		http.Error(w, "try later", http.StatusBadGateway)
 	}))
 	defer upstream.Close()
-	worker := &workshopProcessWorker{store: store, queue: queue, registry: newWorkshopProcessRegistry(), fetcher: &novelfetchworkshop.UpstreamFetcher{Client: upstream.Client(), Endpoint: upstream.URL}}
+	clock := time.Now().UTC()
+	worker := &workshopProcessWorker{now: func() time.Time { return clock }, store: store, queue: queue, registry: newWorkshopProcessRegistry(), fetcher: &novelfetchworkshop.UpstreamFetcher{Client: upstream.Client(), Endpoint: upstream.URL}}
 	job := novelfetchworkshop.ProcessJob{ID: "initial-original-fetch", Owner: owner, BatchID: "batch-original-fetch", BookIDs: []string{bookID}, PlatformID: "2", MaxTxt: 4000}
 	if err := queue.Enqueue(ctx, job); err != nil {
 		t.Fatal(err)
@@ -1609,9 +1618,9 @@ func TestNovelFetchWorkerExecutesFiveScheduledOriginalRetries(t *testing.T) {
 		if err != nil {
 			t.Fatalf("fetch %d did not reach the queue: %v", run+1, err)
 		}
-		started := time.Now()
+		started := clock
 		worker.process(ctx, job)
-		finished := time.Now()
+		finished := clock
 		document, err := store.GetDocument(ctx, owner, bookID)
 		if err != nil {
 			t.Fatal(err)
@@ -1639,6 +1648,7 @@ func TestNovelFetchWorkerExecutesFiveScheduledOriginalRetries(t *testing.T) {
 		if next, err := dispatchNovelFetchAutomationOwner(ctx, store, queue, owner, deadline); err != nil || next == nil {
 			t.Fatalf("fetch %d not redispatched at deadline: job=%#v err=%v", run+1, next, err)
 		}
+		clock = deadline
 	}
 }
 
@@ -2591,7 +2601,9 @@ func TestNovelFetchWorkshopFetchOriginalPersistsRawAndProcessedText(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if document.OriginalRaw != "第一行\n第二行\n第三行" || document.ProcessedText != "第一行" || document.ProcessedChars != 3 || document.OriginalRawChars <= document.ProcessedChars || document.Gender != "男频" || document.Meta["sensitiveStatus"] != "done" {
+	raw, rawErr := novelfetchworkshop.ReadBodyText(context.Background(), store, "tester", document, "original_raw")
+	processed, bodyErr := novelfetchworkshop.ReadBodyText(context.Background(), store, "tester", document, "original")
+	if rawErr != nil || bodyErr != nil || raw != "第一行\n第二行\n第三行" || processed != "第一行" || document.ProcessedChars != 3 || document.OriginalRawChars <= document.ProcessedChars || document.Gender != "男频" || document.Meta["sensitiveStatus"] != "done" {
 		t.Fatalf("fetch persistence mismatch: %#v", document)
 	}
 	if document.BookInfo.WorkTitle != "测试小说" || document.Meta["bookName"] != "测试小说" {
@@ -2615,7 +2627,9 @@ func TestNovelFetchWorkshopRestoreOriginalReprocessesStoredRawText(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if document.OriginalRaw != "完整原文内容" || document.ProcessedText != "完整原文" || document.Meta["originalStatus"] != "restored" {
+	raw, rawErr := novelfetchworkshop.ReadBodyText(context.Background(), store, "tester", document, "original_raw")
+	processed, bodyErr := novelfetchworkshop.ReadBodyText(context.Background(), store, "tester", document, "original")
+	if rawErr != nil || bodyErr != nil || raw != "完整原文内容" || processed != "完整原文" || document.ProcessedChars != 4 || document.Meta["originalStatus"] != "restored" {
 		t.Fatalf("restore mismatch: %#v", document)
 	}
 }
@@ -2640,7 +2654,7 @@ func TestNovelFetchBatchRetryReusesStoredRawInsteadOfFetchingAgain(t *testing.T)
 	settings, _ := store.GetConfig(context.Background(), "tester")
 	mapOrEmpty(settings["workflow"])["skip_short_original"] = false
 	_ = store.PutConfig(context.Background(), "tester", settings)
-	queue := &uniqueRecordingNovelFetchQueue{}
+	queue := &admissionRecordingOnlyQueue{control: novelfetchworkshop.NewMemoryQueue()}
 	fetcher := &novelfetchworkshop.UpstreamFetcher{Client: upstream.Client(), Endpoint: upstream.URL}
 	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store, NovelFetchQueue: queue, NovelFetchFetcher: fetcher})
 	response := doNovelFetchRequest(t, handler, http.MethodPost, "/api/novel-fetch-workshop/tasks/batch-retry", map[string]any{"ids": []string{"stored-raw"}}, now, secret)
@@ -2659,7 +2673,8 @@ func TestNovelFetchBatchRetryReusesStoredRawInsteadOfFetchingAgain(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if requests != 0 || updated.OriginalRaw != "已保存的完整原文" || updated.Meta["originalStatus"] != "done" {
+	raw, rawErr := novelfetchworkshop.ReadBodyText(context.Background(), store, "tester", updated, "original_raw")
+	if requests != 0 || rawErr != nil || raw != "已保存的完整原文" || updated.Meta["originalStatus"] != "done" {
 		t.Fatalf("retry did not resume from stored raw: requests=%d doc=%#v", requests, updated)
 	}
 	if updated.Meta["status"] != "completed" || updated.Meta["queueState"] != "completed" || updated.Meta["error"] != nil {
@@ -2788,10 +2803,10 @@ func TestNovelFetchStartCollapsesZeroPaddedAIVersions(t *testing.T) {
 	invalid := doNovelFetchRequest(t, handler, http.MethodPost, "/api/novel-fetch-workshop/process/start", map[string]any{
 		"inputText":         "12345678903\t书三",
 		"platform_id":       "15",
-		"selected_versions": []string{"ai6"},
+		"selected_versions": []string{"ai21"},
 	}, now, secret)
 	if invalid.Code != http.StatusBadRequest {
-		t.Fatalf("ai6 status=%d, want 400 body=%s", invalid.Code, invalid.Body.String())
+		t.Fatalf("ai21 status=%d, want 400 body=%s", invalid.Code, invalid.Body.String())
 	}
 }
 
@@ -2944,7 +2959,8 @@ func TestNovelFetchManualFetchUsesConfiguredEndpointAndImmediateRetry(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if document.OriginalRaw != "重试成功的原文" {
-		t.Fatalf("original raw=%q", document.OriginalRaw)
+	raw, bodyErr := novelfetchworkshop.ReadBodyText(context.Background(), store, "tester", document, "original_raw")
+	if bodyErr != nil || raw != "重试成功的原文" {
+		t.Fatalf("saved original raw=%q err=%v", raw, bodyErr)
 	}
 }

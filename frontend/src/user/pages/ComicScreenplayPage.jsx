@@ -48,7 +48,9 @@ function collectWarnings(result) {
 function describePartialFailure(result) {
   if (!result?.partial_failure) return '';
   const episodes = Array.isArray(result.failed_episodes) ? result.failed_episodes.filter(no => Number(no) > 0) : [];
-  if (episodes.length) return `第 ${episodes.join('、')} 集生成失败`;
+  const scenes = Array.isArray(result.failed_scenes) ? result.failed_scenes.filter(item => Number(item?.episode) > 0 && Number(item?.scene) > 0).map(item => `第${item.episode}集第${item.scene}场`) : [];
+  if (episodes.length) return `第 ${episodes.join('、')} 集生成失败${scenes.length ? `；失败场景：${scenes.join('、')}` : ''}`;
+  if (scenes.length) return `失败场景：${scenes.join('、')}`;
   const batches = Array.isArray(result.failed_batches)
     ? result.failed_batches.map(item => Number(item?.batch_index)).filter(no => no > 0)
     : [];
@@ -386,6 +388,7 @@ export default function ComicScreenplayPage() {
       const result = await task(controller.signal);
       if(selectedProject.current!==selectedId)return false;await refreshCurrentProject(selectedId);
       if (result?.requires_confirmation) { message.info('尚未确认使用作品拥有者的生成服务，本次未生成'); return { requires_confirmation: true, not_started: true }; }
+      if(result?.generation_attempt?.status==='partial'&&result.generation_attempt.episodes?.some(ep=>ep.status==='awaiting_continue')){message.info('本批已保存，待继续生成；完整覆盖后才发布分镜。');return result;}
       const warnings = collectWarnings(result);
       const partialFailure = describePartialFailure(result);
       if (partialFailure) {

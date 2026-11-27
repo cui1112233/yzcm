@@ -281,7 +281,7 @@ func (s *Service) Run(ctx context.Context, owner, id string) (Run, error) {
 		current, _ = s.store.GetRun(ctx, owner, id)
 		return current, err
 	}
-	runCtx, cancel := context.WithCancel(ctx)
+	runCtx, cancel := context.WithCancel(current.usageContext(ctx, owner))
 	runCtx = context.WithValue(runCtx, journalKey{}, &callJournal{store: s.store, lease: l})
 	defer cancel()
 	defer s.release(context.Background(), l)
@@ -703,6 +703,7 @@ func (s *Service) RetryRun(ctx context.Context, owner, id string) (Run, error) {
 	if err != nil {
 		return Run{}, err
 	}
+	ctx = run.usageContext(ctx, owner)
 	e, ok, err := s.store.GetExecution(ctx, owner, id)
 	if err != nil {
 		return Run{}, err
@@ -748,6 +749,7 @@ func (s *Service) ConfirmRun(ctx context.Context, owner, id string, blueprint js
 	if err != nil {
 		return Run{}, err
 	}
+	ctx = run.usageContext(ctx, owner)
 	return s.queueAtomic(ctx, owner, run.ProjectID, fingerprint(blueprint), func(child *Service) (Run, error) { return child.confirmRun(ctx, owner, id, blueprint) })
 }
 func (s *Service) CancelRun(ctx context.Context, owner, id string) (Run, error) {

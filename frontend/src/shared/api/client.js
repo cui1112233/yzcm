@@ -2,6 +2,7 @@ import { reportClientError } from '../error-reporting.js';
 import { ACCOUNT_PREVIEW_KEY } from './account-session-cache.js';
 import { normalizeLocalExecutorsResponse } from './localExecutors.js';
 import { getSelectedNovelFetchAccount, isNovelFetchScopedPath } from './novelFetchAccountScope.js';
+import { readVerifiedImpersonation, rememberVerifiedImpersonation, setImpersonationExpectation } from './accountImpersonationState.js';
 
 export function getToken() {
   // The Go application is now the single runtime origin. Keep the session in
@@ -10,12 +11,23 @@ export function getToken() {
 }
 
 export function setToken(token) {
-  if (getToken() !== (token || '')) localStorage.removeItem(ACCOUNT_PREVIEW_KEY);
+  if (getToken() !== (token || '')) {
+    rememberVerifiedImpersonation(null);
+    localStorage.removeItem(ACCOUNT_PREVIEW_KEY);
+  }
   if (token) {
     localStorage.setItem('auth_token', token);
   } else {
     localStorage.removeItem('auth_token');
   }
+}
+
+export function setVerifiedImpersonation(identity, token = getToken(), generation) {
+  return token === getToken() && rememberVerifiedImpersonation(identity, token, generation);
+}
+
+export function getVerifiedImpersonation() {
+  return readVerifiedImpersonation();
 }
 
 export function isSessionAuthFailure(response) {
@@ -109,7 +121,9 @@ function reportTimeoutFailure({ path, method, timeoutMs }, options) {
 export async function apiRequest(path, options = {}) {
   const headers = new Headers(options.headers || {});
   const token = getToken();
+  const method = options.method || 'GET';
   if (token) headers.set('Authorization', `Bearer ${token}`);
+  setImpersonationExpectation(headers, path, method, token);
   if (isNovelFetchScopedPath(path)) {
     const selectedAccount = getSelectedNovelFetchAccount();
     if (selectedAccount) headers.set('X-Qiantie-Novel-Fetch-Account', selectedAccount);
@@ -118,7 +132,6 @@ export async function apiRequest(path, options = {}) {
     headers.set('Content-Type', 'application/json');
   }
 
-  const method = options.method || 'GET';
   const timeoutMs = Number.isFinite(options.timeoutMs)
     ? Math.max(0, Number(options.timeoutMs))
     : (isLongRunningRequest(options) ? LONG_RUNNING_API_TIMEOUT_MS : DEFAULT_API_TIMEOUT_MS);

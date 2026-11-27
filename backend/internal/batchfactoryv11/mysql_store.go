@@ -242,7 +242,7 @@ func createBatchTx(ctx context.Context, tx *sql.Tx, owner string, input CreateBa
 		return Batch{}, err
 	}
 	batch := Batch{ID: batchID, Title: title, SourceIntakeID: sourceIntakeID, Revision: 1, Books: []Book{}, CreatedAt: now, UpdatedAt: now}
-	for bookOrdinal, bi := range uniqueBatchBooks(input.Books, map[string]bool{}) {
+	for bookOrdinal, bi := range batchCreationBooks(input) {
 		if len(input.GiantAutomationPlan) > 0 {
 			bi.SourceMetadata = copySourceMetadataWithGiantPlan(bi.SourceMetadata, input.GiantAutomationPlan)
 		}
@@ -764,6 +764,7 @@ func (s *MySQLStore) ListBatchSummaryIndex(ctx context.Context, owner string) ([
 			view.Books[j].SettingsState.Patch = bookModes[book.ID]
 		}
 		batch.ProductionMode = SummaryProductionMode(view)
+		batch.OutputKind = rawString(batchModes[batch.ID], "outputKind", "")
 		if batch.ProductionMode == "text" {
 			batch.ProjectCoverImageURL = textCovers[batch.ID]
 			batch.ProjectCoverMediaURL = ""
@@ -1372,6 +1373,9 @@ func loadBatch(ctx context.Context, q batchQueryer, owner, id string) (Batch, er
 }
 
 func (s *MySQLStore) SaveSettings(ctx context.Context, owner string, ref ScopeRef, update SettingsUpdate) (SettingsResult, error) {
+	if err := freezeLegacyComicStylesBeforeSettings(ctx, s, owner, ref, update); err != nil {
+		return SettingsResult{}, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return SettingsResult{}, err

@@ -87,6 +87,10 @@ func executeWebSubmit(ctx context.Context, owner, usersDir string, store novelfe
 		}
 	}
 	result := webSubmitExecution{OperationID: operationID, Results: []any{}}
+	// An explicit empty selection is not permission to send a default version.
+	if request.Versions != nil && len(cleanStrings(request.Versions)) == 0 {
+		return result, &webSubmitRequestError{Status: http.StatusBadRequest, Code: "UPLOAD_VERSIONS_REQUIRED", Message: "请至少选择一个正文版本，未执行上传"}
+	}
 	session := readUploadTargetSession(usersDir, owner)
 	release, guardErr := acquireWorkshopSubmit(ctx, request.Queue, workshopExternalSubmitScope(session), "")
 	if guardErr != nil {
@@ -96,7 +100,7 @@ func executeWebSubmit(ctx context.Context, owner, usersDir string, store novelfe
 	defer release()
 	// 拿到提交锁说明当前没有并发提交，可以安全收尾上次崩溃遗留的 executing 清单。
 	recoverStaleWebSubmitManifests(usersDir, owner)
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return result, &webSubmitRequestError{Status: http.StatusInternalServerError, Message: "读取提交配置失败"}
 	}
@@ -360,6 +364,10 @@ func executeWebSubmit(ctx context.Context, owner, usersDir string, store novelfe
 							continue
 						}
 						recordSuccess(confirmed, confirmed)
+						continue
+					}
+					if meta["sensitiveManualRetryRequired"] == true {
+						markDeferred("waiting_sensitive_ai", "sensitive_repair_required", "敏感词 AI 修复尚未完成，请先重新处理失败的正文版本")
 						continue
 					}
 					profile := webSubmitProfile(web, version)

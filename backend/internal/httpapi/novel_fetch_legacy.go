@@ -81,7 +81,12 @@ func RegisterLegacyNovelFetchRoutes(root *http.ServeMux, middleware BridgeAuth, 
 		}
 		storageRoot := ""
 		if input.SaveToFolder {
-			storageRoot = configuredStorageRoot(configs, identity.Username)
+			var err error
+			storageRoot, err = configuredStorageRoot(req.Context(), configs, identity.Username)
+			if err != nil {
+				writeAuthError(w, http.StatusServiceUnavailable, "读取存储配置失败")
+				return
+			}
 		}
 		results := make([]map[string]any, 0, len(input.BookIDs))
 		seen := map[string]bool{}

@@ -6,7 +6,6 @@ import { PresetLibraryPage } from './pages/PresetLibraryPage';
 import { ShuihuoModelCatalogPage } from './pages/ShuihuoModelCatalogPage';
 import { AgentSkillLibraryPage } from './pages/AgentSkillLibraryPage';
 import { ErrorLogPage } from './pages/ErrorLogPage';
-import { AccountGovernancePage } from './pages/AccountGovernancePage';
 import { Link } from '../shared/components/Link';
 
 function usePathname() {
@@ -22,7 +21,6 @@ function usePathname() {
 }
 
 function getPage(pathname) {
-  if (pathname === '/admin/accounts') return <AccountGovernancePage />;
   if (pathname === '/admin/presets') return <PresetLibraryPage />;
   if (pathname === '/admin/agent-skills') return <AgentSkillLibraryPage />;
   if (pathname === '/admin/prompts') return <PromptStrategyPage />;
@@ -32,5 +30,10 @@ function getPage(pathname) {
 }
 
 export function AdminApp() {
-  return <AdminLayout>{getPage(usePathname())}</AdminLayout>;
+  const pathname = usePathname();
+  useEffect(() => {
+    if (pathname === '/admin/accounts') window.location.replace('/accounts');
+  }, [pathname]);
+  if (pathname === '/admin/accounts') return <Link href="/accounts" reload>前往账号与角色</Link>;
+  return <AdminLayout>{getPage(pathname)}</AdminLayout>;
 }

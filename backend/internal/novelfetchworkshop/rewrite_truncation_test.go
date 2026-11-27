@@ -3,6 +3,8 @@ package novelfetchworkshop
 import (
 	"context"
 	"errors"
+	"qiantie/backend/internal/batchfactoryv11"
+	"strings"
 	"testing"
 )
 
@@ -49,5 +51,53 @@ func TestRewriteNonTruncationProviderErrorIsNotRetriedInsideValidation(t *testin
 	_, err := completeValidatedRewrite(context.Background(), p, RewriteRequest{MaxTokens: 1200}, "book", "plain_text", 1, 40, "")
 	if !errors.Is(err, want) || calls != 1 {
 		t.Fatalf("unrelated provider error retried: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestControlledRewriteValidationMakesOnlyOneProviderAttempt(t *testing.T) {
+	for _, failure := range []string{"invalid-output", "truncated"} {
+		t.Run(failure, func(t *testing.T) {
+			calls := 0
+			provider := rewriteProviderFunc(func(context.Context, RewriteRequest) (string, error) {
+				calls++
+				if failure == "truncated" {
+					return "", errors.New("finish_reason=length")
+				}
+				return "{invalid output}", nil
+			})
+			_, err := completeValidatedRewrite(batchfactoryv11.WithSingleAttempt(context.Background()), provider, RewriteRequest{MaxTokens: 1200}, "book", "plain_text", 1, 40, "")
+			if !errors.Is(err, ErrRewriteValidation) || calls != 1 {
+				t.Fatalf("controlled validation bypassed central budget: calls=%d err=%v", calls, err)
+			}
+			if strings.Contains(err.Error(), "最多 3 次") {
+				t.Fatalf("single attempt error claims three calls: %v", err)
+			}
+		})
+	}
+}
+
+func TestControlledRewriteValidationLeavesHoldDecisionToCentralBudget(t *testing.T) {
+	for _, controlled := range []bool{false, true} {
+		ctx := context.Background()
+		if controlled {
+			ctx = batchfactoryv11.WithSingleAttempt(ctx)
+		}
+		s := plainRewriteTestStore("alice")
+		if err := s.PutDocument(ctx, "alice", Document{BookID: "123", Original: "saved original"}); err != nil {
+			t.Fatal(err)
+		}
+		calls := 0
+		_, err := GenerateAIRewrites(ctx, s, "alice", "123", 1, rewriteProviderFunc(func(context.Context, RewriteRequest) (string, error) { calls++; return "{invalid output}", nil }))
+		if !errors.Is(err, ErrRewriteValidation) {
+			t.Fatal(err)
+		}
+		got, _ := s.GetDocument(ctx, "alice", "123")
+		want := 3
+		if controlled {
+			want = 1
+		}
+		if calls != want || got.Meta["rewriteValidationHold"] != !controlled {
+			t.Fatalf("controlled=%v calls=%d hold=%v", controlled, calls, got.Meta["rewriteValidationHold"])
+		}
 	}
 }

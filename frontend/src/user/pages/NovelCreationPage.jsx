@@ -4,7 +4,7 @@ import ComposerToolbar from './novel-creation/ComposerToolbar.jsx';
 import ShortStoryDialog from './novel-creation/ShortStoryDialog.jsx';
 import ShortStoryPanel from './novel-creation/ShortStoryPanel.jsx';
 import { Button, Drawer, Empty, Form, Input, InputNumber, Modal, Select, Spin, Tabs, message } from 'antd';
-import { Archive, BookOpen, Bot, CalendarClock, ChartColumn, FileText, FilePlus2, CornerDownRight, Pencil, NotebookPen, Plus } from 'lucide-react';
+import { Archive, BookOpen, Bot, CalendarClock, ChartColumn, FileText, FilePlus2, CornerDownRight, Gamepad2, Pencil, NotebookPen, Plus } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { getCurrentAccount, getCurrentUsername } from '../../shared/api/auth.js';
@@ -17,6 +17,8 @@ import AutomationPanel from './novel-creation/AutomationPanel.jsx';
 import SchedulerPanel from './novel-creation/SchedulerPanel.jsx';
 import MaterialsPanel from './novel-creation/MaterialsPanel.jsx';
 import NotesPanel from './novel-creation/NotesPanel.jsx';
+import HooksPanel from './novel-creation/HooksPanel.jsx';
+import PlayPanel from './novel-creation/PlayPanel.jsx';
 import ChaptersPanel from './novel-creation/ChaptersPanel.jsx';
 import RunCard from './novel-creation/RunCard.jsx';
 import BlueprintEditor from './novel-creation/BlueprintEditor.jsx';
@@ -29,7 +31,7 @@ import useWorkspaceScope from './novel-creation/useWorkspaceScope.js';
 import { MODE_FIELDS, MODES, STATUS, TERMINAL, availableModel, draftKey, mergeSnapshot, modelOptions, readSaved, validRun } from './novel-creation/contracts.js';
 import './NovelCreationPage.css';
 
-const TOOLS = [['写作风格', FileText], ['导入素材', BookOpen], ['Agent设置', Bot], ['定时写作', CalendarClock], ['数据看板', ChartColumn], ['备忘录', NotebookPen]];
+const TOOLS = [['写作风格', FileText], ['导入素材', BookOpen], ['Agent设置', Bot], ['定时写作', CalendarClock], ['互动世界', Gamepad2], ['数据看板', ChartColumn], ['备忘录', NotebookPen]];
 const creationIcons = { long_original: FileText, short_original: FileText, long_imitation: Pencil, short_imitation: Pencil, fanfiction: CornerDownRight, continuation: FilePlus2 };
 const width = value => Math.max(360, Math.min(800, Number(value) || Math.round(window.innerWidth * .38)));
 
@@ -358,7 +360,17 @@ export default function NovelCreationPage() {
       </aside>
       {tool ? <section className="novel-creation-tool-workspace" aria-label={tool}>
         <header className="novel-chat-heading"><Button onClick={() => setTool('')}>返回对话</Button><b>{tool}</b></header>
-        <div className="novel-tool-content" key={scopeKey + ':' + tool}>{tool === '定时写作' ? <SchedulerPanel key={projectReadKey} owner={owner} projectId={projectId} sessionId={sessionId} mode={activeMode} modelId={draft.modelId} models={models} ensureSession={() => createSession(false)} onOpenSession={openScheduledSession}/> : tool === 'Agent设置' ? <AgentPanel projectId={projectId} models={models} mode={activeMode} /> : !projectId ? <Empty description="请先选择作品后使用此工具" /> : tool === '写作风格' ? <MaterialsPanel {...materialsProps} styleMode /> : <div className="novel-panel"><p>统计已保存正文，失败次数不计为章节。</p>{dashboard ? <dl>{[['章节数', dashboard.chapterCount], ['总字数', dashboard.totalWords], ['任务总数', dashboard.runTotal], ['成功率', `${Number(dashboard.successRate ?? 0).toFixed(1)}%`]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl> : <Empty description="暂无统计" />}</div>}</div>
+        <div className="novel-tool-content" key={scopeKey + ':' + tool}>{tool === '定时写作' ? <SchedulerPanel key={projectReadKey} owner={owner} projectId={projectId} sessionId={sessionId} mode={activeMode} modelId={draft.modelId} models={models} ensureSession={() => createSession(false)} onOpenSession={openScheduledSession}/> : tool === 'Agent设置' ? <AgentPanel projectId={projectId} models={models} mode={activeMode} /> : !projectId ? <Empty description="请先选择作品后使用此工具" /> : tool === '写作风格' ? <MaterialsPanel {...materialsProps} styleMode /> : tool === '互动世界' ? <PlayPanel key={projectReadKey} projectId={projectId} /> : <div className="novel-panel"><p>统计已保存正文，失败次数不计为章节。</p>{dashboard ? <>{(() => {
+  const trend = Array.isArray(dashboard.wordTrend) ? dashboard.wordTrend : [];
+  const statusEntries = Object.entries(dashboard.statusCounts || {});
+  const maxWords = Math.max(1, ...trend.map(p => Number(p.wordCount) || 0));
+  const statusLabel = { passed: '已通过', warning: '需复核', unknown: '未标记' };
+  return <>
+    <dl>{[['章节数', dashboard.chapterCount], ['总字数', dashboard.totalWords], ['平均字数', Math.round(Number(dashboard.avgWords) || 0)], ['任务总数', dashboard.runTotal], ['成功率', `${Number(dashboard.successRate ?? 0).toFixed(1)}%`]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
+    {!!statusEntries.length && <section className="novel-dashboard-block"><h4>章节状态分布</h4>{statusEntries.map(([key, value]) => <p key={key}>{statusLabel[key] || key}：{value} 章</p>)}</section>}
+    {!!trend.length && <section className="novel-dashboard-block"><h4>字数趋势</h4><div className="novel-word-trend" role="list">{trend.map(point => <div role="listitem" key={point.number} title={`第${point.number}章 ${point.title || ''} · ${point.wordCount} 字`}><span style={{ height: `${Math.max(4, Math.round((Number(point.wordCount) || 0) * 64 / maxWords))}px` }} /><small>{point.number}</small></div>)}</div><p>横轴为章号，纵轴为该章已保存字数；最高 {maxWords} 字。</p></section>}
+  </>;
+})()}<HooksPanel projectId={projectId} /></> : <Empty description="暂无统计" />}</div>}</div>
       </section> : studioView ? <StudioChat key={`${owner}:${activeMode}:${studioSessionId}`} owner={owner} mode={activeMode} sessionId={studioSessionId} models={models} onSessionSelected={id=>setStudioSessionId(id)} onSessionCreated={item=>setStudioSessions(old=>[item,...old.filter(x=>x.id!==item.id)])} onTransition={result=>{if(result.assistedAction){if(result.targetRoute==='imitation'){setLongImitationEntry(n=>n+1);setLongImitationOpen(true);}else if(result.targetRoute==='chapters')setContinuationOpen(true);return;}setProjects(old=>[result.project,...old.filter(x=>x.id!==result.project.id)]);localStorage.setItem('novel:view:'+owner,'book');localStorage.setItem('novel:project:'+owner,result.project.id);const mode=result.productionSession.mode;localStorage.setItem(`novel:session:${owner}:${result.project.id}:${mode}`,result.productionSession.id);localStorage.setItem(`novel:project-mode:${owner}:${result.project.id}`,mode);setProjectId(result.project.id);setActiveMode(mode);setSessionId(result.productionSession.id);if(result.story)setShortStoryData({key:`${owner}:${result.project.id}`,story:result.story});setTool('');setRefresh(v=>v+1);}}/> : <><section className="novel-creation-conversation">
         <header className="novel-chat-heading"><b>{currentSession?.title || modeName}</b>{connection && <button type="button" className="novel-connection" onClick={() => setRefresh(v => v + 1)}>{connection}</button>}</header>
         <div className="novel-creation-chat-scroll">{!snapshot?.messages?.length && !run && <div className="novel-creation-welcome"><p>告诉我你想写什么——题材、世界观、主角、核心冲突。</p></div>}
@@ -382,7 +394,7 @@ export default function NovelCreationPage() {
       {projectId && !!(shortStory || chapters.length > 0 || run || draft.knowledgeIds?.length) && <><div className="novel-creation-resizer" role="separator" aria-label="调整资料栏宽度" onPointerDown={() => { resize.current = true; document.body.classList.add('novel-creation-resizing'); }} />
       <aside className="novel-creation-inspector">{shortStory ? <ShortStoryPanel key={projectReadKey} owner={owner} projectId={projectId} modelId={draft.modelId} thinkingLevel={draft.thinkingLevel} refreshKey={`${refresh}:${snapshot?.run?.status || ""}:${snapshot?.events?.at(-1)?.eventId || ""}`} onRun={nextRun=>{setSnapshot(old=>({...old,run:nextRun,events:[]}));setRefresh(v=>v+1);}} onTitle={title=>setProjects(old=>old.map(p=>p.id===projectId && title ? {...p,title} : p))}/> : <><div className="novel-current-reference"><h3>当前资料</h3><p>{project?.title} · {project?.genre}</p>{(draft.knowledgeIds || []).map(id => <small key={id}>{references.find(r => r.id === id)?.title || '已保存参考范围'}</small>)}</div>
         <Tabs defaultActiveKey="chapters" items={[
-          { key: 'chapters', label: `正文${chapters.length ? '（' + chapters.length + '）' : ''}`, children: projectId ? <ChaptersPanel key={scopeKey} projectId={projectId} sessionId={sessionId} chapters={chapters} run={run} canExportShort={snapshot?.canExportShort === true} onChapter={chapter => sessionId ? setSnapshot(old => ({ ...old, chapters: (old?.chapters || []).map(c => c.id === chapter.id ? chapter : c) })) : setProjectChapters(old => old?.key === projectReadKey ? { ...old, chapters: old.chapters.map(c => c.id === chapter.id ? chapter : c) } : old)} onMaintenance={maintenance} onBatch={() => setBatchOpen(true)} /> : <Empty description="选择作品后查看正文" /> },
+          { key: 'chapters', label: `正文${chapters.length ? '（' + chapters.length + '）' : ''}`, children: projectId ? <ChaptersPanel key={scopeKey} projectId={projectId} sessionId={sessionId} chapters={chapters} run={run} models={models} canExportShort={snapshot?.canExportShort === true} onChapter={chapter => sessionId ? setSnapshot(old => ({ ...old, chapters: (old?.chapters || []).map(c => c.id === chapter.id ? chapter : c) })) : setProjectChapters(old => old?.key === projectReadKey ? { ...old, chapters: old.chapters.map(c => c.id === chapter.id ? chapter : c) } : old)} onMaintenance={maintenance} onBatch={() => setBatchOpen(true)} /> : <Empty description="选择作品后查看正文" /> },
           ...(run ? [{ key: 'progress', label: '创作进度', children: <ol className="novel-timeline">{(snapshot.events || []).filter(e => e.type !== 'assistant.delta').map(e => <li key={e.eventId}><b>{STATUS[e.status] || '处理进度'}</b><p>{e.message}</p></li>)}</ol> }] : [])
         ]} />
       </>}</aside></>}</>}

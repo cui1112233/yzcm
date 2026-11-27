@@ -57,6 +57,9 @@ func ResolveProjectPrompt(p Project, id, purpose string) (CreativePromptSnapshot
 	}
 	if p.CreativeConfig != nil {
 		if frozen, ok := p.CreativeConfig.PromptSnapshots[purpose]; ok && frozen.ID == resolved.ID && frozen.Type == purpose && frozen.Body != "" {
+			if frozen.ID == ScriptBatchPromptID && frozen.Digest == resolved.Digest && scriptDigest(frozen.Body) == resolved.Digest {
+				frozen.CreativePromptContract = resolved.CreativePromptContract
+			}
 			// Older snapshots contain only body and identity. Reuse the verified
 			// catalog contract only when the complete body still matches.
 			if frozen.ID != "luoshui_storyboard_139" && frozen.OutputProtocol == "" && strings.ReplaceAll(frozen.Body, "\r\n", "\n") == strings.ReplaceAll(resolved.Body, "\r\n", "\n") {

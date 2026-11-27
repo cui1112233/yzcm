@@ -82,6 +82,7 @@ func TestMySQLStoreMigrateLegacyDocumentBodiesIsIdempotent(t *testing.T) {
 	mock.ExpectExec(insertSQL).WithArgs("alice", "123", "original", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(4), "ready").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(insertSQL).WithArgs("alice", "123", "ai1", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(5), "ready").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(insertSQL).WithArgs("alice", "123", "ai3", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(5), "ready").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta(canonicalBodyRefsSQL)).WithArgs("alice", "123").WillReturnRows(sqlmock.NewRows([]string{"version", "revision", "hash", "chars", "state", "updated"}))
 	mock.ExpectExec(updateSQL).WithArgs(sqlmock.AnyArg(), "alice", "123").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
@@ -128,6 +129,7 @@ func TestMySQLStoreGetDocumentMigratesLegacyBodiesLazily(t *testing.T) {
 	mock.ExpectExec(insertSQL).WithArgs("alice", "123", "original_raw", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(4), "ready").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(insertSQL).WithArgs("alice", "123", "original", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(4), "ready").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(insertSQL).WithArgs("alice", "123", "ai1", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(5), "ready").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta(canonicalBodyRefsSQL)).WithArgs("alice", "123").WillReturnRows(sqlmock.NewRows([]string{"version", "revision", "hash", "chars", "state", "updated"}))
 	mock.ExpectExec(updateSQL).WithArgs(sqlmock.AnyArg(), "alice", "123").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	mock.ExpectQuery(getSQL).WithArgs("alice", "123").WillReturnRows(sqlmock.NewRows([]string{"document_json", "updated_at"}).AddRow(migratedRaw, updated.Add(time.Second)))

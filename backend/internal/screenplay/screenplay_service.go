@@ -71,9 +71,15 @@ func (s *ScreenplayService) GenerateA1(ctx context.Context, req A1Request) (Scre
 		return plan, nil
 	}
 	promptID := defaultString(req.PromptID, selectedScriptPrompt(project), "a1_novel_to_screenplay")
+	if promptID == ScriptBatchPromptID {
+		return ScreenplayResult{}, fmt.Errorf("%w: 专业剧本2需要章节分批续接，请前往章节生成", ErrInvalidArgument)
+	}
 	selected, resolveErr := ResolveProjectPrompt(project, promptID, "script")
 	if resolveErr != nil {
 		return ScreenplayResult{}, fmt.Errorf("%w: %v", ErrInvalidArgument, resolveErr)
+	}
+	if selected.ID == ScriptBatchPromptID || selected.OutputProtocol == "script_scene_batch_v1" || !selected.Supported {
+		return ScreenplayResult{}, fmt.Errorf("%w: 此模板需要受支持的章节续接入口", ErrInvalidArgument)
 	}
 	systemPrompt, renderErr := renderScriptLibrary(ctx, s.Store, req.Owner, req.ProjectID, selected.Body)
 	if renderErr != nil {
@@ -129,9 +135,15 @@ func (s *ScreenplayService) GenerateB(ctx context.Context, req BRequest) (Screen
 		return plan, nil
 	}
 	promptID := defaultString(req.PromptID, selectedScriptPrompt(project), "b_director_screenplay")
+	if promptID == ScriptBatchPromptID {
+		return ScreenplayResult{}, fmt.Errorf("%w: 专业剧本2需要章节分批续接，请前往章节生成", ErrInvalidArgument)
+	}
 	selected, resolveErr := ResolveProjectPrompt(project, promptID, "script")
 	if resolveErr != nil {
 		return ScreenplayResult{}, fmt.Errorf("%w: %v", ErrInvalidArgument, resolveErr)
+	}
+	if selected.ID == ScriptBatchPromptID || selected.OutputProtocol == "script_scene_batch_v1" || !selected.Supported {
+		return ScreenplayResult{}, fmt.Errorf("%w: 此模板需要受支持的章节续接入口", ErrInvalidArgument)
 	}
 	systemPrompt, renderErr := renderScriptLibrary(ctx, s.Store, req.Owner, req.ProjectID, selected.Body)
 	if renderErr != nil {
@@ -170,12 +182,36 @@ func (s *ScreenplayService) persist(ctx context.Context, owner, projectID, sourc
 }
 
 func (s *ScreenplayService) persistPrepared(ctx context.Context, owner, projectID, source, content, editable string, segmentCount int) (ScreenplayResult, error) {
-	if ctx.Err() != nil {
-		return ScreenplayResult{}, ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return ScreenplayResult{}, err
 	}
+	prepared, err := prepareParsedScreenplay(owner, projectID, source, content, editable, segmentCount)
+	if err != nil {
+		return ScreenplayResult{}, err
+	}
+	return s.savePreparedScreenplay(ctx, prepared)
+}
+
+func prepareScreenplayPublication(owner, projectID, source, content string, segmentCount int) (ScreenplayResult, error) {
+	editable, err := editableScreenplayOutput(content)
+	if err != nil {
+		return ScreenplayResult{}, err
+	}
+	return prepareParsedScreenplay(owner, projectID, source, content, editable, segmentCount)
+}
+
+func parsePublishableScreenplay(editable string) (ParsedScreenplay, error) {
 	parsed := ParseScreenplayMarkdown(editable)
 	if len(parsed.Shots) == 0 || len(parsed.Episodes) == 0 {
-		return ScreenplayResult{}, fmt.Errorf("%w screenplay.md 未产出可解析的集/场", ErrArtifactInvalid)
+		return ParsedScreenplay{}, fmt.Errorf("%w screenplay.md 未产出可解析的集/场", ErrArtifactInvalid)
+	}
+	return parsed, nil
+}
+
+func prepareParsedScreenplay(owner, projectID, source, content, editable string, segmentCount int) (ScreenplayResult, error) {
+	parsed, err := parsePublishableScreenplay(editable)
+	if err != nil {
+		return ScreenplayResult{}, err
 	}
 	documentID := newScreenplayID("doc")
 	for i := range parsed.Shots {
@@ -207,12 +243,8 @@ func (s *ScreenplayService) persistPrepared(ctx context.Context, owner, projectI
 		EpisodeCount:  len(parsed.Episodes),
 		SegmentCount:  segmentCount,
 	}
-	saved, err := s.Store.SaveScreenplay(ctx, doc, parsed.Shots, parsed.Characters, parsed.Scenes)
-	if err != nil {
-		return ScreenplayResult{}, err
-	}
 	return ScreenplayResult{
-		Document:     saved,
+		Document:     doc,
 		Shots:        parsed.Shots,
 		Characters:   parsed.Characters,
 		Scenes:       parsed.Scenes,
@@ -220,6 +252,18 @@ func (s *ScreenplayService) persistPrepared(ctx context.Context, owner, projectI
 		ShotCount:    len(parsed.Shots),
 		SegmentCount: segmentCount,
 	}, nil
+}
+
+func (s *ScreenplayService) savePreparedScreenplay(ctx context.Context, prepared ScreenplayResult) (ScreenplayResult, error) {
+	if err := ctx.Err(); err != nil {
+		return ScreenplayResult{}, err
+	}
+	saved, err := s.Store.SaveScreenplay(ctx, prepared.Document, prepared.Shots, prepared.Characters, prepared.Scenes)
+	if err != nil {
+		return ScreenplayResult{}, err
+	}
+	prepared.Document = saved
+	return prepared, nil
 }
 
 func (s *ScreenplayService) prompts() *luoshui.Registry {

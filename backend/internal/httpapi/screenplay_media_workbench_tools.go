@@ -333,10 +333,12 @@ func (s *ScreenplayMediaWorkbench) importMedia(w http.ResponseWriter, r *http.Re
 // This is the same maintained default-service catalog used by TtsPage. Custom
 // providers keep their own voice IDs and are not claimed to support these IDs.
 func (s *ScreenplayMediaWorkbench) voiceDirectory(ctx context.Context, owner string) map[string]any {
-	if s.Catalog != nil {
-		if _, found := configuredTTSModel(ctx, s.Catalog, owner); found {
-			return map[string]any{"voices": []any{}, "source": "configured", "reason": "当前自定义配音服务没有公开音色目录，请填写该服务支持的音色ID"}
-		}
+	resolved := resolveTTS(ctx, s.Catalog, owner, "")
+	if err := resolved.err(); err != nil {
+		return map[string]any{"voices": []any{}, "source": string(resolved.state), "reason": err.Error()}
+	}
+	if resolved.state == ttsCustom {
+		return map[string]any{"voices": []any{}, "source": "configured", "reason": "当前自定义配音服务没有公开音色目录，请填写该服务支持的音色ID"}
 	}
 	return map[string]any{"source": "builtin-default-tts", "voices": []map[string]string{{"id": "zh-CN-XiaoxiaoNeural", "name": "晓晓（女声·温柔）"}, {"id": "zh-CN-XiaochenNeural", "name": "晓辰（女声·知性）"}, {"id": "zh-CN-YunxiNeural", "name": "云希（男声·清朗）"}, {"id": "zh-CN-YunyangNeural", "name": "云扬（男声·阳光）"}, {"id": "zh-CN-XiaoyiNeural", "name": "晓伊（女声·甜美）"}, {"id": "zh-CN-YunjianNeural", "name": "云健（男声·稳重）"}}}
 }

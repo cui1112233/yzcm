@@ -74,6 +74,10 @@ func TestAgentWorkspaceImportsLegacyAndUsesStoreForCanvasAndChat(t *testing.T) {
 	if err := json.Unmarshal(created.Body.Bytes(), &createBody); err != nil || createBody.Task.ID == "" {
 		t.Fatalf("create body=%s err=%v", created.Body.String(), err)
 	}
+	emptyCanvas := agentRequest(t, mux, now, http.MethodGet, "/api/agent/tasks/"+createBody.Task.ID+"/canvas", "")
+	if emptyCanvas.Code != http.StatusOK || !strings.Contains(emptyCanvas.Body.String(), `"nodes":[]`) || !strings.Contains(emptyCanvas.Body.String(), `"edges":[]`) {
+		t.Fatalf("empty canvas collections must be arrays: status=%d body=%s", emptyCanvas.Code, emptyCanvas.Body.String())
+	}
 
 	canvasBody := `{"canvas":{"version":1,"revision":0,"appearance":{"edgeColor":"cyan","edgeAnimated":false,"edgeWidth":"thick","backgroundDots":false,"alignmentGuides":true,"edgesVisible":false},"nodes":[{"id":"node-1","type":"script","position":{"x":12,"y":24},"title":"小说原文","version":1,"sourceNodeIds":[],"status":"confirmed","summary":"第一章"}],"edges":[]},"revision":0}`
 	canvasPath := "/api/agent/tasks/" + createBody.Task.ID + "/canvas"

@@ -4,9 +4,11 @@ import { BrandLogo } from '../components/BrandLogo';
 import { Link } from '../components/Link';
 import { ThemePicker } from '../components/ThemePicker';
 import { getCurrentAccount, logout } from '../api/auth';
+import { getToken } from '../api/client';
 import { updateMemberProfile } from '../api/member';
 import { createAntTheme, resolveSchemeId, resolveThemeId } from '../styles/theme';
 import { loadCachedTheme, persistCachedTheme, selectThemePreference } from '../styles/theme-preference.js';
+import { AccountImpersonationBanner, AccountImpersonationPending, useAccountImpersonation } from './AccountCenterLayout';
 
 const navItems = [
   { href: '/admin', icon: '▦', label: '概览' },
@@ -14,7 +16,6 @@ const navItems = [
   { href: '/admin/prompts', icon: '⌁', label: 'Prompt 策略' },
   { href: '/admin/agent-skills', icon: '◇', label: 'CM 平台技能' },
   { href: '/admin/shuihuo-models', icon: '◇', label: '水货生产模型' },
-  { href: '/admin/accounts', icon: '◎', label: '账号与授权' },
   { href: '/admin/error-logs', icon: '!', label: '错误日志' }
 ];
 
@@ -35,27 +36,36 @@ export function AdminLayout({ children }) {
   const [accessState, setAccessState] = useState('checking');
   const [theme, setTheme] = useState(initialTheme);
   const [systemMode, setSystemMode] = useState(initialSystemMode);
+  const hasLoginToken = Boolean(getToken());
+  const { status: impersonation, error: impersonationError, retry: retryImpersonation } = useAccountImpersonation(hasLoginToken);
+  const identityReady = !hasLoginToken || impersonation !== null;
+  const isSwitched = impersonation?.active === true;
   const pathname = window.location.pathname;
   const resolvedTheme = resolveThemeId(theme, systemMode);
   const themeScheme = resolveSchemeId(theme);
 
   useEffect(() => {
+    if (!identityReady) return undefined;
+    let alive = true;
     getCurrentAccount().then(nextAccount => {
+      if (!alive) return;
       setAccount(nextAccount);
       const accountTheme = selectThemePreference({ loggedIn: true, accountThemeId: nextAccount.themeId, cachedThemeId: theme });
       setTheme(accountTheme);
       persistCachedTheme(accountTheme);
-      if (nextAccount?.role === 'dev') {
+      if (nextAccount?.capabilities?.includes('platform_admin')) {
         setAccessState('allowed');
         return;
       }
       setAccessState('denied');
-      window.location.replace('/profile');
+      if (!isSwitched) window.location.replace('/profile');
     }).catch(() => {
+      if (!alive) return;
       setAccessState('denied');
-      window.location.replace('/');
+      if (!isSwitched) window.location.replace('/');
     });
-  }, []);
+    return () => { alive = false; };
+  }, [identityReady, isSwitched]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = resolvedTheme;
@@ -97,16 +107,20 @@ export function AdminLayout({ children }) {
     }
   }
 
-  if (accessState === 'checking') {
-    return <ConfigProvider theme={createAntTheme(theme, systemMode)}><div className="admin-access-screen"><Spin size="large" tip="正在验证开发者权限" /></div></ConfigProvider>;
-  }
-
-  if (accessState !== 'allowed') {
-    return <ConfigProvider theme={createAntTheme(theme, systemMode)}><div className="admin-access-screen"><Result status="403" title="仅 DEV 可访问管理后台" subTitle="账号与组员授权请在个人中心完成。" /></div></ConfigProvider>;
+  if (!identityReady || accessState !== 'allowed') {
+    return <ConfigProvider theme={createAntTheme(theme, systemMode)}>
+      <AccountImpersonationBanner status={impersonation} />
+      <div className="admin-access-screen">
+        {!identityReady ? <AccountImpersonationPending error={impersonationError} onRetry={retryImpersonation} />
+          : accessState === 'checking' ? <div role="status"><Spin size="large" /> 正在验证开发者权限</div>
+          : <Result status="403" title="当前账号没有管理后台权限" subTitle="账号与组员授权请在个人中心完成。" />}
+      </div>
+    </ConfigProvider>;
   }
 
   return (
     <ConfigProvider theme={createAntTheme(theme, systemMode)}>
+      <AccountImpersonationBanner status={impersonation} />
       <div className="admin-shell">
       <aside className="admin-sidebar">
         <div className="admin-brand"><BrandLogo className="admin-brand-logo" /><span>管理后台</span></div>
@@ -116,7 +130,7 @@ export function AdminLayout({ children }) {
         </nav>
         <div className="admin-sidebar-footer">
           <Link href="/profile" reload className="admin-return-link">← 返回个人中心</Link>
-          <div className="admin-user-summary"><span>{account?.username || '正在验证身份'}</span>{account?.isOwner ? <small>主管理员</small> : <small>管理员</small>}</div>
+          <div className="admin-user-summary"><span>{account?.username || '正在验证身份'}</span><small>{account?.canonicalRole}</small></div>
           <ThemePicker value={theme} onChange={changeTheme} />
           <Button size="small" onClick={handleLogout}>退出登录</Button>
         </div>

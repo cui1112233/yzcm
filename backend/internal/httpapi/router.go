@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/agentproxy"
 	"qiantie/backend/internal/agentworkspace"
 	"qiantie/backend/internal/aicut"
@@ -33,8 +34,10 @@ import (
 	"qiantie/backend/internal/releasenotes"
 	"qiantie/backend/internal/runtimeaudit"
 	"qiantie/backend/internal/screenplay"
+	"qiantie/backend/internal/scripteditor"
 	"qiantie/backend/internal/upscale"
 	"qiantie/backend/internal/videomanagementconnector"
+	"qiantie/backend/internal/yzcmmodels"
 )
 
 type runtimeManifest struct {
@@ -70,6 +73,8 @@ type RouterOptions struct {
 	AuthRateLimits                  AuthRateLimitConfig
 	Users                           BridgeUserResolver
 	AuthStore                       auth.Store
+	AccountCenterStore              accountcenter.Store
+	YZCMModelCatalog                yzcmmodels.Reader
 	SessionResolver                 func(context.Context, string) (BridgeIdentity, error)
 	Slice                           int
 	RegisterV11                     func(*http.ServeMux)
@@ -112,6 +117,7 @@ type RouterOptions struct {
 	AICutTimelines            *aicut.TimelineCollectionStore
 	AICutPersonalTemplates    *aicut.PersonalTemplateStore
 	Screenplay                screenplay.Store
+	ScriptEditor              *scripteditor.Service
 	NovelCreation             *novelcreation.Service
 	ProjectRetention          *projectretention.Service
 	NovelCreationRunStarter   NovelCreationRunStarter
@@ -142,8 +148,9 @@ func managedTextProviderResolver(resolver func(context.Context, string, string) 
 	}
 	return func(ctx context.Context, owner, modelID string) (batchfactoryv11.DirectorProvider, error) {
 		if resolveOwner != nil {
-			if resolved := strings.TrimSpace(resolveOwner(owner)); resolved != "" {
-				owner = resolved
+			owner = strings.TrimSpace(resolveOwner(owner))
+			if owner == "" {
+				return nil, accountcenter.ErrForbidden
 			}
 		}
 		return resolver(ctx, owner, modelID)
@@ -152,7 +159,10 @@ func managedTextProviderResolver(resolver func(context.Context, string, string) 
 
 func NewRouter(options RouterOptions) http.Handler {
 	resolveRuntimeModelOwner := func(owner string) string {
-		return effectiveModelCatalogOwner(BridgeIdentity{Username: owner}, options.MemberProfileStore, options.AuthStore)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		resolved, _ := ResolveAPIConfigOwner(ctx, options.AccountCenterStore, owner)
+		return resolved
 	}
 	runtimeCatalogStore := runtimeModelCatalogStore(options.NovelFetchStore, resolveRuntimeModelOwner)
 	runtimeTextProviderResolver := managedTextProviderResolver(options.TextProviderResolver, resolveRuntimeModelOwner)
@@ -298,6 +308,11 @@ func NewRouter(options RouterOptions) http.Handler {
 	}
 	v11 := http.NewServeMux()
 	v12 := http.NewServeMux()
+	multiModeCoordinator := options.AutomationCoordinator
+	if multiModeCoordinator == nil {
+		multiModeCoordinator = &BatchAutomationCoordinator{store: options.Store, fetcher: options.NovelFetchFetcher, giantMaterialResolver: options.GiantMaterialResolver, classification: batchFetchClassification{AIGenderJudge: options.NovelFetchAIGenderJudge, AIGenderJudgeResolver: options.NovelFetchAIGenderJudgeResolver, RewriteProvider: options.NovelFetchRewrite, RewriteResolver: options.NovelFetchRewriteResolver}}
+	}
+	registerMultiModeCreationRoutes(v12, options.Store, options.PresetCatalog, multiModeCoordinator)
 	publish121Available := options.VideoManagementConnector != nil || (options.External != nil && options.External.Enabled[external.Provider121])
 	publishYadiAvailable := options.External != nil && options.External.Enabled[external.ProviderYadi]
 	// V12 is the public workbench namespace. Keep its capability contract on
@@ -322,7 +337,7 @@ func NewRouter(options RouterOptions) http.Handler {
 			}
 			return provider.Complete(ctx, request)
 		})
-		registerComicPageRoutes(v12, manualProduction, options.Store, options.LocalArtifacts, options.LocalExecutors, runtimeCatalogStore, options.UserConfigStore, options.PresetCatalog, options.AuthStore, options.MemberProfileStore, options.Director, comicGenerationGate, options.ImageGenerationCache)
+		registerComicPageRoutes(v12, manualProduction, options.Store, options.LocalArtifacts, options.LocalExecutors, runtimeCatalogStore, options.UserConfigStore, options.PresetCatalog, options.AuthStore, options.MemberProfileStore, options.Director, comicGenerationGate, options.ImageGenerationCache, resolveRuntimeModelOwner)
 	}
 	registerComicDirectRoutes(v12, options.N8ComicPublisher, options.ComicDirectRecordPath, options.Now)
 	registerN8ComicPublishRoutes(v12, options.N8ComicPublisher)
@@ -414,7 +429,7 @@ func NewRouter(options RouterOptions) http.Handler {
 		registerMergeStatusRoute(v12, mergeStatus, "v12")
 	}
 	if batchProduction != nil && options.Slice >= 4 {
-		registerProductionRoutes(v11, batchProduction, runtimeCatalogStore)
+		registerProductionRoutes(v11, batchProduction, options.AccountCenterStore, options.NovelFetchStore, options.YZCMModelCatalog, runtimeCatalogStore)
 		if output, ok := options.MergeOutput.(interface {
 			PutUploadedMP4(context.Context, string, string) (string, error)
 		}); ok {
@@ -468,7 +483,9 @@ func NewRouter(options RouterOptions) http.Handler {
 	// Release notes ship inside this binary and are matched against the release
 	// manifest, so a stale or mismatched release cannot show the wrong payload.
 	registerProductUpdateRoute(root, options.RuntimeManifestPath, releasenotes.Default())
-	auth := BridgeAuth{Secret: options.BridgeSecret, Now: options.Now, Users: options.Users, AuthStore: options.AuthStore, SessionResolver: options.SessionResolver}
+	auth := BridgeAuth{Secret: options.BridgeSecret, Now: options.Now, Users: options.Users, AuthStore: options.AuthStore, AccountCenterStore: options.AccountCenterStore, SessionResolver: options.SessionResolver}
+	impersonation := accountImpersonation{auth: auth}
+	impersonation.register(root)
 	novelScope := novelFetchAccountScopeResolver(options.AuthStore, options.MemberProfileStore)
 	novelCompatAuth := auth
 	novelCompatAuth.IdentityScope = novelScope
@@ -521,7 +538,11 @@ func NewRouter(options RouterOptions) http.Handler {
 	if batchProduction != nil {
 		videoProviderRegistry = batchProduction.ProviderRegistry
 	}
-	registerVideoProviderStatusRoute(v12, auth, options.UserConfigStore, videoProviderRegistry, options.Store, "v12", runtimeCatalogStore)
+	if videoProviderRegistry == nil && options.AccountCenterStore != nil {
+		videoProviderRegistry = NewCatalogVideoProviderRegistry(options.AccountCenterStore, options.NovelFetchStore)
+	}
+	registerVideoProviderStatusRoute(v11, auth, videoProviderRegistry, "v11")
+	registerVideoProviderStatusRoute(v12, auth, videoProviderRegistry, "v12")
 	if options.Store != nil {
 		runtimeStageService := &batchfactoryv11.BookStageService{Store: options.Store, Director: options.Director, Production: batchProduction, ImageReady: shuihuoImageReadyChecker(options.Store, runtimeCatalogStore, options.UserConfigStore, resolveRuntimeModelOwner), VideoReady: shuihuoVideoReadyChecker(options.Store, runtimeCatalogStore, batchProduction)}
 		registerRuntimeSummaryRoute(v12, auth, options.Store, runtimeStageService, batchProduction, mergeStatus, options.AutomationStatusReader, "v12", options.TextRepository)
@@ -539,7 +560,7 @@ func NewRouter(options RouterOptions) http.Handler {
 		rateLimitNow = time.Now
 	}
 	authLimiter := newAuthRateLimiter(options.AuthRateLimits, rateLimitNow)
-	RegisterAuthRoutes(root, AuthOptions{Store: options.AuthStore, Profiles: options.MemberProfileStore, Now: options.Now, SessionResolver: options.SessionResolver, MFAFile: mfaFile, PasskeyFile: passkeyFile, RateLimiter: authLimiter})
+	RegisterAuthRoutes(root, AuthOptions{Store: options.AuthStore, AccountCenterStore: options.AccountCenterStore, Profiles: options.MemberProfileStore, Now: options.Now, SessionResolver: options.SessionResolver, MFAFile: mfaFile, PasskeyFile: passkeyFile, RateLimiter: authLimiter})
 	if options.PresetCatalog != nil {
 		registerPresetRoutes(root, auth, options.PresetCatalog, options.LocalArtifacts)
 	}
@@ -549,13 +570,16 @@ func NewRouter(options RouterOptions) http.Handler {
 	RegisterScriptHistoryRoutes(root, auth, options.ScriptHistoryStore)
 	RegisterMemberProfileRoutes(root, auth, options.MemberProfileStore, options.AuthStore, options.MemberAvatarDir)
 	RegisterMFARoutes(root, auth, options.MemberProfileStore, options.AuthStore)
-	RegisterAccountAdminReadCompat(root, auth, options.AuthStore, options.MemberProfileStore)
-	RegisterAccountTransferCompat(root, auth, options.AuthStore, options.MemberProfileStore)
+	registerAccountCenterAdmin(root, auth)
+	registerAccountCenterEnergy(root, auth, options.Now)
+	registerYZCMModelCatalog(root, auth, options.YZCMModelCatalog)
+	RegisterAccountAdminReadCompat(root, auth)
+	RegisterAccountTransferCompat(root, auth)
 	RegisterMemberTeamReadCompat(root, auth, options.AuthStore, options.MemberProfileStore)
-	RegisterMemberTeamWriteCompat(root, auth, options.AuthStore, options.MemberProfileStore)
-	RegisterTeamAdminCompat(root, auth, options.AuthStore, options.MemberProfileStore)
+	RegisterMemberTeamWriteCompat(root, auth)
+	RegisterTeamAdminCompat(root, auth)
 	if options.MemberProfileStore != nil {
-		RegisterPublicTeamInviteCompat(root, options.MemberProfileStore.SystemDir, options.AuthStore, options.MemberProfileStore)
+		RegisterPublicTeamInviteCompat(root, options.MemberProfileStore.SystemDir, options.AccountCenterStore)
 	}
 	prompt.SetLuoshuiOverrideCatalog(options.PresetCatalog)
 	RegisterAdminReadCompat(root, auth, options.AuthStore, options.MemberProfileStore, options.PresetCatalog, options.LocalArtifacts)
@@ -565,12 +589,12 @@ func NewRouter(options RouterOptions) http.Handler {
 	if options.MemberProfileStore != nil {
 		RegisterAccountRecoveryStatusCompat(root, auth, options.MemberProfileStore.SystemDir, authLimiter)
 		RegisterAccountPasskeyCompat(root, auth, options.MemberProfileStore, options.AuthStore)
-		RegisterAccountPurgeCompat(root, auth, options.AuthStore, options.MemberProfileStore, options.MemberAvatarDir)
+		RegisterAccountPurgeCompat(root, auth)
 	}
 	RegisterReferenceAssetRoutes(root, auth, options.UserDataDir)
 	registerReferenceAssetImageGenerateRoute(root, auth, options.UserConfigStore, runtimeCatalogStore, options.LocalExecutors)
 	registerUserConfigRoutes(root, auth, options.UserConfigStore, options.AuthStore, options.NovelFetchStore, options.MemberProfileStore)
-	registerAPIIntegrationRoutes(root, auth, options.UserConfigStore, options.AuthStore, options.MemberProfileStore)
+	registerAPIIntegrationRoutes(root, auth, options.UserConfigStore, options.AuthStore, options.NovelFetchStore)
 	registerImageCapacityRoutes(root, auth, options)
 	RegisterStorageRoutes(root, auth, options.UserConfigStore, options.ScriptHistoryStore)
 	RegisterPlatformProjectsRoute(root, auth, options.ScriptHistoryStore, options.Store)
@@ -635,7 +659,7 @@ func NewRouter(options RouterOptions) http.Handler {
 		if options.AgentAssetObjects != nil {
 			imageReferences, _ = options.AgentAssetObjects.(agentworkspace.ReferenceURLProvider)
 		}
-		imageGenerate := newAgentImageGenerator(options.Store, runtimeCatalogStore, options.UserConfigStore, options.LocalExecutors, options.LocalArtifacts, options.AgentAssets, imageReferences)
+		imageGenerate := newAgentImageGenerator(options.Store, runtimeCatalogStore, options.UserConfigStore, options.LocalExecutors, options.LocalArtifacts, options.AgentAssets, imageReferences, options.AccountCenterStore)
 		textComplete := newAgentTextCompletionExecutor(textModels)
 		imageServices := AgentNodeGenerationServices{Projects: options.AgentWorkspace, Catalog: runtimeCatalogStore, TextModels: textModels, TextComplete: textComplete, Assets: options.AgentAssets, Objects: options.AgentAssetObjects, ImageGenerate: imageGenerate, ImageProcess: NewAgentImageProcessor(), QueueImages: true, Now: options.Now}
 		RegisterAgentNodeGenerationRoutes(root, auth, imageServices)
@@ -649,7 +673,7 @@ func NewRouter(options RouterOptions) http.Handler {
 				references, _ = options.AgentAssetObjects.(agentworkspace.ReferenceURLProvider)
 			}
 			videoResolver := func(ctx context.Context, owner, modelKey string) (batchfactoryv11.VideoProviderConfig, error) {
-				config, err := loadShuihuoOwnerConfig(ctx, options.Store, owner, runtimeCatalogStore)
+				config, err := currentVideoRuntimeSettings(ctx, options.AccountCenterStore, options.NovelFetchStore, owner)
 				if err != nil {
 					return batchfactoryv11.VideoProviderConfig{}, err
 				}
@@ -694,6 +718,7 @@ func NewRouter(options RouterOptions) http.Handler {
 	}
 	RegisterAICutPersonalTemplateRoutes(root, auth, personalTemplates)
 	registerScreenplayWorkflow(root, auth, options, runtimeTextProviderResolver, runtimeCatalogStore)
+	registerScriptEditor(root, auth, options, runtimeTextProviderResolver)
 	RegisterNovelCreationRoutes(root, auth, options.NovelCreation, options.NovelCreationRunStarter)
 	RegisterProjectRetentionRoutes(root, auth, options.ProjectRetention)
 	RegisterAICutAssetRoutes(root, auth, options.AICut, options.AgentAssetObjects, options.Now)
@@ -734,8 +759,19 @@ func NewRouter(options RouterOptions) http.Handler {
 		registerPluginToolRoutes(root, auth, options.TextProvider, newAgentTextCompletionExecutor(pluginTextModels))
 		registerScriptDirectorPipelineCompat(root, auth, options.TextProvider, options.PresetCatalog, options.PersonalPromptStore)
 	}
-	v11Root := auth.Middleware(adminBatchReadThrough(capabilityNotFoundHandler(v11), options.Store, options.MemberProfileStore, options.AuthStore))
-	v12Root := auth.Middleware(adminBatchReadThrough(capabilityNotFoundHandler(v12), options.Store, options.MemberProfileStore, options.AuthStore))
+	batchRoot := func(mux *http.ServeMux) http.Handler {
+		next := capabilityNotFoundHandler(mux)
+		legacyReadThrough := adminBatchReadThrough(next, options.Store, options.MemberProfileStore, options.AuthStore)
+		return auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, switched := switchedBridgeIdentity(r); switched {
+				next.ServeHTTP(w, r)
+				return
+			}
+			legacyReadThrough.ServeHTTP(w, r)
+		}))
+	}
+	v11Root := batchRoot(v11)
+	v12Root := batchRoot(v12)
 	if legacyV11Public() {
 		root.Handle("/api/batch-factory/v11/", v11Root)
 	}
@@ -760,7 +796,7 @@ func NewRouter(options RouterOptions) http.Handler {
 	RegisterLocalExecutorArtifactRoutes(root, auth, options.LocalExecutors, options.LocalArtifacts)
 	if options.NovelFetchStore != nil {
 		RegisterScriptVideoRoutes(root, auth, options.LocalExecutors, func(ctx context.Context, owner, modelKey string) (batchfactoryv11.VideoProviderConfig, error) {
-			config, err := loadShuihuoOwnerConfig(ctx, options.Store, owner, runtimeCatalogStore)
+			config, err := currentVideoRuntimeSettings(ctx, options.AccountCenterStore, options.NovelFetchStore, owner)
 			if err != nil {
 				return batchfactoryv11.VideoProviderConfig{}, err
 			}
@@ -986,9 +1022,9 @@ func NewRouter(options RouterOptions) http.Handler {
 		root.Handle("PUT /api/tasks/", novelAuth.Middleware(http.HandlerFunc(legacyTaskAlias)))
 		root.Handle("DELETE /api/tasks/", novelAuth.Middleware(http.HandlerFunc(legacyTaskAlias)))
 		root.Handle("/api/web-submit/", sessionOnlyNovelAuth.Middleware(http.HandlerFunc(legacyWebSubmitAlias)))
-		RegisterNovelFetchIntegrations(root, sessionOnlyNovelAuth, options.NovelFetchStore, options.NovelFetchQueue)
+		RegisterNovelFetchIntegrations(root, sessionOnlyCompatAuth, options.NovelFetchStore, options.NovelFetchQueue)
 		registerCanonicalNovelFetchWebSubmitAliases(root, auth)
-		registerModelCatalogRoutes(root, novelAuth, options.NovelFetchStore, options.UserConfigStore, options.AuthStore, options.MemberProfileStore)
+		registerModelCatalogRoutes(root, novelAuth, auth, options.NovelFetchStore, options.UserConfigStore, options.YZCMModelCatalog)
 	}
 	root.HandleFunc("GET /health", func(w http.ResponseWriter, req *http.Request) {
 		if options.Health != nil && options.Health(req.Context()) != nil {
@@ -1000,7 +1036,8 @@ func NewRouter(options RouterOptions) http.Handler {
 	// Compress JSON responses at the outermost layer so every registered route
 	// benefits without touching individual handlers. Non-JSON streams (images,
 	// ServeContent Range/304) are passed through untouched.
-	return withWorkshopSubmitQueue(withJSONCompression(withAICutTimelineScope(root, auth)), options.NovelFetchQueue)
+	business := withAccountCenterBusinessAccess(withAICutTimelineScope(withAPIConfigCompatibility(root, auth), auth), auth)
+	return withWorkshopSubmitQueue(withJSONCompression(impersonation.middleware(root, business)), options.NovelFetchQueue)
 }
 
 // registerCanonicalNovelFetchWebSubmitAliases keeps the public workshop
@@ -1073,8 +1110,9 @@ func shuihuoImageReadyChecker(store batchfactoryv11.Store, catalogStore novelfet
 		// 与成员实际使用的管理员渠道口径不一致。
 		channelOwner := owner
 		if resolveOwner != nil {
-			if resolved := strings.TrimSpace(resolveOwner(owner)); resolved != "" {
-				channelOwner = resolved
+			channelOwner = strings.TrimSpace(resolveOwner(owner))
+			if channelOwner == "" {
+				return false, "当前团队模型配置无法确认"
 			}
 		}
 		if shuihuoImageChannelReady(ctx, userConfig, channelOwner) {

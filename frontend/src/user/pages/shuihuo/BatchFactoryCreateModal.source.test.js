@@ -76,23 +76,23 @@ test('lets a first-time batch owner save unified settings before creating the ba
 
 test('lets a first-time batch owner switch production mode beside the unified title', () => {
   assert.match(source, /BatchFactoryProductionModeControl/);
-  assert.match(source, /<span>新建批量 · 统一配置<\/span><BatchFactoryProductionModeControl/);
+  assert.match(source, /<span>新建批量 · 统一配置<\/span>\{multiCreation/);
   assert.match(source, /productionMode=\{initialBatchSettings\.productionMode\}/);
   assert.doesNotMatch(source, /key: 'media', label: '画面与视频'/);
 });
 
 test('shows comic analysis characters separately from the 4000-character capture limit', () => {
   assert.match(source, /initialBatchSettings\.productionMode === 'comic'/);
-  assert.match(source, /生产模式<Select value=\{initialBatchSettings\.productionMode \|\| 'video'\}/);
+  assert.match(source, /<BatchFactoryMultiModeCreationFields modes=\{creationModes\}/);
   assert.match(source, /漫画分析/);
   assert.match(source, /comicAnalysisCharacters/);
   assert.match(source, /contentCaptureCharacters/);
   assert.match(source, /comicAnalysisCharacters,/);
 });
 
-test('new batch mode menu shares the three options with unified settings and binds the text page target', () => {
-  assert.match(source, /生产模式<Select[^>]*options=\{PRODUCTION_MODE_OPTIONS\}/);
-  assert.match(source, /单页字数<InputNumber[^>]*value=\{initialBatchSettings\.textPageTarget\}/);
+test('new batch has four mode choices and retains the active text page target', () => {
+  assert.match(source, /BatchFactoryMultiModeCreationFields/);
+  assert.match(source, /单页(?:目标)?字数<InputNumber[^>]*value=\{initialBatchSettings\.textPageTarget\}/);
   const unified = fs.readFileSync(path.join(here, 'BatchFactoryUnifiedSettingsModal.jsx'), 'utf8');
   assert.match(unified, /selectedPreset = presetOptions\.find\(/);
 });
@@ -117,17 +117,19 @@ test('uses the unified button treatment for the new batch toolbar', () => {
 });
 
 test('grouped submit surfaces failed book cities and counts only fetched pending books', () => {
-  // I3：失败书城可见——catch 里记录书城名并 console.warn，最终 warning 带出具体书城
-  assert.match(source, /const failedPlatforms = \[\]/);
-  assert.match(source, /failedPlatforms\.push\(platformLabel\)/);
-  assert.match(source, /console\.warn\('分组抓取失败', group\.platformId, error\)/);
+  const preparation = fs.readFileSync(path.join(here, 'batchFactoryCreationSources.js'), 'utf8');
+  // I3：失败书城可见——保留书城名和失败原因，最终 warning 带出具体书城
+  assert.match(preparation, /const failedPlatforms = \[\]/);
+  assert.match(preparation, /failedPlatforms\.push\(platformLabel\)/);
   assert.match(source, /以下书城抓取失败：\$\{failedPlatforms\.join\('、'\)\}/);
   assert.match(source, /失败的书已在列表中标红，可单独重试/);
   // 全部成功但有书没正文时，沿用原来的 X/Y 文案
-  assert.match(source, /\} else if \(fetchedCount < totalCount\) \{/);
+  assert.match(source, /\} else if \(!deferSources && fetchedCount < totalCount\) \{/);
   // #6：fetchedCount 只对本组 pending id 中真正拿到非空正文的计数
-  assert.match(source, /let fetchedCount = 0/);
-  assert.match(source, /for \(const bookId of pending\) \{\s*if \(manualFetchedSourceText\(groupSources\[bookId\]\)\) fetchedCount \+= 1;/);
+  assert.match(preparation, /let fetchedCount = 0/);
+  assert.match(preparation, /for \(const bookId of pending\) \{\s*if \(manualFetchedSourceText\(groupSources\[bookId\]\)\) fetchedCount \+= 1;/);
+  assert.match(source, /const deferSources = automationEnabled \|\| multiCreation/);
+  assert.match(preparation, /if \(!pending.length \|\| deferSources\) continue/);
 });
 
 test('offers giant material intake through the resident executor', () => {
@@ -165,7 +167,7 @@ test('giant immediate execution opens the same automation-plan dialog as other b
 test('giant creation selects a versioned preset without requiring frozen metadata before dispatching reads', () => {
 	assert.match(source, /giantAutomationPlan:/);
 	assert.match(source, /expectedPresetVersion: selectedPreset\.version/);
-	assert.match(source, /automationPresetSnapshot\(automationPresets, automationPresetID\)/);
+	assert.match(source, /automationPresetSnapshot\(automationPresets, automationPresetID \|\| creationDrafts/);
 	assert.doesNotMatch(source, /saveBatchSettings/);
 	assert.doesNotMatch(source, /settingsState\?\.patch\?\.automationPresetSnapshot/);
 	assert.doesNotMatch(source, /巨量素材自动化预设未能随创建冻结/);

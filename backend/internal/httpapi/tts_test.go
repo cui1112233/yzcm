@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/novelfetchworkshop"
 )
 
@@ -41,7 +44,11 @@ func TestConfiguredTTSModelUsesEnabledManagedAudioModel(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	model, ok := configuredTTSModel(context.Background(), store, "tts-owner")
+	resolved := resolveTTS(context.Background(), store, "tts-owner", "")
+	if err := resolved.err(); err != nil {
+		t.Fatal(err)
+	}
+	model, ok := resolved.model, resolved.state == ttsCustom
 	if !ok || model["endpoint"] != "https://enabled.example" {
 		t.Fatalf("model=%#v ok=%v", model, ok)
 	}
@@ -160,9 +167,76 @@ func TestTTSRouteUsesConfiguredAudioModelEndToEnd(t *testing.T) {
 	}}}); err != nil {
 		t.Fatal(err)
 	}
-	api := NewRouter(RouterOptions{BridgeSecret: "secret", Now: func() time.Time { return now }, NovelFetchStore: store})
+	api := NewRouter(RouterOptions{AccountCenterStore: activeModelTestAccounts("tts-user"), BridgeSecret: "secret", Now: func() time.Time { return now }, NovelFetchStore: store})
 	rec := signedJSONRequest(t, api, now, "tts-user", http.MethodPost, "/api/tts", map[string]any{"input": "你好"})
 	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "audio/mpeg" || rec.Body.String() != "configured-audio" {
 		t.Fatalf("status=%d content-type=%q body=%q", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+}
+
+func TestTTSRouteUnavailableCatalogDoesNotCallDefaultProvider(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	var defaultCalls atomic.Int32
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		defaultCalls.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer fallback.Close()
+	previousEndpoint := defaultTTSEndpoint
+	defaultTTSEndpoint = fallback.URL
+	defer func() { defaultTTSEndpoint = previousEndpoint }()
+	api := NewRouter(RouterOptions{BridgeSecret: "secret", Now: func() time.Time { return now }, NovelFetchStore: novelfetchworkshop.NewMemoryStore()})
+	response := signedJSONRequest(t, api, now, "unresolved", http.MethodPost, "/api/tts", map[string]any{"input": "本地测试"})
+	if response.Code != http.StatusServiceUnavailable || defaultCalls.Load() != 0 {
+		t.Fatalf("unresolved model scope should fail before fallback: status %d, calls %d", response.Code, defaultCalls.Load())
+	}
+}
+
+func TestUnusableTTSConfigurationStopsAllRuntimePaths(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(1700000000, 0)
+	var calls atomic.Int32
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "audio/mpeg")
+		_, _ = w.Write([]byte("local-audio"))
+	}))
+	defer fallback.Close()
+	previous := defaultTTSEndpoint
+	defaultTTSEndpoint = fallback.URL
+	defer func() { defaultTTSEndpoint = previous }()
+	catalog := novelfetchworkshop.NewMemoryStore()
+	if err := catalog.PutConfig(ctx, "alice", map[string]any{"modelCatalog": []any{map[string]any{
+		"id": "audio", "kind": "audio", "enabled": true, "credentialStatus": "needs_reentry",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	api := NewRouter(RouterOptions{BridgeSecret: "secret", Now: func() time.Time { return now }, NovelFetchStore: catalog, AccountCenterStore: activeModelTestAccounts("alice")})
+	response := signedJSONRequest(t, api, now, "alice", "POST", "/api/tts", map[string]any{"input": "本地测试"})
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "重新填写 Key") {
+		t.Fatalf("TTS should explain missing custom key, HTTP %d", response.Code)
+	}
+	for _, store := range []novelfetchworkshop.Store{nil, catalog} {
+		if _, _, err := requestTTSBytes(ctx, "alice", ttsRequest{Input: "本地测试"}, store); err == nil {
+			t.Fatal("AICut path accepted an unavailable model")
+		}
+		batchStore := batchfactoryv11.NewMemoryStore()
+		book := batchfactoryv11.Book{SourceText: "本地测试", SourceMetadata: map[string]any{
+			"shuihuoSegments": []any{map[string]any{"id": "segment", "sourceText": "本地测试"}},
+		}}
+		if _, err := generateShuihuoSegmentAudio(ctx, batchStore, nil, "alice", batchfactoryv11.Batch{Books: []batchfactoryv11.Book{book}}, "segment", store); err == nil {
+			t.Fatal("Shuihuo path accepted an unavailable model")
+		}
+		automation := &BatchAutomationCoordinator{store: batchStore, ttsStore: store}
+		if _, _, err := automation.ensureAudioPlan(ctx, "alice", "batch", book); err == nil {
+			t.Fatal("automation accepted an unavailable model")
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("unusable model triggered %d default calls", calls.Load())
+	}
+	got, _, err := requestTTSBytes(ctx, "alice", ttsRequest{Input: "本地测试", ModelID: builtInTTSModelID}, catalog)
+	if err != nil || string(got) != "local-audio" || calls.Load() != 1 {
+		t.Fatal("an explicit built-in selection should use the local default fixture once")
 	}
 }

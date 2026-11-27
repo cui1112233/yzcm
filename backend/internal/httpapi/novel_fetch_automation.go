@@ -35,7 +35,7 @@ func novelFetchSensitiveAIEnabled(settings map[string]any) bool {
 }
 
 func saveNovelFetchAutomationEnabled(ctx context.Context, store novelfetchworkshop.Store, owner string, enabled bool) error {
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return err
 	}
@@ -46,7 +46,7 @@ func saveNovelFetchAutomationEnabled(ctx context.Context, store novelfetchworksh
 	automation["enabled"] = enabled
 	automation["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 	settings[novelFetchAutomationConfigKey] = automation
-	return store.PutConfig(ctx, owner, settings)
+	return novelfetchworkshop.WriteWorkflowConfig(ctx, store, owner, settings)
 }
 
 func novelFetchAutomationVersions(settings map[string]any) []string {
@@ -84,6 +84,9 @@ func novelFetchAIManualRetryRequired(err error) bool {
 	if err == nil {
 		return false
 	}
+	if novelFetchRetryResultUnknown(err) || novelFetchRetryConfigurationFailure(err) {
+		return true
+	}
 	// 模型输出格式错误属于本次输出问题，参考实现允许立即重试而不是转人工。
 	if novelFetchAIErrorIsOutputRejection(err) {
 		return false
@@ -117,7 +120,7 @@ func markNovelFetchAIManualRetry(ctx context.Context, store novelfetchworkshop.S
 	delete(document.Meta, "automationNextRetryAt")
 	// 同步写入阶段重试表，保持与参考实现一致的 manual_only 记录，前端和
 	// 运维可以直接看到卡在改文阶段。
-	scheduleNovelFetchTaskRetry(document.Meta, novelFetchRetryStageRewrite, failure, 0, now)
+	scheduleNovelFetchTaskRetry(document.Meta, novelFetchRetryStageForError(failure), failure, 0, now)
 	appendNovelFetchDocumentLog(&document, "queue_failed", reason, now)
 	return store.PutDocument(ctx, owner, document)
 }
@@ -158,6 +161,16 @@ func saveNovelFetchOriginalFailure(ctx context.Context, store novelfetchworkshop
 	meta["originalFetchRetryAttempts"] = attempts
 	now, message := failure.At, failure.Message
 	meta["originalFetchLastError"] = message
+	previous := novelFetchRetrySchedule(meta)[novelFetchRetryStageOriginalFetch]
+	firstAttempt := firstText(previous["first_attempt_at"])
+	if attempts == 1 && !now.IsZero() {
+		firstAttempt = now.UTC().Format(time.RFC3339Nano)
+	}
+	roundExpired := false
+	if firstAttempt != "" {
+		first, ok := novelFetchParseRetryTime(firstAttempt)
+		roundExpired = !ok || first.After(now) || !now.Before(first.Add(novelFetchRetryRoundLifetime))
+	}
 
 	switch failure.Class {
 	case novelfetchworkshop.UpstreamFailurePermanent:
@@ -165,11 +178,11 @@ func saveNovelFetchOriginalFailure(ctx context.Context, store novelfetchworkshop
 	case novelfetchworkshop.UpstreamFailureConfiguration:
 		markNovelFetchOriginalManual(&document, "waiting_configuration", novelFetchOriginalConfigurationMessage, now)
 	default:
-		if attempts > novelFetchOriginalFetchMaxRetries {
+		if attempts > novelFetchOriginalFetchMaxRetries || roundExpired {
 			markNovelFetchOriginalManual(&document, "failed", "原文连续获取失败已停止自动重试，请检查书籍来源是否有效后手动重试", now)
 			break
 		}
-		settings, err := store.GetConfig(ctx, owner)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 		if err != nil {
 			return "", err
 		}
@@ -182,10 +195,11 @@ func saveNovelFetchOriginalFailure(ctx context.Context, store novelfetchworkshop
 
 		schedule := novelFetchRetrySchedule(meta)
 		schedule[novelFetchRetryStageOriginalFetch] = map[string]any{
-			"attempt":       attempts,
-			"next_retry_at": next,
-			"error":         message,
-			"updated_at":    now.UTC().Format(time.RFC3339Nano),
+			"attempt":          attempts,
+			"next_retry_at":    next,
+			"error":            message,
+			"updated_at":       now.UTC().Format(time.RFC3339Nano),
+			"first_attempt_at": firstAttempt,
 		}
 		meta["retry_schedule"] = schedule
 		refreshNovelFetchTaskRetrySummary(meta)
@@ -207,7 +221,20 @@ func markNovelFetchOriginalManual(document *novelfetchworkshop.Document, status,
 	for _, key := range []string{"originalFetchNextRetryAt", "original_fetch_next_retry_at", "automationNextRetryAt", "automation_next_retry_at"} {
 		delete(meta, key)
 	}
-	clearNovelFetchTaskRetry(meta, "")
+	// A permanent original-fetch failure stops this round, but must not erase
+	// another stage's failures or uncertain paid-request evidence.
+	schedule := novelFetchRetrySchedule(meta)
+	state := copyAnyMap(schedule[novelFetchRetryStageOriginalFetch])
+	state["attempt"] = intValue(meta["originalFetchRetryAttempts"])
+	state["manual_only"], state["next_retry_at"] = true, ""
+	state["error"], state["updated_at"] = reason, now.UTC().Format(time.RFC3339Nano)
+	if intValue(state["attempt"]) == 1 && firstText(state["first_attempt_at"]) == "" && !now.IsZero() {
+		state["first_attempt_at"] = now.UTC().Format(time.RFC3339Nano)
+	}
+	schedule[novelFetchRetryStageOriginalFetch] = state
+	meta["retry_schedule"] = schedule
+	refreshNovelFetchTaskRetrySummary(meta)
+	refreshNovelFetchAIManualRetryHold(meta)
 	appendNovelFetchDocumentLog(document, "queue_"+status, reason, now)
 }
 
@@ -222,7 +249,7 @@ func clearNovelFetchOriginalFetchRetry(ctx context.Context, store novelfetchwork
 	for _, key := range []string{"originalFetchRetryAttempts", "originalFetchNextRetryAt", "originalFetchLastError", "originalFetchFailureJobId"} {
 		delete(document.Meta, key)
 	}
-	clearNovelFetchTaskRetry(document.Meta, "")
+	clearNovelFetchTaskRetry(document.Meta, novelFetchRetryStageOriginalFetch)
 	return store.PutDocument(ctx, owner, document)
 }
 
@@ -240,7 +267,7 @@ func novelFetchAutomationEligible(document novelfetchworkshop.Document, now time
 	}
 	// 自动重试预算耗尽后必须由人工介入，不能因为 status=failed 又被扫描器
 	// 立刻捡回队列，否则“停止自动重试”实际上没有任何效果。
-	if meta["manualOnly"] == true || meta["manual_only"] == true {
+	if meta["manualOnly"] == true || meta["manual_only"] == true || meta["sensitiveManualRetryRequired"] == true {
 		return false
 	}
 	// 阶段重试表里的 manual_only 与 manualOnly 等价：模型确定性失败、AI
@@ -251,6 +278,11 @@ func novelFetchAutomationEligible(document novelfetchworkshop.Document, now time
 	// 退避未到期前不重复入队；不同阶段各自维护到期时间。
 	if !novelFetchTaskRetryDue(meta, "", now) {
 		return false
+	}
+	if nextRaw := firstText(meta["originalFetchNextRetryAt"], meta["original_fetch_next_retry_at"], meta["automationNextRetryAt"], meta["automation_next_retry_at"]); nextRaw != "" {
+		if next, ok := novelFetchParseRetryTime(nextRaw); !ok || next.After(now) {
+			return false
+		}
 	}
 	if meta["rewriteValidationHold"] == true {
 		return false
@@ -269,13 +301,8 @@ func novelFetchAutomationEligible(document novelfetchworkshop.Document, now time
 	// stage fails, the task must be picked up again without fetching upstream
 	// a second time.
 	if strings.EqualFold(firstText(meta["originalStatus"], meta["original_status"]), "waiting_sensitive_ai") &&
-		strings.TrimSpace(document.OriginalRaw) != "" {
+		(document.OriginalRawAvailable || strings.TrimSpace(document.OriginalRaw) != "" || document.BodyRefs["original_raw"].CharCount > 0) {
 		return true
-	}
-	if nextRaw := firstText(meta["originalFetchNextRetryAt"], meta["original_fetch_next_retry_at"], meta["automationNextRetryAt"], meta["automation_next_retry_at"]); nextRaw != "" {
-		if next, err := time.Parse(time.RFC3339Nano, nextRaw); err == nil && next.After(now) {
-			return false
-		}
 	}
 	if submitStatus == "pending_upload" || submitStatus == "pending_confirmation" || submitStatus == "failed" || submitStatus == "error" {
 		return true
@@ -320,7 +347,10 @@ func recoverStaleNovelFetchTasks(ctx context.Context, store novelfetchworkshop.S
 	if len(queues) > 0 {
 		recoveryQueue, _ = queues[0].(novelfetchworkshop.ProcessStaleJobRecoveryQueue)
 	}
-	for _, document := range documents {
+	for index, document := range documents {
+		if ctx.Err() != nil {
+			return
+		}
 		status := strings.ToLower(firstText(document.Meta["status"], document.Meta["queueState"], document.Meta["taskStatus"]))
 		if status != "processing" && status != "running" && status != "ai_processing" && status != "queued" {
 			continue
@@ -329,6 +359,13 @@ func recoverStaleNovelFetchTasks(ctx context.Context, store novelfetchworkshop.S
 		if err != nil || updated.After(cutoff) {
 			continue
 		}
+		// Candidates may omit every body and log. Only hydrate a stale book,
+		// and refuse to overwrite a document that changed since the scan.
+		latest, readErr := store.GetDocument(ctx, owner, document.BookID)
+		if readErr != nil || latest.UpdatedAt != document.UpdatedAt {
+			continue
+		}
+		document = latest
 		if status == "queued" {
 			// Age alone does not prove a queued job is orphaned. Never replace a
 			// job which Redis still owns, or retry when Redis cannot be checked.
@@ -352,7 +389,8 @@ func recoverStaleNovelFetchTasks(ctx context.Context, store novelfetchworkshop.S
 			// 入队前中断），属于彻底的孤儿状态；继续跳过会让它永远显示“排队中”，
 			// 因此和超时任务一样转入等待重试，交给自动扫描重新入队。
 		}
-		if recoveryQueue != nil && status != "queued" {
+		paidAIUnknown := status == "ai_processing" || strings.EqualFold(firstText(document.Meta["aiStatus"], document.Meta["ai_status"]), "ai_processing")
+		if recoveryQueue != nil && status != "queued" && !paidAIUnknown {
 			staleJobID := firstText(document.Meta["currentProcessJobId"], document.Meta["current_process_job_id"])
 			if staleJobID == "" {
 				batchID := firstText(document.Meta["currentBatchId"], document.Meta["current_batch_id"])
@@ -385,6 +423,25 @@ func recoverStaleNovelFetchTasks(ctx context.Context, store novelfetchworkshop.S
 				}
 			}
 		}
+		if paidAIUnknown {
+			// A missing worker is not evidence that a paid request failed. A
+			// positive/unknown queue lookup must not be treated as an orphan.
+			if id := firstText(document.Meta["currentProcessJobId"], document.Meta["current_process_job_id"]); id != "" {
+				if len(queues) == 0 {
+					continue
+				}
+				checker, ok := queues[0].(interface {
+					ProcessJobExists(context.Context, string) (bool, error)
+				})
+				if !ok {
+					continue
+				}
+				exists, err := checker.ProcessJobExists(ctx, id)
+				if err != nil || exists {
+					continue
+				}
+			}
+		}
 		if document.Meta == nil {
 			document.Meta = map[string]any{}
 		}
@@ -393,9 +450,23 @@ func recoverStaleNovelFetchTasks(ctx context.Context, store novelfetchworkshop.S
 		document.Meta["queueState"] = "waiting_retry"
 		document.Meta["error"] = message
 		document.Meta["automationNextRetryAt"] = now.UTC().Format(time.RFC3339Nano)
-		appendNovelFetchDocumentLog(&document, "process_recovered", "超时任务已转入等待重试", now)
-		appendNovelFetchDocumentLog(&document, "process_waiting_retry", message, now)
-		if err := store.PutDocument(ctx, owner, document); err == nil {
+		if paidAIUnknown {
+			message = "AI执行结果未知，请先核对结果后手动重试"
+			document.Meta["status"], document.Meta["queueState"] = "failed", "failed"
+			document.Meta["manualOnly"] = true
+			document.Meta["error"] = message
+			delete(document.Meta, "automationNextRetryAt")
+			scheduleNovelFetchTaskRetry(document.Meta, novelFetchRetryStagePipeline, fmt.Errorf("%s", message), 0, now)
+		}
+		if paidAIUnknown {
+			appendNovelFetchDocumentLog(&document, "process_waiting_manual", message, now)
+		} else {
+			appendNovelFetchDocumentLog(&document, "process_recovered", "超时任务已转入等待重试", now)
+			appendNovelFetchDocumentLog(&document, "process_waiting_retry", message, now)
+		}
+		if version, err := store.CompareAndSwapDocument(ctx, owner, document); err == nil {
+			document.UpdatedAt = version
+			documents[index] = document
 			staleBatches[firstText(document.Meta["currentBatchId"], document.Meta["current_batch_id"])] = true
 		}
 	}
@@ -477,7 +548,7 @@ func dispatchNovelFetchAutomationOwner(ctx context.Context, store novelfetchwork
 			log.Printf("novel fetch automation: reaped %d stale processing jobs owner=%s", reaped, owner)
 		}
 	}
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -485,14 +556,11 @@ func dispatchNovelFetchAutomationOwner(ctx context.Context, store novelfetchwork
 	// 自动队列只接管当前批次。旧批次里没跑完的书属于那一天的批次，
 	// 不能在今天被无声拉起；用户切到对应日期手动重跑即可。
 	currentBatchID := strings.TrimSpace(firstText(settings["novel_fetch_current_batch_id"], settings["novelFetchCurrentBatchId"]))
-	documents, err := store.ListDocuments(ctx, owner)
+	documents, err := listNovelFetchAutomationCandidates(ctx, store, owner, currentBatchID)
 	if err != nil {
 		return nil, err
 	}
 	recoverStaleNovelFetchTasks(ctx, store, owner, settings, documents, now, queue)
-	if refreshed, refreshErr := store.ListDocuments(ctx, owner); refreshErr == nil {
-		documents = refreshed
-	}
 	bookIDs := make([]string, 0, 50)
 	batchID := ""
 	platformID := "2"
@@ -500,8 +568,11 @@ func dispatchNovelFetchAutomationOwner(ctx context.Context, store novelfetchwork
 	var selectedJob novelfetchworkshop.ProcessJob
 	groupKey := ""
 	for _, document := range documents {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if len(bookIDs) >= 50 {
-			continue
+			break
 		}
 		if currentBatchID != "" && novelFetchDocumentBatchID(document) != currentBatchID {
 			continue
@@ -513,6 +584,11 @@ func dispatchNovelFetchAutomationOwner(ctx context.Context, store novelfetchwork
 		if cancelled {
 			continue
 		}
+		if held, holdErr := persistNovelFetchRetrySafetyHold(ctx, store, owner, document, now); holdErr != nil {
+			return nil, holdErr
+		} else if held {
+			continue
+		}
 		waitingFetchRetry := strings.EqualFold(firstText(document.Meta["originalStatus"], document.Meta["original_status"]), "waiting_fetch_retry")
 		// A fetch failure has already created an explicit retry deadline. It must
 		// survive a paused global automation switch and a service restart; only
@@ -521,7 +597,10 @@ func dispatchNovelFetchAutomationOwner(ctx context.Context, store novelfetchwork
 			continue
 		}
 		eligible := novelFetchAutomationEligible(document, now)
-		if !eligible {
+		if !eligible && strings.EqualFold(firstText(document.Meta["status"], document.Meta["queueState"]), "completed") &&
+			firstText(document.Meta["siteSubmitStatus"], document.Meta["site_submit_status"]) == "" &&
+			document.Meta["manualOnly"] != true && document.Meta["manual_only"] != true &&
+			!novelFetchRetryScheduleHasManualHold(document.Meta) && novelFetchTaskRetryDue(document.Meta, "", now) {
 			// Body text is stored separately from the lightweight document JSON.
 			// Hydrate refs before deciding whether a stale legacy task is ready
 			// for automatic submission.
@@ -639,7 +718,7 @@ func dispatchNovelFetchManualQueue(ctx context.Context, store novelfetchworkshop
 	if queue == nil || len(ids) == 0 {
 		return nil, ids, nil
 	}
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -760,6 +839,7 @@ func markNovelFetchAutomationSubmitResult(ctx context.Context, store novelfetchw
 		}
 		status := strings.ToLower(firstText(document.Meta["siteSubmitStatus"], document.Meta["site_submit_status"]))
 		if submitErr == nil && status == "submitted" {
+			clearNovelFetchTaskRetry(document.Meta, novelFetchRetryStageUpload)
 			delete(document.Meta, "automationSubmitAttempts")
 			delete(document.Meta, "automationNextRetryAt")
 			delete(document.Meta, "automationSubmitError")
@@ -777,19 +857,31 @@ func markNovelFetchAutomationSubmitResult(ctx context.Context, store novelfetchw
 			delete(document.Meta, "automationSubmitAttempts")
 			delete(document.Meta, "automationNextRetryAt")
 		} else {
-			attempts := intValue(document.Meta["automationSubmitAttempts"]) + 1
-			delay := 30 * time.Second
-			for step := 1; step < attempts && delay < 15*time.Minute; step++ {
-				delay *= 2
+			// Preserve a legacy counter rather than resetting its budget when the
+			// staged schedule is first introduced or another job is created.
+			schedule := novelFetchRetrySchedule(document.Meta)
+			if schedule[novelFetchRetryStageUpload] == nil && intValue(document.Meta["automationSubmitAttempts"]) > 0 {
+				schedule[novelFetchRetryStageUpload] = map[string]any{"attempt": intValue(document.Meta["automationSubmitAttempts"])}
+				document.Meta["retry_schedule"] = schedule
 			}
-			if delay > 15*time.Minute {
-				delay = 15 * time.Minute
+			failure := submitErr
+			if failure == nil {
+				failure = fmt.Errorf("上传尚未确认")
 			}
+			// pending_confirmation is handled by the connector's readback path;
+			// never downgrade its status to a fresh upload.
+			state := scheduleNovelFetchTaskRetry(document.Meta, novelFetchRetryStageUpload, failure, novelFetchAIRetryDelayHintSeconds(failure), now)
 			if !strings.EqualFold(firstText(document.Meta["siteSubmitStatus"]), "pending_confirmation") {
 				document.Meta["siteSubmitStatus"] = "pending_upload"
 			}
-			document.Meta["automationSubmitAttempts"] = attempts
-			document.Meta["automationNextRetryAt"] = now.Add(delay).Format(time.RFC3339Nano)
+			document.Meta["automationSubmitAttempts"] = intValue(state["attempt"])
+			if novelFetchRetryStateIsManual(state) {
+				document.Meta["manualOnly"] = true
+				document.Meta["status"], document.Meta["queueState"] = "failed", "failed"
+				delete(document.Meta, "automationNextRetryAt")
+			} else {
+				document.Meta["automationNextRetryAt"] = firstText(state["next_retry_at"])
+			}
 			document.Meta["automationSubmitError"] = firstText(submitErr, document.Meta["siteSubmitFailedErrors"], "上传尚未确认")
 		}
 		_ = store.PutDocument(ctx, owner, document)
@@ -911,11 +1003,11 @@ func novelFetchScopedRunMatches(run novelfetchworkshop.RunRecord, scope novelFet
 	return true
 }
 
-func novelFetchAutomationStatus(ctx context.Context, store novelfetchworkshop.Store, registry *workshopProcessRegistry, owner string) (map[string]any, error) {
-	return novelFetchAutomationStatusScoped(ctx, store, registry, owner, novelFetchQueueScope{})
+func novelFetchAutomationStatus(ctx context.Context, store novelfetchworkshop.Store, registry *workshopProcessRegistry, owner string, queues ...novelfetchworkshop.ProcessQueue) (map[string]any, error) {
+	return novelFetchAutomationStatusScoped(ctx, store, registry, owner, novelFetchQueueScope{}, queues...)
 }
 
-func novelFetchAutomationStatusScoped(ctx context.Context, store novelfetchworkshop.Store, registry *workshopProcessRegistry, owner string, scope novelFetchQueueScope) (map[string]any, error) {
+func novelFetchAutomationStatusScoped(ctx context.Context, store novelfetchworkshop.Store, registry *workshopProcessRegistry, owner string, scope novelFetchQueueScope, queues ...novelfetchworkshop.ProcessQueue) (map[string]any, error) {
 	var settings map[string]any
 	var documents []novelfetchworkshop.Document
 	var err error
@@ -924,7 +1016,7 @@ func novelFetchAutomationStatusScoped(ctx context.Context, store novelfetchworks
 	}); ok {
 		settings, documents, err = reader.AutomationStatusInputs(ctx, owner)
 	} else {
-		settings, err = store.GetConfig(ctx, owner)
+		settings, err = novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 		if err == nil {
 			documents, err = store.ListDocuments(ctx, owner)
 		}
@@ -992,6 +1084,9 @@ func novelFetchAutomationStatusScoped(ctx context.Context, store novelfetchworks
 				break
 			}
 		}
+	}
+	if len(queues) > 0 {
+		latest = verifiedWorkshopJobView(ctx, store, queues[0], owner, latest)
 	}
 	activeJobID := ""
 	status := strings.ToLower(firstText(latest["status"], latest["queue_state"]))

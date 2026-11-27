@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	promptcatalog "qiantie/backend/internal/prompt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -31,6 +32,8 @@ type Service struct {
 	restoreProject  func(context.Context, string, string) error
 	documents       DocumentObjectStore
 	documentParser  DocumentParser
+	covers          CoverImageGenerator
+	playText        PlayTextCompleter
 	automationClock func() time.Time
 	store           Store
 	runtime         Runtime
@@ -174,18 +177,25 @@ func (s *Service) sendMessage(ctx context.Context, owner string, input SendMessa
 		return Run{}, err
 	}
 	snapshotFields := map[string]any{
-		"system_prompts":         systemPrompts,
-		"project_settings":       settings,
-		"agent_contract_version": 1,
-		"review_cycle_version":   4,
-		"source_type":            input.SourceType, "source_plan_id": input.SourcePlanID, "source_round": input.SourceRound, "source_run_id": input.SourceRunID,
+		"system_prompts":           systemPrompts,
+		"project_settings":         settings,
+		"agent_contract_version":   1,
+		"review_cycle_version":     4,
+		"hook_health_version":      1,
+		"state_validation_version": 1,
+		"writer_rule_version":      1,
+		"review_loop_version":      1,
+		"source_type":              input.SourceType, "source_plan_id": input.SourcePlanID, "source_round": input.SourceRound, "source_run_id": input.SourceRunID,
 		"version": 1, "mode": session.Mode, "user_message": input.Content,
 		"mode_inputs": selected.ModeInputs, "chapter_number": chapterNumber, "checkpoint": checkpoint,
 		"knowledge_ids": selected.KnowledgeIDs, "knowledge_materials": selected.Knowledge,
 		"note_ids": selected.NoteIDs, "notes": selected.Notes, "style_profile_id": selected.StyleProfileID, "style_profile": selected.StyleProfile,
 		"previous_truth": continuity.Truth, "previous_memory": continuity.Memory,
-		"previous_chapters": continuity.Chapters,
-		"message_id":        message.ID,
+		"previous_chapters":  continuity.Chapters,
+		"post_write_context": buildPostWriteContext(chapters, chapterNumber, settings, project),
+		"retrieval_version":  1,
+		"retrieved_chapters": retrieveRelevantChapters(chapters, retrievalQuery(input.Content, chapters), chapterNumber, retrievalLimit),
+		"message_id":         message.ID,
 	}
 	if imitation != nil {
 		snapshotFields["long_imitation"] = imitation
@@ -248,26 +258,33 @@ func (s *Service) runPipeline(ctx context.Context, owner, runID string) (Run, er
 		return s.finishWithError(ctx, owner, run, ErrSessionNotFound, "创作会话不存在", err)
 	}
 	var prompt struct {
-		SystemPrompts        *SystemPromptSnapshot  `json:"system_prompts"`
-		LongImitation        *LongImitationCreation `json:"long_imitation"`
-		AgentContractVersion int                    `json:"agent_contract_version"`
-		ReviewCycleVersion   int                    `json:"review_cycle_version"`
-		Settings             *ProjectSettings       `json:"project_settings"`
-		StyleProfile         *string                `json:"style_profile"`
-		Notes                []ProjectNote          `json:"notes"`
-		UserMessage          string                 `json:"user_message"`
-		Mode                 string                 `json:"mode"`
-		ModeInputs           map[string]string      `json:"mode_inputs"`
-		ChapterNumber        int                    `json:"chapter_number"`
-		Checkpoint           bool                   `json:"checkpoint"`
-		ConfirmedFoundation  json.RawMessage        `json:"confirmed_foundation"`
-		KnowledgeIDs         []string               `json:"knowledge_ids"`
-		KnowledgeMaterials   []KnowledgeMaterial    `json:"knowledge_materials"`
-		ExpectedTarget       *PreviousChapter       `json:"expected_target"`
-		RetryOfRunID         string                 `json:"retry_of_run_id"`
-		PreviousChapters     []PreviousChapter      `json:"previous_chapters"`
-		PreviousTruth        json.RawMessage        `json:"previous_truth"`
-		PreviousMemory       json.RawMessage        `json:"previous_memory"`
+		SystemPrompts          *SystemPromptSnapshot  `json:"system_prompts"`
+		LongImitation          *LongImitationCreation `json:"long_imitation"`
+		AgentContractVersion   int                    `json:"agent_contract_version"`
+		ReviewCycleVersion     int                    `json:"review_cycle_version"`
+		HookHealthVersion      int                    `json:"hook_health_version"`
+		StateValidationVersion int                    `json:"state_validation_version"`
+		WriterRuleVersion      int                    `json:"writer_rule_version"`
+		ReviewLoopVersion      int                    `json:"review_loop_version"`
+		Settings               *ProjectSettings       `json:"project_settings"`
+		StyleProfile           *string                `json:"style_profile"`
+		Notes                  []ProjectNote          `json:"notes"`
+		UserMessage            string                 `json:"user_message"`
+		Mode                   string                 `json:"mode"`
+		ModeInputs             map[string]string      `json:"mode_inputs"`
+		ChapterNumber          int                    `json:"chapter_number"`
+		Checkpoint             bool                   `json:"checkpoint"`
+		ConfirmedFoundation    json.RawMessage        `json:"confirmed_foundation"`
+		KnowledgeIDs           []string               `json:"knowledge_ids"`
+		KnowledgeMaterials     []KnowledgeMaterial    `json:"knowledge_materials"`
+		ExpectedTarget         *PreviousChapter       `json:"expected_target"`
+		RetryOfRunID           string                 `json:"retry_of_run_id"`
+		PreviousChapters       []PreviousChapter      `json:"previous_chapters"`
+		PreviousTruth          json.RawMessage        `json:"previous_truth"`
+		PreviousMemory         json.RawMessage        `json:"previous_memory"`
+		PostWriteContext       *PostWriteContext      `json:"post_write_context"`
+		RetrievalVersion       int                    `json:"retrieval_version"`
+		RetrievedChapters      []RetrievedChapter     `json:"retrieved_chapters"`
 	}
 	if err := json.Unmarshal(run.PromptSnapshot, &prompt); err != nil {
 		return s.finishWithError(ctx, owner, run, ErrPersistenceFailed, "创作输入快照损坏", err)
@@ -343,7 +360,11 @@ func (s *Service) runPipeline(ctx context.Context, owner, runID string) (Run, er
 		OwnerUsername: owner, Run: run, Project: project, Session: session,
 		UserMessage: prompt.UserMessage, ChapterNumber: prompt.ChapterNumber,
 		PreviousTruth: prompt.PreviousTruth, PreviousMemory: prompt.PreviousMemory, PreviousChapters: prompt.PreviousChapters, Runtime: s.runtime,
-		ModeInputs: prompt.ModeInputs, StyleProfile: styleProfile, Rules: settings.Rules, Notes: prompt.Notes,
+		PostWrite: postWriteContextOf(prompt.PostWriteContext), HookHealthVersion: prompt.HookHealthVersion,
+		RetrievedChapters: prompt.RetrievedChapters, RetrievalVersion: prompt.RetrievalVersion,
+		StateValidationVersion: prompt.StateValidationVersion, WriterRuleVersion: prompt.WriterRuleVersion,
+		ReviewLoopVersion: prompt.ReviewLoopVersion,
+		ModeInputs:        prompt.ModeInputs, StyleProfile: styleProfile, Rules: settings.Rules, Notes: prompt.Notes,
 		Checkpoint:          prompt.Checkpoint && len(prompt.ConfirmedFoundation) == 0,
 		ConfirmedFoundation: prompt.ConfirmedFoundation,
 		KnowledgeMaterials:  prompt.KnowledgeMaterials,
@@ -873,10 +894,26 @@ func (s *Service) GetDashboard(ctx context.Context, owner, projectID string) (Da
 	if err != nil {
 		return Dashboard{}, err
 	}
-	dashboard := Dashboard{ProjectID: projectID, ChapterCount: len(chapters), RunCounts: make(map[string]int)}
+	dashboard := Dashboard{
+		ProjectID: projectID, ChapterCount: len(chapters),
+		RunCounts: make(map[string]int), StatusCounts: make(map[string]int),
+		WordTrend: []ChapterWordPoint{},
+	}
 	for _, chapter := range chapters {
 		dashboard.TotalWords += chapter.WordCount
+		status := strings.TrimSpace(chapter.AuditStatus)
+		if status == "" {
+			status = "unknown"
+		}
+		dashboard.StatusCounts[status]++
+		dashboard.WordTrend = append(dashboard.WordTrend, ChapterWordPoint{
+			Number: chapter.Number, Title: chapter.Title, WordCount: chapter.WordCount, Status: status,
+		})
 	}
+	if len(chapters) > 0 {
+		dashboard.AvgWords = float64(dashboard.TotalWords) / float64(len(chapters))
+	}
+	sort.Slice(dashboard.WordTrend, func(i, j int) bool { return dashboard.WordTrend[i].Number < dashboard.WordTrend[j].Number })
 	terminal, successful := 0, 0
 	for _, run := range runs {
 		dashboard.RunTotal++
@@ -899,6 +936,32 @@ func (s *Service) GetDashboard(ctx context.Context, owner, projectID string) (Da
 	return dashboard, nil
 }
 
+// GetHookHealth 基于最新章节结算快照计算伏笔健康，不调用模型、不写库。
+func (s *Service) GetHookHealth(ctx context.Context, owner, projectID string) (HookHealthReport, error) {
+	if s == nil || s.store == nil {
+		return HookHealthReport{}, &DomainError{Code: ErrPersistenceFailed, Message: "novel store is unavailable"}
+	}
+	owner, projectID = strings.TrimSpace(owner), strings.TrimSpace(projectID)
+	if _, err := s.store.GetProject(ctx, owner, projectID); err != nil {
+		return HookHealthReport{}, err
+	}
+	chapters, err := s.store.ListChapters(ctx, owner, projectID)
+	if err != nil {
+		return HookHealthReport{}, err
+	}
+	latest := 0
+	for _, chapter := range chapters {
+		if chapter.Number > latest {
+			latest = chapter.Number
+		}
+	}
+	continuity, err := s.loadContinuity(ctx, owner, projectID, chapters)
+	if err != nil {
+		return HookHealthReport{}, err
+	}
+	return analyzeHookHealth(hooksFromTruth(continuity.Truth), latest), nil
+}
+
 func normalizeRules(rules []string) []string {
 	normalized := make([]string, 0, len(rules))
 	for _, rule := range rules {
@@ -914,6 +977,8 @@ type ExportDocument struct {
 	Filename    string
 	ContentType string
 	Content     string
+	// Binary 用于 epub 等二进制格式；非空时优先于 Content。
+	Binary []byte
 }
 
 // ExportProject renders every stored chapter in reading order.
@@ -945,8 +1010,19 @@ func (s *Service) ExportProject(ctx context.Context, owner, projectID, format st
 		normalized = "markdown"
 	case "txt", "text":
 		normalized = "txt"
+	case "epub":
+		normalized = "epub"
 	default:
-		return ExportDocument{}, &DomainError{Code: ErrInputRequired, Message: "导出格式仅支持 markdown 或 txt"}
+		return ExportDocument{}, &DomainError{Code: ErrInputRequired, Message: "导出格式仅支持 markdown、txt 或 epub"}
+	}
+	if normalized == "epub" {
+		ordered := append([]Chapter(nil), chapters...)
+		sort.Slice(ordered, func(i, j int) bool { return ordered[i].Number < ordered[j].Number })
+		binary, e := buildEPUB(project.Title, ordered)
+		if e != nil {
+			return ExportDocument{}, &DomainError{Code: ErrPersistenceFailed, Message: "生成 epub 失败", Cause: e}
+		}
+		return ExportDocument{Filename: sanitizeExportFilename(project.Title) + ".epub", ContentType: "application/epub+zip", Binary: binary}, nil
 	}
 	var builder strings.Builder
 	if normalized == "markdown" {

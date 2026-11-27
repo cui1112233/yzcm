@@ -31,11 +31,17 @@ func TestScreenplayPromptCatalogExposesProtocolAndDisabledReasons(t *testing.T) 
 		if p.Body != "" {
 			t.Fatal("public metadata leaked system body")
 		}
-		if p.SourceID == 138 || p.SourceID == 293 {
-			if p.Supported || p.Reason == "" {
-				t.Fatal("unsupported choice became enabled", p)
+		if p.SourceID == 138 {
+			if !p.Supported || p.Reason != "" || p.Parser != "cm_storyboard138_source_batches_v1" {
+				t.Fatal("138 source continuation adapter missing", p)
 			}
 			found[p.SourceID] = true
+		}
+		if p.SourceID == 293 {
+			if !p.Supported || p.Reason != "" || p.Protocol != "script_scene_batch_v1" || p.Parser != "cm_script_293_durable_batch_v1" {
+				t.Fatal("durable chapter adapter missing", p)
+			}
+			found[293] = true
 		}
 		if p.SourceID == 139 {
 			if !p.Supported || p.Reason != "" || p.Parser != "cm_storyboard_139_optional_image_v2" {

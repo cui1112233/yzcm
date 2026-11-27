@@ -2,26 +2,36 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { getWorkshopLogs, getWorkshopJob, listWorkshopTasks, listWorkshopSchedules, saveWorkshopSchedule, updateWorkshopSchedule, deleteWorkshopSchedule, workshopPlatformsPath, workshopTaskDiagnosticPath, previewWorkshopProcess, getWorkshopCurrentBatch, getWorkshopBatches, rerunWorkshopBatch, stopWorkshopTasks, saveWorkshopBody } from './novelFetchWorkshop.js';
 import * as workshopApi from './novelFetchWorkshop.js';
-import { getWebSubmitHistory, getWebSubmitOrganizations, saveWebSubmitConfig, uploadLogin, webSubmitOrganizationsPath } from './novelFetch.js';
+import { getWebSubmitHistory, getWebSubmitOrganizations, saveWebSubmitConfig, uploadLogin, getUploadSession, webSubmitOrganizationsPath } from './novelFetch.js';
+import { setVerifiedImpersonation } from './client.js';
+
+function confirmedTestStorage() {
+  const values = new Map([['auth_token', 'novel-fetch-test-session']]);
+  const storage = { getItem: key => values.get(key) || '', setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) };
+  globalThis.localStorage = storage;
+  setVerifiedImpersonation(null);
+  assert.equal(setVerifiedImpersonation({ actorUsername: 'tester', username: 'tester', impersonationId: 'none' }), true);
+  return storage;
+}
 
 test('knowledge writes carry the loaded config version to prevent stale saves', async () => {
   const oldFetch=globalThis.fetch, oldStorage=globalThis.localStorage;
   const calls=[];
-  globalThis.localStorage={getItem(){return '';}};
+  confirmedTestStorage();
   globalThis.fetch=async(path,options)=>{calls.push([path,options.body && JSON.parse(options.body)]);return new Response('{}',{status:200,headers:{'content-type':'application/json'}});};
   try {
     await workshopApi.saveWorkshopKnowledge('opening_phrases',{id:'one',text:'draft'},{configRevision:'7'});
     await workshopApi.deleteWorkshopKnowledge('opening_phrases','one',{configRevision:'7'});
     assert.equal(calls[0][1].configRevision,'7');
     assert.equal(calls[1][0],'/api/novel-fetch-workshop/knowledge/opening_phrases/one?configRevision=7');
-  } finally {globalThis.fetch=oldFetch;globalThis.localStorage=oldStorage;}
+  } finally {setVerifiedImpersonation(null);globalThis.fetch=oldFetch;globalThis.localStorage=oldStorage;}
 });
 
 test('rule preview sends the current editable rule draft', async () => {
   const oldFetch = globalThis.fetch;
   const oldStorage = globalThis.localStorage;
   let body;
-  globalThis.localStorage = { getItem() { return ''; } };
+  confirmedTestStorage();
   globalThis.fetch = async (_path, options) => {
     body = JSON.parse(options.body);
     return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
@@ -29,7 +39,7 @@ test('rule preview sends the current editable rule draft', async () => {
   try {
     await workshopApi.previewWorkshopRules('正文', 'original', { knowledge: { symbol_rules: { enabled: false } } });
     assert.deepEqual(body, { text: '正文', scope: 'original', knowledge: { symbol_rules: { enabled: false } } });
-  } finally { globalThis.fetch = oldFetch; globalThis.localStorage = oldStorage; }
+  } finally { setVerifiedImpersonation(null); globalThis.fetch = oldFetch; globalThis.localStorage = oldStorage; }
 });
 
 test('Novel Fetch platform reader uses the dedicated platform endpoint', () => {
@@ -97,7 +107,7 @@ test('schedule cancellation and record deletion use distinct Go actions', async 
   const oldFetch = globalThis.fetch;
   const oldStorage = globalThis.localStorage;
   const calls = [];
-  globalThis.localStorage = { getItem() { return ''; } };
+  confirmedTestStorage();
   globalThis.fetch = async (path, options) => {
     calls.push([path, options.method]);
     return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
@@ -110,6 +120,7 @@ test('schedule cancellation and record deletion use distinct Go actions', async 
       ['/api/novel-fetch-workshop/schedules/schedule%2Fone', 'DELETE']
     ]);
   } finally {
+    setVerifiedImpersonation(null);
     globalThis.fetch = oldFetch;
     globalThis.localStorage = oldStorage;
   }
@@ -127,7 +138,7 @@ test('video-management login leaves error presentation to its modal', async () =
   const previousStorage = globalThis.localStorage;
   const previousCustomEvent = globalThis.CustomEvent;
   const events = [];
-  globalThis.localStorage = { getItem() { return ''; }, removeItem() {}, setItem() {} };
+  confirmedTestStorage();
   globalThis.CustomEvent = class CustomEvent { constructor(type, options) { this.type = type; this.detail = options?.detail; } };
   globalThis.window = { location: { pathname: '/novel-fetch' }, dispatchEvent(event) { events.push(event); } };
   globalThis.fetch = async path => path === '/api/client-errors'
@@ -137,9 +148,29 @@ test('video-management login leaves error presentation to its modal', async () =
     await assert.rejects(uploadLogin({ username: 'operator', password: 'secret' }), /视频管理系统登录入口不可用/);
     assert.equal(events.filter(event => event.type === 'qiantie:api-error').length, 0);
   } finally {
+    setVerifiedImpersonation(null);
     globalThis.fetch = previousFetch;
     globalThis.window = previousWindow;
     globalThis.localStorage = previousStorage;
     globalThis.CustomEvent = previousCustomEvent;
+  }
+});
+
+test('expired target upload session stays local to the login indicator', async () => {
+  const previousFetch=globalThis.fetch, previousWindow=globalThis.window, previousStorage=globalThis.localStorage, previousEvent=globalThis.CustomEvent;
+  const events=[];
+  confirmedTestStorage();
+  globalThis.CustomEvent=class {constructor(type,options){this.type=type;this.detail=options?.detail;}};
+  globalThis.window={location:{pathname:'/novel-fetch'},dispatchEvent(event){events.push(event);}};
+  globalThis.fetch=async path=>path==='/api/client-errors'
+    ? new Response('{}',{status:200,headers:{'content-type':'application/json'}})
+    : new Response(JSON.stringify({error:'目标站登录已失效，请重新登录'}),{status:401,headers:{'content-type':'application/json'}});
+  try {
+    await assert.rejects(getUploadSession(),error=>error.status===401);
+    assert.equal(events.filter(event=>event.type==='qiantie:api-error').length,0);
+    assert.equal(globalThis.localStorage.getItem('auth_token'),'novel-fetch-test-session');
+  } finally {
+    setVerifiedImpersonation(null);
+    globalThis.fetch=previousFetch;globalThis.window=previousWindow;globalThis.localStorage=previousStorage;globalThis.CustomEvent=previousEvent;
   }
 });

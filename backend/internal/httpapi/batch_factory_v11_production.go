@@ -1,13 +1,13 @@
 package httpapi
 
 import (
-	"context"
-	"errors"
 	"net/http"
 	"strings"
 
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/novelfetchworkshop"
+	"qiantie/backend/internal/yzcmmodels"
 )
 
 type productionSubmitInput struct {
@@ -16,67 +16,10 @@ type productionSubmitInput struct {
 	CompilationID string `json:"compilationId,omitempty"`
 }
 
-type videoProviderConfigInput struct {
-	Provider   string `json:"provider"`
-	APIKey     string `json:"apiKey,omitempty"`
-	Model      string `json:"model,omitempty"`
-	CreateURL  string `json:"createUrl,omitempty"`
-	TasksURL   string `json:"tasksUrl,omitempty"`
-	ResultURL  string `json:"resultUrl,omitempty"`
-	WorkflowID string `json:"workflowId,omitempty"`
-}
-
-func registerProductionRoutes(mux *http.ServeMux, service *batchfactoryv11.ProductionService, catalogStores ...novelfetchworkshop.Store) {
+func registerProductionRoutes(mux *http.ServeMux, service *batchfactoryv11.ProductionService, accounts accountcenter.Store, store novelfetchworkshop.Store, saved yzcmmodels.Reader, catalogStores ...novelfetchworkshop.Store) {
 	registerProductionStatusRoute(mux, service, "v11")
 	mux.HandleFunc("PUT /api/batch-factory/v11/video-provider/config", func(w http.ResponseWriter, r *http.Request) {
-		owner, ok := bridgeOwner(r)
-		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
-		if service == nil || service.ProviderRegistry == nil {
-			writeStoreError(w, batchfactoryv11.ErrUnavailable)
-			return
-		}
-		var input videoProviderConfigInput
-		if !decodeJSON(w, r, &input) {
-			return
-		}
-		err := saveVideoProviderConfig(r.Context(), service.ProviderRegistry, owner, batchfactoryv11.VideoProviderConfig{
-			Provider: input.Provider, APIKey: input.APIKey, Model: input.Model,
-			CreateURL: input.CreateURL, TasksURL: input.TasksURL, ResultURL: input.ResultURL, WorkflowID: input.WorkflowID,
-		})
-		if err != nil {
-			writeStoreError(w, err)
-			return
-		}
-		provider := batchfactoryv11.NormalizeVideoProviderForHTTP(input.Provider)
-		model := input.Model
-		if provider == batchfactoryv11.VideoProviderPersonalAPI && strings.TrimSpace(model) == "" {
-			model = batchfactoryv11.DefaultPersonalVideoModel
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"provider": provider, "model": model, "configured": true})
-	})
-	mux.HandleFunc("GET /api/batch-factory/v11/video-provider/status", func(w http.ResponseWriter, r *http.Request) {
-		owner, ok := bridgeOwner(r)
-		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
-		provider := batchfactoryv11.NormalizeVideoProviderForHTTP(r.URL.Query().Get("provider"))
-		if service == nil || service.ProviderRegistry == nil {
-			writeStoreError(w, batchfactoryv11.ErrUnavailable)
-			return
-		}
-		view, err := service.ProviderRegistry.View(r.Context(), owner, provider)
-		if err != nil && !errors.Is(err, batchfactoryv11.ErrUnavailable) {
-			writeStoreError(w, err)
-			return
-		}
-		if errors.Is(err, batchfactoryv11.ErrUnavailable) {
-			view = batchfactoryv11.VideoProviderConfigView{Provider: provider, Configured: false}
-		}
-		writeJSON(w, http.StatusOK, view)
+		writeVideoConfigAlias(w, r, accounts, store, saved)
 	})
 	mux.HandleFunc("POST /api/batch-factory/v11/batches/{batchId}/books/{bookId}/production", func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
@@ -190,13 +133,4 @@ func registerProductionStatusRoute(mux *http.ServeMux, service *batchfactoryv11.
 		}
 		writeJSON(w, http.StatusOK, status)
 	})
-}
-
-// saveVideoProviderConfig persists explicit provider settings when the registry
-// supports it, while keeping the in-memory contract for test registries.
-func saveVideoProviderConfig(ctx context.Context, registry batchfactoryv11.VideoProviderRegistry, owner string, cfg batchfactoryv11.VideoProviderConfig) error {
-	if persister, ok := registry.(batchfactoryv11.VideoProviderConfigPersister); ok {
-		return persister.SaveConfig(ctx, owner, cfg)
-	}
-	return registry.Put(ctx, owner, cfg)
 }

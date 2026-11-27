@@ -28,7 +28,7 @@ func TestNovelFetchRetryScheduleBacksOffAndHoldsManualStages(t *testing.T) {
 	now := time.Date(2026, 11, 14, 3, 0, 0, 0, time.UTC)
 	meta := map[string]any{}
 
-	first := scheduleNovelFetchTaskRetry(meta, novelFetchRetryStageRewrite, errors.New("模型超时"), 0, now)
+	first := scheduleNovelFetchTaskRetry(meta, novelFetchRetryStageRewrite, errors.New("HTTP 429 rate limit"), 0, now)
 	if attempt := intValue(first["attempt"]); attempt != 1 {
 		t.Fatalf("attempt=%v, want 1", first["attempt"])
 	}
@@ -43,7 +43,7 @@ func TestNovelFetchRetryScheduleBacksOffAndHoldsManualStages(t *testing.T) {
 		t.Fatal("31 秒后应到期")
 	}
 
-	second := scheduleNovelFetchTaskRetry(meta, novelFetchRetryStageRewrite, errors.New("模型超时"), 0, now)
+	second := scheduleNovelFetchTaskRetry(meta, novelFetchRetryStageRewrite, errors.New("HTTP 429 rate limit"), 0, now)
 	if attempt := intValue(second["attempt"]); attempt != 2 {
 		t.Fatalf("attempt=%v, want 2", second["attempt"])
 	}
@@ -87,7 +87,7 @@ func TestNovelFetchRetryDelayHintSetsMinimumDelay(t *testing.T) {
 func TestNovelFetchAutomationEligibleRespectsStageRetryDeadline(t *testing.T) {
 	now := time.Date(2026, 11, 14, 3, 0, 0, 0, time.UTC)
 	document := novelfetchworkshop.Document{BookID: "book-1", Meta: map[string]any{"status": "failed"}}
-	scheduleNovelFetchTaskRetry(document.Meta, novelFetchRetryStageRewrite, errors.New("模型超时"), 0, now)
+	scheduleNovelFetchTaskRetry(document.Meta, novelFetchRetryStageRewrite, errors.New("HTTP 429 rate limit"), 0, now)
 
 	if novelFetchAutomationEligible(document, now.Add(time.Second)) {
 		t.Fatal("退避未到期前不应重新入队")

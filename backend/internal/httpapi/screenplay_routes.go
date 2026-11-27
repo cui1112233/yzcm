@@ -554,7 +554,7 @@ func registerScreenplayRoutesWorkflow(mux *http.ServeMux, auth BridgeAuth, store
 		if !decode(w, req, &input) {
 			return
 		}
-		service := screenplay.AssetService{Store: store, Generator: screenplayTextGenerator{owner: owner, resolver: resolver}}
+		service := screenplay.AssetService{Store: store, Generator: screenplayTextGenerator{owner: owner, resolver: resolver}, Authoring: authors}
 		request := screenplay.AssetRequest{Owner: owner, ProjectID: req.PathValue("id"), Type: input.Type, Degree: input.Degree, Content: input.Content, Chapters: input.Chapters, Model: input.Model, Concurrency: input.Concurrency, Confirmed: input.Confirmed, MissingOnly: input.MissingOnly}
 		var result screenplay.AssetResult
 		var err error
@@ -1066,12 +1066,8 @@ func registerScreenplayRoutesWorkflow(mux *http.ServeMux, auth BridgeAuth, store
 		if !ok {
 			return
 		}
-		storyboard, err := store.GetStoryboard(req.Context(), owner, projectID, episode, engine)
-		if err != nil {
-			writeScreenplayError(w, err)
-			return
-		}
-		report, err := screenplay.CheckStoryboardShots(storyboard.Shots)
+		service := screenplay.StoryboardService{Store: store, Authoring: authors}
+		report, err := service.CheckStoryboard(req.Context(), owner, projectID, episode, engine)
 		if err != nil {
 			writeScreenplayError(w, err)
 			return

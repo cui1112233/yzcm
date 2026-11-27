@@ -18,11 +18,15 @@ func StaticHandler(files fs.FS) http.Handler {
 	fileServer := http.FileServer(http.FS(files))
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		name := strings.TrimPrefix(path.Clean(req.URL.Path), "/")
-		// There is one production workspace. Keep the historical URL as a
-		// server-side redirect so it cannot render a second shell or get stuck
-		// behind the login gate before React mounts.
-		if name == "shuihuo-production" {
-			target := "/batch-factory"
+		// Historical page URLs enter the maintained React workspace.
+		var target string
+		switch name {
+		case "shuihuo-production":
+			target = "/batch-factory"
+		case "batch-rewrite", "batch-rewrite/index.html":
+			target = "/novel-fetch"
+		}
+		if target != "" {
 			if req.URL.RawQuery != "" {
 				target += "?" + req.URL.RawQuery
 			}

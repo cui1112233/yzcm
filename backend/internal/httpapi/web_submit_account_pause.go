@@ -25,7 +25,7 @@ func submitSessionFingerprint(session map[string]any) string {
 
 func saveWorkshopSubmitPause(ctx context.Context, store novelfetchworkshop.Store, owner string, pause map[string]any) error {
 	for attempt := 0; attempt < 3; attempt++ {
-		cfg, err := store.GetConfig(ctx, owner)
+		cfg, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 		if err != nil {
 			return err
 		}
@@ -34,7 +34,7 @@ func saveWorkshopSubmitPause(ctx context.Context, store novelfetchworkshop.Store
 		} else {
 			cfg[workshopSubmitPauseKey] = pause
 		}
-		err = store.PutConfig(ctx, owner, cfg)
+		err = novelfetchworkshop.WriteWorkflowConfig(ctx, store, owner, cfg)
 		if !errors.Is(err, novelfetchworkshop.ErrConfigConflict) {
 			return err
 		}
@@ -43,7 +43,7 @@ func saveWorkshopSubmitPause(ctx context.Context, store novelfetchworkshop.Store
 }
 
 func checkWorkshopSubmitPause(ctx context.Context, store novelfetchworkshop.Store, owner string, session map[string]any, target videomanagementconnector.Service) error {
-	cfg, err := store.GetConfig(ctx, owner)
+	cfg, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return err
 	}
@@ -119,7 +119,7 @@ func recoverWorkshopSubmitAccount(ctx context.Context, store novelfetchworkshop.
 	if target == nil {
 		return
 	}
-	cfg, err := store.GetConfig(ctx, owner)
+	cfg, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return
 	}
@@ -149,7 +149,7 @@ func recoverWorkshopSubmitAccount(ctx context.Context, store novelfetchworkshop.
 func resumeWorkshopUploadsAfterLogin(ctx context.Context, store novelfetchworkshop.Store, owner string) error {
 	// Authentication alone does not prove a changed upload API has recovered.
 	if store != nil {
-		cfg, err := store.GetConfig(ctx, owner)
+		cfg, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 		if err != nil {
 			return err
 		}

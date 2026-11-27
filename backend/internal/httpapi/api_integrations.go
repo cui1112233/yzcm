@@ -1,14 +1,19 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"os"
 	"strings"
 
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/apisecrets"
 	"qiantie/backend/internal/auth"
+	"qiantie/backend/internal/novelfetchworkshop"
 )
 
 // 「API 接口」配置的独立存储键。它只写进用户自己的 api-config.json / MySQL
@@ -220,7 +225,7 @@ func apiIntegrationsView(stored map[string]any) map[string]any {
 		}
 		configured[key] = true
 		if !secret {
-			publicValues[key] = value
+			publicValues[key] = deepCloneConfigValue(value)
 		}
 	}
 	channels := apiIntegrationChannels(stored)
@@ -230,14 +235,14 @@ func apiIntegrationsView(stored map[string]any) map[string]any {
 		public := map[string]any{}
 		for _, field := range []string{"id", "name", "baseUrl", "model", "concurrency", "apiFormat", "fullUrl", "enabled", "group", "params"} {
 			if value, ok := channel[field]; ok {
-				public[field] = value
+				public[field] = deepCloneConfigValue(value)
 			}
 		}
 		key, _ := channel["apiKey"].(string)
 		public["hasApiKey"] = strings.TrimSpace(key) != ""
 		publicChannels = append(publicChannels, public)
 	}
-	return map[string]any{
+	result := map[string]any{
 		"values":           publicValues,
 		"configured":       configured,
 		"pinned":           apiIntegrationPinned(stored),
@@ -245,6 +250,8 @@ func apiIntegrationsView(stored map[string]any) map[string]any {
 		"customChannels":   publicChannels,
 		"channelSelection": apiIntegrationChannelSelection(stored),
 	}
+	stripInternalPreferenceFields(result)
+	return result
 }
 
 func isEmptyIntegrationValue(value any) bool {
@@ -297,10 +304,24 @@ func coerceIntegrationValue(key string, value any) (any, bool) {
 }
 
 func sanitizeIntegrationChannel(input map[string]any, previous map[string]any) (map[string]any, bool) {
+	for key, raw := range input {
+		switch key {
+		case "id", "name", "baseUrl", "model", "group", "apiFormat", "apiKey":
+			if _, ok := raw.(string); !ok {
+				return nil, false
+			}
+		case "enabled", "fullUrl", "clearApiKey":
+			if _, ok := raw.(bool); !ok {
+				return nil, false
+			}
+		}
+	}
+
 	channel := map[string]any{}
 	id, _ := input["id"].(string)
 	id = strings.TrimSpace(id)
-	if id == "" {
+	addressed := id != ""
+	if !addressed {
 		buffer := make([]byte, 6)
 		if _, err := rand.Read(buffer); err != nil {
 			return nil, false
@@ -309,13 +330,18 @@ func sanitizeIntegrationChannel(input map[string]any, previous map[string]any) (
 	}
 	channel["id"] = id
 
-	name, _ := input["name"].(string)
-	name = strings.TrimSpace(name)
-	if name == "" || len([]rune(name)) > 64 {
-		return nil, false
+	name, named := input["name"].(string)
+	// An identified channel may be temporarily unavailable during migration.
+	// Its omitted name never becomes a synthetic assignment.
+	if named || !addressed {
+		name = strings.TrimSpace(name)
+		if name == "" || len([]rune(name)) > 64 {
+			return nil, false
+		}
+		channel["name"] = name
+	} else if existing, ok := previous["name"].(string); ok {
+		channel["name"] = existing
 	}
-	channel["name"] = name
-
 	baseURL, _ := input["baseUrl"].(string)
 	baseURL = strings.TrimSpace(baseURL)
 	if len(baseURL) > 1024 {
@@ -449,162 +475,176 @@ func sanitizeIntegrationChannel(input map[string]any, previous map[string]any) (
 	return channel, true
 }
 
-func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, store *UserConfigStore, accounts auth.Store, profiles ...*MemberProfileStore) {
+func (s *UserConfigStore) encryptLegacyIntegrationFile(ctx context.Context, owner string) error {
+	encrypt := func(_ bool) error {
+		path, err := s.configPath(owner)
+		if err != nil {
+			return err
+		}
+		raw, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var stored map[string]any
+		if err := json.Unmarshal(raw, &stored); err != nil {
+			return err
+		}
+		if CountPlaintextConfigSecrets(stored) == 0 {
+			return nil
+		}
+		return s.writeAuthenticatedConfig(owner, stored)
+	}
+	if s.journal == nil {
+		return encrypt(false)
+	}
+	state, found, err := s.journal.DiscoverLegacyConfigMigration(ctx, owner)
+	if err != nil {
+		return err
+	}
+	if found && state.Phase != novelfetchworkshop.LegacyComplete {
+		return nil
+	}
+	_, err = s.journal.WriteStandardSettingsIfReady(ctx, owner, encrypt)
+	return err
+
+}
+
+func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, store *UserConfigStore, accounts auth.Store, catalog novelfetchworkshop.Store) {
 	if root == nil || middleware.AuthStore == nil || store == nil || accounts == nil {
 		return
 	}
-	var profileStore *MemberProfileStore
-	if len(profiles) > 0 {
-		profileStore = profiles[0]
-	}
-	canManage := func(req *http.Request) (BridgeIdentity, bool) {
-		identity, ok := BridgeIdentityFromContext(req.Context())
-		if !ok {
-			return BridgeIdentity{}, false
-		}
-		allowed, _ := configManagementState(identity, profileStore, accounts)
-		return identity, allowed
+	policy := func(req *http.Request) apiConfigAccess {
+		return apiConfigPolicy(req.Context(), middleware.AccountCenterStore)
 	}
 
 	root.Handle("GET /api/settings/api-integrations", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		identity, ok := BridgeIdentityFromContext(req.Context())
-		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		access := policy(req)
+		if !access.authorize(w, false, false) {
+			return
+		}
+		if !access.custom {
+			writeJSON(w, http.StatusOK, access.response(map[string]any{}))
 			return
 		}
 		store.mu.Lock()
-		config := store.read(identity.Username)
+		config, err := store.effectiveConfig(req.Context(), access.identity.Subject.Username)
 		store.mu.Unlock()
-		writeJSON(w, http.StatusOK, apiIntegrationsView(apiIntegrationStoredMap(config)))
+		if err != nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "读取接口配置失败")
+			return
+		}
+		writeJSON(w, http.StatusOK, access.response(apiIntegrationsView(apiIntegrationStoredMap(config))))
 	})))
 
 	root.Handle("POST /api/settings/api-integrations", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		identity, allowed := canManage(req)
-		if identity.Username == "" {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		access := policy(req)
+		if !access.authorize(w, true, true) {
 			return
 		}
-		if !allowed {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "没有权限修改 API 接口配置"})
-			return
-		}
+		identity := access.identity.Subject
 		// 用指针区分「没提交这个键」和「提交了空值」：输入类字段自动保存时
 		// 只带 values 一个键，未提交的 pinned / customChannels 必须保持原值，
 		// 不能被当成整组覆盖。
-		var payload struct {
-			Values           map[string]any    `json:"values"`
-			Pinned           *[]string         `json:"pinned"`
-			CustomChannels   *[]map[string]any `json:"customChannels"`
-			ChannelSelection map[string]any    `json:"channelSelection"`
-		}
+		var payload map[string]any
 		if json.NewDecoder(http.MaxBytesReader(w, req.Body, 512<<10)).Decode(&payload) != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求内容无效"})
 			return
 		}
 		store.mu.Lock()
 		defer store.mu.Unlock()
-		config := store.read(identity.Username)
-		stored := apiIntegrationStoredMap(config)
-		values := apiIntegrationValues(stored)
-		nextValues := map[string]any{}
-		for key, value := range values {
-			nextValues[key] = value
+		config, err := store.effectiveConfig(req.Context(), identity.Username)
+		if err != nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "读取接口配置失败")
+			return
 		}
-		for key, value := range payload.Values {
-			secret, allowedKey := apiIntegrationFields[key]
-			if !allowedKey {
-				continue
-			}
-			if value == nil {
-				delete(nextValues, key)
-				continue
-			}
-			coerced, ok := coerceIntegrationValue(key, value)
-			if !ok {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "字段内容无效：" + key})
-				return
-			}
-			if secret {
-				if text, _ := coerced.(string); text == "" {
-					delete(nextValues, key)
-					continue
-				}
-			}
-			nextValues[key] = coerced
+		edits, err := integrationRequestEdits(config, payload)
+		if err != nil {
+			writeAuthError(w, http.StatusBadRequest, err.Error())
+			return
 		}
-		previousChannels := apiIntegrationChannels(stored)
-		previousByID := map[string]map[string]any{}
-		for _, item := range previousChannels {
-			if channel, ok := item.(map[string]any); ok {
-				if id, _ := channel["id"].(string); id != "" {
-					previousByID[id] = channel
-				}
-			}
+		if err := edits.apply(config); err != nil {
+			writeAuthError(w, http.StatusBadRequest, "接口设置无效")
+			return
 		}
-		channels := make([]any, 0, len(previousChannels))
-		if payload.CustomChannels != nil {
-			channels = make([]any, 0, len(*payload.CustomChannels))
-			for _, input := range *payload.CustomChannels {
-				id, _ := input["id"].(string)
-				channel, ok := sanitizeIntegrationChannel(input, previousByID[id])
-				if !ok {
-					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "自定义渠道内容无效"})
-					return
-				}
-				channels = append(channels, channel)
-			}
-		} else {
-			channels = previousChannels
-		}
-		next := map[string]any{"values": nextValues, "pinned": apiIntegrationPinned(stored), "customChannels": channels}
-		if payload.Pinned != nil {
-			next["pinned"] = apiIntegrationPinned(map[string]any{"pinned": toAnySlice(*payload.Pinned)})
-		}
-		// 渠道选择与字段值分开合并：只覆盖本次提交的分组，其余分组保持不变。
-		selection := apiIntegrationChannelSelection(stored)
-		for group, value := range payload.ChannelSelection {
-			if !apiIntegrationChannelGroups[group] {
-				continue
-			}
-			enabled := normalizeChannelSelectionValue(value)
-			if len(enabled) == 0 && !isExplicitChannelSelection(value) {
-				delete(selection, group)
-				continue
-			}
-			if enabled == nil {
-				enabled = []string{}
-			}
-			selection[group] = map[string]any{"enabled": enabled}
-		}
-		next["channelSelection"] = selection
-		config[apiIntegrationsSettingKey] = next
-		if err := store.write(identity.Username, config); err != nil {
+		if err := store.writeSettingsPatch(req.Context(), identity.Username, config, edits); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "配置保存失败"})
 			return
 		}
-		writeJSON(w, http.StatusOK, apiIntegrationsView(next))
+		writeJSON(w, http.StatusOK, apiIntegrationsView(apiIntegrationStoredMap(config)))
 	})))
 
-	root.Handle("POST /api/settings/api-integrations/reveal", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		identity, allowed := canManage(req)
-		if identity.Username == "" {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	root.Handle("POST /api/settings/api-integrations/reveal", middleware.SessionOnly().AccountCenterMiddleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		access := policy(req)
+		if !access.authorize(w, true, false) {
 			return
 		}
-		if !allowed {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "没有权限查看密钥"})
+		if bearerToken(req) == "" {
+			writeAccountCenterForbidden(w)
 			return
 		}
+		identity := access.identity.Subject
 		var payload struct {
 			Key string `json:"key"`
 		}
-		if json.NewDecoder(http.MaxBytesReader(w, req.Body, 8<<10)).Decode(&payload) != nil {
+		decoder := json.NewDecoder(http.MaxBytesReader(w, req.Body, 8<<10))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&payload) != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求内容无效"})
 			return
 		}
 		key := strings.TrimSpace(payload.Key)
+		reveal := func(value string) {
+			if apisecrets.IsEncrypted(value) {
+				writeAuthError(w, http.StatusConflict, "该密钥无法解密，请重新填写后保存")
+				return
+			}
+			if err := middleware.AccountCenterStore.AppendAudit(req.Context(), accountcenter.AuditEvent{ActorUsername: access.identity.Actor.Username,
+				SubjectUsername: identity.Username, TeamID: identity.TeamID, Action: "reveal_model_key"}); err != nil {
+				writeAuthError(w, http.StatusServiceUnavailable, "暂时无法记录密钥查看")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"key": key, "value": value})
+		}
+		if id, modelKey := strings.CutPrefix(key, "model:"); modelKey {
+			if catalog == nil || id == "" || (!access.custom && !strings.HasPrefix(id, "yzcm:")) {
+				writeAccountCenterForbidden(w)
+				return
+			}
+			config, err := catalog.GetConfig(req.Context(), identity.Username)
+			if err != nil {
+				writeAuthError(w, http.StatusServiceUnavailable, "模型配置暂不可用")
+				return
+			}
+			for _, model := range modelCatalog(config) {
+				if model["id"] == id && (access.custom || isManagedYZCMModel(model)) {
+					value, _ := model["credential"].(string)
+					reveal(value)
+					return
+				}
+			}
+			writeAccountCenterForbidden(w)
+			return
+		}
+		if !access.custom {
+			writeAccountCenterForbidden(w)
+			return
+		}
 		store.mu.Lock()
-		stored := apiIntegrationStoredMap(store.read(identity.Username))
+		config, err := store.effectiveConfig(req.Context(), identity.Username)
+		if err != nil {
+			store.mu.Unlock()
+			writeAuthError(w, http.StatusServiceUnavailable, "读取接口配置失败")
+			return
+		}
+		if err := store.encryptLegacyIntegrationFile(req.Context(), identity.Username); err != nil {
+			store.mu.Unlock()
+			writeAuthError(w, http.StatusServiceUnavailable, "加密旧配置失败")
+			return
+		}
+		stored := apiIntegrationStoredMap(config)
 		store.mu.Unlock()
 		if strings.HasPrefix(key, "custom:") {
 			id := strings.TrimPrefix(key, "custom:")
@@ -622,7 +662,7 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 					writeJSON(w, http.StatusConflict, map[string]string{"error": "该渠道密钥无法解密，请重新填写后保存"})
 					return
 				}
-				writeJSON(w, http.StatusOK, map[string]any{"key": key, "value": apiKey})
+				reveal(apiKey)
 				return
 			}
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "渠道不存在"})
@@ -638,14 +678,6 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "该密钥无法解密，请重新填写后保存"})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"key": key, "value": value})
+		reveal(value)
 	})))
-}
-
-func toAnySlice(list []string) []any {
-	result := make([]any, 0, len(list))
-	for _, item := range list {
-		result = append(result, item)
-	}
-	return result
 }

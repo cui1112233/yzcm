@@ -50,6 +50,11 @@ type StoryboardRequest struct {
 	ExtraContent string  `json:"extraContent,omitempty"`
 }
 
+type StoryboardSceneFailure struct {
+	Episode int `json:"episode"`
+	Scene   int `json:"scene"`
+}
+
 type StoryboardResult struct {
 	GenerationAttempt    *StoryboardGenerationSummary `json:"generation_attempt,omitempty"`
 	AddedAssetCount      int                          `json:"added_asset_count,omitempty"`
@@ -59,6 +64,7 @@ type StoryboardResult struct {
 	Warnings             []string                     `json:"warnings,omitempty"`
 	PartialFailure       bool                         `json:"partial_failure"`
 	FailedEpisodes       []int                        `json:"failed_episodes,omitempty"`
+	FailedScenes         []StoryboardSceneFailure     `json:"failed_scenes,omitempty"`
 	RequiresConfirmation bool                         `json:"requires_confirmation"`
 	PendingActions       []PendingAction              `json:"pending_actions,omitempty"`
 }
@@ -178,7 +184,7 @@ func (s *StoryboardService) Generate(ctx context.Context, req StoryboardRequest)
 	for _, episode := range episodes {
 		body := episode.Content
 		for _, position := range storyboardEpisodeHeadingRe.FindAllStringSubmatchIndex(body, -1) {
-			if _, ok := storyboardEpisodeNumber(body[position[2]:position[3]]); ok {
+			if _, ok := storyboardEpisodeHeadingNumber(body, position); ok {
 				body = body[position[1]:]
 				break
 			}
@@ -191,9 +197,26 @@ func (s *StoryboardService) Generate(ctx context.Context, req StoryboardRequest)
 	sceneInputs := map[int][]storyboardSceneInput{}
 	sceneCounts := map[int]int{}
 	for _, ep := range episodes {
-		units, e := storyboardScenesForEpisode(req, authoring, ep)
+		var units []storyboardSceneInput
+		var e error
+		if selected.SourceID == 138 {
+			units, e = storyboard138ScenesForEpisode(req, authoring, ep)
+		} else {
+			units, e = storyboardScenesForEpisode(req, authoring, ep)
+		}
 		if e != nil {
 			return out, fmt.Errorf("第%d集：%w", ep.No, e)
+		}
+		if selected.SourceID == 138 {
+			if e := validate138Episode(req, authoring, ep.No); e != nil {
+				return out, e
+			}
+			if e := validate138Sources(units); e != nil {
+				return out, e
+			}
+			if s.Authoring == nil || s.Authoring.Receipts == nil {
+				return out, fmt.Errorf("%w: 分镜回包保存目录未配置", ErrInvalidState)
+			}
 		}
 		sceneInputs[ep.No] = units
 		sceneCounts[ep.No] = len(units)
@@ -259,6 +282,11 @@ func (s *StoryboardService) Generate(ctx context.Context, req StoryboardRequest)
 	if replay != nil {
 		return replay.replay()
 	}
+	if selected.SourceID == 138 {
+		session.receipts = storyboard138Receipts(s.Authoring)
+		guard := guard138Value(project, authoring, assets, prefix, &session.attempt)
+		session.verifyCurrent = func(c context.Context) error { return s.guard138(c, req, guard) }
+	}
 	req.generationSession = session
 	roles, scenes, props = session.attempt.Roles, session.attempt.Scenes, session.attempt.Props
 
@@ -283,8 +311,11 @@ func (s *StoryboardService) Generate(ctx context.Context, req StoryboardRequest)
 			result.Warnings = append(result.Warnings, fmt.Sprintf("第 %d 集内容为空，已跳过", episode.No))
 			continue
 		}
-		shots, sceneErr := s.generateSceneShots(ctx, req, episode, sceneInputs[episode.No], selected, roles, scenes, props, style, synopsis, prefix, req.ExtraContent, planningByEpisode[episode.No], firstNonEmpty(req.Model, project.ModelID, "gpt-4o-mini"), EffectiveCreativeConfig(project).StoryboardUseContextHistory, EffectiveCreativeConfig(project).AspectRatio)
+		shots, failedScenes, sceneErr := s.generateSceneShots(ctx, req, episode, sceneInputs[episode.No], selected, roles, scenes, props, style, synopsis, prefix, req.ExtraContent, planningByEpisode[episode.No], firstNonEmpty(req.Model, project.ModelID, "gpt-4o-mini"), EffectiveCreativeConfig(project).StoryboardUseContextHistory, EffectiveCreativeConfig(project).AspectRatio)
 		if sceneErr != nil {
+			for _, scene := range failedScenes {
+				result.FailedScenes = append(result.FailedScenes, StoryboardSceneFailure{Episode: episode.No, Scene: scene})
+			}
 			if ctx.Err() != nil {
 				return result, wrapAIError(ctx.Err())
 			}
@@ -329,6 +360,11 @@ func (s *StoryboardService) Generate(ctx context.Context, req StoryboardRequest)
 				case AssetProp:
 					known.props[a.Name] = true
 				}
+			}
+		}
+		if selected.SourceID == 138 && session.verifyCurrent != nil {
+			if e := session.verifyCurrent(ctx); e != nil {
+				return result, e
 			}
 		}
 		storyboard := Storyboard{
@@ -426,9 +462,21 @@ func (s *StoryboardService) resolveEpisodes(ctx context.Context, req StoryboardR
 	return episodes, nil
 }
 
-// A title needs a line of its own and a separator after 集; chapter headings
-// and narrative mentions such as 第2集会再见 remain body text.
-var storyboardEpisodeHeadingRe = regexp.MustCompile(`(?m)^[ \t]*(?:#{1,6}[ \t]*)?第[ \t]*([0-9〇零一二三四五六七八九十百千万两]+)[ \t]*集([ \t：:·—\-][^\r\n]*)?\r?$`)
+// A title needs a line of its own and a separator after 集；English Episode N 等价。
+// Chapter headings and narrative mentions such as 第2集会再见 remain body text.
+var storyboardEpisodeHeadingRe = regexp.MustCompile(`(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:第[ \t]*([0-9〇零一二三四五六七八九十百千万两]+)[ \t]*集|Episode[ \t]+([0-9]+))([ \t：:·—\-][^\r\n]*)?\r?$`)
+
+// storyboardEpisodeHeadingNumber 从匹配位置取集号：中文集号在第 1 组，Episode 在第 2 组。
+func storyboardEpisodeHeadingNumber(content string, position []int) (int, bool) {
+	if position[2] >= 0 {
+		return storyboardEpisodeNumber(content[position[2]:position[3]])
+	}
+	if position[4] >= 0 {
+		value, err := strconv.Atoi(content[position[4]:position[5]])
+		return value, err == nil && value > 0
+	}
+	return 0, false
+}
 
 func storyboardEpisodeNumber(text string) (int, bool) {
 	if number, err := strconv.ParseInt(text, 10, 64); err == nil {
@@ -487,13 +535,13 @@ func splitEpisodes(content string) []episodeInput {
 	positions := storyboardEpisodeHeadingRe.FindAllStringSubmatchIndex(content, -1)
 	valid := make([][]int, 0, len(positions))
 	for _, position := range positions {
-		if _, ok := storyboardEpisodeNumber(content[position[2]:position[3]]); ok {
+		if _, ok := storyboardEpisodeHeadingNumber(content, position); ok {
 			valid = append(valid, position)
 		}
 	}
 	episodes := make([]episodeInput, 0, len(valid))
 	for i, position := range valid {
-		number, _ := storyboardEpisodeNumber(content[position[2]:position[3]])
+		number, _ := storyboardEpisodeHeadingNumber(content, position)
 		start, end := position[0], len(content)
 		if i == 0 {
 			start = 0

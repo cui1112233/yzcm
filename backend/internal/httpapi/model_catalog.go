@@ -18,12 +18,85 @@ import (
 	"sync"
 	"time"
 
-	"qiantie/backend/internal/auth"
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/novelfetchworkshop"
 	"qiantie/backend/internal/safehttp"
+	"qiantie/backend/internal/yzcmmodels"
 )
 
 var modelKinds = map[string]bool{"text": true, "video": true, "image": true, "audio": true, "asr": true}
+
+func registerYZCMModelCatalog(root *http.ServeMux, auth BridgeAuth, reader yzcmmodels.Reader) {
+	root.Handle("GET /api/config/models/yzcm", auth.AccountCenterMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		identity, ok := AccountCenterIdentityFromContext(r.Context())
+		if !ok || (identity.Subject.Role != accountcenter.RoleFounder && identity.Subject.Role != accountcenter.RoleDeveloper && identity.Subject.Role != accountcenter.RoleManager) {
+			writeAccountCenterForbidden(w)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		query, err := yzcmCatalogQuery(r.URL.RawQuery)
+		if err != nil {
+			writeAuthError(w, http.StatusBadRequest, "模型目录筛选条件无效")
+			return
+		}
+		page := yzcmmodels.Page{Status: "unavailable", Reason: "catalog_store_unavailable", Models: []yzcmmodels.CatalogRow{}, Limit: query.Limit, Offset: query.Offset}
+		status := http.StatusOK
+		if reader != nil {
+			saved, err := reader.Search(r.Context(), query)
+			switch {
+			case errors.Is(err, yzcmmodels.ErrCatalogChanged):
+				writeAuthError(w, http.StatusConflict, "模型目录已更新，请从第一页重新查询")
+				return
+			case err != nil:
+				status = http.StatusServiceUnavailable
+			default:
+				page = saved
+			}
+		}
+		writeJSON(w, status, struct {
+			yzcmmodels.Page
+			SyncSource string `json:"syncSource"`
+		}{Page: page, SyncSource: "not_configured"})
+	})))
+}
+
+func yzcmCatalogQuery(raw string) (yzcmmodels.Query, error) {
+	values, err := url.ParseQuery(raw)
+	if err != nil {
+		return yzcmmodels.Query{}, yzcmmodels.ErrInvalidQuery
+	}
+	var query yzcmmodels.Query
+	for key, list := range values {
+		if len(list) != 1 {
+			return yzcmmodels.Query{}, yzcmmodels.ErrInvalidQuery
+		}
+		value := list[0]
+		switch key {
+		case "kind":
+			query.Kind = value
+		case "q":
+			query.Q = value
+		case "limit":
+			query.Limit, err = strconv.Atoi(value)
+			if query.Limit < 1 {
+				err = yzcmmodels.ErrInvalidQuery
+			}
+		case "offset":
+			query.Offset, err = strconv.Atoi(value)
+		case "snapshotId":
+			query.SnapshotID, err = strconv.ParseUint(value, 10, 64)
+			if query.SnapshotID == 0 {
+				err = yzcmmodels.ErrInvalidQuery
+			}
+		default:
+			err = yzcmmodels.ErrInvalidQuery
+		}
+		if err != nil {
+			return yzcmmodels.Query{}, yzcmmodels.ErrInvalidQuery
+		}
+	}
+	return query.Normalize()
+}
 
 // modelIdentityKey 是「同一个真实模型」的去重键：地址忽略大小写与末尾斜杠，
 // 模型名忽略大小写。任一为空时返回空串，表示无法判定为同一模型，宁可不合并。
@@ -37,20 +110,42 @@ func modelIdentityKey(baseURL, modelID string) string {
 	return baseURL + "|" + modelID
 }
 
-func effectiveModelCatalogOwner(identity BridgeIdentity, profiles *MemberProfileStore, accounts auth.Store) string {
-	_, managedBy := configManagementState(identity, profiles, accounts)
-	if owner := strings.TrimSpace(fmt.Sprint(managedBy)); owner != "" && owner != "<nil>" {
-		return owner
-	}
-	return identity.Username
-}
-
 // resolvedOwnerModelCatalogStore keeps every user's own workflow settings but
 // reads the model catalog from the manager that owns the member's configuration.
 // Writes still go to the original owner through the embedded Store.
 type resolvedOwnerModelCatalogStore struct {
 	novelfetchworkshop.Store
 	resolveOwner func(string) string
+}
+
+type runtimeConfigReader interface {
+	GetConfig(context.Context, string) (map[string]any, error)
+}
+
+type runtimeUserConfig struct {
+	accounts accountcenter.Store
+	prefs    *UserConfigStore
+	catalog  novelfetchworkshop.Store
+}
+
+func (s runtimeUserConfig) GetConfig(ctx context.Context, subject string) (map[string]any, error) {
+	owner, err := ResolveAPIConfigOwner(ctx, s.accounts, subject)
+	if err != nil {
+		return nil, err
+	}
+	config, err := s.prefs.GetConfig(ctx, owner)
+	if err != nil {
+		return nil, err
+	}
+	delete(config, "modelCatalog")
+	if s.catalog != nil {
+		models, err := novelfetchworkshop.ReadRuntimeConfig(ctx, s.catalog, owner)
+		if err != nil {
+			return nil, err
+		}
+		config["modelCatalog"] = models["modelCatalog"]
+	}
+	return config, nil
 }
 
 func runtimeModelCatalogStore(store novelfetchworkshop.Store, resolveOwner func(string) string) novelfetchworkshop.Store {
@@ -61,18 +156,21 @@ func runtimeModelCatalogStore(store novelfetchworkshop.Store, resolveOwner func(
 }
 
 func (s resolvedOwnerModelCatalogStore) GetConfig(ctx context.Context, owner string) (map[string]any, error) {
-	config, err := s.Store.GetConfig(ctx, owner)
-	if err != nil {
-		return nil, err
-	}
 	resolvedOwner := owner
 	if s.resolveOwner != nil {
 		resolvedOwner = strings.TrimSpace(s.resolveOwner(owner))
 	}
-	if resolvedOwner == "" || resolvedOwner == owner {
-		return config, nil
+	if resolvedOwner == "" {
+		return nil, accountcenter.ErrForbidden
 	}
-	managed, err := s.Store.GetConfig(ctx, resolvedOwner)
+	if resolvedOwner == owner {
+		return novelfetchworkshop.ReadRuntimeConfig(ctx, s.Store, owner)
+	}
+	managed, err := novelfetchworkshop.ReadRuntimeConfig(ctx, s.Store, resolvedOwner)
+	if err != nil {
+		return nil, err
+	}
+	config, err := novelfetchworkshop.ReadWorkflowConfig(ctx, s.Store, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -93,41 +191,85 @@ func (s resolvedOwnerModelCatalogStore) GetConfig(ctx context.Context, owner str
 	return merged, nil
 }
 
-func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridgeAuth, store novelfetchworkshop.Store, userConfig *UserConfigStore, accounts auth.Store, profiles *MemberProfileStore) {
+func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridgeAuth, configAuth BridgeAuth, store novelfetchworkshop.Store, userConfig *UserConfigStore, saved yzcmmodels.Reader) {
+	registerLegacyModelConflictRoutes(root, configAuth, store)
 	mux := http.NewServeMux()
+	policy := func(req *http.Request) apiConfigAccess {
+		return apiConfigPolicy(req.Context(), configAuth.AccountCenterStore)
+	}
+	public := func(access apiConfigAccess, model map[string]any) map[string]any {
+		if access.custom {
+			return publicManagedModel(model)
+		}
+		return publicRestrictedModel(model)
+	}
 	mux.HandleFunc("POST /api/test/text", func(w http.ResponseWriter, req *http.Request) {
-		testConfiguredModel(w, req, store, "text")
+		access := policy(req)
+		if access.authorize(w, true, true) {
+			testConfiguredModel(w, req, store, access.identity.Subject.Username, "text")
+		}
 	})
 	mux.HandleFunc("POST /api/test/image", func(w http.ResponseWriter, req *http.Request) {
-		testConfiguredModel(w, req, store, "image")
+		access := policy(req)
+		if access.authorize(w, true, true) {
+			testConfiguredModel(w, req, store, access.identity.Subject.Username, "image")
+		}
 	})
 	mux.HandleFunc("GET /api/models", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		modelOwner := effectiveModelCatalogOwner(identity, profiles, accounts)
+		modelOwner, err := ResolveAPIConfigOwner(req.Context(), configAuth.AccountCenterStore, identity.Username)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"models": []any{}})
+			return
+		}
 		models, err := readModelCatalog(req, store, userConfig, modelOwner, req.URL.Query().Get("kind"), true)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
+		if configAuth.AccountCenterStore != nil {
+			ctx, _ := configAuth.accountCenterContext(req.Context(), identity.Username)
+			access := apiConfigPolicy(ctx, configAuth.AccountCenterStore)
+			if !access.custom {
+				visible := models[:0]
+				for _, model := range models {
+					if access.identity.Subject.Role == accountcenter.RoleDeveloper && model["kind"] == "video" &&
+						model["catalogSource"] != managedYZCMSource && model["provider"] != "local_executor_video" {
+						continue
+					}
+					visible = append(visible, publicRuntimeModel(model))
+				}
+				models = visible
+			}
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"models": models})
 	})
 	mux.HandleFunc("GET /api/config/models", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "无权管理模型"})
+		access := policy(req)
+		if !access.authorize(w, false, false) {
 			return
 		}
-		models, err := readModelCatalog(req, store, userConfig, identity.Username, req.URL.Query().Get("kind"), false)
+		kind := req.URL.Query().Get("kind")
+		if kind != "" && !modelKinds[kind] {
+			writeAPIConfigError(w, accountcenter.ErrInvalid)
+			return
+		}
+		settings, err := novelfetchworkshop.ReadRuntimeConfig(req.Context(), store, access.identity.Subject.Username)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			writeAuthError(w, http.StatusServiceUnavailable, "模型配置暂不可用")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"models": models})
+		models := []map[string]any{}
+		for _, model := range modelCatalog(settings) {
+			if (kind == "" || model["kind"] == kind) && (access.custom || isManagedYZCMModel(model)) {
+				models = append(models, public(access, model))
+			}
+		}
+		writeJSON(w, http.StatusOK, access.response(map[string]any{"models": models}))
 	})
 	mux.HandleFunc("POST /api/config/models", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "无权管理模型"})
+		access := policy(req)
+		if !access.authorize(w, true, false) {
 			return
 		}
 		var input map[string]any
@@ -135,9 +277,23 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求内容无效"})
 			return
 		}
-		model, err := normalizeManagedModel(input)
+		var model map[string]any
+		var err error
+		if rejectsCredentialReference(input) {
+			writeAccountCenterForbidden(w)
+			return
+		}
+		if !access.custom || allowedInputFields(input, "kind", "modelId", "credential") {
+			model, err = newRestrictedYZCMModel(req.Context(), saved, input)
+		} else {
+			model, err = normalizeManagedModel(input)
+			if err != nil {
+				writeAuthError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			writeAPIConfigError(w, err)
 			return
 		}
 		// H3 新建时必须同时给出 Key 和工作流，否则建出来就是一条不可用配置。
@@ -146,7 +302,12 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "H3 需要填写 API Key"})
 			return
 		}
-		settings, _ := store.GetConfig(req.Context(), identity.Username)
+		owner := access.identity.Subject.Username
+		settings, err := store.GetConfig(req.Context(), owner)
+		if err != nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "模型配置暂不可用")
+			return
+		}
 		catalog := modelCatalog(settings)
 		for _, current := range catalog {
 			if current["id"] == model["id"] {
@@ -156,18 +317,18 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 		}
 		catalog = append(catalog, model)
 		settings["modelCatalog"] = catalog
-		if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+		if err := store.PutConfig(req.Context(), owner, settings); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存模型失败"})
 			return
 		}
-		writeJSON(w, http.StatusCreated, map[string]any{"model": publicManagedModel(model)})
+		writeJSON(w, http.StatusCreated, map[string]any{"model": public(access, model)})
 	})
 	mux.HandleFunc("POST /api/config/models/test", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "无权管理模型"})
+		access := policy(req)
+		if !access.authorize(w, true, true) {
 			return
 		}
+		identity := access.identity.Subject
 		var input map[string]any
 		if err := decodeNovelFetchJSON(w, req, &input); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求内容无效"})
@@ -187,12 +348,12 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 					if existing["id"] != strings.TrimSpace(existingModelID) {
 						continue
 					}
-					if savedCredential, ok := existing["credential"].(string); ok {
-						credential = strings.TrimSpace(savedCredential)
+					target := novelfetchworkshop.ModelCredentialDestination(existing)
+					if existing["kind"] != "text" || strings.TrimSpace(baseURL) == "" || strings.TrimSpace(baseURL) != target.BaseURL || target.Endpoint != target.BaseURL {
+						writeAccountCenterForbidden(w)
+						return
 					}
-					if baseURL == "" {
-						baseURL = firstText(existing["baseUrl"])
-					}
+					credential = shuihuoModelCredential(existing)
 					if modelID == "" {
 						modelID = firstText(existing["modelId"])
 					}
@@ -249,11 +410,11 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "文本模型连接成功，现在可以保存并启用。"})
 	})
 	mux.HandleFunc("POST /api/config/models/test-audio", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "无权管理模型"})
+		access := policy(req)
+		if !access.authorize(w, true, true) {
 			return
 		}
+		identity := access.identity.Subject
 		var input map[string]any
 		if err := decodeNovelFetchJSON(w, req, &input); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求内容无效"})
@@ -261,20 +422,28 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 		}
 		model := map[string]any{
 			"kind":            "audio",
-			"endpoint":        strings.TrimSpace(fmt.Sprint(input["endpoint"])),
-			"requestTemplate": strings.TrimSpace(fmt.Sprint(input["requestTemplate"])),
-			"responseMapping": strings.TrimSpace(fmt.Sprint(input["responseMapping"])),
-			"credential":      strings.TrimSpace(fmt.Sprint(input["credential"])),
+			"endpoint":        firstText(input["endpoint"]),
+			"requestTemplate": firstText(input["requestTemplate"]),
+			"responseMapping": firstText(input["responseMapping"]),
+			"credential":      firstText(input["credential"]),
 		}
-		existingModelID := strings.TrimSpace(fmt.Sprint(input["existingModelId"]))
+		existingModelID := firstText(input["existingModelId"])
 		if existingModelID != "" {
 			if settings, settingsErr := store.GetConfig(req.Context(), identity.Username); settingsErr == nil {
 				for _, existing := range modelCatalog(settings) {
 					if existing["id"] != existingModelID {
 						continue
 					}
-					for _, key := range []string{"endpoint", "requestTemplate", "responseMapping", "credential"} {
-						if strings.TrimSpace(fmt.Sprint(model[key])) == "" {
+					if model["credential"] == "" {
+						target := novelfetchworkshop.ModelCredentialDestination(existing)
+						if existing["kind"] != "audio" || model["endpoint"] == "" || model["endpoint"] != target.Endpoint {
+							writeAccountCenterForbidden(w)
+							return
+						}
+						model["credential"] = shuihuoModelCredential(existing)
+					}
+					for _, key := range []string{"requestTemplate", "responseMapping"} {
+						if model[key] == "" {
 							model[key] = existing[key]
 						}
 					}
@@ -297,9 +466,8 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "contentType": contentType, "message": "音频模型连接成功，现在可以保存并启用。"})
 	})
 	mux.HandleFunc("PATCH /api/config/models/{modelId}", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "无权管理模型"})
+		access := policy(req)
+		if !access.authorize(w, true, false) {
 			return
 		}
 		var patch map[string]any
@@ -307,7 +475,76 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求内容无效"})
 			return
 		}
-		settings, _ := store.GetConfig(req.Context(), identity.Username)
+		if rejectsCredentialReference(patch) || !access.custom && !allowedInputFields(patch, "credential", "clearCredential", "selectedForConfigPage") {
+			writeAccountCenterForbidden(w)
+			return
+		}
+		if !access.custom && !strings.HasPrefix(req.PathValue("modelId"), "yzcm:") {
+			writeAccountCenterForbidden(w)
+			return
+		}
+		if _, _, err := modelCredentialPatch(patch); err != nil {
+			writeAPIConfigError(w, err)
+			return
+		}
+		if raw, present := patch["selectedForConfigPage"]; present {
+			if _, ok := raw.(bool); !ok {
+				writeAPIConfigError(w, accountcenter.ErrInvalid)
+				return
+			}
+		}
+		owner := access.identity.Subject.Username
+		repairPatch := patch
+		if !access.custom {
+			// A prefix is not proof that this is an approved managed row. Keep
+			// the original row authorization and bind it to the repair's CAS.
+			current, err := novelfetchworkshop.ReadRuntimeConfig(req.Context(), store, owner)
+			if err != nil {
+				writeAuthError(w, http.StatusServiceUnavailable, "模型配置暂不可用")
+				return
+			}
+			found := false
+			for _, row := range modelCatalog(current) {
+				if row["id"] != req.PathValue("modelId") {
+					continue
+				}
+				if !isManagedYZCMModel(row) {
+					writeAccountCenterForbidden(w)
+					return
+				}
+				found = true
+				break
+			}
+			if !found {
+				writeJSON(w, http.StatusNotFound, map[string]any{"error": "模型不存在"})
+				return
+			}
+			repairPatch = cloneAnyMap(patch)
+			repairPatch[novelfetchworkshop.ConfigRevisionKey] = firstText(current[novelfetchworkshop.ConfigRevisionKey], "0")
+		}
+		_, selectionPatch := patch["selectedForConfigPage"]
+		if repair, ok := store.(interface {
+			TryPatchBoundTextCredential(context.Context, string, string, map[string]any) (map[string]any, bool, error)
+		}); ok && !selectionPatch {
+			model, handled, err := repair.TryPatchBoundTextCredential(req.Context(), owner, req.PathValue("modelId"), repairPatch)
+			if err != nil {
+				if errors.Is(err, novelfetchworkshop.ErrConfigConflict) {
+					writeAuthError(w, http.StatusConflict, "模型配置已变化，请刷新后重新填写 Key")
+				} else {
+					writeAuthError(w, http.StatusServiceUnavailable, "文本模型凭证保存失败，请稍后重试")
+				}
+				return
+			}
+			if handled {
+				writeJSON(w, http.StatusOK, map[string]any{"model": public(access, model)})
+				return
+			}
+		}
+		settings, err := store.GetConfig(req.Context(), owner)
+		if err != nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "模型配置暂不可用")
+			return
+		}
 		catalog := modelCatalog(settings)
 		found := false
 		var updated map[string]any
@@ -315,6 +552,28 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			if current["id"] != req.PathValue("modelId") {
 				continue
 			}
+			if isManagedYZCMModel(current) {
+				if !allowedInputFields(patch, "credential", "clearCredential", "selectedForConfigPage") {
+					writeAccountCenterForbidden(w)
+					return
+				}
+				credential, clear, _ := modelCredentialPatch(patch)
+				if clear || credential != "" {
+					current["credential"] = credential
+					delete(current, "apiKey")
+					delete(current, "credentialStatus")
+				}
+				if selected, present := patch["selectedForConfigPage"].(bool); present {
+					current["selectedForConfigPage"] = selected
+				}
+				updated, found = current, true
+				break
+			}
+			if !access.custom {
+				writeAccountCenterForbidden(w)
+				return
+			}
+			before := cloneAnyMap(current)
 			for key, value := range patch {
 				if key == "id" || key == "clearCredential" {
 					continue
@@ -351,6 +610,14 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 				return
 			}
+			addressChanged := novelfetchworkshop.ModelCredentialDestination(before) != novelfetchworkshop.ModelCredentialDestination(model)
+			if (addressChanged || modelTargetChanged(before, model) && shuihuoModelCredential(before) != "") && firstText(patch["credential"], patch["apiKey"]) == "" {
+				writeAccountCenterForbidden(w)
+				return
+			}
+			if before["credentialStatus"] == "needs_reentry" && shuihuoModelCredential(model) == "" {
+				model["credentialStatus"] = "needs_reentry"
+			}
 			catalog[index] = model
 			updated = model
 			found = true
@@ -361,24 +628,36 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			return
 		}
 		settings["modelCatalog"] = catalog
-		if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+		if err := store.PutConfig(req.Context(), owner, settings); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存模型失败"})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"model": publicManagedModel(updated)})
+		writeJSON(w, http.StatusOK, map[string]any{"model": public(access, updated)})
 	})
 	mux.HandleFunc("DELETE /api/config/models/{modelId}", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "无权管理模型"})
+		access := policy(req)
+		if !access.authorize(w, true, false) {
 			return
 		}
-		settings, _ := store.GetConfig(req.Context(), identity.Username)
+		if !access.custom {
+			writeAccountCenterForbidden(w)
+			return
+		}
+		owner := access.identity.Subject.Username
+		settings, err := store.GetConfig(req.Context(), owner)
+		if err != nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "模型配置暂不可用")
+			return
+		}
 		catalog := modelCatalog(settings)
 		filtered := make([]map[string]any, 0, len(catalog))
 		removed := false
 		for _, model := range catalog {
 			if model["id"] == req.PathValue("modelId") {
+				if !access.custom && !isManagedYZCMModel(model) {
+					writeAccountCenterForbidden(w)
+					return
+				}
 				removed = true
 				continue
 			}
@@ -389,19 +668,22 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			return
 		}
 		settings["modelCatalog"] = filtered
-		if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+		if err := store.PutConfig(req.Context(), owner, settings); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "删除模型失败"})
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("GET /api/config/models/quotas", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "无权管理模型"})
+		access := policy(req)
+		if !access.authorize(w, false, false) {
 			return
 		}
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		if !access.custom {
+			writeJSON(w, http.StatusOK, map[string]any{"quotas": []any{}})
+			return
+		}
+		settings, err := novelfetchworkshop.ReadRuntimeConfig(req.Context(), store, access.identity.Subject.Username)
 		if err != nil {
 			writeJSON(w, http.StatusOK, map[string]any{"quotas": []any{}})
 			return
@@ -418,9 +700,7 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 		writeJSON(w, http.StatusOK, map[string]any{"quotas": quotas})
 	})
 	mux.HandleFunc("GET /api/config/models/local-doubao-executor-video/pairing-status", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
-		if !identity.IsOwner {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "无权管理模型"})
+		if !policy(req).authorize(w, false, true) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"executorPaired": false})
@@ -428,17 +708,13 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 	secured := bridgeAuth.Middleware(mux)
 	root.Handle("/api/models", secured)
 	root.Handle("/api/models/", secured)
-	root.Handle("/api/config/models", secured)
-	root.Handle("/api/config/models/", secured)
-	root.Handle("/api/test/", secured)
+	config := configAuth.Middleware(mux)
+	root.Handle("/api/config/models", config)
+	root.Handle("/api/config/models/", config)
+	root.Handle("/api/test/", config)
 }
 
-func testConfiguredModel(w http.ResponseWriter, req *http.Request, store novelfetchworkshop.Store, kind string) {
-	identity, ok := BridgeIdentityFromContext(req.Context())
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "kind": kind, "error": "unauthorized"})
-		return
-	}
+func testConfiguredModel(w http.ResponseWriter, req *http.Request, store novelfetchworkshop.Store, owner, kind string) {
 	var input map[string]any
 	if err := decodeNovelFetchJSON(w, req, &input); err != nil {
 		return
@@ -448,7 +724,7 @@ func testConfiguredModel(w http.ResponseWriter, req *http.Request, store novelfe
 			input = nested
 		}
 	}
-	settings, err := store.GetConfig(req.Context(), identity.Username)
+	settings, err := store.GetConfig(req.Context(), owner)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "kind": kind, "error": "无法读取当前模型配置，请稍后重试。"})
 		return
@@ -461,14 +737,14 @@ func testConfiguredModel(w http.ResponseWriter, req *http.Request, store novelfe
 			if model["kind"] != kind || !managedModelAvailable(model) {
 				continue
 			}
-			if baseURL == "" {
-				baseURL = firstText(model["baseUrl"])
-			}
 			if modelID == "" {
 				modelID = firstText(model["modelId"])
 			}
 			if credential == "" {
-				credential = firstText(model["credential"])
+				target := novelfetchworkshop.ModelCredentialDestination(model)
+				if baseURL != "" && baseURL == target.Endpoint && target.Endpoint == target.BaseURL {
+					credential = shuihuoModelCredential(model)
+				}
 			}
 			break
 		}
@@ -569,18 +845,21 @@ func readModelCatalog(req *http.Request, store novelfetchworkshop.Store, userCon
 	if kind != "" && !modelKinds[kind] {
 		return nil, errors.New("模型类型无效")
 	}
-	settings, err := store.GetConfig(req.Context(), owner)
+	settings, err := novelfetchworkshop.ReadRuntimeConfig(req.Context(), store, owner)
 	if err != nil {
 		return nil, err
 	}
 	result := make([]map[string]any, 0)
 	for _, model := range modelCatalog(settings) {
+		if model["runtimeReason"] == "legacy_video_migration_pending" {
+			continue
+		}
 		if kind != "" && model["kind"] != kind {
 			continue
 		}
 		// 唯一可用性口径：凭证填了就生效；[off] 已下线与空凭证都不进页面也不进下拉。
 		public := publicManagedModel(model)
-		if public["available"] != true {
+		if public["available"] != true && public["unavailableReason"] == nil {
 			continue
 		}
 		result = append(result, public)
@@ -707,11 +986,13 @@ func integrationChannelModels(ctx context.Context, kind string, userConfig *User
 		if modelID != "" && modelID != "本地服务" && modelID != "自定义渠道" {
 			displayName = label + " · " + modelID
 		}
-		result = append(result, map[string]any{
+		item := map[string]any{
 			"id": id, "kind": kind, "displayName": displayName, "modelId": modelID,
 			"baseUrl": baseURL, "provider": "api_integrations", "enabled": true,
 			"configured": true, "hasCredential": true, "channel": id,
-		})
+		}
+		setVideoExecutionAvailability(item, item)
+		result = append(result, item)
 	}
 
 	for _, preset := range integrationChannelPresets {
@@ -840,6 +1121,9 @@ func normalizeManagedModel(input map[string]any) (map[string]any, error) {
 		credential = ""
 	}
 	model := map[string]any{"id": id, "kind": kind, "displayName": strings.TrimSpace(fmt.Sprint(input["displayName"])), "modelId": strings.TrimSpace(fmt.Sprint(input["modelId"])), "baseUrl": strings.TrimSpace(fmt.Sprint(input["baseUrl"])), "endpoint": strings.TrimSpace(fmt.Sprint(input["endpoint"])), "provider": strings.TrimSpace(fmt.Sprint(input["provider"])), "requestTemplate": strings.TrimSpace(fmt.Sprint(input["requestTemplate"])), "responseMapping": strings.TrimSpace(fmt.Sprint(input["responseMapping"])), "voiceCloneRequestTemplate": strings.TrimSpace(fmt.Sprint(input["voiceCloneRequestTemplate"])), "voiceCloneResponseMapping": strings.TrimSpace(fmt.Sprint(input["voiceCloneResponseMapping"])), "credential": credential, "workflowId": workflowID, "enabled": normalizedModelEnabled(input["enabled"])}
+	if selected, ok := input["selectedForConfigPage"].(bool); ok {
+		model["selectedForConfigPage"] = selected
+	}
 	if model["displayName"] == "<nil>" || model["displayName"] == "" {
 		if name := strings.TrimSpace(fmt.Sprint(input["name"])); name != "" && name != "<nil>" {
 			model["displayName"] = name
@@ -858,10 +1142,10 @@ func normalizeManagedModel(input map[string]any) (map[string]any, error) {
 			model[key] = ""
 		}
 	}
-	// 管理端「水货生产模型」写 name / adapterKind / credentialRef / parameterSchema，
+	// 管理端「水货生产模型」写 name / adapterKind / parameterSchema，
 	// 个人中心平台预设卡写 displayName / baseUrl / credential。两处共用这份规范化，
 	// 只改 Key 或启用状态时不能把另一侧写入的扩展字段冲掉。
-	for _, key := range []string{"name", "adapterKind", "credentialRef", "parameterSchema", "tasksEndpoint", "resultEndpoint", "group", "capabilities"} {
+	for _, key := range []string{"name", "adapterKind", "parameterSchema", "tasksEndpoint", "resultEndpoint", "group", "capabilities"} {
 		if value, exists := input[key]; exists && fmt.Sprint(value) != "<nil>" {
 			model[key] = value
 		}
@@ -873,21 +1157,17 @@ func normalizeManagedModel(input map[string]any) (map[string]any, error) {
 }
 
 func publicManagedModel(model map[string]any) map[string]any {
-	result := map[string]any{}
-	for key, value := range model {
-		if key != "credential" && key != "apiKey" {
-			result[key] = value
-		}
-	}
+	result := redactAPIConfig(model).(map[string]any)
 	result["hasCredential"] = managedModelHasCredential(model)
 	result["available"] = managedModelAvailable(model)
+	result["selectedForConfigPage"] = modelSelectedForConfigPage(model)
+	setVideoExecutionAvailability(result, model)
 	result["capabilities"] = publicModelCapabilities(model)
 	return result
 }
 
 func managedModelHasCredential(model map[string]any) bool {
-	credential := strings.TrimSpace(fmt.Sprint(model["credential"]))
-	return credential != "" && credential != "<nil>"
+	return shuihuoModelCredential(model) != ""
 }
 
 // managedModelRetired 识别已下线模型：沿用数据里的 [off] 命名约定。
@@ -919,7 +1199,7 @@ func managedModelNeedsNoCredential(model map[string]any) bool {
 // 2) 填了凭证就生效；3) 本地执行器无需凭证。
 // 本页不再写入 enabled=false：清空 Key 就是停用，enabled 只用于承接旧数据。
 func managedModelAvailable(model map[string]any) bool {
-	if managedModelRetired(model) {
+	if managedModelRetired(model) || videoExecutionUnavailableReason(model) != "" {
 		return false
 	}
 	if _, present := model["enabled"]; present && !normalizedModelEnabled(model["enabled"]) {

@@ -93,7 +93,7 @@ test('task summary exposes stable Chinese labels instead of internal meta keys',
 
   assert.deepEqual(items.map(item => item.label), [
     '书籍 ID', '书名', '平台', '风格', '男女频', '判断依据', '分类模型', '分类失败原因',
-    '原文状态', '原文失败原因', '原文错误码', '处理字数', '敏感词状态', '敏感词模型',
+    '原文状态', '原文失败原因', '原文错误码', '处理字数', '敏感词状态', '敏感词失败原因', '待修复版本', '敏感词模型',
     '命中 / 已处理', 'AI 状态', 'AI 失败原因', 'AI 当前版本', 'AI 文案版本', 'AI 尝试次数',
     'AI 最近失败', '网站提交失败原因', '改文模型', '改文方案', '改文模板', '开头词', '高仿参考',
     '创建时间', '更新时间', '当前批次'
@@ -196,4 +196,12 @@ test('sensitive comparisons return a truthful empty state when no hit detail exi
   assert.equal(result.summary.hitCount, 4);
   assert.equal(result.summary.fixedCount, 0);
   assert.deepEqual(result.items, []);
+});
+
+
+test('sensitive repair failures expose the scoped reason and failed versions',()=>{
+ const rows=novelFetchTaskSummaryItems({meta:{sensitiveStatus:'failed',sensitiveError:'ai1：模型需要补填 Key',sensitiveManualRetryRequired:true,sensitiveManualRetryErrors:{ai1:'模型需要补填 Key'}}});
+ const values=new Map(rows.map(item=>[item.label,item.value]));
+ assert.equal(values.get('敏感词失败原因'),'ai1：模型需要补填 Key');
+ assert.equal(values.get('待修复版本'),'ai1');
 });

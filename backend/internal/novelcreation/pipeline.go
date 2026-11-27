@@ -52,7 +52,23 @@ type RunContext struct {
 	PreviousChapters      []PreviousChapter
 	PreviousTruth         json.RawMessage
 	PreviousMemory        json.RawMessage
-	Runtime               Runtime
+	// HookHealthVersion >= 1 freezes the planner hook-health injection for new
+	// runs; older snapshots keep their original request shape.
+	HookHealthVersion int
+	// RetrievedChapters is the frozen cross-chapter recall for planner/writer.
+	// RetrievalVersion gates injection so old runs keep their request shape.
+	RetrievedChapters []RetrievedChapter
+	RetrievalVersion  int
+	// StateValidationVersion >= 1 adds the settlement validator call that the
+	// reference pipeline runs between settlement and memory indexing.
+	StateValidationVersion int
+	// WriterRuleVersion >= 1 appends the ported writer craft rules to the
+	// chapter-draft system prompt. Old runs never see these blocks.
+	WriterRuleVersion int
+	// ReviewLoopVersion >= 1 switches to the structured review cycle with
+	// length-aware best selection, net-improvement exit and rollback report.
+	ReviewLoopVersion int
+	Runtime           Runtime
 	// ModeInputs is the validated mode-specific contract payload.
 	ModeInputs map[string]string
 	// StyleProfile and Rules are project-level writing constraints injected into
@@ -68,6 +84,9 @@ type RunContext struct {
 	// KnowledgeMaterials is the bounded snapshot of user-selected materials.
 	Notes              []ProjectNote
 	KnowledgeMaterials []KnowledgeMaterial
+	// PostWrite carries the frozen cross-chapter data for deterministic checks.
+	// Old runs have no such snapshot and therefore report those checks as absent.
+	PostWrite PostWriteContext
 	// MaxRevisionRounds overrides the default audit-revision loop bound.
 	MaxRevisionRounds              int
 	Agent                          *AgentSettings
@@ -129,8 +148,16 @@ type chapterPlanOutput struct {
 	TargetWords   int    `json:"targetWords"`
 }
 
+type preWriteCheckRow struct {
+	Item   string `json:"item"`
+	Record string `json:"record"`
+	Note   string `json:"note,omitempty"`
+}
+
 type chapterDraftOutput struct {
-	Content string `json:"content"`
+	PreWriteCheck []preWriteCheckRow `json:"preWriteCheck"`
+	Title         string             `json:"title"`
+	Content       string             `json:"content"`
 }
 
 type chapterAuditOutput struct {
@@ -181,6 +208,16 @@ type settledTimelineEvent struct {
 type settledForeshadowing struct {
 	Thread string `json:"thread"`
 	Status string `json:"status"`
+	// 以下字段由服务端自动维护，模型输出不要求填写。
+	// 旧结算快照没有这些字段时，伏笔健康按章号与 open/resolved 保守推断。
+	StartChapter        int    `json:"startChapter,omitempty"`
+	LastAdvancedChapter int    `json:"lastAdvancedChapter,omitempty"`
+	AdvancingCount      int    `json:"advancingCount,omitempty"`
+	Type                string `json:"type,omitempty"`
+	PayoffTiming        string `json:"payoffTiming,omitempty"`
+	ExpectedPayoff      string `json:"expectedPayoff,omitempty"`
+	CoreHook            bool   `json:"coreHook,omitempty"`
+	Promoted            bool   `json:"promoted,omitempty"`
 }
 
 type memoryIndexOutput struct {
@@ -293,23 +330,33 @@ func (p *Pipeline) Run(ctx context.Context, input RunContext, sink EventSink) (C
 		chapterNumber = 1
 	}
 	var plan chapterPlanOutput
+	chapterPlanPayload := map[string]any{
+		"creation_mode":        modeContract(input.Session.Mode),
+		"mode_inputs":          input.ModeInputs,
+		"style_profile":        input.StyleProfile,
+		"rules":                input.Rules,
+		"notes":                input.Notes,
+		"knowledge_materials":  input.KnowledgeMaterials,
+		"foundation_plan":      foundation,
+		"chapter_number":       chapterNumber,
+		"target_chapter_words": input.Project.TargetChapterWords,
+		"previous_truth":       rawJSONValue(input.PreviousTruth),
+		"previous_chapters":    input.PreviousChapters,
+		"memory_context":       rawJSONValue(input.PreviousMemory),
+		"user_message":         input.UserMessage,
+	}
+	if input.HookHealthVersion >= 1 {
+		if hooks := hooksFromTruth(input.PreviousTruth); len(hooks) > 0 {
+			chapterPlanPayload["hook_health"] = formatHookHealthForPlanner(analyzeHookHealth(hooks, chapterNumber))
+		}
+	}
+	if input.RetrievalVersion >= 1 && len(input.RetrievedChapters) > 0 {
+		chapterPlanPayload["retrieved_chapters"] = input.RetrievedChapters
+	}
 	planRaw, err := p.callJSON(ctx, input, sink, provider, modelCallSpec{
-		definition: novelprompt.ChapterPlan, step: RunPlanning,
-		userPayload: map[string]any{
-			"creation_mode":        modeContract(input.Session.Mode),
-			"mode_inputs":          input.ModeInputs,
-			"style_profile":        input.StyleProfile,
-			"rules":                input.Rules,
-			"notes":                input.Notes,
-			"knowledge_materials":  input.KnowledgeMaterials,
-			"foundation_plan":      foundation,
-			"chapter_number":       chapterNumber,
-			"target_chapter_words": input.Project.TargetChapterWords,
-			"previous_truth":       rawJSONValue(input.PreviousTruth),
-			"previous_chapters":    input.PreviousChapters,
-			"memory_context":       rawJSONValue(input.PreviousMemory),
-			"user_message":         input.UserMessage,
-		},
+		definition:  novelprompt.ChapterPlan,
+		step:        RunPlanning,
+		userPayload: chapterPlanPayload,
 		temperature: 0.35, maxTokens: 3500,
 		validate: func() error {
 			return validateImitationPlan(plan, chapterNumber, foundation.Volumes, input.LongImitation)
@@ -327,26 +374,46 @@ func (p *Pipeline) Run(ctx context.Context, input RunContext, sink EventSink) (C
 		return ChapterBundle{}, err
 	}
 	var draft chapterDraftOutput
+	draftPayload := map[string]any{
+		"creation_mode":       modeContract(input.Session.Mode),
+		"mode_inputs":         input.ModeInputs,
+		"style_profile":       input.StyleProfile,
+		"rules":               input.Rules,
+		"notes":               input.Notes,
+		"knowledge_materials": input.KnowledgeMaterials,
+		"foundation_plan":     foundation,
+		"chapter_plan":        plan,
+		"previous_truth":      rawJSONValue(input.PreviousTruth),
+		"previous_chapters":   input.PreviousChapters,
+		"memory_context":      rawJSONValue(input.PreviousMemory),
+	}
+	if input.RetrievalVersion >= 1 && len(input.RetrievedChapters) > 0 {
+		draftPayload["retrieved_chapters"] = input.RetrievedChapters
+	}
 	draftRaw, err := p.callJSON(ctx, input, sink, provider, modelCallSpec{
-		definition: novelprompt.ChapterDraft, step: RunWriting,
-		userPayload: map[string]any{
-			"creation_mode":       modeContract(input.Session.Mode),
-			"mode_inputs":         input.ModeInputs,
-			"style_profile":       input.StyleProfile,
-			"rules":               input.Rules,
-			"notes":               input.Notes,
-			"knowledge_materials": input.KnowledgeMaterials,
-			"foundation_plan":     foundation,
-			"chapter_plan":        plan,
-			"previous_truth":      rawJSONValue(input.PreviousTruth),
-			"previous_chapters":   input.PreviousChapters,
-			"memory_context":      rawJSONValue(input.PreviousMemory),
-		},
+		definition:  novelprompt.ChapterDraft,
+		step:        RunWriting,
+		userPayload: draftPayload,
 		temperature: 0.75, maxTokens: 12000,
-		validate: func() error { return requireText("content", draft.Content) },
+		validate: func() error {
+			if e := requireText("content", draft.Content); e != nil {
+				return e
+			}
+			if e := validatePreWriteCheck(draft.PreWriteCheck); e != nil {
+				return e
+			}
+			draft.Title = normalizeDraftTitle(draft.Title)
+			return nil
+		},
 	}, &draft)
 	if err != nil {
 		return ChapterBundle{}, err
+	}
+	// 只有新任务采用写手标题；旧任务没有 PostWrite 快照，保持章节计划标题。
+	if input.WriterRuleVersion >= 1 {
+		if adopted := adoptDraftTitle(draft.Title, plan.Title, input.PostWrite.ExistingTitles); adopted != "" {
+			plan.Title = adopted
+		}
 	}
 
 	if err := p.emitStage(ctx, input, sink, RunNormalizing, "正在规范化章节正文", 45); err != nil {
@@ -368,64 +435,105 @@ func (p *Pipeline) Run(ctx context.Context, input RunContext, sink EventSink) (C
 	if err := p.emitStage(ctx, input, sink, RunAuditing, "正在审核章节", 55); err != nil {
 		return ChapterBundle{}, err
 	}
-	audits := make([]Audit, 0, p.maxRevisions+1)
-	revisions := make([]Revision, 0, p.maxRevisions)
-	currentAudit, currentAuditRaw, err := p.auditChapter(ctx, input, sink, provider, foundation, plan, bestContent, 0)
-	if err != nil {
-		return ChapterBundle{}, err
-	}
-	audits = append(audits, newAudit(input, len(audits)+1, currentAudit, currentAuditRaw))
-	bestAudit := currentAudit
-	bestAuditRaw := currentAuditRaw
-
 	threshold := p.threshold(input)
-	revisingStageEmitted := false
 	maxRevisions := p.maxRevisions
 	if input.Agent != nil {
 		maxRevisions = input.Agent.MaxRevisionRounds
 	} else if input.MaxRevisionRounds > 0 {
 		maxRevisions = input.MaxRevisionRounds
 	}
-	for round := 1; !auditPasses(bestAudit, threshold) && round <= maxRevisions; round++ {
-		if len(bestAudit.Issues) == 0 {
-			break
+	var audits []Audit
+	var revisions []Revision
+	var bestAudit chapterAuditOutput
+	var bestAuditRaw json.RawMessage
+	var reviewReport *reviewCycleReport
+
+	if input.ReviewLoopVersion >= 1 {
+		loop, loopErr := p.runStructuredReviewLoop(ctx, reviewLoopRequest{
+			Input: input, Sink: sink, Foundation: foundation, Plan: plan,
+			Initial: bestContent, InitialRaw: bestContentRaw,
+			Threshold: threshold, MaxRounds: maxRevisions,
+			Assess: func(callCtx context.Context, content string, round int) (chapterAuditOutput, json.RawMessage, error) {
+				return p.auditChapter(callCtx, input, sink, provider, foundation, plan, content, round)
+			},
+			Revise: func(callCtx context.Context, content string, audit chapterAuditOutput, round int) (chapterRevisionOutput, json.RawMessage, error) {
+				var revision chapterRevisionOutput
+				raw, callErr := p.callJSON(callCtx, input, sink, provider, modelCallSpec{
+					definition: novelprompt.ChapterRevision, step: RunRevising, key: fmt.Sprintf(":%d", round),
+					userPayload: withReviewDimensionContext(input, map[string]any{
+						"chapter_content":   content,
+						"chapter_plan":      plan,
+						"audit_issues":      audit.Issues,
+						"previous_truth":    rawJSONValue(input.PreviousTruth),
+						"previous_chapters": input.PreviousChapters,
+						"memory_context":    rawJSONValue(input.PreviousMemory),
+					}, foundation),
+					temperature: 0.55, maxTokens: 12000,
+					validate: func() error { return validateRevision(revision, audit.Issues) },
+				}, &revision)
+				return revision, raw, callErr
+			},
+		})
+		if loopErr != nil {
+			return ChapterBundle{}, loopErr
 		}
-		if !revisingStageEmitted {
-			if err := p.emitStage(ctx, input, sink, RunRevising, "正在根据审核修订章节", 65); err != nil {
-				return ChapterBundle{}, err
+		audits, revisions = loop.Audits, loop.Revisions
+		bestContent, bestContentRaw = loop.Content, loop.ContentRaw
+		bestAudit, bestAuditRaw = loop.Audit, loop.AuditRaw
+		reviewReport = loop.Report
+	} else {
+		audits = make([]Audit, 0, p.maxRevisions+1)
+		revisions = make([]Revision, 0, p.maxRevisions)
+		currentAudit, currentAuditRaw, err := p.auditChapter(ctx, input, sink, provider, foundation, plan, bestContent, 0)
+		if err != nil {
+			return ChapterBundle{}, err
+		}
+		audits = append(audits, newAudit(input, len(audits)+1, currentAudit, currentAuditRaw))
+		bestAudit = currentAudit
+		bestAuditRaw = currentAuditRaw
+
+		revisingStageEmitted := false
+		for round := 1; !auditPasses(bestAudit, threshold) && round <= maxRevisions; round++ {
+			if len(bestAudit.Issues) == 0 {
+				break
 			}
-			revisingStageEmitted = true
-		}
+			if !revisingStageEmitted {
+				if err := p.emitStage(ctx, input, sink, RunRevising, "正在根据审核修订章节", 65); err != nil {
+					return ChapterBundle{}, err
+				}
+				revisingStageEmitted = true
+			}
 
-		var revision chapterRevisionOutput
-		revisionRaw, callErr := p.callJSON(ctx, input, sink, provider, modelCallSpec{
-			definition: novelprompt.ChapterRevision, step: RunRevising, key: fmt.Sprintf(":%d", round),
-			userPayload: withReviewDimensionContext(input, map[string]any{
-				"chapter_content":   bestContent,
-				"chapter_plan":      plan,
-				"audit_issues":      bestAudit.Issues,
-				"previous_truth":    rawJSONValue(input.PreviousTruth),
-				"previous_chapters": input.PreviousChapters,
-				"memory_context":    rawJSONValue(input.PreviousMemory),
-			}, foundation),
-			temperature: 0.55, maxTokens: 12000,
-			validate: func() error { return validateRevision(revision, bestAudit.Issues) },
-		}, &revision)
-		if callErr != nil {
-			return ChapterBundle{}, callErr
-		}
-		revisions = append(revisions, newRevision(input, round, revision, revisionRaw))
+			var revision chapterRevisionOutput
+			revisionRaw, callErr := p.callJSON(ctx, input, sink, provider, modelCallSpec{
+				definition: novelprompt.ChapterRevision, step: RunRevising, key: fmt.Sprintf(":%d", round),
+				userPayload: withReviewDimensionContext(input, map[string]any{
+					"chapter_content":   bestContent,
+					"chapter_plan":      plan,
+					"audit_issues":      bestAudit.Issues,
+					"previous_truth":    rawJSONValue(input.PreviousTruth),
+					"previous_chapters": input.PreviousChapters,
+					"memory_context":    rawJSONValue(input.PreviousMemory),
+				}, foundation),
+				temperature: 0.55, maxTokens: 12000,
+				validate: func() error { return validateRevision(revision, bestAudit.Issues) },
+			}, &revision)
+			if callErr != nil {
+				return ChapterBundle{}, callErr
+			}
+			revisions = append(revisions, newRevision(input, round, revision, revisionRaw))
 
-		candidateAudit, candidateAuditRaw, auditErr := p.auditChapter(ctx, input, sink, provider, foundation, plan, revision.Content, round)
-		if auditErr != nil {
-			return ChapterBundle{}, auditErr
-		}
-		audits = append(audits, newAudit(input, len(audits)+1, candidateAudit, candidateAuditRaw))
-		if betterAudit(candidateAudit, bestAudit, threshold) {
-			bestContent = strings.TrimSpace(revision.Content)
-			bestContentRaw = revisionRaw
-			bestAudit = candidateAudit
-			bestAuditRaw = candidateAuditRaw
+			candidateAudit, candidateAuditRaw, auditErr := p.auditChapter(ctx, input, sink, provider, foundation, plan, revision.Content, round)
+			if auditErr != nil {
+				return ChapterBundle{}, auditErr
+			}
+			audits = append(audits, newAudit(input, len(audits)+1, candidateAudit, candidateAuditRaw))
+			if betterAudit(candidateAudit, bestAudit, threshold) {
+				bestContent = strings.TrimSpace(revision.Content)
+				bestContentRaw = revisionRaw
+				bestAudit = candidateAudit
+				bestAuditRaw = candidateAuditRaw
+			}
 		}
 	}
 
@@ -438,12 +546,9 @@ func (p *Pipeline) Run(ctx context.Context, input RunContext, sink EventSink) (C
 	if input.Agent != nil && (input.Agent.EnablePostWrite || input.Agent.EnableAiTells) {
 		checks := map[string]any{"model_calls": 0, "content_rewritten": false}
 		if input.Agent.EnablePostWrite {
-			titles := []string{}
-			// Full previous chapter texts are not currently present in RunContext.
-			// Do not feed bounded endings to the full cross-chapter check.
-			result := ValidatePostWrite(bestContent, PostWriteInput{Title: plan.Title, ExistingTitles: titles})
+			result := ValidatePostWrite(bestContent, input.PostWrite.postWriteInput(plan.Title))
 			checks["post_write"] = result
-			checks["cross_chapter_status"] = "not_checked_missing_full_text"
+			checks["post_write_status"] = input.PostWrite.postWriteStatus()
 			if !result.Passed {
 				finalStatus = RunSucceededWithWarnings
 			}
@@ -489,6 +594,22 @@ func (p *Pipeline) Run(ctx context.Context, input RunContext, sink EventSink) (C
 		}
 	}
 
+	var stateValidationRaw json.RawMessage
+	if input.StateValidationVersion >= 1 {
+		validation := validateStateConsistency(input.PreviousTruth, settlement, foundation)
+		stateValidationRaw, err = json.Marshal(validation)
+		if err != nil {
+			return ChapterBundle{}, err
+		}
+		// 校验不通过不阻断落盘：章节标记为需要人工复核。
+		if !validation.Passed {
+			finalStatus = RunSucceededWithWarnings
+		}
+		if err := p.emit(ctx, input, sink, RunEvent{Type: "run.state_validation", Step: string(RunSettling), Status: RunSettling, Message: "状态一致性检查完成，未调用模型", Progress: 88, Payload: stateValidationRaw}); err != nil {
+			return ChapterBundle{}, err
+		}
+	}
+
 	if err := p.emitStage(ctx, input, sink, RunIndexing, "正在生成下一章可用的记忆索引", 92); err != nil {
 		return ChapterBundle{}, err
 	}
@@ -516,12 +637,27 @@ func (p *Pipeline) Run(ctx context.Context, input RunContext, sink EventSink) (C
 	if err != nil {
 		return ChapterBundle{}, &DomainError{Code: ErrPersistenceFailed, Message: "failed to assemble chapter bundle", Cause: err}
 	}
-	if len(localChecks) > 0 {
+	if len(localChecks) > 0 || len(stateValidationRaw) > 0 || len(draft.PreWriteCheck) > 0 || reviewReport != nil {
 		var snapshot map[string]json.RawMessage
 		if err = json.Unmarshal(bundle.RuntimeSnapshot, &snapshot); err != nil {
 			return ChapterBundle{}, err
 		}
-		snapshot["localChecks"] = localChecks
+		if len(localChecks) > 0 {
+			snapshot["localChecks"] = localChecks
+		}
+		if len(stateValidationRaw) > 0 {
+			snapshot["stateValidation"] = stateValidationRaw
+		}
+		if len(draft.PreWriteCheck) > 0 {
+			if snapshot["preWriteCheck"], err = json.Marshal(draft.PreWriteCheck); err != nil {
+				return ChapterBundle{}, err
+			}
+		}
+		if reviewReport != nil {
+			if snapshot["reviewCycle"], err = json.Marshal(reviewReport); err != nil {
+				return ChapterBundle{}, err
+			}
+		}
 		bundle.RuntimeSnapshot, err = json.Marshal(snapshot)
 		if err != nil {
 			return ChapterBundle{}, err
@@ -615,6 +751,18 @@ func (p *Pipeline) callJSON(ctx context.Context, input RunContext, sink EventSin
 		}
 		if input.Project.TargetChapterWords > 8000 && spec.maxTokens >= 12000 {
 			spec.maxTokens = input.Project.TargetChapterWords*2 + 4000
+		}
+	}
+	if input.WriterRuleVersion >= 1 && spec.definition.ID == novelprompt.ChapterDraft.ID {
+		blocks := BuildWriterRuleBlocks(WriterRuleInput{
+			Genre:         input.Project.Genre,
+			ChapterNumber: input.ChapterNumber,
+			TargetWords:   input.Project.TargetChapterWords,
+			HasHookDebt:   input.HookHealthVersion >= 1 && len(hooksFromTruth(input.PreviousTruth)) > 0,
+			HasRetrieval:  input.RetrievalVersion >= 1 && len(input.RetrievedChapters) > 0,
+		})
+		if len(blocks) > 0 {
+			spec.definition.SystemPrompt += "\n\n" + strings.Join(blocks, "\n\n")
 		}
 	}
 	if input.Agent != nil {

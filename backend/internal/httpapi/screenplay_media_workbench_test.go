@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"qiantie/backend/internal/agentworkspace"
 	"qiantie/backend/internal/aicut"
+	"qiantie/backend/internal/novelfetchworkshop"
 	"qiantie/backend/internal/screenplay"
 	"strings"
 	"testing"
@@ -67,6 +68,64 @@ func TestScreenplayMediaImageReferencesAndFailureHistory(t *testing.T) {
 		t.Fatal(st)
 	}
 }
+func TestScreenplayMediaAssetMultiViewGenerationAndSelection(t *testing.T) {
+	ctx := context.Background()
+	projects := screenplay.NewMemoryStore()
+	p, _ := projects.CreateProject(ctx, screenplay.Project{ID: "view-p", OwnerUsername: "alice", Title: "多视图", AspectRatio: "9:16"})
+	asset, e := projects.CreateAsset(ctx, screenplay.Asset{ID: "char-1", ProjectID: p.ID, OwnerUsername: "alice", Type: screenplay.AssetCharacter, Name: "林晚", Description: "黑发少女", Prompt: "白衬衫"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	media := screenplay.NewMediaMemoryStore()
+	s := &ScreenplayMediaWorkbench{Projects: projects, Media: media, Cut: aicut.NewMemoryStore(), Objects: &memoryImageToolObjects{files: map[string][]byte{}}, Assets: agentworkspace.NewMemoryAssetStore()}
+	prompts := []string{}
+	referenceAssets := [][]string{}
+	s.Images = func(_ context.Context, _ string, in AgentImageGenerationInput) ([]string, int, error) {
+		prompts = append(prompts, in.Prompt)
+		referenceAssets = append(referenceAssets, in.ReferenceAssetIDs)
+		return []string{"data:image/png;base64," + base64.StdEncoding.EncodeToString(testImageToolPNG(t))}, 200, nil
+	}
+	s.ReferencesProvider = agentImageReferenceProvider(func(context.Context, agentworkspace.Asset, time.Duration) (string, error) {
+		return "https://assets.example/ref.png", nil
+	})
+	mainResult, e := s.action(ctx, p, screenplayMediaAction{Action: "image", TargetID: asset.ID, ModelID: "mine", Prompt: "主图"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	mainItem := mainResult.(screenplay.MediaItem)
+	if mainItem.View != "" || len(prompts) != 1 || strings.Contains(prompts[0], "视角要求") {
+		t.Fatalf("main=%+v prompts=%q", mainItem, prompts)
+	}
+	if _, e = s.action(ctx, p, screenplayMediaAction{Action: "select", TargetID: asset.ID, ItemID: mainItem.ID}); e != nil {
+		t.Fatal(e)
+	}
+	frontResult, e := s.action(ctx, p, screenplayMediaAction{Action: "image", TargetID: asset.ID, ModelID: "mine", View: "front"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	frontItem := frontResult.(screenplay.MediaItem)
+	if frontItem.View != "front" || !strings.Contains(prompts[len(prompts)-1], "正面全身视图") {
+		t.Fatalf("front=%+v prompt=%q", frontItem, prompts[len(prompts)-1])
+	}
+	if len(referenceAssets) < 2 || len(referenceAssets[1]) != 1 || referenceAssets[1][0] != mainItem.AssetID {
+		t.Fatalf("view generation did not use main image as reference: %+v", referenceAssets)
+	}
+	state, _ := media.LoadMedia(ctx, "alice", p.ID)
+	if state.Selected[asset.ID] != mainItem.ID {
+		t.Fatalf("main selection changed: %+v", state.Selected)
+	}
+	if _, e = s.action(ctx, p, screenplayMediaAction{Action: "select", TargetID: asset.ID, ItemID: frontItem.ID, View: "front"}); e != nil {
+		t.Fatal(e)
+	}
+	state, _ = media.LoadMedia(ctx, "alice", p.ID)
+	if state.ViewSelected[asset.ID+"|front"] != frontItem.ID || state.Selected[asset.ID] != mainItem.ID {
+		t.Fatalf("view selection wrong: selected=%+v views=%+v", state.Selected, state.ViewSelected)
+	}
+	if _, e = s.action(ctx, p, screenplayMediaAction{Action: "image", TargetID: asset.ID, ModelID: "mine", View: "top"}); e == nil {
+		t.Fatal("unknown view must be rejected")
+	}
+}
+
 func TestScreenplayMediaTimelinePackageAndScope(t *testing.T) {
 	ctx := context.Background()
 	projects := screenplay.NewMemoryStore()
@@ -202,7 +261,7 @@ func TestScreenplayMediaTTSUsesRoleVoiceAndIdempotency(t *testing.T) {
 	ctx := context.Background()
 	projects := screenplay.NewMemoryStore()
 	p, _ := projects.CreateProject(ctx, screenplay.Project{ID: "tts-p", OwnerUsername: "alice", Title: "片"})
-	s := &ScreenplayMediaWorkbench{Projects: projects, Media: screenplay.NewMediaMemoryStore(), Cut: aicut.NewMemoryStore(), Objects: agentworkspace.NewLocalAssetObjectStore(t.TempDir())}
+	s := &ScreenplayMediaWorkbench{Projects: projects, Media: screenplay.NewMediaMemoryStore(), Cut: aicut.NewMemoryStore(), Objects: agentworkspace.NewLocalAssetObjectStore(t.TempDir()), Catalog: novelfetchworkshop.NewMemoryStore()}
 	_, e := s.action(ctx, p, screenplayMediaAction{Action: "voice", TargetID: "narrator", VoiceID: "voice-own"})
 	if e != nil {
 		t.Fatal(e)

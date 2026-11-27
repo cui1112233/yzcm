@@ -132,7 +132,7 @@ test('picker removes the scene library and explains the style reference scopes',
   const pickerSource = fs.readFileSync(new URL('./BatchFactoryComicStylePicker.jsx', import.meta.url), 'utf8');
   assert.match(pickerSource, /comicReferenceForSelectedStyle/);
   assert.doesNotMatch(pickerSource, /场景参考图库/);
-  assert.match(pickerSource, /画风库图片会默认作为参考图/);
+  assert.match(pickerSource, /每种画风独立出图、合成与上传/);
   assert.match(pickerSource, /用于资产图（仅人物）/);
 });
 
@@ -158,13 +158,13 @@ test('comic style names stay readable on the white preview cards', () => {
 });
 
 test('authenticated preview loader accepts built-in comic scene previews', () => {
-  const source = fs.readFileSync(new URL('../../../shared/api/batchFactoryV11.js', import.meta.url), 'utf8');
+  const source = fs.readFileSync(new URL('../../../shared/api/batchFactoryV12.js', import.meta.url), 'utf8');
   assert.match(source, /COMIC_REFERENCE_SCENE_PREVIEW_PATTERN/);
   assert.match(source, /comic-reference-scene/);
 });
 
 test('authenticated preview loader accepts administrator-uploaded comic material previews', () => {
-  const source = fs.readFileSync(new URL('../../../shared/api/batchFactoryV11.js', import.meta.url), 'utf8');
+  const source = fs.readFileSync(new URL('../../../shared/api/batchFactoryV12.js', import.meta.url), 'utf8');
   assert.match(source, /COMIC_MATERIAL_PREVIEW_PATTERN/);
   assert.match(source, /comic-material/);
   assert.match(source, /COMIC_MATERIAL_PREVIEW_PATTERN\.test\(path\)/);

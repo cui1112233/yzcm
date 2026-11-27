@@ -6,8 +6,18 @@ import (
 	"testing"
 	"time"
 
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/novelfetchworkshop"
 )
+
+func shuihuoConfigFounderAuth(now time.Time) BridgeAuth {
+	return BridgeAuth{
+		Secret: "secret", Now: func() time.Time { return now },
+		AccountCenterStore: &impersonationTestStore{identities: map[string]accountcenter.Identity{
+			"alice": {Username: "alice", Role: accountcenter.RoleFounder, Active: true},
+		}},
+	}
+}
 
 func TestRegisterShuihuoAccountAIConfigCompatPersistsLegacyModelsWithoutReturningSecrets(t *testing.T) {
 	now := time.Unix(100, 0)
@@ -18,7 +28,7 @@ func TestRegisterShuihuoAccountAIConfigCompatPersistsLegacyModelsWithoutReturnin
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	RegisterShuihuoAccountAIConfigCompat(mux, BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}, store)
+	RegisterShuihuoAccountAIConfigCompat(mux, shuihuoConfigFounderAuth(now), store)
 	recorder := signedJSONRequest(t, mux, now, "alice", http.MethodPut, "/api/shuihuo-production/account-ai-config", map[string]any{
 		"provider": "custom", "baseUrl": "https://text.example/v1", "model": "text-model", "apiKey": "text-secret",
 		"image": map[string]any{"provider": "openai_compatible", "baseUrl": "https://image.example/v1", "model": "image-model", "apiKey": "image-secret"},
@@ -50,7 +60,7 @@ func TestRegisterShuihuoAccountAIConfigCompatRejectsMissingTextFields(t *testing
 	mux := http.NewServeMux()
 	store := novelfetchworkshop.NewMemoryStore()
 	now := time.Unix(100, 0)
-	RegisterShuihuoAccountAIConfigCompat(mux, BridgeAuth{Secret: "secret", Now: func() time.Time { return now }}, store)
+	RegisterShuihuoAccountAIConfigCompat(mux, shuihuoConfigFounderAuth(now), store)
 	recorder := signedJSONRequest(t, mux, now, "alice", http.MethodPut, "/api/shuihuo-production/account-ai-config", map[string]any{"provider": "custom"})
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())

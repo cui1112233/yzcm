@@ -4,8 +4,40 @@ function progressTime(value) {
   return date.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+export function novelFetchLatestJob(data = {}) {
+  const latest = data?.latest;
+  return latest && typeof latest === 'object' && Object.keys(latest).length ? latest : null;
+}
+
+export function novelFetchJobState(job) {
+  return String(job?.queue_state || job?.queueState || job?.status || '').trim().toLowerCase();
+}
+
+export function novelFetchJobFinished(job) {
+  // Deferred work uses another dispatch; this job ID will no longer advance.
+  return ['done', 'failed', 'stopped', 'cancelled', 'canceled', 'completed', 'waiting_retry', 'waiting_classification', 'waiting_configuration', 'waiting_login', 'pending_confirmation', 'manual_only'].includes(novelFetchJobState(job));
+}
+
+export function novelFetchActionNotice(result, fallbackText) {
+  const queuedCount = typeof result?.queued === 'number' ? Math.max(0, result.queued) : 0;
+  if (result?.ok === false || Number(result?.failed) > 0) {
+    const reason = Object.values(result?.errors || {}).find(value => typeof value === 'string' && value.trim()) || result?.error;
+    return {
+      type: queuedCount > 0 || Number(result?.updated) > 0 ? 'warning' : 'error',
+      message: [result?.message || fallbackText || '操作未成功，请查看失败原因', reason].filter(Boolean).join('；')
+    };
+  }
+  if (result?.queued === true) return { type: 'info', message: result.message || '已进入后台生成队列' };
+  if (queuedCount > 0) return { type: 'info', message: result.message || `已进入后台处理队列（${queuedCount} 本）` };
+  return { type: 'success', message: result?.message || fallbackText };
+}
+
 export function novelFetchProgressLines(jobOrJobs, taskRows = []) {
   const jobs = (Array.isArray(jobOrJobs) ? jobOrJobs : [jobOrJobs]).filter(Boolean);
+  const latestJob = jobs[0];
+  if (latestJob?.status_reason === 'queue_missing' || latestJob?.queue_check_error) {
+    return [String(latestJob.queue_check_error || latestJob.error)];
+  }
   const entries = jobs.flatMap(job => Array.isArray(job?.progress) ? job.progress : (Array.isArray(job?.steps) ? job.steps : []));
   if (Array.isArray(taskRows)) {
     for (const row of taskRows) {

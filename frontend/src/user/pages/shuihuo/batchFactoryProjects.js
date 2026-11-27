@@ -32,6 +32,7 @@ export function batchFactoryProjectsFrom(batches) {
       name: text(batch.title) || '未命名批量',
       productionMode: 'batch_factory',
       factoryMode: batchFactoryProductionMode(batch.productionMode || batch.settingsState?.patch?.productionMode),
+      factoryOutputKind: batch.outputKind || batch.settingsState?.patch?.outputKind || '',
       source: BATCH_FACTORY_V11_SOURCE,
       createdAt: batch.createdAt,
       updatedAt: batch.updatedAt,

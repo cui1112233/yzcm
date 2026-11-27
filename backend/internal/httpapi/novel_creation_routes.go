@@ -42,7 +42,11 @@ func RegisterNovelCreationRoutes(mux *http.ServeMux, auth BridgeAuth, service *n
 				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "请先登录"})
 				return
 			}
-			fn(w, req, strings.TrimSpace(identity.Username))
+			owner := strings.TrimSpace(identity.Username)
+			if account, ok := AccountCenterIdentityFromContext(req.Context()); ok && strings.EqualFold(account.Subject.Username, owner) {
+				owner = account.Subject.Username
+			}
+			fn(w, req, owner)
 		})))
 	}
 	decode := func(w http.ResponseWriter, req *http.Request, target any) bool {
@@ -350,6 +354,91 @@ func RegisterNovelCreationRoutes(mux *http.ServeMux, auth BridgeAuth, service *n
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"dashboard": dashboard})
+	})
+	handle("GET /api/novel-creation/projects/{projectID}/cover", func(w http.ResponseWriter, req *http.Request, owner string) {
+		cover, found, err := service.GetProjectCover(req.Context(), owner, req.PathValue("projectID"))
+		if err != nil {
+			writeNovelCreationError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"cover": cover, "exists": found})
+	})
+	handle("POST /api/novel-creation/projects/{projectID}/cover", func(w http.ResponseWriter, req *http.Request, owner string) {
+		var input struct {
+			ImageModelID string `json:"imageModelId"`
+			StyleHint    string `json:"styleHint"`
+		}
+		if !decode(w, req, &input) {
+			return
+		}
+		cover, err := service.GenerateProjectCover(req.Context(), owner, req.PathValue("projectID"), input.ImageModelID, input.StyleHint)
+		if err != nil {
+			writeNovelCreationError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"cover": cover})
+	})
+	handle("GET /api/novel-creation/projects/{projectID}/plays", func(w http.ResponseWriter, req *http.Request, owner string) {
+		worlds, err := service.ListPlayWorlds(req.Context(), owner, req.PathValue("projectID"))
+		if err != nil {
+			writeNovelCreationError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"worlds": worlds})
+	})
+	handle("POST /api/novel-creation/projects/{projectID}/plays", func(w http.ResponseWriter, req *http.Request, owner string) {
+		var input novelcreation.PlayWorldInput
+		if !decode(w, req, &input) {
+			return
+		}
+		world, opening, err := service.CreatePlayWorld(req.Context(), owner, req.PathValue("projectID"), input)
+		if err != nil {
+			writeNovelCreationError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"world": world, "opening": opening})
+	})
+	handle("GET /api/novel-creation/projects/{projectID}/plays/{worldID}", func(w http.ResponseWriter, req *http.Request, owner string) {
+		world, err := service.GetPlayWorld(req.Context(), owner, req.PathValue("projectID"), req.PathValue("worldID"))
+		if err != nil {
+			writeNovelCreationError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"world": world})
+	})
+	handle("POST /api/novel-creation/projects/{projectID}/plays/{worldID}/step", func(w http.ResponseWriter, req *http.Request, owner string) {
+		var input struct {
+			Input string `json:"input"`
+		}
+		if !decode(w, req, &input) {
+			return
+		}
+		world, turn, err := service.StepPlayWorld(req.Context(), owner, req.PathValue("projectID"), req.PathValue("worldID"), input.Input)
+		if err != nil {
+			writeNovelCreationError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"world": world, "turn": turn})
+	})
+	handle("PATCH /api/novel-creation/projects/{projectID}/plays/{worldID}", func(w http.ResponseWriter, req *http.Request, owner string) {
+		var input novelcreation.PlayEditPatch
+		if !decode(w, req, &input) {
+			return
+		}
+		world, err := service.EditPlayWorld(req.Context(), owner, req.PathValue("projectID"), req.PathValue("worldID"), input)
+		if err != nil {
+			writeNovelCreationError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"world": world})
+	})
+	handle("GET /api/novel-creation/projects/{projectID}/hooks", func(w http.ResponseWriter, req *http.Request, owner string) {
+		health, err := service.GetHookHealth(req.Context(), owner, req.PathValue("projectID"))
+		if err != nil {
+			writeNovelCreationError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"hooks": health})
 	})
 	handle("GET /api/novel-creation/projects/{projectID}/schedules", func(w http.ResponseWriter, req *http.Request, owner string) {
 		schedules, err := service.ListSchedules(req.Context(), owner, req.PathValue("projectID"))

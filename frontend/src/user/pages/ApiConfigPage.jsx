@@ -1,12 +1,15 @@
 import { Alert, Button, Input, Select, Skeleton, Space, Tag, message } from 'antd';
 import { Cpu, KeyRound, RefreshCw, ShieldCheck, Video } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { canManageModelCatalog, getConfig } from '../../shared/api/config';
-import { createManagedModel, getManagedModelQuotas, invalidateAvailableModelCatalog, listManagedModels, updateManagedModel } from '../../shared/api/modelCatalog';
+import { getConfig } from '../../shared/api/config';
+import { createManagedModel, getManagedModelQuotas, invalidateAvailableModelCatalog, listManagedModels, searchSavedYZCMModels, updateManagedModel } from '../../shared/api/modelCatalog';
 import { getMemberCenter } from '../../shared/api/member';
 import { FANKE_VIDEO_MODELS } from './shuihuo/providerModelBinding';
 import { PageHeader, Panel, RoleBadge } from './accountCenterShared';
 import { getPresetCardState } from './api-config-preset-state';
+import { loadApiConfigPage, refreshApiConfigModels } from './api-config-initial-load.js';
+import { projectApiConfigCapabilities } from './api-config-role-policy.js';
+import { executeYZCMSelectionOperations, restrictedCredentialPatch } from './apiPresetSelection.js';
 import { isCatalogModelAvailable, modelNeedsNoCredential } from './apiConfigCatalogMerge';
 import ApiIntegrationSettings from './ApiIntegrationSettings';
 
@@ -45,6 +48,8 @@ function ModelQuotaStatus({ quota, error }) {
 
 export default function ApiConfigPage() {
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const [memberError, setMemberError] = useState('');
   const [config, setConfig] = useState(null);
   const [center, setCenter] = useState(null);
   const [models, setModels] = useState([]);
@@ -58,7 +63,8 @@ export default function ApiConfigPage() {
   const [quotaError, setQuotaError] = useState('');
   const [quotaLoading, setQuotaLoading] = useState(false);
   const [catalogModelSavingId, setCatalogModelSavingId] = useState('');
-  const canManageApi = canManageModelCatalog(config);
+  const policy = projectApiConfigCapabilities(config);
+  const canManageApi = policy.mode !== 'none';
   const member = center?.member;
 
   // 自动保存需要的“最新值”引用：定时器里不能依赖闭包里的旧 state。
@@ -82,56 +88,63 @@ export default function ApiConfigPage() {
   useEffect(() => { modelIdsRef.current = presetModelIds; }, [presetModelIds]);
   useEffect(() => { baseURLsRef.current = presetBaseURLs; }, [presetBaseURLs]);
 
-  const refreshQuotaState = useCallback(async () => {
+  const refreshQuotaState = useCallback(async (lifecycle = null) => {
     if (!canManageApi) return;
+    const isActive = () => typeof lifecycle?.isActive !== 'function' || lifecycle.isActive();
     setQuotaLoading(true);
     try {
-      setQuotas(await getManagedModelQuotas());
+      const nextQuotas = await getManagedModelQuotas();
+      if (!isActive()) return;
+      setQuotas(nextQuotas);
       setQuotaError('');
     } catch (error) {
+      if (!isActive()) return;
       // 读取失败不能退化成“额度尚未查询”，否则用户会把服务异常当成没填 Key。
       setQuotaError(error.message || '额度查询失败');
       message.error(error.message || '额度查询失败');
     }
-    finally { setQuotaLoading(false); }
+    finally { if (isActive()) setQuotaLoading(false); }
   }, [canManageApi]);
 
-  const refreshModels = useCallback(async () => {
-    if (!canManageApi) return;
-    const [nextModels, nextQuotas] = await Promise.all([
-      listManagedModels(),
-      getManagedModelQuotas().then(data => ({ data })).catch(error => ({ error }))
-    ]);
+  const applyModels = useCallback(nextModels => {
+    modelsRef.current = nextModels;
     setModels(nextModels);
     const h3 = nextModels.find(model => model.id === 'minimax-h3-video');
     if (h3 && !dirtyRef.current['minimax-h3-video']) setPresetWorkflowIds(current => ({ ...current, 'minimax-h3-video': h3.workflowId || DEFAULT_H3_WORKFLOW_ID }));
     const fanke = nextModels.find(model => model.id === 'fanke-video-api');
     if (fanke && !dirtyRef.current['fanke-video-api']) setPresetModelIds(current => ({ ...current, 'fanke-video-api': fanke.modelId || FANKE_VIDEO_MODELS[0].value }));
-    if (nextQuotas.error) setQuotaError(nextQuotas.error.message || '额度查询失败');
-    else { setQuotas(nextQuotas.data || []); setQuotaError(''); }
-  }, [canManageApi]);
+  }, []);
+
+  const refreshModels = useCallback(async () => {
+    if (!canManageApi) return;
+    await refreshApiConfigModels({ listModels: listManagedModels, getQuotas: getManagedModelQuotas }, {
+      models: applyModels,
+      quotas: nextQuotas => { setQuotas(nextQuotas || []); setQuotaError(''); },
+      quotaError: error => setQuotaError(error.message || '额度查询失败'),
+      quotaLoading: setQuotaLoading
+    });
+  }, [canManageApi, applyModels]);
 
   useEffect(() => {
     let alive = true;
-    Promise.all([getConfig(), getMemberCenter()]).then(async ([nextConfig, nextCenter]) => {
-      if (!alive) return;
-      setConfig(nextConfig);
-      setCenter(nextCenter);
-      if (canManageModelCatalog(nextConfig)) {
-        const [nextModels, nextQuotas] = await Promise.all([
-          listManagedModels(),
-          getManagedModelQuotas().then(data => ({ data })).catch(error => ({ error }))
-        ]);
-        setModels(nextModels);
-        const h3 = nextModels.find(model => model.id === 'minimax-h3-video');
-        if (h3 && !dirtyRef.current['minimax-h3-video']) setPresetWorkflowIds(current => ({ ...current, 'minimax-h3-video': h3.workflowId || DEFAULT_H3_WORKFLOW_ID }));
-        const fanke = nextModels.find(model => model.id === 'fanke-video-api');
-        if (fanke && !dirtyRef.current['fanke-video-api']) setPresetModelIds(current => ({ ...current, 'fanke-video-api': fanke.modelId || FANKE_VIDEO_MODELS[0].value }));
-        if (nextQuotas.error) setQuotaError(nextQuotas.error.message || '额度查询失败');
-        else { setQuotas(nextQuotas.data || []); setQuotaError(''); }
-      }
-    }).catch(error => message.error(error.message || 'API 配置加载失败'))
-      .finally(() => { if (alive) setLoading(false); });
+    const whileAlive = callback => (...args) => { if (alive) callback(...args); };
+    void loadApiConfigPage({
+      getConfig, getMemberCenter, canManage: value => projectApiConfigCapabilities(value).mode !== 'none',
+      listModels: listManagedModels, getQuotas: getManagedModelQuotas
+    }, {
+      config: whileAlive(setConfig),
+      center: whileAlive(setCenter),
+      models: whileAlive(applyModels),
+      quotas: whileAlive(nextQuotas => { setQuotas(nextQuotas || []); setQuotaError(''); }),
+      quotaError: whileAlive(error => setQuotaError(error.message || '额度查询失败')),
+      quotaLoading: whileAlive(setQuotaLoading),
+      error: whileAlive((stage, error) => {
+        const reason = error.message || '请求失败，请刷新重试';
+        if (stage === 'member') setMemberError(`身份详情读取失败：${reason}`);
+        else setLoadError(`${stage === 'config' ? 'API 配置' : '模型目录'}加载失败：${reason}`);
+      }),
+      ready: whileAlive(() => setLoading(false))
+    });
     return () => { alive = false; };
   }, []);
 
@@ -232,22 +245,46 @@ export default function ApiConfigPage() {
 
   // 目录模型凭证的唯一编辑入口（管理员）：写入 modelCatalog.credential，
   // 服务端据此重新计算 available，页面与 /api/models 下拉同时生效/消失。
-  async function saveCatalogCredential(model, key, clear) {
+  async function saveCatalogCredential(model, key, clear, lifecycle = null) {
     if (!canManageApi || !model?.id) throw new Error('无权修改目录模型凭证');
+    const isActive = () => typeof lifecycle?.isActive !== 'function' || lifecycle.isActive();
     const trimmed = String(key || '').trim();
     if (!clear && !trimmed) throw new Error('请输入 API Key');
     setCatalogModelSavingId(model.id);
     try {
-      await updateManagedModel(model.id, clear ? { clearCredential: true } : { credential: trimmed, enabled: true });
+      const patch = policy.mode === 'restricted'
+        ? restrictedCredentialPatch(trimmed, clear)
+        : (clear ? { clearCredential: true } : { credential: trimmed, enabled: true });
+      await updateManagedModel(model.id, patch);
+      if (!isActive()) return;
       invalidateAvailableModelCatalog();
       await refreshModels();
+      if (!isActive()) return;
       message.success(clear ? '已清除目录 Key，该模型不再出现在下拉里' : '目录 Key 已保存，立即生效');
     } catch (error) {
-      message.error(error.message || '目录模型凭证保存失败');
+      if (isActive()) message.error(error.message || '目录模型凭证保存失败');
       throw error;
     } finally {
-      setCatalogModelSavingId('');
+      if (isActive()) setCatalogModelSavingId('');
     }
+  }
+
+  async function saveYZCMSelection(selectedModels, lifecycle = null) {
+    if (policy.mode !== 'restricted') throw new Error('当前账号不能修改 YZCM 展示选择');
+    const isActive = () => typeof lifecycle?.isActive !== 'function' || lifecycle.isActive();
+    await executeYZCMSelectionOperations({
+      existingModels: modelsRef.current,
+      selectedModels,
+      create: createManagedModel,
+      update: updateManagedModel,
+      refresh: async () => {
+        if (!isActive()) return null;
+        const nextModels = await listManagedModels();
+        if (isActive()) applyModels(nextModels);
+        return nextModels;
+      },
+      onModels: nextModels => { if (isActive()) applyModels(nextModels); }
+    });
   }
 
   // 用户自建目录模型的唯一编辑入口：与自定义渠道共用同一张表单，
@@ -277,14 +314,16 @@ export default function ApiConfigPage() {
   }
 
   if (loading) return <div className="account-center-page"><Skeleton active paragraph={{ rows: 9 }} /></div>;
+  if (loadError || !config) return <div className="account-center-page api-config-page"><Alert type="error" showIcon message="API 配置尚未就绪" description={loadError || '未取得有效配置，请刷新重试'} /></div>;
 
-  return <div className="account-center-page api-config-page">
+  return <div className={`account-center-page api-config-page ${policy.mode === 'restricted' ? 'pc-api-manager' : policy.mode === 'full' ? 'pc-api-founder' : 'pc-api-member'}`}>
     <PageHeader title="API 配置" subtitle="统一管理平台预设模型与各渠道 API 接口；业务页面按凭证自动读取可用模型。" />
-    {!canManageApi ? <div className="ac-managed-api-card">
+    {memberError ? <Alert type="warning" showIcon message={memberError} /> : null}
+    {policy.mode === 'none' ? <div className="ac-managed-api-card pc-api-member-card">
       <span><ShieldCheck size={28} /></span>
-      <div><div><h2>模型服务由团队托管</h2>{member ? <RoleBadge role={member.role} /> : null}</div><p>你可在获授权的业务下拉框中选择管理员已配置凭证的模型；不会显示 API Key。</p></div>
-      <Tag color={config?.managedBy ? 'green' : 'gold'}>{config?.managedBy ? `托管账号 @${config.managedBy}` : '等待绑定 MANAGER'}</Tag>
-    </div> : <Panel title="平台预设模型" eyebrow="PLATFORM PRESETS" className="ac-form-panel" action={<Space size={12}>
+      <div><div><h2>模型服务由团队托管</h2>{member ? <RoleBadge canonicalRole={member.canonicalRole} /> : null}</div><p>你可在获授权的业务下拉框中选择管理员已配置凭证的模型；不会显示 API Key。</p></div>
+      <Tag color={config?.managedBy ? 'green' : 'gold'}>{config?.managedBy ? `托管账号 @${config.managedBy}` : '等待绑定管理者'}</Tag>
+    </div> : policy.mode === 'full' ? <Panel title="平台预设模型" eyebrow="PLATFORM PRESETS" className="ac-form-panel pc-api-founder-panel" action={<Space size={12}>
         <span className="ac-muted-copy" role="status" aria-live="polite">{SAVE_STATUS_TEXT[saveStatus]}</span>
         <Button icon={<RefreshCw size={15} />} loading={quotaLoading} onClick={refreshQuotaState}>刷新额度</Button>
       </Space>}>
@@ -323,14 +362,20 @@ export default function ApiConfigPage() {
             <div className="ac-platform-preset-state"><small>始终可用</small></div>
           </div>
         ))}
-      </Panel>}
-    <ApiIntegrationSettings
+      </Panel> : null}
+    {policy.mode !== 'none' ? <ApiIntegrationSettings
+      mode={policy.mode}
+      policy={policy}
       models={models}
       quotas={quotas}
       platformPresetIds={PLATFORM_PRESET_IDS}
       onSaveCatalogCredential={canManageApi ? saveCatalogCredential : null}
-      onUpdateCatalogModel={canManageApi ? saveCatalogModel : null}
+      onUpdateCatalogModel={policy.mode === 'full' ? saveCatalogModel : null}
+      onSearchYZCMModels={policy.mode === 'restricted' ? searchSavedYZCMModels : null}
+      onSaveYZCMSelection={policy.mode === 'restricted' ? saveYZCMSelection : null}
+      onRefreshQuotas={refreshQuotaState}
+      quotaLoading={quotaLoading}
       catalogModelSavingId={catalogModelSavingId}
-    />
+    /> : null}
   </div>;
 }

@@ -24,10 +24,12 @@ func newBodySQLMock(t *testing.T) (*sql.DB, sqlmock.Sqlmock, *MySQLStore) {
 func TestMySQLStorePutBody(t *testing.T) {
 	_, mock, store := newBodySQLMock(t)
 	ctx := context.Background()
-	updated := time.Date(2026, 9, 2, 13, 0, 0, 0, time.UTC)
 
-	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO novel_fetch_workshop_bodies(owner_username,book_id,version_id,revision,content_encoding,content_blob,content_hash,char_count,state,created_at,updated_at,last_needed_at,releasable_at,expires_at) VALUES(?,?,?,1,'gzip',?,?,?,?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),NULL,NULL) ON DUPLICATE KEY UPDATE revision=revision+1, content_encoding=VALUES(content_encoding), content_blob=VALUES(content_blob), content_hash=VALUES(content_hash), char_count=VALUES(char_count), state=VALUES(state), updated_at=CURRENT_TIMESTAMP(6), last_needed_at=CURRENT_TIMESTAMP(6), releasable_at=NULL, expires_at=NULL`)).WithArgs("alice", "123", "ai3", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(2), "ready").WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT revision, content_hash, char_count, state, updated_at FROM novel_fetch_workshop_bodies WHERE owner_username=? AND book_id=? AND version_id=?`)).WithArgs("alice", "123", "ai3").WillReturnRows(sqlmock.NewRows([]string{"revision", "content_hash", "char_count", "state", "updated_at"}).AddRow(uint64(1), "hash", int64(2), "ready", updated))
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(lockBodySQL)).WithArgs("alice", "123", "ai3").WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec("INSERT INTO novel_fetch_workshop_bodies").WithArgs("alice", "123", "ai3", uint64(1), "gzip", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(2), "ready", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(1, 1))
+	expectBodyMetadataWrite(mock, "alice", "123")
+	mock.ExpectCommit()
 
 	ref, err := store.PutBody(ctx, "alice", BodyRecord{
 		BookID:  "123",
@@ -102,7 +104,11 @@ func TestMySQLStoreListBodyRefs(t *testing.T) {
 
 func TestMySQLStoreDeleteBody(t *testing.T) {
 	_, mock, store := newBodySQLMock(t)
-	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM novel_fetch_workshop_bodies WHERE owner_username=? AND book_id=? AND version_id=?`)).WithArgs("alice", "123", "ai3").WillReturnResult(sqlmock.NewResult(0, 1))
+
+	mock.ExpectBegin()
+	expectLockedBody(mock, "alice", "123", "ai3", 1, "gzip", []byte("old"), "ready", nil, nil)
+	expectBodyRemoval(mock, "alice", "123", "ai3", 1, "gzip", []byte("old"))
+	mock.ExpectCommit()
 
 	deleted, err := store.DeleteBody(context.Background(), "alice", "123", "ai3")
 	if err != nil {

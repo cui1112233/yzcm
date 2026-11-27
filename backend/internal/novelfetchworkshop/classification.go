@@ -3,8 +3,8 @@ package novelfetchworkshop
 import "context"
 
 // ClassificationResult is the shared result of the novel metadata stage.
-// Both Novel Fetch and Batch Factory use the same upstream-first, AI-fallback
-// ordering through this function.
+// Batch Factory uses ClassifyBook to complete missing labels with its defaults.
+// Novel Fetch calls ResolveGender/ResolveStyle directly to preserve failures.
 type ClassificationResult struct {
 	Gender GenderDecision `json:"gender"`
 	Style  StyleDecision  `json:"style"`

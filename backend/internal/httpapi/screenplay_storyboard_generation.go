@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"qiantie/backend/internal/screenplay"
 	"sort"
@@ -12,6 +14,40 @@ func RegisterScreenplayStoryboardGenerationRoutes(mux *http.ServeMux, auth Bridg
 	if !ok || mux == nil {
 		return
 	}
+	mux.Handle("POST /api/comic-screenplays/projects/{id}/storyboard-generation-attempts/{key}/recover", auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		actor, ok := BridgeIdentityFromContext(r.Context())
+		if !ok {
+			writeJSON(w, 401, map[string]string{"error": "unauthorized"})
+			return
+		}
+		if authors == nil {
+			writeScreenplayError(w, screenplay.ErrInvalidState)
+			return
+		}
+		owner, e := authors.Resolve(r.Context(), actor.Username, r.PathValue("id"), "generate")
+		if e != nil {
+			writeScreenplayError(w, e)
+			return
+		}
+		var input struct{}
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+		decoder.DisallowUnknownFields()
+		if e := decoder.Decode(&input); e != nil {
+			writeJSON(w, 400, map[string]string{"error": "恢复请求只能包含空对象"})
+			return
+		}
+		if decoder.Decode(&struct{}{}) != io.EOF {
+			writeJSON(w, 400, map[string]string{"error": "恢复请求格式无效"})
+			return
+		}
+		service := screenplay.StoryboardService{Store: projects, Authoring: authors}
+		attempt, e := service.RecoverStoryboard138(r.Context(), owner, r.PathValue("id"), r.PathValue("key"))
+		if e != nil {
+			writeScreenplayError(w, e)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"attempt": attempt.Public()})
+	})))
 	for _, pattern := range []string{"GET /api/comic-screenplays/projects/{id}/storyboard-generation-attempts", "GET /api/comic-screenplays/projects/{id}/storyboard-generation-attempts/{key}"} {
 		mux.Handle(pattern, auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			actor, ok := BridgeIdentityFromContext(r.Context())

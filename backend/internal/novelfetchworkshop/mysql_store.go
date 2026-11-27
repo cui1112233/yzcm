@@ -2,39 +2,41 @@ package novelfetchworkshop
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"log"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
-	"qiantie/backend/internal/safepath"
 )
 
 type MySQLStore struct {
-	DB              *sql.DB
-	LegacyConfigDir string
-	ObjectBodies    *BodyObjectStore
-
-	// The legacy api-config.json can be several megabytes. Parsing it on every
-	// settings read costs hundreds of milliseconds and used to dominate the
-	// batch runtime summary, which recomputes availability per book. Cache the
-	// decoded document and validate it against the file's size/mtime.
-	legacyMu    sync.RWMutex
-	legacyCache map[string]legacyConfigCacheEntry
-}
-
-type legacyConfigCacheEntry struct {
-	modTime time.Time
-	size    int64
-	config  map[string]any
+	DB                 *sql.DB
+	LegacyConfigDir    string
+	ObjectBodies       *BodyObjectStore
+	ModelSecrets       ModelConfigSecrets
+	LegacyConfigLocker sync.Locker
+	// ReplaceLegacyConfig can supply an atomic model-file replacement for
+	// installations with an alternative file writer.
+	ReplaceLegacyConfig func(string, map[string]any) error
 }
 
 func NewMySQLStore(db *sql.DB) *MySQLStore { return &MySQLStore{DB: db} }
+
+const ModelSecretVersionKey = "modelCatalogSecretVersion"
+const ModelSecretVersion = "bound-v3"
+
+type ModelConfigSecrets interface {
+	SealModelConfig(owner string, next, previous map[string]any) error
+	OpenModelConfig(owner string, settings map[string]any) error
+	SealLegacyConflict(owner string, source LegacyConflictSource, key string) (ciphertext, fingerprint string, err error)
+	OpenLegacyConflict(owner string, source LegacyConflictSource, ciphertext, fingerprint string) (string, error)
+}
 
 func (s *MySQLStore) GetDocument(ctx context.Context, owner, bookID string) (Document, error) {
 	var raw []byte
@@ -67,12 +69,24 @@ func (s *MySQLStore) PutDocument(ctx context.Context, owner string, document Doc
 	if document.BookID == "" {
 		return errors.New("book id is required")
 	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	document, err = prepareDocumentWrite(ctx, tx, owner, document)
+	if err != nil {
+		return err
+	}
 	raw, err := json.Marshal(document)
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_documents(owner_username,book_id,document_json,created_at,updated_at) VALUES(?,?,CAST(? AS CHAR CHARACTER SET utf8mb4),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE document_json=VALUES(document_json), updated_at=GREATEST(CURRENT_TIMESTAMP(6), TIMESTAMPADD(MICROSECOND,1,updated_at))`, owner, document.BookID, string(raw))
-	return err
+	_, err = tx.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_documents(owner_username,book_id,document_json,created_at,updated_at) VALUES(?,?,CAST(? AS CHAR CHARACTER SET utf8mb4),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE document_json=VALUES(document_json), updated_at=GREATEST(CURRENT_TIMESTAMP(6), TIMESTAMPADD(MICROSECOND,1,updated_at))`, owner, document.BookID, string(raw))
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *MySQLStore) CompareAndSwapDocument(ctx context.Context, owner string, document Document) (string, error) {
@@ -88,6 +102,15 @@ func (s *MySQLStore) CompareAndSwapDocument(ctx context.Context, owner string, d
 			return "", err
 		}
 	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	document, err = prepareDocumentWrite(ctx, tx, owner, document)
+	if err != nil {
+		return "", err
+	}
 	next := nextDocumentWriteTime(previous)
 	document.UpdatedAt = next.Format(time.RFC3339Nano)
 	raw, err := json.Marshal(document)
@@ -95,14 +118,14 @@ func (s *MySQLStore) CompareAndSwapDocument(ctx context.Context, owner string, d
 		return "", err
 	}
 	if previous.IsZero() {
-		_, err = s.DB.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_documents(owner_username,book_id,document_json,created_at,updated_at) VALUES(?,?,CAST(? AS CHAR CHARACTER SET utf8mb4),?,?)`, owner, document.BookID, string(raw), next, next)
+		_, err = tx.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_documents(owner_username,book_id,document_json,created_at,updated_at) VALUES(?,?,CAST(? AS CHAR CHARACTER SET utf8mb4),?,?)`, owner, document.BookID, string(raw), next, next)
 		var duplicate *mysql.MySQLError
 		if errors.As(err, &duplicate) && duplicate.Number == 1062 {
 			return "", ErrDocumentChanged
 		}
 	} else {
 		var result sql.Result
-		result, err = s.DB.ExecContext(ctx, `UPDATE novel_fetch_workshop_documents SET document_json=CAST(? AS CHAR CHARACTER SET utf8mb4), updated_at=? WHERE owner_username=? AND book_id=? AND updated_at=?`, string(raw), next, owner, document.BookID, previous.UTC())
+		result, err = tx.ExecContext(ctx, `UPDATE novel_fetch_workshop_documents SET document_json=CAST(? AS CHAR CHARACTER SET utf8mb4), updated_at=? WHERE owner_username=? AND book_id=? AND updated_at=?`, string(raw), next, owner, document.BookID, previous.UTC())
 		if err == nil {
 			var n int64
 			n, err = result.RowsAffected()
@@ -112,6 +135,9 @@ func (s *MySQLStore) CompareAndSwapDocument(ctx context.Context, owner string, d
 		}
 	}
 	if err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
 		return "", err
 	}
 	return document.UpdatedAt, nil
@@ -242,139 +268,217 @@ func (s *MySQLStore) DeleteDocuments(ctx context.Context, owner string, ids []st
 
 func (s *MySQLStore) GetConfig(ctx context.Context, owner string) (map[string]any, error) {
 	var raw []byte
-	err := s.DB.QueryRowContext(ctx, `SELECT settings_json FROM novel_fetch_workshop_configs WHERE owner_username=?`, owner).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		// The old Node frontend stores the model catalog in each user's
-		// api-config.json. Read it as a local compatibility fallback until the
-		// user saves the settings through the Go frontend. Secrets stay local and
-		// are never committed to the repository.
-		settings := map[string]any{}
-		if legacy := s.readLegacyConfigFile(owner); legacy != nil {
-			if catalog, ok := legacy["modelCatalog"]; ok {
-				settings["modelCatalog"] = catalog
-			}
-			if version, ok := legacy["modelCatalogVersion"]; ok {
-				settings["modelCatalogVersion"] = version
-			}
+	var pending bool
+	// Read the catalog and its migration phase from the same database snapshot.
+	// Historical tables may use different collations; bind the same owner in both lookups.
+	err := s.DB.QueryRowContext(ctx, `SELECT c.settings_json,EXISTS(
+SELECT 1 FROM novel_fetch_legacy_config_migrations m WHERE m.owner_username=? AND m.phase!='complete')
+FROM novel_fetch_workshop_configs c WHERE c.owner_username=?`, owner, owner).Scan(&raw, &pending)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if pending && s.ModelSecrets == nil {
+		return nil, fmt.Errorf("pending legacy video migration requires model configuration encryption")
+	}
+	var settings map[string]any
+	if len(raw) != 0 {
+		if err := json.Unmarshal(raw, &settings); err != nil {
+			return nil, fmt.Errorf("decode novel fetch config: %w", err)
 		}
-		settings[ConfigRevisionKey] = "0"
-		return EnsureWorkshopDefaults(settings), nil
+	}
+	if settings == nil {
+		settings = map[string]any{}
+	}
+	settings[ConfigRevisionKey] = configRevision(settings)
+	if s.ModelSecrets != nil {
+		return s.openConfig(ctx, owner, settings)
+	}
+	if hasLegacyVideoProviders(settings) || settings[legacyVideoPendingKey] != nil || (s.LegacyConfigDir != "" && len(collectLegacyVideoCandidates(settings)) > 0) {
+		return nil, fmt.Errorf("legacy video credentials require model configuration encryption")
+	}
+	return EnsureWorkshopDefaults(settings), nil
+}
+
+// GetWorkflowConfig returns personal workflow preferences without loading a
+// member's historical model keys when runtime uses the current team catalog.
+func (s *MySQLStore) GetWorkflowConfig(ctx context.Context, owner string) (map[string]any, error) {
+	var raw []byte
+	err := s.DB.QueryRowContext(ctx, `SELECT JSON_REMOVE(settings_json,
+ '$.modelCatalog', '$.settings.modelCatalog', '$.appConfig.modelCatalog', '$.settings.appConfig.modelCatalog', '$.modelCatalogSecretVersion', '$.modelCatalogLegacyScrubPending',
+ '$.modelCatalogLegacyScrubEntries', '$.modelCatalogLegacyMigrationVersion', '$.modelCatalogLegacyVideoPending',
+ '$.videoProviders', '$.settings.videoProviders', '$.appConfig.videoProviders', '$.settings.appConfig.videoProviders')
+FROM novel_fetch_workshop_configs WHERE owner_username=?`, owner).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return workflowPreferencesForWrite(nil), nil
 	}
 	if err != nil {
 		return nil, err
 	}
 	var settings map[string]any
 	if err := json.Unmarshal(raw, &settings); err != nil {
-		return nil, fmt.Errorf("decode novel fetch config: %w", err)
+		return nil, err
 	}
-	if settings == nil {
-		settings = map[string]any{}
+	if hasLegacyVideoProviders(settings) || ModelConfigText(settings, modelLegacyScrubPendingKey) != "" {
+		return nil, ErrConfigConflict
 	}
-	legacyCatalog := s.readLegacyModelCatalog(owner)
-	if catalog, ok := settings["modelCatalog"].([]any); !ok || len(catalog) == 0 {
-		if len(legacyCatalog) > 0 {
-			settings["modelCatalog"] = legacyCatalog
+	return workflowPreferencesForWrite(settings), nil
+}
+
+// ReadBoundModelConfig compares a read-only form echo without triggering an
+// import or rewriting storage on a forbidden request.
+func (s *MySQLStore) ReadBoundModelConfig(ctx context.Context, owner string) (map[string]any, error) {
+	var raw []byte
+	err := s.DB.QueryRowContext(ctx, `SELECT settings_json FROM novel_fetch_workshop_configs WHERE owner_username=?`, owner).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return map[string]any{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		return nil, err
+	}
+	if _, exists := settings["modelCatalog"]; !exists {
+		return map[string]any{}, nil
+	}
+	if s.ModelSecrets == nil || settings[ModelSecretVersionKey] != ModelSecretVersion {
+		return nil, ErrConfigConflict
+	}
+	delete(settings, legacyVideoPendingKey)
+	return settings, s.ModelSecrets.OpenModelConfig(owner, settings)
+}
+
+func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[string]any) (map[string]any, error) {
+	currentVersion := settings[ModelSecretVersionKey] == ModelSecretVersion
+	state, found, err := s.discoverLegacyConfigMigration(ctx, owner, settings)
+	if err != nil {
+		return nil, err
+	}
+	if !found && s.LegacyConfigDir == "" && settings[legacyVideoPendingKey] != nil {
+		return nil, fmt.Errorf("staged legacy videos require their original file directory")
+	}
+	waiting := found && (state.Phase == LegacyAwaitingSource || state.Phase == LegacyReconciling)
+	checkFile := s.LegacyConfigDir != "" && (waiting || (!found && settings[legacyModelMigrationVersionKey] != legacyModelMigrationVersion))
+	needsDBMigration := !currentVersion || settings[legacyVideoPendingKey] != nil || hasLegacyVideoProviders(settings) || hasNestedLegacyModels(settings)
+	if needsDBMigration || checkFile {
+		path, err := s.legacyModelFilePath(owner)
+		if err != nil {
+			return nil, err
 		}
-	} else {
-		// A previous migration may have persisted only the redacted catalog in
-		// MySQL. Keep credentials local and hydrate only missing runtime fields
-		// from the user's uncommitted legacy config file; never write them back.
-		mergeLegacyRuntimeModelFields(catalog, legacyCatalog)
+		legacy, err := readLegacyModelDocument(path)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateLegacyVideoDocument(settings); err != nil {
+			return nil, err
+		}
+		if err := validateLegacyVideoDocument(legacy); err != nil {
+			return nil, err
+		}
+		var videoMatches []legacyVideoMatch
+		if waiting {
+			candidates, err := s.migrationCandidates(state)
+			if err != nil {
+				return nil, err
+			}
+			var ready bool
+			videoMatches, ready = candidates.matchFile(legacy)
+			if !ready {
+				legacy = nil
+			}
+		} else if len(legacyCatalogRows(legacy)) == 0 && ModelConfigText(settings, modelLegacyScrubPendingKey) == "" {
+			legacy = nil
+		}
+		if legacy == nil && ModelConfigText(settings, modelLegacyScrubPendingKey) != "" {
+			return nil, fmt.Errorf("legacy model file is unavailable during credential cleanup")
+		}
+		fileChecked := legacy != nil
+		rows := legacyCatalogRows(settings)
+		hasCatalog := hasLegacyVideoProviders(settings)
+		for _, container := range LegacyCatalogContainers(settings) {
+			if _, exists := container["modelCatalog"]; exists {
+				hasCatalog = true
+				break
+			}
+		}
+		if (needsDBMigration || fileChecked) && (currentVersion || hasCatalog || len(rows) > 0 || len(legacy) > 0 || settings[legacyVideoMigratedKey] == true) {
+			previouslyBound := hasBoundCatalog(settings)
+			var boundRows []any
+			if previouslyBound {
+				boundRows, _ = settings["modelCatalog"].([]any)
+				rows, err = preserveBoundLegacyRows(settings)
+				if err != nil {
+					return nil, err
+				}
+			}
+			migration := &legacyConfigMigration{path: path, state: state, releaseVideos: fileChecked, videoMatches: videoMatches, hasFileVideo: len(collectLegacyVideoCandidates(legacy)) > 0}
+			for _, source := range collectLegacySources(settings) {
+				if (!waiting || ModelConfigText(source.model, "kind") != "video") && (!previouslyBound || source.Video || source.Container != 0) {
+					migration.database = append(migration.database, source)
+				}
+			}
+			if !previouslyBound && len(rows) > 0 {
+				mergeLegacyModelKeys(rows, legacyCatalogRows(legacy))
+			}
+			if waiting {
+				rows = migration.prepareVideoRows(rows, boundRows, legacy)
+			}
+			delete(settings, legacyVideoPendingKey)
+			rows, migration.file = prepareLegacyModelEntries(rows, legacy, collectLegacySources(legacy), previouslyBound)
+			for i := range migration.file {
+				if id := migration.fileModelIDs[videoPosition(migration.file[i])]; id != "" {
+					migration.file[i].TargetID = id
+				}
+			}
+			reconcileLegacyVideoCredentials(rows, boundRows, migration.database, migration.file)
+			digest := legacyCatalogSecretDigest(legacy)
+			settings["modelCatalog"] = rows
+			if digest != "" {
+				pending := ModelConfigText(settings, modelLegacyScrubPendingKey)
+				if pending != "" && pending != digest && pending != priorLegacyModelDigest(legacy) &&
+					!legacySourcesMatchPreviousPlan(settings, legacy, migration.file) {
+					return nil, fmt.Errorf("legacy model file changed before credential cleanup")
+				}
+				settings[modelLegacyScrubPendingKey] = digest
+			}
+			settings[legacyVideoMigratedKey] = true
+			if fileChecked {
+				settings[legacyModelMigrationVersionKey] = legacyModelMigrationVersion
+			}
+			if err := s.putConfig(ctx, owner, settings, migration); err != nil {
+				return nil, err
+			}
+			return s.GetConfig(ctx, owner)
+		}
 	}
-	settings[ConfigRevisionKey] = configRevision(settings)
+	delete(settings, legacyVideoPendingKey)
+	if err := s.ModelSecrets.OpenModelConfig(owner, settings); err != nil {
+		return nil, err
+	}
+	hasScrubPlan := ModelConfigText(settings, modelLegacyScrubPendingKey) != ""
+	if hasScrubPlan || state.Phase == LegacyFinalizing {
+		if err := s.finishLegacyMigration(ctx, owner, settings, state); err != nil {
+			return nil, fmt.Errorf("clean legacy model configuration: %w", err)
+		}
+		delete(settings, modelLegacyScrubPendingKey)
+		delete(settings, legacyModelScrubEntriesKey)
+	} else if err := s.resumeArchivedSettingFile(ctx, owner, state.Phase); err != nil {
+		return nil, err
+	}
 	return EnsureWorkshopDefaults(settings), nil
 }
 
-func mergeLegacyRuntimeModelFields(current, legacy []any) {
-	for _, rawCurrent := range current {
-		currentModel, ok := rawCurrent.(map[string]any)
-		if !ok {
-			continue
-		}
-		currentID := strings.TrimSpace(fmt.Sprint(currentModel["id"]))
-		currentModelID := strings.TrimSpace(fmt.Sprint(currentModel["modelId"]))
-		for _, rawLegacy := range legacy {
-			legacyModel, ok := rawLegacy.(map[string]any)
-			if !ok {
-				continue
-			}
-			legacyID := strings.TrimSpace(fmt.Sprint(legacyModel["id"]))
-			legacyModelID := strings.TrimSpace(fmt.Sprint(legacyModel["modelId"]))
-			if (currentID == "" || legacyID == "" || currentID != legacyID) && (currentModelID == "" || legacyModelID == "" || currentModelID != legacyModelID) {
-				continue
-			}
-			for _, key := range []string{"credential", "apiKey", "baseUrl", "endpoint", "tasksEndpoint", "resultEndpoint", "workflowId"} {
-				if runtimeModelFieldEmpty(currentModel[key]) {
-					if value, exists := legacyModel[key]; exists && !runtimeModelFieldEmpty(value) {
-						currentModel[key] = value
-					}
-				}
-			}
-			break
-		}
-	}
-}
-
-func runtimeModelFieldEmpty(value any) bool {
-	if value == nil {
-		return true
-	}
-	raw := strings.TrimSpace(fmt.Sprint(value))
-	return raw == "" || raw == "<nil>"
-}
-
-func (s *MySQLStore) readLegacyModelCatalog(owner string) []any {
-	legacy := s.readLegacyConfigFile(owner)
-	if legacy == nil {
-		return nil
-	}
-	catalog, _ := legacy["modelCatalog"].([]any)
-	return catalog
-}
-
-// readLegacyConfigFile returns the decoded legacy api-config.json, reusing the
-// cached document while the file's size and modification time are unchanged.
-// The cache keeps the per-owner settings read cheap: the legacy file is a
-// several-megabyte JSON blob and the batch runtime summary used to parse it
-// dozens of times per request.
-func (s *MySQLStore) readLegacyConfigFile(owner string) map[string]any {
-	if s == nil || strings.TrimSpace(s.LegacyConfigDir) == "" {
-		return nil
-	}
-	path, pathErr := safepath.UserPath(s.LegacyConfigDir, owner, "api-config.json")
-	if pathErr != nil {
-		return nil
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil
-	}
-	s.legacyMu.RLock()
-	entry, cached := s.legacyCache[owner]
-	s.legacyMu.RUnlock()
-	if cached && entry.size == info.Size() && entry.modTime.Equal(info.ModTime()) {
-		return entry.config
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	var config map[string]any
-	if json.Unmarshal(raw, &config) != nil {
-		return nil
-	}
-	s.legacyMu.Lock()
-	if s.legacyCache == nil {
-		s.legacyCache = map[string]legacyConfigCacheEntry{}
-	}
-	s.legacyCache[owner] = legacyConfigCacheEntry{modTime: info.ModTime(), size: info.Size(), config: config}
-	s.legacyMu.Unlock()
-	return config
-}
-
 func (s *MySQLStore) PutConfig(ctx context.Context, owner string, settings map[string]any) error {
+	return s.putConfig(ctx, owner, settings, nil)
+}
+
+func (s *MySQLStore) putConfig(ctx context.Context, owner string, settings map[string]any, migration *legacyConfigMigration) error {
 	if settings == nil {
 		settings = map[string]any{}
+	}
+	if s.ModelSecrets == nil && hasLegacyVideoProviders(settings) {
+		return fmt.Errorf("legacy video credentials require model configuration encryption")
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -399,6 +503,75 @@ func (s *MySQLStore) PutConfig(ctx context.Context, owner string, settings map[s
 		return err
 	}
 	updated := cloneMap(settings)
+	if migration == nil {
+		delete(updated, legacyVideoPendingKey)
+		if pending, exists := previous[legacyVideoPendingKey]; exists {
+			if s.ModelSecrets == nil {
+				return ErrConfigConflict
+			}
+			updated[legacyVideoPendingKey] = pending
+		}
+	}
+	if s.ModelSecrets != nil {
+		if migration == nil {
+			unverifiedVideos := s.LegacyConfigDir != "" && !hasBoundCatalog(previous) && len(collectLegacyVideoCandidates(previous)) > 0
+			if unverifiedVideos || hasLegacyVideoProviders(previous) || hasNestedLegacyModels(previous) || ModelConfigText(previous, modelLegacyScrubPendingKey) != "" {
+				return ErrConfigConflict
+			}
+			for _, key := range []string{modelLegacyScrubPendingKey, legacyModelScrubEntriesKey, legacyModelMigrationVersionKey} {
+				delete(updated, key)
+			}
+		}
+		if pending := ModelConfigText(previous, modelLegacyScrubPendingKey); pending != "" && (previous[legacyModelMigrationVersionKey] == legacyModelMigrationVersion || ModelConfigText(updated, modelLegacyScrubPendingKey) == "") {
+			updated[modelLegacyScrubPendingKey] = pending
+			if entries, ok := previous[legacyModelScrubEntriesKey]; ok {
+				updated[legacyModelScrubEntriesKey] = entries
+			}
+		}
+		if previous[legacyModelMigrationVersionKey] == legacyModelMigrationVersion {
+			updated[legacyModelMigrationVersionKey] = legacyModelMigrationVersion
+		}
+		for _, nested := range LegacyCatalogContainers(updated)[1:] {
+			delete(nested, "modelCatalog")
+			delete(nested, "modelCatalogVersion")
+		}
+		for _, container := range LegacyCatalogContainers(updated) {
+			delete(container, "videoProviders")
+		}
+		updated[legacyVideoMigratedKey] = true
+		delete(updated, ModelSecretVersionKey)
+		if _, present := updated["modelCatalog"]; present {
+			if err := s.ModelSecrets.SealModelConfig(owner, updated, previous); err != nil {
+				return err
+			}
+			updated[ModelSecretVersionKey] = ModelSecretVersion
+		} else if previous[ModelSecretVersionKey] == ModelSecretVersion {
+			updated["modelCatalog"] = []any{}
+			updated[ModelSecretVersionKey] = ModelSecretVersion
+		}
+		if migration != nil {
+			state := migration.state
+			if state.Owner == "" && migration.releaseVideos && migration.hasFileVideo {
+				state, err = s.beginLegacyConfigMigration(ctx, tx, owner, pendingLegacyVideos{})
+				if err != nil {
+					return err
+				}
+			}
+			if migration.releaseVideos && state.Phase == LegacyAwaitingSource {
+				if err := s.moveLegacyMigration(ctx, tx, &state, LegacyReconciling); err != nil {
+					return err
+				}
+			}
+			if err := s.stageLegacyRecovery(ctx, tx, owner, updated, migration); err != nil {
+				return err
+			}
+			if migration.releaseVideos && state.Phase == LegacyReconciling {
+				if err := s.moveLegacyMigration(ctx, tx, &state, LegacyFinalizing); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	updated[ConfigRevisionKey] = next
 	raw, err := json.Marshal(updated)
 	if err != nil {
@@ -493,8 +666,7 @@ func nullableRunString(value string) any {
 }
 
 func (s *MySQLStore) PutBody(ctx context.Context, owner string, body BodyRecord) (BodyRef, error) {
-	bookID := strings.TrimSpace(body.BookID)
-	versionID := strings.TrimSpace(body.VersionID)
+	bookID, versionID := strings.TrimSpace(body.BookID), strings.TrimSpace(body.VersionID)
 	if bookID == "" {
 		return BodyRef{}, errors.New("book id is required")
 	}
@@ -509,34 +681,23 @@ func (s *MySQLStore) PutBody(ctx context.Context, owner string, body BodyRecord)
 	if err != nil {
 		return BodyRef{}, err
 	}
-	objectKey := ""
+	encoding := "gzip"
 	if s.ObjectBodies != nil {
-		objectKey = BodyObjectKey(owner, bookID, versionID)
-		if err := s.ObjectBodies.PutContent(ctx, objectKey, body.Content); err != nil {
+		key, err := newBodyObjectKey(owner, bookID, versionID)
+		if err != nil {
+			return BodyRef{}, err
+		}
+		if err := s.ObjectBodies.PutContent(ctx, key, body.Content); err != nil {
 			return BodyRef{}, fmt.Errorf("store novel fetch body in TOS: %w", err)
 		}
-		blob = []byte(objectKey)
+		encoding, blob = "tos", []byte(key)
 	}
-	query := `INSERT INTO novel_fetch_workshop_bodies(owner_username,book_id,version_id,revision,content_encoding,content_blob,content_hash,char_count,state,created_at,updated_at,last_needed_at,releasable_at,expires_at) VALUES(?,?,?,1,'gzip',?,?,?,?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),NULL,NULL) ON DUPLICATE KEY UPDATE revision=revision+1, content_encoding=VALUES(content_encoding), content_blob=VALUES(content_blob), content_hash=VALUES(content_hash), char_count=VALUES(char_count), state=VALUES(state), updated_at=CURRENT_TIMESTAMP(6), last_needed_at=CURRENT_TIMESTAMP(6), releasable_at=NULL, expires_at=NULL`
-	if objectKey != "" {
-		query = strings.Replace(query, "'gzip'", "'tos'", 1)
+	ref, err := s.switchBodyReference(ctx, owner, bookID, versionID, encoding, blob, hash, charCount, state)
+	if err != nil && encoding == "tos" {
+		// An ambiguous commit must never trigger object deletion.
+		log.Printf("novel fetch body reference not confirmed; uploaded object retained id=%x", sha256.Sum256(blob))
 	}
-	_, err = s.DB.ExecContext(ctx, query, owner, bookID, versionID, blob, hash, charCount, state)
-	if err != nil {
-		if objectKey != "" {
-			_ = s.ObjectBodies.DeleteContent(ctx, objectKey)
-		}
-		return BodyRef{}, err
-	}
-
-	ref := BodyRef{VersionID: versionID}
-	var updated time.Time
-	err = s.DB.QueryRowContext(ctx, `SELECT revision, content_hash, char_count, state, updated_at FROM novel_fetch_workshop_bodies WHERE owner_username=? AND book_id=? AND version_id=?`, owner, bookID, versionID).Scan(&ref.Revision, &ref.ContentHash, &ref.CharCount, &ref.State, &updated)
-	if err != nil {
-		return BodyRef{}, err
-	}
-	ref.UpdatedAt = updated.UTC().Format(time.RFC3339Nano)
-	return ref, nil
+	return ref, err
 }
 
 func (s *MySQLStore) GetBody(ctx context.Context, owner, bookID, versionID string) (BodyRecord, error) {
@@ -595,28 +756,23 @@ func (s *MySQLStore) ListBodyRefs(ctx context.Context, owner, bookID string) ([]
 }
 
 func (s *MySQLStore) DeleteBody(ctx context.Context, owner, bookID, versionID string) (bool, error) {
-	bookID = strings.TrimSpace(bookID)
-	versionID = strings.TrimSpace(versionID)
-	if s.ObjectBodies != nil {
-		var encoding string
-		var blob []byte
-		err := s.DB.QueryRowContext(ctx, `SELECT content_encoding, content_blob FROM novel_fetch_workshop_bodies WHERE owner_username=? AND book_id=? AND version_id=?`, owner, bookID, versionID).Scan(&encoding, &blob)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return false, err
-		}
-		if encoding == "tos" {
-			if err := s.ObjectBodies.DeleteContent(ctx, string(blob)); err != nil {
-				return false, err
-			}
-		}
-	}
-	result, err := s.DB.ExecContext(ctx, `DELETE FROM novel_fetch_workshop_bodies WHERE owner_username=? AND book_id=? AND version_id=?`, owner, bookID, versionID)
+	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
-	rows, err := result.RowsAffected()
+	defer tx.Rollback()
+	candidate, err := lockBody(ctx, tx, owner, strings.TrimSpace(bookID), strings.TrimSpace(versionID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
-	return rows > 0, nil
+	if err := removeBody(ctx, tx, candidate, time.Now().UTC()); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }

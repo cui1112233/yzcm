@@ -22,7 +22,6 @@ func (s *MySQLStore) SaveScreenplay(ctx context.Context, doc Document, shots []S
 	if doc.ProjectID == "" || doc.OwnerUsername == "" {
 		return Document{}, fmt.Errorf("%w: 项目与 owner 不能为空", ErrInvalidArgument)
 	}
-	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Document{}, err
@@ -38,6 +37,19 @@ func (s *MySQLStore) SaveScreenplay(ctx context.Context, doc Document, shots []S
 	if err != nil {
 		return Document{}, err
 	}
+	saved, err := saveScreenplayInTx(ctx, tx, doc, shots, characters, scenes)
+	if err != nil {
+		return Document{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Document{}, err
+	}
+	return saved, nil
+}
+
+// The caller holds the project row lock until the entire publication commits.
+func saveScreenplayInTx(ctx context.Context, tx *sql.Tx, doc Document, shots []Shot, characters []Character, scenes []Scene) (Document, error) {
+	now := time.Now().UTC()
 	var maxVersion int
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM screenplay_documents WHERE project_id = ? AND owner_username = ?`,
 		doc.ProjectID, doc.OwnerUsername).Scan(&maxVersion); err != nil {
@@ -106,9 +118,6 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			scene.ImagePrompt, scene.ReferenceImage, scene.SortOrder, now, now); err != nil {
 			return Document{}, err
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return Document{}, err
 	}
 	return doc, nil
 }

@@ -17,7 +17,7 @@ import { AgentWorkspaceDrawer } from '../components/AgentWorkspaceDrawer';
 import { AgentWorkspaceHeader } from '../components/AgentWorkspaceHeader';
 import { AuthenticatedAgentImage } from '../components/AuthenticatedAgentImage';
 import { AuthenticatedAgentVideo } from '../components/AuthenticatedAgentVideo';
-import { buildSelectedNodeContext, createCanvasSaveQueue, mergePendingCanvas, shouldAcceptCanvasRefresh, shouldKeepPendingCreatedTask } from './agent-canvas-state';
+import { buildSelectedNodeContext, createCanvasSaveQueue, mergePendingCanvas, normalizeCanvasCollections, shouldAcceptCanvasRefresh, shouldKeepPendingCreatedTask } from './agent-canvas-state';
 import { clearCanvasDraft, isDraftAtLeastAsFresh, loadCanvasDraft, saveCanvasDraft } from './agent-canvas-draft-storage';
 import { detectDirectorMode } from './agent-director-mode';
 import { buildStoryboardAssetContext, patchStoryboardNodeConfig } from './agent-storyboard-model';
@@ -186,8 +186,9 @@ export function AgentPageV2({ theme = 'dark' }) {
   const composerMenuId = 'agent-composer-menu';
 
   function replaceCanvas(nextCanvas) {
-    canvasStateRef.current = nextCanvas;
-    setCanvas(nextCanvas);
+    const safeCanvas = normalizeCanvasCollections(nextCanvas);
+    canvasStateRef.current = safeCanvas;
+    setCanvas(safeCanvas);
   }
 
   function persistCanvasDraft(nextCanvas, taskId = activeTaskIdRef.current) {
@@ -752,7 +753,7 @@ export function AgentPageV2({ theme = 'dark' }) {
       .then(([canvasLoad, executionResult]) => {
         if (cancelled) return;
         const canvasResult = canvasLoad.result;
-        const loadedCanvas = canvasResult.canvas || { version: 1, revision: 0, nodes: [], edges: [] };
+        const loadedCanvas = normalizeCanvasCollections(canvasResult.canvas);
         const loadedViewState = normalizeWorkspaceView(loadedCanvas.viewState);
         const queryView = new URLSearchParams(window.location.search).get('view');
         const nextViewState = queryView

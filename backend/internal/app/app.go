@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/agentproxy"
 	"qiantie/backend/internal/agentworkspace"
 	"qiantie/backend/internal/aicut"
@@ -40,11 +40,12 @@ import (
 	"qiantie/backend/internal/prompt"
 	novelprompt "qiantie/backend/internal/prompt/novelcreation"
 	"qiantie/backend/internal/safehttp"
-	"qiantie/backend/internal/safepath"
 	"qiantie/backend/internal/screenplay"
+	"qiantie/backend/internal/scripteditor"
 	"qiantie/backend/internal/storage"
 	"qiantie/backend/internal/upscale"
 	"qiantie/backend/internal/videomanagementconnector"
+	"qiantie/backend/internal/yzcmmodels"
 	"qiantie/backend/internal/yzcmusage"
 )
 
@@ -57,14 +58,23 @@ import (
 var novelFetchClassificationTimeout = 60 * time.Second
 
 type novelFetchRewriteAdapter struct {
-	provider *batchfactoryv11.OpenAICompatibleProvider
+	provider batchfactoryv11.DirectorProvider
 }
 
 func (a novelFetchRewriteAdapter) ModelIdentity() string {
-	if a.provider == nil {
+	if novelFetchTextProviderMissing(a.provider) {
 		return ""
 	}
-	return strings.TrimSpace(a.provider.Model)
+	if configured, ok := a.provider.(*batchfactoryv11.OpenAICompatibleProvider); ok {
+		if model := strings.TrimSpace(configured.TextModelMetadata().ActualModel); model != "" {
+			return model
+		}
+		return strings.TrimSpace(configured.Model)
+	}
+	if configured, ok := a.provider.(batchfactoryv11.TextModelMetadataProvider); ok {
+		return strings.TrimSpace(configured.TextModelMetadata().ActualModel)
+	}
+	return ""
 }
 
 type ownerTextProvider struct {
@@ -99,7 +109,7 @@ func (p ownerTextProvider) Complete(ctx context.Context, request batchfactoryv11
 }
 
 func (a novelFetchRewriteAdapter) Complete(ctx context.Context, request novelfetchworkshop.RewriteRequest) (string, error) {
-	callCtx, cancel := context.WithTimeout(ctx, novelFetchClassificationTimeout)
+	callCtx, cancel := context.WithTimeout(batchfactoryv11.WithSingleAttempt(ctx), novelFetchClassificationTimeout)
 	defer cancel()
 	return a.provider.Complete(callCtx, batchfactoryv11.TextCompletionRequest{
 		SystemPrompt:        request.SystemPrompt,
@@ -136,6 +146,9 @@ func configuredTextProvider(settings map[string]any, selected string) (*batchfac
 		if selected != "" && id != selected && modelID != selected {
 			continue
 		}
+		if model["credentialStatus"] == "needs_reentry" || novelfetchworkshop.ModelConfigText(model, "credential") == "" {
+			return nil, errors.New("文本模型需要在 API 配置中重新填写 Key")
+		}
 		endpoint := strings.TrimRight(strings.TrimSpace(fmt.Sprint(model["baseUrl"])), "/")
 		if !strings.HasSuffix(endpoint, "/chat/completions") {
 			endpoint += "/chat/completions"
@@ -143,7 +156,7 @@ func configuredTextProvider(settings map[string]any, selected string) (*batchfac
 		provider := &batchfactoryv11.OpenAICompatibleProvider{
 			Metadata: batchfactoryv11.NewTextModelMetadata(modelID, id, endpoint, model),
 			Endpoint: endpoint,
-			APIKey:   strings.TrimSpace(fmt.Sprint(model["credential"])),
+			APIKey:   novelfetchworkshop.ModelConfigText(model, "credential"),
 			Model:    modelID,
 		}
 		if err := provider.Validate(); err != nil {
@@ -193,12 +206,22 @@ func firstConfiguredString(settings map[string]any, keys ...string) string {
 	return ""
 }
 
-func textGenderJudge(provider *batchfactoryv11.OpenAICompatibleProvider) novelfetchworkshop.AIGenderJudge {
-	if provider == nil {
+func loadSubjectModelConfig(ctx context.Context, accounts accountcenter.Store, catalog novelfetchworkshop.Store, subject string) (map[string]any, error) {
+	owner, err := httpapi.ResolveAPIConfigOwner(ctx, accounts, subject)
+	if err != nil {
+		return nil, err
+	}
+	return novelfetchworkshop.ReadRuntimeConfig(ctx, catalog, owner)
+}
+
+func textGenderJudge(provider batchfactoryv11.DirectorProvider) novelfetchworkshop.AIGenderJudge {
+	if novelFetchTextProviderMissing(provider) {
 		return nil
 	}
 	return func(ctx context.Context, info novelfetchworkshop.BookInfo) (string, error) {
-		return provider.Complete(ctx, batchfactoryv11.TextCompletionRequest{
+		callCtx, cancel := context.WithTimeout(batchfactoryv11.WithSingleAttempt(ctx), novelFetchClassificationTimeout)
+		defer cancel()
+		return provider.Complete(callCtx, batchfactoryv11.TextCompletionRequest{
 			SystemPrompt:        "你是小说男女频分类助手。只输出 JSON：{\"gender\":\"男频或女频\"}。必须从「男频」「女频」中选择最接近的一项，不要留空，不要输出 JSON 以外的内容。",
 			UserPrompt:          "请根据以下分类信息和正文片段判断小说男女频：分类=" + info.Category + "；题材=" + info.Genre + "；正文片段=" + genderTextExcerpt(info.Text),
 			Temperature:         0,
@@ -224,6 +247,20 @@ func selectGiantMaterialResolver(cfg config.Config) httpapi.GiantMaterialResolve
 	return giantmaterialresolver.NewClient(nil, cfg.QingyuMaterialSelectURL, cfg.QingyuN8AdminToken)
 }
 
+func prepareAccountCenter(ctx context.Context, db *sql.DB, authStore *auth.MySQLStore, cfg config.Config) (*accountcenter.MySQLStore, error) {
+	if err := auth.ImportLegacyAccountsOnce(ctx, authStore, cfg.LegacyAccountsPath); err != nil {
+		return nil, err
+	}
+	store := accountcenter.NewMySQLStore(db)
+	if err := store.ImportLegacy(ctx, cfg.MemberSystemDir); err != nil {
+		return nil, fmt.Errorf("import legacy account center: %w", err)
+	}
+	if err := store.ReserveLegacyNames(ctx, cfg.MemberSystemDir); err != nil {
+		return nil, fmt.Errorf("reserve historical account names: %w", err)
+	}
+	return store, nil
+}
+
 func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*http.ServeMux)) (http.Handler, error) {
 	if err := db.PingContext(ctx); err != nil {
 		return nil, err
@@ -244,15 +281,30 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	}
 	store := batchfactoryv11.NewReadbackMySQLStore(db)
 	authStore := auth.NewMySQLStore(db)
-	if err := auth.ImportLegacyAccountsOnce(ctx, authStore, cfg.LegacyAccountsPath); err != nil {
+	accountCenterStore, err := prepareAccountCenter(ctx, db, authStore, cfg)
+	if err != nil {
 		return nil, err
 	}
 	novelFetchStore := novelfetchworkshop.NewMySQLStore(db)
+	userConfigStore := httpapi.NewUserConfigStore(cfg.ScriptHistoryDir)
+	userConfigStore.UseLegacySettingJournal(novelFetchStore)
+	novelFetchStore.ModelSecrets = userConfigStore.ModelConfigSecrets()
 	agentWorkspaceStore := agentworkspace.NewMySQLStore(db)
 	agentProxyStore := agentproxy.NewMySQLStore(db)
 	aiCutStore := aicut.NewMySQLStore(db)
 	aiCutTimelines := aicut.NewMySQLTimelineCollectionStore(db, aiCutStore)
 	screenplayStore := screenplay.NewMySQLStore(db)
+	scriptEditorService := scripteditor.NewService(scripteditor.NewMySQLStore(db))
+	scriptEditorService.ComicStore = screenplayStore
+	scriptEditorService.ComicAuthoring = screenplayStore.AuthoringRepository()
+	scriptEditorService.AgentWorkspace = agentWorkspaceStore
+	if strings.TrimSpace(cfg.RedisURL) != "" {
+		if redisTransport, redisErr := mergeworker.NewRedisStore(cfg.RedisURL, "qiantie:script-editor"); redisErr == nil {
+			scriptEditorService.JobQueue = scripteditor.NewRedisJobQueue(redisTransport)
+		} else {
+			log.Printf("script editor redis queue unavailable, MySQL recovery scan remains active: %v", redisErr)
+		}
+	}
 	novelCreationStore := novelcreation.NewMySQLStore(db)
 	agentAssetStore := agentworkspace.NewMySQLAssetStore(db)
 	var agentAssetObjects agentworkspace.AssetObjectStore
@@ -261,6 +313,12 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 		legacyAgentAssetObjects = agentworkspace.NewLocalAssetObjectStore(cfg.AgentAssetLocalDir)
 	}
 	novelFetchStore.LegacyConfigDir = cfg.ScriptHistoryDir
+	novelFetchStore.LegacyConfigLocker = userConfigStore.LegacyModelFileLocker()
+	cleanupCtx, cancelCleanup := context.WithTimeout(ctx, 5*time.Second)
+	if err := novelFetchStore.ResumeLegacyModelCleanup(cleanupCtx); err != nil {
+		log.Printf("legacy model credential cleanup remains pending: %v", err)
+	}
+	cancelCleanup()
 	if cfg.NovelFetchTOSEndpoint != "" || cfg.NovelFetchTOSRegion != "" || cfg.NovelFetchTOSBucket != "" || cfg.NovelFetchTOSAccessKey != "" || cfg.NovelFetchTOSSecretKey != "" {
 		bodyStore, bodyStoreErr := novelfetchworkshop.NewBodyTOSStore(novelfetchworkshop.BodyTOSConfig{Endpoint: cfg.NovelFetchTOSEndpoint, Region: cfg.NovelFetchTOSRegion, Bucket: cfg.NovelFetchTOSBucket, AccessKey: cfg.NovelFetchTOSAccessKey, SecretKey: cfg.NovelFetchTOSSecretKey})
 		if bodyStoreErr != nil {
@@ -310,39 +368,18 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 		}
 		novelFetchRewrite = novelFetchRewriteAdapter{provider: textProvider}
 	}
-	var userConfigStore *httpapi.UserConfigStore
 	resolveCatalogTextProviderWithSelection := func(ctx context.Context, owner, selection string) (*batchfactoryv11.OpenAICompatibleProvider, error) {
-		settings, err := novelFetchStore.GetConfig(ctx, owner)
+		owner, err := httpapi.ResolveAPIConfigOwner(ctx, accountCenterStore, owner)
+		if err != nil {
+			return nil, err
+		}
+		settings, err := novelfetchworkshop.ReadRuntimeConfig(ctx, novelFetchStore, owner)
 		if err != nil {
 			return nil, err
 		}
 		provider, providerErr := resolveNovelFetchTextProvider(settings, selection)
 		if providerErr != nil {
 			return nil, providerErr
-		}
-		// Keep the Go runtime aligned with the visible API Config page even
-		// when MySQL contains an older redacted/empty catalog row. The legacy
-		// file is local runtime configuration, not a second request path.
-		// Explicit per-task selections must never be swapped for the legacy
-		// account model: a bad selection has to fail visibly instead.
-		if provider == nil && strings.TrimSpace(selection) == "" && strings.TrimSpace(cfg.ScriptHistoryDir) != "" {
-			legacyPath, pathErr := safepath.UserPath(cfg.ScriptHistoryDir, owner, "api-config.json")
-			if pathErr != nil {
-				return nil, pathErr
-			}
-			raw, readErr := os.ReadFile(legacyPath)
-			if readErr == nil {
-				var legacy map[string]any
-				if json.Unmarshal(raw, &legacy) == nil {
-					if catalog, ok := legacy["modelCatalog"]; ok {
-						settings["modelCatalog"] = catalog
-					}
-					provider, providerErr = resolveNovelFetchTextProvider(settings, "")
-					if providerErr != nil {
-						return nil, providerErr
-					}
-				}
-			}
 		}
 		if provider != nil {
 			provider.UsageOwner = owner
@@ -384,8 +421,10 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	memberProfiles := httpapi.NewMemberProfileStore(cfg.MemberSystemDir)
 	memberProfiles.UsageReader = usageStore.ReadSummary
 	memberProfiles.TeamTokenReader = usageStore.TeamMonthTokens
-	novelCreationService := novelcreation.NewService(novelCreationStore, novelCreationRuntime, novelcreation.NewPipeline(novelcreation.ProviderResolver(httpapi.NovelCreationTextResolver(authStore, memberProfiles, textProviderForModel))))
+	novelCreationService := novelcreation.NewService(novelCreationStore, novelCreationRuntime, novelcreation.NewPipeline(novelcreation.ProviderResolver(httpapi.NovelCreationTextResolver(accountCenterStore, textProviderForModel))))
 	novelCreationService.ConfigureSystemPrompts(prompt.NewCatalog(cfg.PresetPath))
+	novelCreationService.ConfigureCoverGenerator(httpapi.NewNovelCoverGenerator(store, novelFetchStore, accountCenterStore))
+	novelCreationService.ConfigurePlayText(httpapi.NewNovelPlayText(novelcreation.ProviderResolver(httpapi.NovelCreationTextResolver(accountCenterStore, textProviderForModel))))
 	if cfg.AgentAssetTOSBucket != "" {
 		documentObjects, documentErr := novelcreation.NewTOSDocumentStore(novelcreation.DocumentTOSConfig{Endpoint: cfg.AgentAssetTOSEndpoint, Region: cfg.AgentAssetTOSRegion, Bucket: cfg.AgentAssetTOSBucket, AccessKey: cfg.AgentAssetTOSAccessKey, SecretKey: cfg.AgentAssetTOSSecretKey})
 		if documentErr != nil {
@@ -396,7 +435,7 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	novelCreationRunStarter := novelCreationService.Notify
 	novelStartup := &novelCreationStartup{service: novelCreationService}
 	novelFetchRewriteResolver = func(ctx context.Context, owner string) (novelfetchworkshop.RewriteProvider, error) {
-		provider, providerErr := resolveCatalogTextProviderWithSelection(ctx, owner, novelfetchworkshop.ProcessTextModel(ctx))
+		provider, providerErr := resolveNovelFetchProcessTextProvider(ctx, accountCenterStore, owner, novelfetchworkshop.ProcessTextModel(ctx), textProviderForModel, resolveCatalogTextProviderWithSelection)
 		if providerErr != nil {
 			return nil, providerErr
 		}
@@ -406,7 +445,7 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 		return novelFetchRewrite, nil
 	}
 	novelFetchAIGenderJudgeResolver = func(ctx context.Context, owner string) (novelfetchworkshop.AIGenderJudge, error) {
-		provider, providerErr := resolveCatalogTextProviderWithSelection(ctx, owner, novelfetchworkshop.ProcessTextModel(ctx))
+		provider, providerErr := resolveNovelFetchProcessTextProvider(ctx, accountCenterStore, owner, novelfetchworkshop.ProcessTextModel(ctx), textProviderForModel, resolveCatalogTextProviderWithSelection)
 		if providerErr != nil {
 			return nil, providerErr
 		}
@@ -424,11 +463,7 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 		novelFetchQueue = novelfetchworkshop.NewRedisQueueWithDo("qiantie:novel-fetch", novelfetchworkshop.RedisDoFunc(redisTransport.Do))
 	}
 	compiler := &batchfactoryv11.PromptCompilerService{Store: store}
-	// Explicit video provider settings are persisted in the owner config document
-	// so a restart keeps the last saved provider; catalog-driven sync stays in
-	// memory because the model catalog is already durable.
-	videoRegistry := batchfactoryv11.NewPersistentVideoProviderRegistry(novelFetchStore)
-	videoRegistry.Warm(ctx)
+	videoRegistry := httpapi.NewCatalogVideoProviderRegistry(accountCenterStore, novelFetchStore)
 	localExecutorService := localexecutor.NewService(localexecutor.NewMySQLStore(db), nil)
 	giantMaterialExecutorService := giantmaterialexecutor.NewService(giantmaterialexecutor.NewMySQLStore(db), nil)
 	if _, err := giantMaterialExecutorService.ConsolidateExecutors(ctx); err != nil {
@@ -451,12 +486,21 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	}
 	imageCapacityController := imagecapacity.NewController(imageCapacityPolicies, imageCapacityRedis, "qiantie:imagecapacity")
 	usageTracker := &yzcmusage.Tracker{Store: usageStore, Client: yzcmusage.Client{HTTP: safehttp.NewClientWithTimeout(12 * time.Second)}, ReceiptDir: filepath.Join(cfg.MemberSystemDir, "usage-receipts")}
+	if err := usageTracker.InitializeReceiptStorage(ctx); err != nil {
+		log.Printf("YZCM usage: receipt storage unavailable at startup: %v", err)
+	}
 	safehttp.SetManagedOutboundDecorator(func(base http.RoundTripper, timeout time.Duration) http.RoundTripper {
 		return imageCapacityController.WrapTransportWithTimeout(usageTracker.Wrap(base), timeout)
 	})
 	imagecapacity.SetEnabled(true)
-	userConfigStore = httpapi.NewUserConfigStore(cfg.ScriptHistoryDir)
-	usageTracker.ResolveCredential = httpapi.YZCMUsageCredentialResolver(userConfigStore, memberProfiles, authStore, novelFetchStore.GetConfig)
+	usageCredential := httpapi.YZCMUsageCredentialResolver(userConfigStore, novelFetchStore.GetConfig)
+	usageTracker.ResolveCredential = func(ctx context.Context, subject, fingerprint string) (string, error) {
+		owner, err := httpapi.ResolveAPIConfigOwner(ctx, accountCenterStore, subject)
+		if err != nil {
+			return "", err
+		}
+		return usageCredential(ctx, owner, fingerprint)
+	}
 
 	var aiCutASRService *aicut.ASRService
 	if strings.TrimSpace(cfg.RedisURL) != "" && agentAssetObjects != nil {
@@ -473,7 +517,7 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 				return agentAssetObjects.Open(ctx, agentworkspace.Asset{ID: asset.ID, ProjectID: asset.ProjectID, Kind: asset.Kind, Name: asset.Name, ContentType: asset.ContentType, ObjectKey: asset.ObjectKey, ByteSize: asset.ByteSize, CreatedAt: asset.CreatedAt})
 			},
 			ResolveProvider: func(ctx context.Context, owner, modelID string) (aicut.ASRProvider, error) {
-				settings, err := novelFetchStore.GetConfig(ctx, owner)
+				settings, err := loadSubjectModelConfig(ctx, accountCenterStore, novelFetchStore, owner)
 				if err != nil {
 					return nil, err
 				}
@@ -504,7 +548,7 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 			return httpapi.RunAICutAnalyzeSilence(ctx, aiCutStore, agentAssetObjects, owner, projectID, assetID, options)
 		},
 		ListASRModels: func(ctx context.Context, owner string) ([]aicut.AgentASRModel, error) {
-			settings, err := novelFetchStore.GetConfig(ctx, owner)
+			settings, err := loadSubjectModelConfig(ctx, accountCenterStore, novelFetchStore, owner)
 			if err != nil {
 				return nil, err
 			}
@@ -777,7 +821,8 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	n8ProducerDirectory := n8catalog.NewClient(nil, cfg.N8AdminBaseURL, cfg.QingyuN8AdminToken)
 	n8ComicWorks := n8catalog.NewWorksClientWithPath(nil, cfg.N8ComicBaseURL, cfg.QingyuN8AdminToken, os.Getenv("QIANTIE_N8_WORKS_PATH"))
 	upscaleService := upscale.NewService(upscale.NewClient(cfg.VolcanoMediaKitBaseURL, cfg.VolcanoMediaKitAPIKey), time.Now)
-	router := httpapi.NewRouter(httpapi.RouterOptions{AgentVideoWorkerContext: context.Background(), AgentScriptSplitWorkerContext: context.Background(), AgentImageWorkerContext: context.Background(), AgentAudioWorkerContext: context.Background(), BridgeSecret: cfg.BridgeSecret, ReleaseSHA: cfg.ReleaseSHA, RuntimeManifestPath: os.Getenv("QIANTIE_RUNTIME_MANIFEST_PATH"), Health: databaseHealth(db), AuthRateLimits: httpapi.AuthRateLimitConfig{LoginWindow: cfg.AuthRateLimitLoginWindow, LoginMaxFailures: cfg.AuthRateLimitLoginMaxFailures, LoginLockout: cfg.AuthRateLimitLoginLockout, RegisterWindow: cfg.AuthRateLimitRegisterWindow, RegisterMax: cfg.AuthRateLimitRegisterMax, RegisterLockout: cfg.AuthRateLimitRegisterLockout, PasswordResetWindow: cfg.AuthRateLimitPasswordResetWindow, PasswordResetMax: cfg.AuthRateLimitPasswordResetMax, PasswordResetLockout: cfg.AuthRateLimitPasswordResetLockout}, Users: &storage.BridgeUsers{DB: db}, AuthStore: authStore, SessionResolver: nil, Slice: cfg.Slice, Store: store, TextRepository: batchfactorytext.NewMySQLRepository(db), Director: director, Compiler: compiler, Production: production, Merge: merge, MergeOutput: mergeOutput, External: externalPublish, NovelFetchStore: novelFetchStore, NovelFetchQueue: novelFetchQueue, NovelFetchAIGenderJudge: novelFetchAIGenderJudge, NovelFetchAIGenderJudgeResolver: novelFetchAIGenderJudgeResolver, NovelFetchFetcher: &novelfetchworkshop.UpstreamFetcher{Endpoint: cfg.NovelFetch121Endpoint, Client: safehttp.NewClientWithTimeout(cfg.NovelFetch121Timeout)}, NovelFetchRewrite: novelFetchRewrite, NovelFetchRewriteResolver: novelFetchRewriteResolver, LocalExecutors: localExecutorService, GiantMaterialExecutor: giantMaterialExecutorService, GiantMaterialResolver: giantMaterialResolver, LocalArtifacts: artifactStore, ImageGenerationCache: imageGenerationCache, LocalExecutorDownloadsDir: cfg.LocalExecutorDownloadsDir, PresetCatalog: prompt.NewCatalog(cfg.PresetPath), AutomationPresetStore: automationPresetStore, AutomationStatusReader: httpapi.NewFileAutomationStatusReader(cfg.AutomationStatePath), AutomationStateStore: automationStateStore, BatchExecutionService: executionService, PersonalPromptStore: prompt.NewPersonalStore(cfg.PersonalPromptPath), ScriptHistoryStore: httpapi.NewScriptHistoryStore(cfg.ScriptHistoryDir), MemberProfileStore: memberProfiles, MemberAvatarDir: cfg.MemberAvatarDir, UserDataDir: cfg.ScriptHistoryDir, UserConfigStore: userConfigStore, TextProvider: effectiveTextProvider, TextProviderResolver: textProviderForModel, AgentWorkspace: agentWorkspaceStore, AgentProxy: agentProxyStore, AICut: aiCutStore, AICutPersonalTemplates: aicut.NewMySQLPersonalTemplateStore(db), AICutTimelines: aiCutTimelines, Screenplay: screenplayStore, NovelCreation: novelCreationService, ProjectRetention: projectRetention, NovelCreationRunStarter: novelCreationRunStarter, AICutASR: aiCutASRService, AICutExport: aiCutExportService, AICutAgentStore: aiCutStore, AICutAgentStarter: aiCutAgentStarter, Upscale: upscaleService, AgentAssets: agentAssetStore, AgentAssetObjects: agentAssetObjects, RedisURL: cfg.RedisURL, ImageCapacity: imageCapacityController, RegisterV11: register, VideoManagementConnector: &videomanagementconnector.TargetHTTPService{BaseURL: targetBaseURL}, N8ComicPublisher: &httpapi.BatchFactoryN8ComicPublisher{Store: store, LocalFiles: artifactStore, Client: n8ComicClient, ProducerDirectory: n8ProducerDirectory, WorksDirectory: n8ComicWorks, ProducerAccounts: cfg.N8ComicProducerAccounts, WorkTitleMapPath: os.Getenv("QIANTIE_N8_WORK_TITLE_MAP_PATH")}, ComicDirectRecordPath: comicDirectRecordPath(cfg)})
+	router := httpapi.NewRouter(httpapi.RouterOptions{AgentVideoWorkerContext: context.Background(), AgentScriptSplitWorkerContext: context.Background(), AgentImageWorkerContext: context.Background(), AgentAudioWorkerContext: context.Background(), BridgeSecret: cfg.BridgeSecret, ReleaseSHA: cfg.ReleaseSHA, RuntimeManifestPath: os.Getenv("QIANTIE_RUNTIME_MANIFEST_PATH"), Health: databaseHealth(db), AuthRateLimits: httpapi.AuthRateLimitConfig{LoginWindow: cfg.AuthRateLimitLoginWindow, LoginMaxFailures: cfg.AuthRateLimitLoginMaxFailures, LoginLockout: cfg.AuthRateLimitLoginLockout, RegisterWindow: cfg.AuthRateLimitRegisterWindow, RegisterMax: cfg.AuthRateLimitRegisterMax, RegisterLockout: cfg.AuthRateLimitRegisterLockout, PasswordResetWindow: cfg.AuthRateLimitPasswordResetWindow, PasswordResetMax: cfg.AuthRateLimitPasswordResetMax, PasswordResetLockout: cfg.AuthRateLimitPasswordResetLockout}, Users: &storage.BridgeUsers{DB: db}, AuthStore: authStore, AccountCenterStore: accountCenterStore, YZCMModelCatalog: &yzcmmodels.Store{DB: db}, SessionResolver: nil, Slice: cfg.Slice, Store: store, TextRepository: batchfactorytext.NewMySQLRepository(db), Director: director, Compiler: compiler, Production: production, Merge: merge, MergeOutput: mergeOutput, External: externalPublish, NovelFetchStore: novelFetchStore, NovelFetchQueue: novelFetchQueue, NovelFetchAIGenderJudge: novelFetchAIGenderJudge, NovelFetchAIGenderJudgeResolver: novelFetchAIGenderJudgeResolver, NovelFetchFetcher: &novelfetchworkshop.UpstreamFetcher{Endpoint: cfg.NovelFetch121Endpoint, Client: safehttp.NewClientWithTimeout(cfg.NovelFetch121Timeout)}, NovelFetchRewrite: novelFetchRewrite, NovelFetchRewriteResolver: novelFetchRewriteResolver, LocalExecutors: localExecutorService, GiantMaterialExecutor: giantMaterialExecutorService, GiantMaterialResolver: giantMaterialResolver, LocalArtifacts: artifactStore, ImageGenerationCache: imageGenerationCache, LocalExecutorDownloadsDir: cfg.LocalExecutorDownloadsDir, PresetCatalog: prompt.NewCatalog(cfg.PresetPath), AutomationPresetStore: automationPresetStore, AutomationStatusReader: httpapi.NewFileAutomationStatusReader(cfg.AutomationStatePath), AutomationStateStore: automationStateStore, BatchExecutionService: executionService, PersonalPromptStore: prompt.NewPersonalStore(cfg.PersonalPromptPath), ScriptHistoryStore: httpapi.NewScriptHistoryStore(cfg.ScriptHistoryDir), MemberProfileStore: memberProfiles, MemberAvatarDir: cfg.MemberAvatarDir, UserDataDir: cfg.ScriptHistoryDir, UserConfigStore: userConfigStore, TextProvider: effectiveTextProvider, TextProviderResolver: textProviderForModel, AgentWorkspace: agentWorkspaceStore, AgentProxy: agentProxyStore, AICut: aiCutStore, AICutPersonalTemplates: aicut.NewMySQLPersonalTemplateStore(db), AICutTimelines: aiCutTimelines, Screenplay: screenplayStore, ScriptEditor: scriptEditorService, NovelCreation: novelCreationService, ProjectRetention: projectRetention, NovelCreationRunStarter: novelCreationRunStarter, AICutASR: aiCutASRService, AICutExport: aiCutExportService, AICutAgentStore: aiCutStore, AICutAgentStarter: aiCutAgentStarter, Upscale: upscaleService, AgentAssets: agentAssetStore, AgentAssetObjects: agentAssetObjects, RedisURL: cfg.RedisURL, ImageCapacity: imageCapacityController, RegisterV11: register, VideoManagementConnector: &videomanagementconnector.TargetHTTPService{BaseURL: targetBaseURL}, N8ComicPublisher: &httpapi.BatchFactoryN8ComicPublisher{Store: store, LocalFiles: artifactStore, Client: n8ComicClient, ProducerDirectory: n8ProducerDirectory, WorksDirectory: n8ComicWorks, ProducerAccounts: cfg.N8ComicProducerAccounts, WorkTitleMapPath: os.Getenv("QIANTIE_N8_WORK_TITLE_MAP_PATH")}, ComicDirectRecordPath: comicDirectRecordPath(cfg)})
+	scripteditor.StartWorker(context.Background(), scriptEditorService, time.Second)
 	executionDispatcher := &batchfactoryexecution.Dispatcher{Repository: executionRepository, Handler: executionService.DispatchOutboxEvent, RetryDelay: time.Minute}
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
@@ -872,14 +917,21 @@ func startNovelFetchTaskCleanup(ctx context.Context, store *novelfetchworkshop.M
 // startNovelFetchBodyCleanup 定时兜底回收批量测书的过期正文。
 // 删除历史文档只把正文标记为 releasable，真正的 TOS 对象删除依赖这里。
 func startNovelFetchBodyCleanup(ctx context.Context, store *novelfetchworkshop.MySQLStore) {
+	startNovelFetchBodyCleanupWithTiming(ctx, store, time.Minute, 6*time.Hour)
+}
+
+func startNovelFetchBodyCleanupWithTiming(startupCtx context.Context, store *novelfetchworkshop.MySQLStore, initial, interval time.Duration) context.CancelFunc {
+	// Build uses a short startup deadline. Permanent maintenance must outlive
+	// it while retaining an explicit stop function for controlled shutdown/tests.
+	ctx, cancel := context.WithCancel(context.WithoutCancel(startupCtx))
 	if store == nil {
-		return
+		return cancel
 	}
 	const batchLimit = 500
 	const maxBatchesPerSweep = 20
 	go func() {
 		// 启动后尽快回收一次，避免服务重启把已过期正文又拖一天。
-		timer := time.NewTimer(time.Minute)
+		timer := time.NewTimer(initial)
 		defer timer.Stop()
 		for {
 			select {
@@ -901,8 +953,16 @@ func startNovelFetchBodyCleanup(ctx context.Context, store *novelfetchworkshop.M
 						break
 					}
 				}
-				timer.Reset(6 * time.Hour)
+				if strings.EqualFold(strings.TrimSpace(os.Getenv("NOVEL_FETCH_BODY_REAPER_DISABLED")), "true") == false {
+					if deleted, err := store.ReapRetiredBodyObjects(ctx, time.Now().UTC(), batchLimit); err != nil {
+						log.Printf("novel fetch retired object cleanup failed: %v", err)
+					} else if deleted > 0 {
+						log.Printf("novel fetch retired object cleanup deleted %d objects", deleted)
+					}
+				}
+				timer.Reset(interval)
 			}
 		}
 	}()
+	return cancel
 }

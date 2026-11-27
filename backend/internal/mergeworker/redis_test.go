@@ -31,6 +31,89 @@ func TestReadRESPArray(t *testing.T) {
 	}
 }
 
+func TestRedisClientMGETPreservesValuePositions(t *testing.T) {
+	for _, tc := range []struct {
+		name, reply string
+		want        []any
+	}{
+		{"all missing", "*3\r\n$-1\r\n$-1\r\n$-1\r\n", []any{nil, nil, nil}},
+		{"some missing", "*3\r\n$3\r\none\r\n$-1\r\n$5\r\nthree\r\n", []any{"one", nil, "three"}},
+		{"all present", "*3\r\n$3\r\none\r\n$3\r\ntwo\r\n$5\r\nthree\r\n", []any{"one", "two", "three"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := redisClientWithReply(t, tc.reply, false)
+			got, err := client.Do(context.Background(), "MGET", "one", "two", "three")
+			if err != nil || !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("MGET = %#v, %v, want %#v", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRedisClientKeepsCommandProtocolAndAuthenticationErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name, reply, want string
+		auth              bool
+	}{
+		{"command", "-ERR synthetic command failure\r\n", "redis error: ERR synthetic command failure", false},
+		{"protocol", "!unexpected\r\n", "unsupported redis response", false},
+		{"truncated array", "*2\r\n$-1\r\n", "redis response failed", false},
+		{"array element command error", "*2\r\n$-1\r\n-ERR synthetic element failure\r\n", "redis error: ERR synthetic element failure", false},
+		{"authentication", "-WRONGPASS synthetic authentication failure\r\n", "redis authentication failed", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := redisClientWithReply(t, tc.reply, tc.auth)
+			value, err := client.Do(context.Background(), "MGET", "one", "two")
+			if value != nil || err == nil || IsRedisNil(err) || err.Error() != tc.want {
+				t.Fatalf("MGET = %#v, %v, want %q", value, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRedisClientKeepsConnectionErrors(t *testing.T) {
+	client := redisClientWithReply(t, "+OK\r\n", false)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	value, err := client.Do(ctx, "MGET", "one")
+	if value != nil || err == nil || IsRedisNil(err) || err.Error() != "redis connection failed" {
+		t.Fatalf("MGET = %#v, %v, want connection error", value, err)
+	}
+}
+
+func redisClientWithReply(t *testing.T, reply string, auth bool) *RedisStore {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	address := listener.Addr().String()
+	wantCommand := "MGET"
+	if auth {
+		address = ":test-password@" + address
+		wantCommand = "AUTH"
+	}
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+		value, err := readRESP(bufio.NewReader(conn))
+		if args, ok := value.([]any); err != nil || !ok || len(args) == 0 || args[0] != wantCommand {
+			return
+		}
+		_, _ = io.WriteString(conn, reply)
+	}()
+	client, err := NewRedisStore("redis://"+address, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
+
 func TestRedisStoreCommandContract(t *testing.T) {
 	fake := &fakeRedisDo{}
 	store := &RedisStore{Prefix: "qiantie:test:merge", Do: fake.Do}

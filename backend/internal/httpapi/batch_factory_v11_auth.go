@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/auth"
 	"qiantie/backend/internal/yzcmusage"
 )
@@ -35,13 +36,14 @@ type BridgeUserResolver interface {
 }
 
 type BridgeAuth struct {
-	Secret          string
-	Now             func() time.Time
-	MaxSkew         time.Duration
-	Users           BridgeUserResolver
-	AuthStore       auth.Store
-	SessionResolver func(context.Context, string) (BridgeIdentity, error)
-	IdentityScope   func(context.Context, BridgeIdentity, string) (BridgeIdentity, error)
+	Secret             string
+	Now                func() time.Time
+	MaxSkew            time.Duration
+	Users              BridgeUserResolver
+	AuthStore          auth.Store
+	AccountCenterStore accountcenter.Store
+	SessionResolver    func(context.Context, string) (BridgeIdentity, error)
+	IdentityScope      func(context.Context, BridgeIdentity, string) (BridgeIdentity, error)
 }
 
 func canonicalBridgePayload(username, issuedAt, isOwner, method, pathname string) string {
@@ -64,6 +66,9 @@ func SignBridgeRequest(req *http.Request, username string, isOwner bool, issuedA
 }
 
 func (a BridgeAuth) authenticate(req *http.Request) (BridgeIdentity, error) {
+	if identity, ok := switchedBridgeIdentity(req); ok {
+		return identity, nil
+	}
 	if token := bearerToken(req); token != "" {
 		if a.AuthStore != nil {
 			now := time.Now
@@ -134,6 +139,10 @@ func (a BridgeAuth) authenticate(req *http.Request) (BridgeIdentity, error) {
 }
 
 func (a BridgeAuth) Middleware(next http.Handler) http.Handler {
+	return a.middleware(next, false)
+}
+
+func (a BridgeAuth) middleware(next http.Handler, requireAccountCenter bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		identity, err := a.authenticate(req)
 		if err != nil {
@@ -145,17 +154,43 @@ func (a BridgeAuth) Middleware(next http.Handler) http.Handler {
 			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 			return
 		}
-		if a.IdentityScope != nil {
+		actorUsername := identity.Username
+		if _, switched := switchedBridgeIdentity(req); switched {
+			account, _ := AccountCenterIdentityFromContext(req.Context())
+			actorUsername = account.Actor.Username
+		} else if a.IdentityScope != nil {
 			identity, err = a.IdentityScope(req.Context(), identity, req.Header.Get(HeaderNovelFetchAccount))
 			if err != nil {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 				return
 			}
+			if a.AccountCenterStore != nil && accountCenterBusinessWrite(req) &&
+				!strings.EqualFold(identity.Username, actorUsername) && !a.allowBusinessSubject(w, req, identity.Username) {
+				return
+			}
 		}
 		ctx := context.WithValue(req.Context(), bridgeIdentityKey{}, identity)
-		ctx = yzcmusage.WithIdentity(ctx, identity.Username, usageFeature(req.URL.Path))
+		if requireAccountCenter || a.AccountCenterStore != nil {
+			ctx, err = a.accountCenterContext(ctx, actorUsername)
+			if requireAccountCenter && err != nil {
+				writeAccountCenterForbidden(w)
+				return
+			}
+		}
+		ctx = withBridgeUsageAttribution(ctx, identity.Username, usageFeature(req.URL.Path))
 		next.ServeHTTP(w, req.WithContext(ctx))
 	})
+}
+
+func withBridgeUsageAttribution(ctx context.Context, owner, feature string) context.Context {
+	if account, ok := AccountCenterIdentityFromContext(ctx); ok {
+		teamID := ""
+		if strings.EqualFold(account.Subject.Username, owner) {
+			owner, teamID = account.Subject.Username, account.Subject.TeamID
+		}
+		ctx = yzcmusage.WithAttribution(ctx, owner, teamID, account.Actor.Username)
+	}
+	return yzcmusage.WithIdentity(ctx, owner, feature)
 }
 
 func BridgeIdentityFromContext(ctx context.Context) (BridgeIdentity, bool) {

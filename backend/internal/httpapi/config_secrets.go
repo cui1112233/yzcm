@@ -1,6 +1,9 @@
 package httpapi
 
 import (
+	"crypto/hmac"
+	"encoding/hex"
+	"encoding/json"
 	"log"
 	"os"
 	"path/filepath"
@@ -8,6 +11,7 @@ import (
 	"sync"
 
 	"qiantie/backend/internal/apisecrets"
+	"qiantie/backend/internal/novelfetchworkshop"
 )
 
 // configSecretProvider 是 UserConfigStore 的密钥加解密入口。
@@ -20,6 +24,211 @@ type configSecretProvider struct {
 	keyFile string
 	mu      sync.Mutex
 	warned  map[string]bool
+}
+
+func (p *configSecretProvider) encryptStrict(config map[string]any) error {
+	if CountPlaintextConfigSecrets(config) == 0 {
+		return nil
+	}
+	cipher, err := p.secrets.WriteCipher()
+	if err != nil {
+		return err
+	}
+	transformConfigSecrets(config, func(value string) string {
+		if err != nil || value == "" || apisecrets.IsEncrypted(value) {
+			return value
+		}
+		var sealed string
+		sealed, err = cipher.Encrypt(value)
+		return sealed
+	})
+	return err
+}
+
+func (s *UserConfigStore) ModelConfigSecrets() novelfetchworkshop.ModelConfigSecrets {
+	return s.secrets
+}
+
+func legacyConflictBinding(owner string, source novelfetchworkshop.LegacyConflictSource) []byte {
+	data, _ := json.Marshal([]any{"qiantie:v88:legacy-model-conflict:v1", strings.ToLower(owner), source})
+	return data
+}
+
+func (p *configSecretProvider) SealLegacyConflict(owner string, source novelfetchworkshop.LegacyConflictSource, key string) (string, string, error) {
+	cipher, err := p.secrets.WriteCipher()
+	if err != nil {
+		return "", "", err
+	}
+	binding := legacyConflictBinding(owner, source)
+	ciphertext, err := cipher.SealBound(key, binding)
+	return ciphertext, hex.EncodeToString(cipher.BoundFingerprint(key, binding)), err
+}
+
+func (p *configSecretProvider) OpenLegacyConflict(owner string, source novelfetchworkshop.LegacyConflictSource, ciphertext, fingerprint string) (string, error) {
+	cipher, err := p.secrets.ReadCipher()
+	if err != nil {
+		return "", err
+	}
+	binding := legacyConflictBinding(owner, source)
+	key, err := cipher.OpenBound(ciphertext, binding)
+	stored, decodeErr := hex.DecodeString(fingerprint)
+	if err != nil || decodeErr != nil || !hmac.Equal(stored, cipher.BoundFingerprint(key, binding)) {
+		return "", apisecrets.ErrBadCiphertext
+	}
+	return key, nil
+}
+
+func modelSecretBinding(owner string, model map[string]any, field string) ([]byte, error) {
+	id, _ := model["id"].(string)
+	kind, _ := model["kind"].(string)
+	if owner == "" || id == "" || !modelKinds[kind] {
+		return nil, apisecrets.ErrBadCiphertext
+	}
+	return json.Marshal([]any{"qiantie:v88:model:bound-v3", strings.ToLower(owner), kind, id, firstText(model["modelId"]), novelfetchworkshop.ModelCredentialSource(model), novelfetchworkshop.ModelCredentialDestination(model), field})
+}
+
+func v2ModelSecretBinding(owner string, model map[string]any, field string) ([]byte, error) {
+	target := novelfetchworkshop.ModelCredentialDestination(model)
+	if target.BaseURL == "" || target.Endpoint != target.BaseURL || target.TasksEndpoint != "" || target.ResultEndpoint != "" || model["kind"] == "video" {
+		return nil, apisecrets.ErrBadCiphertext
+	}
+	return json.Marshal([]string{"qiantie:v88:model:bound-v2", strings.ToLower(owner), firstText(model["kind"]), firstText(model["id"]), firstText(model["catalogSource"]), firstText(model["modelId"]), target.BaseURL, field})
+}
+
+func (p *configSecretProvider) SealModelConfig(owner string, next, previous map[string]any) error {
+	oldModels := map[string]map[string]any{}
+	for _, model := range modelCatalog(previous) {
+		oldModels[firstText(model["id"])] = model
+	}
+	var cipher *apisecrets.Cipher
+	for _, model := range modelCatalog(next) {
+		if _, legacyReference := model["credentialRef"]; legacyReference {
+			delete(model, "credentialRef")
+			if firstText(model["credential"], model["apiKey"]) == "" {
+				model["credentialStatus"] = "needs_reentry"
+			}
+		}
+		for _, field := range []string{"credential", "apiKey"} {
+			value, _ := model[field].(string)
+			if strings.TrimSpace(value) == "" {
+				continue
+			}
+			if cipher == nil {
+				var err error
+				cipher, err = p.secrets.WriteCipher()
+				if err != nil {
+					return err
+				}
+			}
+			binding, err := modelSecretBinding(owner, model, field)
+			if err != nil {
+				return err
+			}
+			if apisecrets.IsEncrypted(value) {
+				// Only migration can ingest a historical v1 record. An already
+				// bound record must authenticate for this precise model and field.
+				if strings.HasPrefix(value, apisecrets.BoundPrefix) {
+					if _, err := cipher.OpenBound(value, binding); err == nil {
+						continue
+					}
+					if previous[novelfetchworkshop.ModelSecretVersionKey] != "bound-v2" {
+						return apisecrets.ErrBadCiphertext
+					}
+					oldModel := oldModels[firstText(model["id"])]
+					oldBinding, bindErr := v2ModelSecretBinding(owner, oldModel, field)
+					if bindErr != nil || novelfetchworkshop.ModelCredentialDestination(model) != novelfetchworkshop.ModelCredentialDestination(oldModel) {
+						delete(model, field)
+						model["credentialStatus"] = "needs_reentry"
+						continue
+					}
+					value, err = cipher.OpenBound(value, oldBinding)
+				} else {
+					if previous[novelfetchworkshop.ModelSecretVersionKey] == novelfetchworkshop.ModelSecretVersion {
+						return apisecrets.ErrBadCiphertext
+					}
+					value, err = cipher.Decrypt(value)
+				}
+				if err != nil {
+					return err
+				}
+			}
+			if previousCipher, _ := oldModels[firstText(model["id"])][field].(string); strings.HasPrefix(previousCipher, apisecrets.BoundPrefix) {
+				if prior, err := cipher.OpenBound(previousCipher, binding); err == nil && prior == value {
+					model[field] = previousCipher
+					continue
+				}
+			}
+			model[field], err = cipher.SealBound(value, binding)
+			if err != nil {
+				return err
+			}
+		}
+		if alias := firstText(model["apiKey"]); alias != "" {
+			aliasBinding, err := modelSecretBinding(owner, model, "apiKey")
+			if err != nil {
+				return err
+			}
+			plain, err := cipher.OpenBound(alias, aliasBinding)
+			if err != nil {
+				return err
+			}
+			binding, err := modelSecretBinding(owner, model, "credential")
+			if err != nil {
+				return err
+			}
+			if stored := firstText(model["credential"]); stored != "" {
+				primary, err := cipher.OpenBound(stored, binding)
+				if err != nil {
+					return err
+				}
+				if primary != plain {
+					delete(model, "credential")
+					model["credentialStatus"] = "needs_reentry"
+				}
+			} else {
+				model["credential"], err = cipher.SealBound(plain, binding)
+				if err != nil {
+					return err
+				}
+			}
+			delete(model, "apiKey")
+		}
+	}
+	return nil
+}
+
+func (p *configSecretProvider) OpenModelConfig(owner string, settings map[string]any) error {
+	var cipher *apisecrets.Cipher
+	for _, model := range modelCatalog(settings) {
+		for _, field := range []string{"credential", "apiKey"} {
+			value, _ := model[field].(string)
+			if strings.TrimSpace(value) == "" {
+				continue
+			}
+			if settings[novelfetchworkshop.ModelSecretVersionKey] != novelfetchworkshop.ModelSecretVersion || !strings.HasPrefix(value, apisecrets.BoundPrefix) {
+				return apisecrets.ErrBadCiphertext
+			}
+			if cipher == nil {
+				var err error
+				cipher, err = p.secrets.ReadCipher()
+				if err != nil {
+					return err
+				}
+			}
+			binding, err := modelSecretBinding(owner, model, field)
+			if err != nil {
+				return err
+			}
+			model[field], err = cipher.OpenBound(value, binding)
+			if err != nil {
+				return err
+			}
+		}
+		if firstText(model["credential"]) == "" && firstText(model["apiKey"]) != "" {
+			model["credential"] = model["apiKey"]
+		}
+	}
+	return nil
 }
 
 func newConfigSecretProvider(baseDir string) *configSecretProvider {

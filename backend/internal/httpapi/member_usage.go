@@ -3,7 +3,6 @@ package httpapi
 import (
 	"context"
 	"errors"
-	"qiantie/backend/internal/auth"
 	"qiantie/backend/internal/yzcmusage"
 	"strings"
 )
@@ -29,15 +28,17 @@ func usageMonthTokens(usage map[string]any) int {
 
 // Resolve only credentials from the effective account's existing configuration.
 // No raw credential is persisted in the usage ledger or sent to a browser.
-func YZCMUsageCredentialResolver(config *UserConfigStore, profiles *MemberProfileStore, accounts auth.Store, primary ...func(context.Context, string) (map[string]any, error)) func(context.Context, string, string) (string, error) {
+func YZCMUsageCredentialResolver(config *UserConfigStore, primary ...func(context.Context, string) (map[string]any, error)) func(context.Context, string, string) (string, error) {
 	return func(ctx context.Context, owner, hash string) (string, error) {
-		effective := effectiveModelCatalogOwner(BridgeIdentity{Username: owner}, profiles, accounts)
-		if effective == "" {
+		if strings.TrimSpace(owner) == "" || config == nil {
 			return "", errors.New("usage account unavailable")
 		}
-		config.mu.Lock()
-		settings := config.read(effective)
-		config.mu.Unlock()
+		settings, err := config.GetConfig(ctx, owner)
+		if err != nil {
+			return "", err
+		}
+		delete(settings, "modelCatalog")
+		delete(settings, "settings")
 		var find func(any) string
 		find = func(value any) string {
 			switch v := value.(type) {

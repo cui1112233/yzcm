@@ -58,9 +58,7 @@ type comicPageGenerator struct {
 
 func (g comicPageGenerator) modelOwner(owner string) string {
 	if g.resolveModelOwner != nil {
-		if resolved := strings.TrimSpace(g.resolveModelOwner(owner)); resolved != "" {
-			return resolved
-		}
+		return strings.TrimSpace(g.resolveModelOwner(owner))
 	}
 	return owner
 }
@@ -292,6 +290,12 @@ func runComicPageWork(ctx context.Context, work []comicPageWorkItem, concurrency
 				return
 			}
 			if err := generate(ctx, item); err != nil {
+				// A live page worker owns this request. Leave it out of the
+				// failure ledger so the book's settle/refill path can collect its
+				// result instead of exhausting retries against the same lease.
+				if comicPageGenerationInFlightError(err) {
+					return
+				}
 				disposition := classifyAutomationFailure(err, "comic_images")
 				resultMu.Lock()
 				failures = append(failures, comicPageFailure{
@@ -602,12 +606,12 @@ func comicPromptRepairExhaustedError(label, refusal string, rounds int) error {
 // 进程内缓存即可：后续整本自动重试直接复用修复版，不再拿原提示词撞审核。
 var shuihuoRepairedPrompts sync.Map
 
-func comicPageRepairKey(batchID, bookID, videoID string) string {
-	return batchID + "|" + bookID + "|" + videoID
+func comicPageRepairKey(batchID, bookID, videoID string, styleID ...string) string {
+	return comicStyleRepairKey(batchID+"|"+bookID+"|"+videoID, styleID...)
 }
 
-func comicAssetRepairKey(batchID, bookID, assetID string) string {
-	return batchID + "|" + bookID + "|" + assetID
+func comicAssetRepairKey(batchID, bookID, assetID string, styleID ...string) string {
+	return comicStyleRepairKey(batchID+"|"+bookID+"|"+assetID, styleID...)
 }
 
 // comicPromptRevision 用数据库提示词内容派生版本号。提示词一旦被人工或
@@ -649,7 +653,7 @@ func storeShuihuoRepairedPrompt(key string, cached shuihuoRepairedPrompt) {
 // 写入（页级 PUT、reference-images、settings_patches 补丁）都必须调用它，
 // 不允许在业务代码里直接 Delete 缓存。
 // 只给 batchID 时按批次清理，给到 bookID 时按书清理，三者齐全时精确清理该页。
-func invalidateShuihuoRepairedPrompt(batchID, bookID, videoID string) bool {
+func invalidateShuihuoRepairedPrompt(batchID, bookID, videoID string, styleID ...string) bool {
 	batchID = strings.TrimSpace(batchID)
 	if batchID == "" {
 		return false
@@ -657,7 +661,7 @@ func invalidateShuihuoRepairedPrompt(batchID, bookID, videoID string) bool {
 	bookID = strings.TrimSpace(bookID)
 	videoID = strings.TrimSpace(videoID)
 	if bookID != "" && videoID != "" {
-		key := comicPageRepairKey(batchID, bookID, videoID)
+		key := comicPageRepairKey(batchID, bookID, videoID, styleID...)
 		if _, loaded := shuihuoRepairedPrompts.LoadAndDelete(key); loaded {
 			log.Printf("comic prompt repair cache invalidated batch=%s book=%s video=%s", batchID, bookID, videoID)
 			return true
@@ -896,6 +900,9 @@ func (g comicPageGenerator) persistRepairedComicPrompt(ctx context.Context, comi
 	if err != nil {
 		return current, "", err
 	}
+	if batchfactoryv11.ComicStyleOutputID(ctx) != "" {
+		return updated, repairedRaw, nil
+	}
 	comicPromptRaw, _ := json.Marshal(input.ComicPrompt)
 	imagePromptRaw, _ := json.Marshal(repairedRaw)
 	if _, err := g.store.SaveSettings(ctx, owner, batchfactoryv11.ScopeRef{
@@ -953,7 +960,7 @@ func (g comicPageGenerator) generatePage(ctx context.Context, owner, batchID, bo
 	// The in-memory gate belongs to this Go service instance.
 	ownsLocalGenerationGate := false
 	if g.generationGate != nil {
-		release, acquired := g.generationGate.tryAcquire(strings.Join([]string{owner, batchID, bookID, videoID}, "/"))
+		release, acquired := g.generationGate.tryAcquire(strings.Join([]string{owner, batchID, bookID, videoID, batchfactoryv11.ComicStyleStorageScopeID(ctx)}, "/"))
 		if !acquired {
 			return batchfactoryv11.ComicPage{}, batchfactoryv11.ComicPageImage{}, fmt.Errorf("%w: 当前漫画页正在生成，请等待本次结果完成后再重试", batchfactoryv11.ErrConflict)
 		}
@@ -1000,7 +1007,7 @@ func (g comicPageGenerator) generatePage(ctx context.Context, owner, batchID, bo
 		}
 	}
 	effective := batchfactoryv11.ResolveSettings(batch.SettingsState.Patch, selectedBook.SettingsState.Patch)
-	effective, err = resolvePublishedComicStyleReference(effective, g.presetCatalog)
+	effective, err = resolveScopedPublishedComicStyleReference(ctx, effective, g.presetCatalog)
 	if err != nil {
 		return batchfactoryv11.ComicPage{}, batchfactoryv11.ComicPageImage{}, err
 	}
@@ -1164,7 +1171,7 @@ func (g comicPageGenerator) generatePage(ctx context.Context, owner, batchID, bo
 	// 把批次生效设置注入上下文，让出图保存前读取水印配置。
 	generationCtx = withShuihuoEffectiveSettings(generationCtx, comicSettingsToMap(effective))
 	generationPrompt := contract.Prompt
-	repairKey := comicPageRepairKey(batchID, bookID, videoID)
+	repairKey := comicPageRepairKey(batchID, bookID, videoID, batchfactoryv11.ComicStyleStorageScopeID(ctx))
 	// 修复版缓存用“数据库原始提示词”派生版本：人工改写会改变版本并让缓存
 	// 失效；我们自己写回的修复版会带着新版本写入，跨轮次才能继续累计。
 	promptRevision := comicPromptRevision(comicPagePromptContent(input.ComicPrompt, input.ImagePrompt))
@@ -1176,7 +1183,7 @@ func (g comicPageGenerator) generatePage(ctx context.Context, owner, batchID, bo
 	// 轮次用尽后不再调用上游，直接把这一页转 needs_manual，避免继续计费。
 	if hasRepairedCache && repairedCache.RepairCount >= comicPromptRepairMaxRounds {
 		// 自动优化已经用尽：清掉缓存，用户再点一次重试可以重新获得一次机会。
-		invalidateShuihuoRepairedPrompt(batchID, bookID, videoID)
+		invalidateShuihuoRepairedPrompt(batchID, bookID, videoID, batchfactoryv11.ComicStyleStorageScopeID(ctx))
 		return batchfactoryv11.ComicPage{}, batchfactoryv11.ComicPageImage{},
 			comicPromptRepairExhaustedError(selectedPage.Label, comicPromptRefusalSummary(repairedCache.LastRefusalRaw), repairedCache.RepairCount)
 	}
@@ -1212,7 +1219,7 @@ func (g comicPageGenerator) generatePage(ctx context.Context, owner, batchID, bo
 			roundsUsed = repairedCache.RepairCount
 		}
 		if roundsUsed >= comicPromptRepairMaxRounds {
-			invalidateShuihuoRepairedPrompt(batchID, bookID, videoID)
+			invalidateShuihuoRepairedPrompt(batchID, bookID, videoID, batchfactoryv11.ComicStyleStorageScopeID(ctx))
 			return batchfactoryv11.ComicPage{}, batchfactoryv11.ComicPageImage{},
 				comicPromptRepairExhaustedError(selectedPage.Label, refusal, roundsUsed)
 		}
@@ -1236,7 +1243,7 @@ func (g comicPageGenerator) generatePage(ctx context.Context, owner, batchID, bo
 			}
 		}
 		if repaired == "" || repaired == generationPrompt {
-			invalidateShuihuoRepairedPrompt(batchID, bookID, videoID)
+			invalidateShuihuoRepairedPrompt(batchID, bookID, videoID, batchfactoryv11.ComicStyleStorageScopeID(ctx))
 			return batchfactoryv11.ComicPage{}, batchfactoryv11.ComicPageImage{},
 				comicPromptRepairExhaustedError(selectedPage.Label, refusal, roundsUsed+1)
 		}
@@ -1275,7 +1282,7 @@ func (g comicPageGenerator) generatePage(ctx context.Context, owner, batchID, bo
 		if errors.Is(err, errShuihuoImageContentPolicy) {
 			// 按上游反馈优化过一次仍未通过：不再继续自动撞审核，转给用户处理，
 			// 同时清掉缓存，让“直接再次重试”也能重新获得一次自动优化机会。
-			invalidateShuihuoRepairedPrompt(batchID, bookID, videoID)
+			invalidateShuihuoRepairedPrompt(batchID, bookID, videoID, batchfactoryv11.ComicStyleStorageScopeID(ctx))
 			return batchfactoryv11.ComicPage{}, batchfactoryv11.ComicPageImage{},
 				comicPromptRepairExhaustedError(selectedPage.Label, comicPromptRefusalSummary(err.Error()), roundsUsed+1)
 		}
@@ -1490,6 +1497,10 @@ func (g comicPageGenerator) generateBook(ctx context.Context, owner, batchID, bo
 		return batchfactoryv11.ComicCollection{}, batchfactoryv11.ErrNotFound
 	}
 	effective := batchfactoryv11.ResolveSettings(batch.SettingsState.Patch, book.SettingsState.Patch)
+	effective, err = resolveScopedPublishedComicStyleReference(ctx, effective, g.presetCatalog)
+	if err != nil {
+		return batchfactoryv11.ComicCollection{}, err
+	}
 	// 出图并发来自统一配置，漫画资产图与漫画页共用同一个上限。
 	imageConcurrency := shuihuoClampImageConcurrency(comicSettingInt(effective, "imageConcurrency", shuihuoImageConcurrencyDefault))
 	imageConcurrency = imageRequestWorkerCount(imageConcurrency)
@@ -1518,6 +1529,8 @@ func (g comicPageGenerator) generateBook(ctx context.Context, owner, batchID, bo
 		}
 		assetBatch := batch
 		assetBatch.Books = []batchfactoryv11.Book{*book}
+		assetBatch.SettingsState.Patch = effective
+		assetBatch.Books[0].SettingsState.Patch = nil
 		_, assetErr := generateShuihuoAssetImagesWithRepair(ctx, g.store, g.files, owner, assetBatch, missingAssetIDs, modelID, "16:9", provider, g.localExecutors, g.presetCatalog, g.rewritePrompt, g.userConfig, g.modelOwner(owner), g.catalogStore)
 		remainingAssetIDs, verifyErr := missingComicAssetImageIDs(ctx, g.store, owner, batchID, *book)
 		if verifyErr != nil {
@@ -1623,8 +1636,22 @@ func (g comicPageGenerator) generateBook(ctx context.Context, owner, batchID, bo
 				progress("comic_images", fmt.Sprintf("正在生成漫画第 %d/%d 张（已完成 %d/%d 张）", item.index+1, totalPages, completedPages, totalPages))
 				resultMu.Unlock()
 			}
+			comicPrompt, imagePrompt := item.page.ComicPrompt, item.page.ComicImagePrompt
+			if batchfactoryv11.ComicStyleOutputID(ctx) != "" {
+				for _, saved := range existingPages {
+					if saved.VideoID == item.page.ID {
+						if saved.ComicPrompt != "" {
+							comicPrompt = saved.ComicPrompt
+						}
+						if saved.ImagePrompt != "" {
+							imagePrompt = saved.ImagePrompt
+						}
+						break
+					}
+				}
+			}
 			_, _, generateErr := g.generatePage(generateCtx, owner, batchID, bookID, item.page.ID, batchfactoryv11.UpsertComicPageInput{
-				ComicPrompt: item.page.ComicPrompt, ImagePrompt: item.page.ComicImagePrompt, Provider: provider,
+				ComicPrompt: comicPrompt, ImagePrompt: imagePrompt, Provider: provider,
 				ModelID: modelID, AspectRatio: aspectRatio,
 			})
 			if generateErr != nil {
@@ -1930,11 +1957,14 @@ func comicPromptTextIsJSON(text string) bool {
 	return trimmed[0] == '{' || trimmed[0] == '['
 }
 
-func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoordinator, store batchfactoryv11.Store, files *localartifact.Store, localExecutors *localexecutor.Service, catalogStore novelfetchworkshop.Store, userConfig *UserConfigStore, presetCatalog *prompt.Catalog, accounts auth.Store, profiles *MemberProfileStore, director *batchfactoryv11.DirectorService, generationGate *comicPageGenerationGate, imageCache imagegenerationcache.Repository) {
+func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoordinator, store batchfactoryv11.Store, files *localartifact.Store, localExecutors *localexecutor.Service, catalogStore novelfetchworkshop.Store, userConfig *UserConfigStore, presetCatalog *prompt.Catalog, accounts auth.Store, profiles *MemberProfileStore, director *batchfactoryv11.DirectorService, generationGate *comicPageGenerationGate, imageCache imagegenerationcache.Repository, resolveModelOwner func(string) string) {
 	registerComicSourceSegmentRoutes(mux, production, store, director)
 	comicStore, ok := store.(batchfactoryv11.ComicPageStore)
 	if mux == nil || !ok {
 		return
+	}
+	handleComic := func(pattern string, handler http.HandlerFunc) {
+		mux.HandleFunc(pattern, comicStyleHandler(store, handler))
 	}
 	const pages = "/api/batch-factory/v12/batches/{batchId}/books/{bookId}/comic-pages"
 	const page = pages + "/{videoId}"
@@ -1948,11 +1978,9 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 	const image = images + "/{imageId}"
 	const collections = "/api/batch-factory/v12/batches/{batchId}/books/{bookId}/comic-collections"
 	const collectionDownload = collections + "/{collectionId}/download"
-	generator := comicPageGenerator{production: production, store: store, files: files, localExecutors: localExecutors, catalogStore: catalogStore, userConfig: userConfig, presetCatalog: presetCatalog, generationGate: generationGate, imageCache: imageCache, resolveModelOwner: func(owner string) string {
-		return effectiveModelCatalogOwner(BridgeIdentity{Username: owner}, profiles, accounts)
-	}}
+	generator := comicPageGenerator{production: production, store: store, files: files, localExecutors: localExecutors, catalogStore: catalogStore, userConfig: userConfig, presetCatalog: presetCatalog, generationGate: generationGate, imageCache: imageCache, resolveModelOwner: resolveModelOwner}
 
-	mux.HandleFunc("GET "+pages, func(w http.ResponseWriter, r *http.Request) {
+	handleComic("GET "+pages, func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -1999,7 +2027,7 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 			"readiness": readiness,
 		})
 	})
-	mux.HandleFunc("GET "+promptZip, func(w http.ResponseWriter, r *http.Request) {
+	handleComic("GET "+promptZip, func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -2012,7 +2040,7 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 		}
 		serveComicZip(r.Context(), w, files, plan, "comic-prompts.zip")
 	})
-	mux.HandleFunc("GET "+imagesZip, func(w http.ResponseWriter, r *http.Request) {
+	handleComic("GET "+imagesZip, func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -2025,7 +2053,7 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 		}
 		serveComicZip(r.Context(), w, files, plan, "comic-images.zip")
 	})
-	mux.HandleFunc("GET "+douyinZip, func(w http.ResponseWriter, r *http.Request) {
+	handleComic("GET "+douyinZip, func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -2038,7 +2066,7 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 		}
 		serveComicZip(r.Context(), w, files, plan, "douyin-publish.zip")
 	})
-	mux.HandleFunc("PUT "+page, func(w http.ResponseWriter, r *http.Request) {
+	handleComic("PUT "+page, func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -2083,11 +2111,11 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 		// 人工改了页提示词就必须让修复版缓存立即失效，否则旧的自动改写版
 		// 会继续压住数据库里的新提示词。
 		if input.ComicPrompt != nil || input.ImagePrompt != nil {
-			invalidateShuihuoRepairedPrompt(r.PathValue("batchId"), r.PathValue("bookId"), r.PathValue("videoId"))
+			invalidateShuihuoRepairedPrompt(r.PathValue("batchId"), r.PathValue("bookId"), r.PathValue("videoId"), batchfactoryv11.ComicStyleStorageScopeID(r.Context()))
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"page": comicPageResponse(created)})
+		writeJSON(w, http.StatusOK, map[string]any{"page": comicPageResponse(withComicStyleResponse(created, r.Context()))})
 	})
-	mux.HandleFunc("POST "+page+"/prompt-preview", func(w http.ResponseWriter, r *http.Request) {
+	handleComic("POST "+page+"/prompt-preview", func(w http.ResponseWriter, r *http.Request) {
 		owner, authorized := bridgeOwner(r)
 		if !authorized {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -2151,7 +2179,7 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 			return
 		}
 		effective := batchfactoryv11.ResolveSettings(batch.SettingsState.Patch, targetBook.SettingsState.Patch)
-		effective, err = resolvePublishedComicStyleReference(effective, presetCatalog)
+		effective, err = resolveScopedPublishedComicStyleReference(r.Context(), effective, presetCatalog)
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -2169,7 +2197,7 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 			"stylePresetId":   contract.StylePresetID, "snapshotHash": contract.SnapshotHash,
 		})
 	})
-	mux.HandleFunc("PUT "+page+"/reference-images", func(w http.ResponseWriter, r *http.Request) {
+	handleComic("PUT "+page+"/reference-images", func(w http.ResponseWriter, r *http.Request) {
 		owner, authorized := bridgeOwner(r)
 		if !authorized {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -2213,7 +2241,7 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 				ModelID: comicSettingString(effective, "imageModelId", ""), AspectRatio: batchfactoryv11.EffectiveImageAspectRatio(effective),
 			})
 			if err == nil {
-				invalidateShuihuoRepairedPrompt(batch.ID, targetBook.ID, targetVideo.ID)
+				invalidateShuihuoRepairedPrompt(batch.ID, targetBook.ID, targetVideo.ID, batchfactoryv11.ComicStyleStorageScopeID(r.Context()))
 				updated, err = comicStore.SetComicPageReferenceImages(r.Context(), owner, batch.ID, targetBook.ID, targetVideo.ID, input.ReferenceImageURLs)
 			}
 		}
@@ -2221,9 +2249,9 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 			writeStoreError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"page": comicPageResponse(updated)})
+		writeJSON(w, http.StatusOK, map[string]any{"page": comicPageResponse(withComicStyleResponse(updated, r.Context()))})
 	})
-	mux.HandleFunc("POST "+page+"/reference-images/apply-to-all", func(w http.ResponseWriter, r *http.Request) {
+	handleComic("POST "+page+"/reference-images/apply-to-all", func(w http.ResponseWriter, r *http.Request) {
 		owner, authorized := bridgeOwner(r)
 		if !authorized {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -2275,7 +2303,7 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"updated": updated})
 	})
-	mux.HandleFunc("POST "+repairPrompts, func(w http.ResponseWriter, r *http.Request) {
+	handleComic("POST "+repairPrompts, func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -2336,7 +2364,7 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 		}
 		writeJSON(w, http.StatusOK, payload)
 	})
-	mux.HandleFunc("POST "+page+"/generate", func(w http.ResponseWriter, r *http.Request) {
+	handleComic("POST "+page+"/generate", func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -2361,7 +2389,7 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 			// Do not inherit the browser request context. A browser refresh or
 			// disconnect must not discard a provider result that can still be
 			// written back to the comic page.
-			generationCtx, cancel := comicPageGenerationContext(context.Background())
+			generationCtx, cancel := comicPageGenerationContext(r.Context())
 			defer cancel()
 			generationCtx = withShuihuoImageGenerationCacheBypass(withShuihuoImageGenerationCache(generationCtx, imageCache))
 			createdPage, createdImage, err := generator.generatePage(generationCtx, owner, batchID, bookID, videoID, input)
@@ -2376,10 +2404,11 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 				writeStoreError(w, result.err)
 				return
 			}
-			writeJSON(w, http.StatusCreated, map[string]any{"page": comicPageResponse(result.page), "image": comicPageImageResponse(result.image)})
+			writeJSON(w, http.StatusCreated, map[string]any{"page": comicPageResponse(withComicStyleResponse(result.page, r.Context())), "image": comicPageImageResponse(result.image)})
 		case <-time.After(comicPageHTTPFastPathWait):
 			writeJSON(w, http.StatusAccepted, map[string]any{
 				"status":  "generating",
+				"styleId": batchfactoryv11.ComicStyleOutputID(r.Context()),
 				"batchId": batchID,
 				"bookId":  bookID,
 				"videoId": videoID,
@@ -2387,7 +2416,7 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 			})
 		}
 	})
-	mux.HandleFunc("POST "+images, func(w http.ResponseWriter, r *http.Request) {
+	handleComic("POST "+images, func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -2432,7 +2461,7 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"image": comicPageImageResponse(created)})
 	})
-	mux.HandleFunc("POST "+images+"/upload", func(w http.ResponseWriter, r *http.Request) {
+	handleComic("POST "+images+"/upload", func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -2471,7 +2500,7 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"image": comicPageImageResponse(created)})
 	})
-	mux.HandleFunc("PUT "+image+"/primary", func(w http.ResponseWriter, r *http.Request) {
+	handleComic("PUT "+image+"/primary", func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -2484,7 +2513,7 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"image": comicPageImageResponse(updated)})
 	})
-	mux.HandleFunc("GET "+image+"/content", func(w http.ResponseWriter, r *http.Request) {
+	handleComic("GET "+image+"/content", func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -2494,47 +2523,31 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "comic image storage is unavailable"})
 			return
 		}
-		pages, err := comicStore.ListComicPages(r.Context(), owner, r.PathValue("batchId"), r.PathValue("bookId"))
+		candidate, err := findComicPageImage(r.Context(), comicStore, owner, r.PathValue("batchId"), r.PathValue("bookId"), r.PathValue("pageId"), r.PathValue("imageId"))
 		if err != nil {
 			writeStoreError(w, err)
 			return
 		}
-		for _, current := range pages {
-			if current.ID != r.PathValue("pageId") {
-				continue
-			}
-			for _, candidate := range current.Images {
-				if candidate.ID != r.PathValue("imageId") {
-					continue
-				}
-				if candidate.StorageRef == "" {
-					writeJSON(w, http.StatusNotFound, map[string]string{"error": "image bytes are not stored locally"})
-					return
-				}
-				file, openErr := files.OpenContext(r.Context(), candidate.StorageRef)
-				if openErr != nil {
-					writeJSON(w, http.StatusNotFound, map[string]string{"error": "image file not found"})
-					return
-				}
-				defer file.Close()
-				w.Header().Set("Content-Type", candidate.MediaType)
-				w.Header().Set("X-Content-Type-Options", "nosniff")
-				// 页图只在登录态下可见：只允许浏览器私有缓存，不引入共享缓存。
-				// 7 天与缩略图一致；同 ref 原地重新生成会改变 size/mtime，ETag 随之失效。
-				if info, statErr := file.Stat(); statErr == nil {
-					w.Header().Set("ETag", fmt.Sprintf("\"%x-%x\"", info.Size(), info.ModTime().UTC().UnixNano()))
-				}
-				w.Header().Set("Cache-Control", "private, max-age=604800")
-				// ServeContent 继续负责 Accept-Ranges、Content-Length、Range→206
-				// 与 If-None-Match/If-Modified-Since→304。
-				http.ServeContent(w, r, candidate.ID, candidate.CreatedAt, file)
-				return
-			}
+		if candidate.StorageRef == "" {
+			writeStoreError(w, batchfactoryv11.ErrNotFound)
+			return
 		}
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "image not found"})
+		file, err := files.OpenContext(r.Context(), candidate.StorageRef)
+		if err != nil {
+			writeStoreError(w, batchfactoryv11.ErrNotFound)
+			return
+		}
+		defer file.Close()
+		w.Header().Set("Content-Type", candidate.MediaType)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if info, statErr := file.Stat(); statErr == nil {
+			w.Header().Set("ETag", fmt.Sprintf("\"%x-%x\"", info.Size(), info.ModTime().UTC().UnixNano()))
+		}
+		w.Header().Set("Cache-Control", "private, max-age=604800")
+		http.ServeContent(w, r, candidate.ID, candidate.CreatedAt, file)
 	})
-	mux.HandleFunc("GET "+image+"/thumbnail", handleComicPageThumbnail(comicStore, files))
-	mux.HandleFunc("POST "+collections, func(w http.ResponseWriter, r *http.Request) {
+	handleComic("GET "+image+"/thumbnail", handleComicPageThumbnail(comicStore, files))
+	handleComic("POST "+collections, func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -2578,9 +2591,9 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 			writeStoreError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, map[string]any{"collection": comicCollectionResponse(created)})
+		writeJSON(w, http.StatusCreated, map[string]any{"collection": comicCollectionResponse(withComicCollectionStyleResponse(created, r.Context()))})
 	})
-	mux.HandleFunc("POST "+collections+"/generate", func(w http.ResponseWriter, r *http.Request) {
+	handleComic("POST "+collections+"/generate", func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -2590,14 +2603,47 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "漫画图片生成服务尚未配置"})
 			return
 		}
+		if batchfactoryv11.ComicStyleOutputID(r.Context()) == "" {
+			settings, settingsErr := comicStyleSettings(r.Context(), store, owner, r.PathValue("batchId"), r.PathValue("bookId"))
+			if settingsErr != nil {
+				writeStoreError(w, settingsErr)
+				return
+			}
+			if hasMultipleComicStyles(settings) {
+				batch, readErr := store.GetBatch(r.Context(), owner, r.PathValue("batchId"))
+				if readErr != nil {
+					writeStoreError(w, readErr)
+					return
+				}
+				book, found := findBatchBookByID(batch, r.PathValue("bookId"))
+				if !found {
+					writeStoreError(w, batchfactoryv11.ErrNotFound)
+					return
+				}
+				coordinator := &BatchAutomationCoordinator{store: store, now: time.Now, comicGenerate: generator.generateBook}
+				coordinator.stages = production.stages
+				book, readErr = coordinator.confirmComicSharedStory(r.Context(), owner, batch.ID, book, settings, false)
+				if readErr != nil {
+					writeStoreError(w, readErr)
+					return
+				}
+				result, runErr := coordinator.runComicStyleOutputs(r.Context(), owner, batch.ID, book, settings, map[string]any{}, func() {}, false, false)
+				if runErr != nil {
+					writeStoreError(w, runErr)
+					return
+				}
+				writeJSON(w, http.StatusCreated, map[string]any{"collections": result.Collections})
+				return
+			}
+		}
 		collection, err := generator.generateBook(r.Context(), owner, r.PathValue("batchId"), r.PathValue("bookId"))
 		if err != nil {
 			writeStoreError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, map[string]any{"collection": comicCollectionResponse(collection)})
+		writeJSON(w, http.StatusCreated, map[string]any{"collection": comicCollectionResponse(withComicCollectionStyleResponse(collection, r.Context()))})
 	})
-	mux.HandleFunc("GET "+collectionDownload, func(w http.ResponseWriter, r *http.Request) {
+	handleComic("GET "+collectionDownload, func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -2614,7 +2660,7 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 		}
 		serveComicZip(r.Context(), w, files, plan, "comic-collection.zip")
 	})
-	mux.HandleFunc("GET "+collections, func(w http.ResponseWriter, r *http.Request) {
+	handleComic("GET "+collections, func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -2626,7 +2672,7 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 			return
 		}
 		for index := range result {
-			result[index] = comicCollectionResponse(result[index])
+			result[index] = comicCollectionResponse(withComicCollectionStyleResponse(result[index], r.Context()))
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"collections": result})
 	})
@@ -2699,7 +2745,7 @@ func uploadComicPageImageDataURL(w http.ResponseWriter, r *http.Request, owner s
 			break
 		}
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"page": comicPageResponse(updated), "image": comicPageImageResponse(image)})
+	writeJSON(w, http.StatusCreated, map[string]any{"page": comicPageResponse(withComicStyleResponse(updated, r.Context())), "image": comicPageImageResponse(image)})
 }
 
 // loadComicPageForUpload 先按 comic page ID 匹配，再按 videoId 匹配。
@@ -3260,7 +3306,7 @@ func planComicPromptZip(ctx context.Context, store batchfactoryv11.Store, comicS
 		pagesByVideo[page.VideoID] = page
 	}
 	effective := batchfactoryv11.ResolveSettings(batch.SettingsState.Patch, book.SettingsState.Patch)
-	effective, err = resolvePublishedComicStyleReference(effective, presetCatalog)
+	effective, err = resolveScopedPublishedComicStyleReference(ctx, effective, presetCatalog)
 	if err != nil {
 		return comicZipPlan{}, err
 	}

@@ -144,7 +144,14 @@ func aiContentReady(document Document) bool {
 		if !strings.HasPrefix(strings.ToLower(version), "ai") {
 			continue
 		}
-		if text := strings.TrimSpace(fmt.Sprint(value)); text != "" && text != "<nil>" {
+		var text string
+		switch body := value.(type) {
+		case string:
+			text = body
+		case map[string]any:
+			text, _ = body["text"].(string)
+		}
+		if strings.TrimSpace(text) != "" {
 			return true
 		}
 	}

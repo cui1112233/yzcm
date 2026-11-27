@@ -125,9 +125,17 @@ func AppMigrations() []Migration {
 	out = append(out, ScreenplayProductionMigrations()...)
 	out = append(out, ScreenplayMediaMigrations()...)
 	out = append(out, ScreenplayAuthoringMigrations()...)
+	out = append(out, screenplayAssistantSessionMigration(), screenplayAssistantSessionUpgrade())
 	out = append(out, NovelCreationMigrations()...)
 	out = append(out, ProjectRetentionMigrations()...)
 	out = append(out, ImageCapacityMigrations()...)
 	out = append(out, YZCMUsageMigrations()...)
+	out = append(out, AccountCenterMigrations()...)
+	out = append(out, AccountCenterEnergyMigrations()...)
+	out = append(out, ScriptEditorMigrations()...)
+	out = append(out, YZCMModelCatalogMigrations()...)
+	out = append(out, YZCMModelCatalogPrecisionMigration())
+	out = append(out, ComicStyleOutputMigrations()...)
+	out = append(out, BatchMultiModeMigrations()...)
 	return out
 }

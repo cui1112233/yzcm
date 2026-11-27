@@ -99,19 +99,28 @@ func (input CreateBatchInput) initialSettings() SettingsPatch {
 func ApplySparseUpdate(current SettingsPatch, update SettingsUpdate) SettingsPatch {
 	out := clonePatch(current)
 	for _, key := range update.RestoreKeys {
-		if IsProjectOwnershipKey(key) {
+		if IsProjectOwnershipKey(key) || key == videoSelectionBindingKey {
 			continue
 		}
 		delete(out, key)
+		if key == "videoModelId" {
+			delete(out, videoSelectionBindingKey)
+		}
 	}
 	for key, value := range update.Patch {
-		if IsProjectOwnershipKey(key) {
+		if IsProjectOwnershipKey(key) || key == videoSelectionBindingKey {
 			continue
+		}
+		if key == "videoModelId" {
+			delete(out, videoSelectionBindingKey)
 		}
 		if key == "patch" {
 			value, _ = userConfigJSON(value)
 		}
 		out[key] = append([]byte(nil), value...)
+	}
+	if update.videoSelection != nil {
+		out[videoSelectionBindingKey], _ = json.Marshal(update.videoSelection)
 	}
 	return out
 }

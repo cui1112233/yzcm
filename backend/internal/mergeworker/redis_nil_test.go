@@ -16,4 +16,8 @@ func TestIsRedisNilRecognizesRESPAbsenceOnly(t *testing.T) {
 	if IsRedisNil(nil) || IsRedisNil(errors.New("redis nil")) || IsRedisNil(errors.New("connection failed")) {
 		t.Fatal("other errors must not become missing values")
 	}
+	_, missingArray := readRESP(bufio.NewReader(strings.NewReader("*-1\r\n")))
+	if !IsRedisNil(missingArray) {
+		t.Fatal("a top-level null array must still be a missing reply")
+	}
 }

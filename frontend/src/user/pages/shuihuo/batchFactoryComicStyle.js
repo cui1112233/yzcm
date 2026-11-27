@@ -7,6 +7,35 @@ export function comicStyleSelection(preset) {
   };
 }
 
+export const MAX_COMIC_OUTPUT_STYLES = 5;
+
+export function normalizeComicOutputStyles(comic = {}) {
+  const values = Object.hasOwn(comic, 'styles')
+    ? comic.styles
+    : comic.style?.presetId ? [{ ...comic.style, globalReferenceImage: comic.globalReferenceImage }] : null;
+  if (values === null) return [];
+  if (!Array.isArray(values) || values.length < 1 || values.length > MAX_COMIC_OUTPUT_STYLES) throw new Error('漫画画风需选择1～5种');
+  const seen = new Set();
+  return values.map(item => {
+    const presetId = String(item?.presetId || '').trim();
+    if (!presetId || seen.has(presetId)) throw new Error('漫画画风不能为空或重复');
+    seen.add(presetId);
+    return { ...item, presetId, globalReferenceImage: normalizeComicReference(item.globalReferenceImage) };
+  });
+}
+
+export function selectComicOutputStyle(comic, preset) {
+  const current = normalizeComicOutputStyles(comic);
+  const selected = String(preset?.id || '').trim();
+  if (!selected) throw new Error('请选择画风');
+  const index = current.findIndex(item => item.presetId === selected);
+  if (index >= 0 && current.length === 1) throw new Error('至少保留一种画风');
+  if (index < 0 && current.length >= MAX_COMIC_OUTPUT_STYLES) throw new Error('最多选择5种画风');
+  const next = index >= 0 ? current.filter(item => item.presetId !== selected)
+    : [...current, { ...comicStyleSelection(preset), globalReferenceImage: comicStylePreviewReference(preset) }];
+  return { ...comic, enabled: true, styles: next, style: { ...next[0] }, globalReferenceImage: { ...next[0].globalReferenceImage } };
+}
+
 export function normalizeComicReference(value) {
   const reference = value && typeof value === 'object' ? value : {};
   const normalized = {

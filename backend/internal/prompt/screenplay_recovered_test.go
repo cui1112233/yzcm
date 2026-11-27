@@ -70,7 +70,7 @@ func TestRecoveredProtocolsKeepDistinctFieldsReportsAndDurations(t *testing.T) {
 		supported          bool
 	}{
 		{"137", "storyboard_image_voice_v1", "json_with_report", 0, 0, 0, true},
-		{"138", "storyboard_image_voice_v1", "json_with_report", 0, 0, 0, false},
+		{"138", "storyboard_image_voice_v1", "json_with_report", 0, 0, 0, true},
 		{"139", "storyboard_image_voice_v1", "json_object", 15, 15, 15, true},
 		{"147", "storyboard_seedance_timed_v1", "json_object", 2, 15, 0, true},
 		{"175", "storyboard_nine_grid_v1", "json_object", 15, 15, 15, true},
@@ -97,8 +97,8 @@ func TestRecoveredProtocolsKeepDistinctFieldsReportsAndDurations(t *testing.T) {
 		if p.ResponseMode != "json_with_report" || len(p.ReportMarkers) == 0 {
 			t.Fatal("script report lost", id)
 		}
-		if id == "293" && (p.Supported || len(p.ReportMarkers) != 2) {
-			t.Fatal("batch script incorrectly enabled")
+		if id == "293" && (!p.Supported || p.ParserVersion != "cm_script_293_durable_batch_v1" || len(p.ReportMarkers) != 2) {
+			t.Fatal("batch script durable adapter missing")
 		}
 	}
 	nine, _ := ResolveCreativePrompt("175", "storyboard")

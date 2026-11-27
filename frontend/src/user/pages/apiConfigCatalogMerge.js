@@ -47,6 +47,15 @@ export function isCatalogModelAvailable(model) {
   return modelNeedsNoCredential(model);
 }
 
+export function isCatalogModelVisibleForManagement(model, platformPresetIds, canRepair = false) {
+  if (!model || isRetiredModel(model) || model.enabled === false || isPlatformManagedModel(model, platformPresetIds)) return false;
+  if (model.runtimeReason === 'legacy_video_migration_pending' || model.unavailableReason === 'execution_adapter_unavailable') return false;
+  if (isCatalogModelAvailable(model)) return true;
+  // A saved custom entry still needs its existing edit form when its key is
+  // missing. This management exception must never enable a business picker.
+  return canRepair && model.hasCredential === false && isUserManagedCatalogModel(model, platformPresetIds);
+}
+
 // 平台托管的模型：预设面板里的条目（按面板 id 动态判断，新增预设自动生效）
 // 与本地执行器（在引擎设置里维护）。这类模型不重复出现在文本/视频/图片三组。
 export function isPlatformManagedModel(model, platformPresetIds) {

@@ -53,3 +53,19 @@ export function writeNovelFetchProcessSettings(settings, storage = getDefaultSto
   writeStorageValue(storage, NOVEL_FETCH_PROCESS_SETTINGS_KEY, JSON.stringify(normalized));
   return normalized;
 }
+
+// Missing credentials must never select a substitute model.
+export function resolveNovelFetchTextModel(current, accountDefault = '') {
+  return String(current || accountDefault || '').trim();
+}
+
+export function novelFetchTextModelError(selected, options = []) {
+  if (!String(selected || '').trim()) return '请选择可用的文本模型';
+  return options.some(option => option.value === selected && !option.disabled)
+    ? '' : '当前文本模型不可用，请检查 API 配置或重新选择模型';
+}
+
+export function resolveNovelFetchSelectedVersions(selected, supported) {
+  const versions = Array.isArray(selected) ? selected : ['original', 'ai1'];
+  return versions.filter(version => supported.includes(version));
+}

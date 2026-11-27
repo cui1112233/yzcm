@@ -210,12 +210,13 @@ func TestComicPageGenerateChatChannelRetryWritesSinglePageAndImage(t *testing.T)
 	}
 	prepareComicPageSourceForGeneration(t, store, catalog, batch.ID, book.ID, video.ID)
 	api := NewRouter(RouterOptions{
-		BridgeSecret:    "secret",
-		Now:             func() time.Time { return now },
-		Slice:           1,
-		Store:           store,
-		LocalArtifacts:  localartifact.NewStore(t.TempDir(), 1<<20),
-		NovelFetchStore: catalog,
+		AccountCenterStore: activeModelTestAccounts("alice"),
+		BridgeSecret:       "secret",
+		Now:                func() time.Time { return now },
+		Slice:              1,
+		Store:              store,
+		LocalArtifacts:     localartifact.NewStore(t.TempDir(), 1<<20),
+		NovelFetchStore:    catalog,
 	})
 	path := "/api/batch-factory/v12/batches/" + batch.ID + "/books/" + book.ID + "/comic-pages/" + video.ID + "/generate"
 	generated := signedJSONRequest(t, api, now, "alice", http.MethodPost, path, map[string]any{

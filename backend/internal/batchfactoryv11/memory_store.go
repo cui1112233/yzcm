@@ -19,6 +19,8 @@ type memoryOwned[T any] struct {
 	Value T
 }
 type MemoryStore struct {
+	multiModeMu           sync.Mutex
+	multiModeGroups       map[string]*memoryMultiModeGroup
 	mu                    sync.Mutex
 	seq                   int64
 	batches               map[string]memoryOwned[Batch]
@@ -33,6 +35,7 @@ type MemoryStore struct {
 	comicSourceSegments   map[string]memoryOwned[ComicSourceSegment]
 	comicPageImages       map[string]memoryOwned[ComicPageImage]
 	comicCollections      map[string]memoryOwned[ComicCollection]
+	comicLegacyStyles     map[[3]string]ComicStyleOutput
 	shuihuoConfigs        map[string]map[string]any
 	hooks                 map[string][]HookRevision
 	directors             map[string][]DirectorRevision
@@ -85,6 +88,10 @@ func productionRequestKey(owner, batchID, bookID, requestID string) string {
 func cloneProductionJob(value ProductionJob) ProductionJob {
 	value.Tasks = append([]ProductionTask(nil), value.Tasks...)
 	for index := range value.Tasks {
+		if binding := value.Tasks[index].Binding; binding != nil {
+			copy := *binding
+			value.Tasks[index].Binding = &copy
+		}
 		value.Tasks[index].ReferenceImageURLs = append([]string(nil), value.Tasks[index].ReferenceImageURLs...)
 		value.Tasks[index].DowngradedAssetIDs = append([]string(nil), value.Tasks[index].DowngradedAssetIDs...)
 		value.Tasks[index].CompileTrace = cloneH3CompileTrace(value.Tasks[index].CompileTrace)
@@ -187,6 +194,7 @@ func (s *MemoryStore) UpdateProductionTask(_ context.Context, owner, jobID, task
 	found := false
 	for index := range job.Tasks {
 		if job.Tasks[index].ID == taskID {
+			task.Binding = job.Tasks[index].Binding
 			job.Tasks[index] = task
 			found = true
 			break
@@ -637,7 +645,7 @@ func (s *MemoryStore) CreateBatch(_ context.Context, owner string, input CreateB
 	if b.Title == "" {
 		b.Title = "Untitled Batch"
 	}
-	for _, bi := range uniqueBatchBooks(input.Books, map[string]bool{}) {
+	for _, bi := range batchCreationBooks(input) {
 		if len(input.GiantAutomationPlan) > 0 {
 			bi.SourceMetadata = copySourceMetadataWithGiantPlan(bi.SourceMetadata, input.GiantAutomationPlan)
 		}
@@ -881,7 +889,10 @@ func (s *MemoryStore) deleteMemoryBookData(owner, batchID, bookID string) {
 		}
 	}
 }
-func (s *MemoryStore) SaveSettings(_ context.Context, owner string, ref ScopeRef, update SettingsUpdate) (SettingsResult, error) {
+func (s *MemoryStore) SaveSettings(ctx context.Context, owner string, ref ScopeRef, update SettingsUpdate) (SettingsResult, error) {
+	if err := freezeLegacyComicStylesBeforeSettings(ctx, s, owner, ref, update); err != nil {
+		return SettingsResult{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	owned, ok := s.batches[ref.BatchID]
@@ -1284,7 +1295,7 @@ func (s *MemoryStore) hasAssetLocked(owner, batchID, bookID, assetID string) boo
 	return ok && owned.Owner == owner && owned.Value.BatchID == batchID && owned.Value.BookID == bookID
 }
 
-func (s *MemoryStore) ListBookAssetImages(_ context.Context, owner, batchID, bookID, assetID string) ([]BookAssetImage, error) {
+func (s *MemoryStore) ListBookAssetImages(ctx context.Context, owner, batchID, bookID, assetID string) ([]BookAssetImage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.hasBookLocked(owner, batchID, bookID) || !s.hasAssetLocked(owner, batchID, bookID, assetID) {
@@ -1292,7 +1303,7 @@ func (s *MemoryStore) ListBookAssetImages(_ context.Context, owner, batchID, boo
 	}
 	images := []BookAssetImage{}
 	for _, owned := range s.bookAssetImages {
-		if owned.Owner == owner && owned.Value.AssetID == assetID {
+		if owned.Owner == owner && owned.Value.AssetID == assetID && owned.Value.StyleID == comicStyleID(ctx) {
 			images = append(images, owned.Value)
 		}
 	}
@@ -1300,7 +1311,7 @@ func (s *MemoryStore) ListBookAssetImages(_ context.Context, owner, batchID, boo
 	return images, nil
 }
 
-func (s *MemoryStore) CreateBookAssetImage(_ context.Context, owner, batchID, bookID, assetID string, input CreateBookAssetImageInput) (BookAssetImage, error) {
+func (s *MemoryStore) CreateBookAssetImage(ctx context.Context, owner, batchID, bookID, assetID string, input CreateBookAssetImageInput) (BookAssetImage, error) {
 	input, err := validBookAssetImageInput(input)
 	if err != nil {
 		return BookAssetImage{}, err
@@ -1312,28 +1323,28 @@ func (s *MemoryStore) CreateBookAssetImage(_ context.Context, owner, batchID, bo
 	}
 	hasPrimary := false
 	for _, owned := range s.bookAssetImages {
-		if owned.Owner == owner && owned.Value.AssetID == assetID && owned.Value.IsPrimary {
+		if owned.Owner == owner && owned.Value.AssetID == assetID && owned.Value.StyleID == comicStyleID(ctx) && owned.Value.IsPrimary {
 			hasPrimary = true
 			break
 		}
 	}
-	image := BookAssetImage{ID: s.id("asset-image"), AssetID: assetID, URL: input.URL, StorageRef: input.StorageRef, MediaType: input.MediaType, Source: input.Source, IsPrimary: !hasPrimary, Revision: 1, CreatedAt: time.Now().UTC()}
+	image := BookAssetImage{ID: s.id("asset-image"), AssetID: assetID, StyleID: comicStyleID(ctx), URL: input.URL, StorageRef: input.StorageRef, MediaType: input.MediaType, Source: input.Source, IsPrimary: !hasPrimary, Revision: 1, CreatedAt: time.Now().UTC()}
 	s.bookAssetImages[image.ID] = memoryOwned[BookAssetImage]{Owner: owner, Value: image}
 	return image, nil
 }
 
-func (s *MemoryStore) SetPrimaryBookAssetImage(_ context.Context, owner, batchID, bookID, assetID, imageID string) (BookAssetImage, error) {
+func (s *MemoryStore) SetPrimaryBookAssetImage(ctx context.Context, owner, batchID, bookID, assetID, imageID string) (BookAssetImage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.hasBookLocked(owner, batchID, bookID) || !s.hasAssetLocked(owner, batchID, bookID, assetID) {
 		return BookAssetImage{}, ErrNotFound
 	}
 	target, ok := s.bookAssetImages[imageID]
-	if !ok || target.Owner != owner || target.Value.AssetID != assetID {
+	if !ok || target.Owner != owner || target.Value.AssetID != assetID || target.Value.StyleID != comicStyleID(ctx) {
 		return BookAssetImage{}, ErrNotFound
 	}
 	for id, owned := range s.bookAssetImages {
-		if owned.Owner != owner || owned.Value.AssetID != assetID || !owned.Value.IsPrimary {
+		if owned.Owner != owner || owned.Value.AssetID != assetID || owned.Value.StyleID != comicStyleID(ctx) || !owned.Value.IsPrimary {
 			continue
 		}
 		image := owned.Value

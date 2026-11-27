@@ -9,6 +9,29 @@ import (
 	"qiantie/backend/internal/novelfetchworkshop"
 )
 
+// Omitted versions retain legacy defaults. An explicit empty slice means no
+// versions and must survive both in-memory and JSON document snapshots.
+func copyNovelFetchSelectedVersions(versions []string) []string {
+	if versions == nil {
+		return nil
+	}
+	return append([]string{}, versions...)
+}
+
+func readNovelFetchSelectedVersions(value any) []string {
+	switch versions := value.(type) {
+	case nil:
+		return nil
+	case []string:
+		return copyNovelFetchSelectedVersions(versions)
+	case []any:
+		if versions == nil {
+			return nil
+		}
+	}
+	return scheduleStringSlice(value)
+}
+
 // Persist execution choices separately from mutable account defaults. Never
 // persist provider credentials here. Older books use defaults until snapshotted.
 func saveNovelFetchJobSnapshot(ctx context.Context, store novelfetchworkshop.Store, job novelfetchworkshop.ProcessJob) error {
@@ -29,8 +52,8 @@ func saveNovelFetchJobSnapshot(ctx context.Context, store novelfetchworkshop.Sto
 				continue
 			}
 		}
-		doc.Meta["processSnapshot"] = map[string]any{"batch_id": job.BatchID, "schedule_id": job.ScheduleID, "platform_id": job.PlatformID, "max_txt": job.MaxTxt, "selected_versions": append([]string{}, job.SelectedVersions...), "rewrite_methods": job.RewriteMethods, "text_model_id": job.TextModelID, "sensitive_ai_enabled": job.SensitiveAIEnabled, "auto_submit": job.AutoSubmit}
-		doc.Meta["nextSelectedVersions"] = append([]string{}, job.SelectedVersions...)
+		doc.Meta["processSnapshot"] = map[string]any{"batch_id": job.BatchID, "schedule_id": job.ScheduleID, "platform_id": job.PlatformID, "max_txt": job.MaxTxt, "selected_versions": copyNovelFetchSelectedVersions(job.SelectedVersions), "rewrite_methods": job.RewriteMethods, "text_model_id": job.TextModelID, "sensitive_ai_enabled": job.SensitiveAIEnabled, "auto_submit": job.AutoSubmit, "generate_only": job.GenerateOnly}
+		doc.Meta["nextSelectedVersions"] = copyNovelFetchSelectedVersions(job.SelectedVersions)
 		if err = store.PutDocument(ctx, job.Owner, doc); err != nil {
 			return err
 		}
@@ -68,9 +91,10 @@ func novelFetchRecoveryJob(doc novelfetchworkshop.Document, settings map[string]
 		job.MaxTxt = intValue(snap["max_txt"])
 		job.TextModelID = firstText(snap["text_model_id"], job.TextModelID)
 		// Empty selections are meaningful: original-only processing stays original-only.
-		job.SelectedVersions = scheduleStringSlice(snap["selected_versions"])
+		job.SelectedVersions = readNovelFetchSelectedVersions(snap["selected_versions"])
 		job.RewriteMethods = scheduleStringMap(snap["rewrite_methods"])
 		job.SensitiveAIEnabled = snap["sensitive_ai_enabled"] == true
+		job.GenerateOnly = snap["generate_only"] == true
 		if explicit, ok := snap["auto_submit"].(bool); ok {
 			job.AutoSubmit = explicit
 		}
@@ -83,10 +107,14 @@ func novelFetchRecoveryJob(doc novelfetchworkshop.Document, settings map[string]
 	// A later user edit is the next-run target; the old snapshot remains a
 	// record of the already queued job, not an override of that edit.
 	if versions, exists := doc.Meta["nextSelectedVersions"]; exists {
-		job.SelectedVersions = scheduleStringSlice(versions)
+		job.SelectedVersions = readNovelFetchSelectedVersions(versions)
 	}
 	if job.MaxTxt <= 0 {
 		job.MaxTxt = 4000
+	}
+	if job.GenerateOnly {
+		job.AutoSubmit = false
+		job.ScheduleID = ""
 	}
 	return job
 }

@@ -33,9 +33,11 @@ type Rates struct {
 	USDExchangeRate float64 `json:"usd_exchange_rate"`
 }
 type Request struct {
-	ID      string
-	Owner   string
-	Feature string
+	ID            string
+	Owner         string
+	Feature       string
+	TeamID        string `json:",omitempty"`
+	ActorUsername string `json:",omitempty"`
 }
 type Entry struct {
 	ID           string    `json:"id"`

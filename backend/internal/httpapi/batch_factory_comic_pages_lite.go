@@ -14,10 +14,21 @@ type comicPageLiteStore interface {
 }
 
 func listComicPagesForView(ctx context.Context, store batchfactoryv11.ComicPageStore, owner, batchID, bookID string, lite bool) ([]batchfactoryv11.ComicPage, error) {
+	var pages []batchfactoryv11.ComicPage
+	var err error
 	if lite {
 		if liteStore, ok := store.(comicPageLiteStore); ok {
-			return liteStore.ListComicPagesLite(ctx, owner, batchID, bookID)
+			pages, err = liteStore.ListComicPagesLite(ctx, owner, batchID, bookID)
+		} else {
+			pages, err = store.ListComicPages(ctx, owner, batchID, bookID)
+		}
+	} else {
+		pages, err = store.ListComicPages(ctx, owner, batchID, bookID)
+	}
+	if err == nil {
+		for i := range pages {
+			pages[i] = withComicStyleResponse(pages[i], ctx)
 		}
 	}
-	return store.ListComicPages(ctx, owner, batchID, bookID)
+	return pages, err
 }

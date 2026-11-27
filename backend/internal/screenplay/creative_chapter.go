@@ -21,6 +21,9 @@ func BuildChapterTextRequest(p Project, c Chapter, instruction, contextJSON stri
 		if !snap.Supported {
 			return TextRequest{}, fmt.Errorf("%w: 所选剧本提示词的输出协议尚未支持：%s", ErrInvalidArgument, snap.OutputProtocol)
 		}
+		if snap.ID == ScriptBatchPromptID && !prompt.Script293SupportsBatch(snap) {
+			return TextRequest{}, fmt.Errorf("%w: 293分批协议正文摘要不匹配", ErrInvalidArgument)
+		}
 		system = snap.Body
 		// 144 requires JSON followed by an optional plain-text conversion report.
 		// JSON-only provider mode would contradict that documented output contract.
@@ -46,6 +49,9 @@ func ApplyChapterGeneration(c *Chapter, raw string) error {
 	}
 	if strings.TrimSpace(raw) == "" {
 		return ErrAIEmptyContent
+	}
+	if err := rejectPartialScriptBatch(raw); err != nil {
+		return err
 	}
 	text, err := professionalScriptMarkdown(raw)
 	if err != nil {

@@ -8,30 +8,21 @@ import (
 	"strings"
 )
 
-// 分镜检查（洛水 storyboard_check 技能，bundle 反编译取证）：
-//   - 洛水描述：「检查原文分镜与AI分镜的缺失/重复/越界，自动补齐缺失分镜并生成检查报告。输出 storyboard_check_report.json」
-//   - 洛水运行时 Bt()：从原文按 /^(\d+)[.、．]\s*/gm 提取序号行，与 AI 结果的 scene_id 对照，
-//     得到 missing（原文有 AI 没有）、extra（AI 有原文没有，即越界）、duplicates（scene_id 重复），
-//     报告结构 {total, originalTotal, errors, missing, extra, duplicates, minNum, maxNum, passed}。
-// V88 等价实现：分镜由规划链生成、seq 即镜头序号，没有「原文序号行」这个中间产物，
-// 因此检查基准改为「序号 1..最大序号 连续完整」：
-//   - missing  = 1..maxSeq 中缺席的序号（跳号）
-//   - duplicates = 同一 seq 出现多次
-//   - invalid  = seq <= 0 的异常序号（洛水「异常ID」）
-//   - extra    = 洛水按原文序号行对照的「多余（越界）」，V88 无对照基准恒为空（保留字段对齐报告结构）
-// 修复与洛水一致：缺失分镜逐条调用 AI 补全并插入，完成后可下载 storyboard_check_report.json。
+// 镜头序号检查与来源覆盖独立报告。旧 missing / passed 仅描述镜头 seq，
+// 来源编号结果在 source_coverage 中，绝不交给 seq 补齐器。
 
 // StoryboardCheckReport 对齐洛水 storyboard_check_report.json 的结构（字段名 snake_case）。
 type StoryboardCheckReport struct {
-	Total         int   `json:"total"`          // 分镜条数（洛水 total = scene_id 数量）
-	ExpectedTotal int   `json:"expected_total"` // 1..maxSeq 应有条数（洛水 originalTotal = 原文序号行数）
-	MinSeq        int   `json:"min_seq"`        // 洛水 minNum
-	MaxSeq        int   `json:"max_seq"`        // 洛水 maxNum
-	Missing       []int `json:"missing"`        // 缺失：序号范围内缺席的编号
-	Extra         []int `json:"extra"`          // 洛水「多余（越界）」；V88 无原文序号行对照，恒为空
-	Duplicates    []int `json:"duplicates"`     // 重复：同一编号出现多次
-	Invalid       []int `json:"invalid"`        // 异常ID：seq <= 0
-	Passed        bool  `json:"passed"`         // 洛水 passed = 无缺失/多余/重复
+	SourceCoverage SourceCoverageReport `json:"source_coverage"`
+	Total          int                  `json:"total"`          // 分镜条数（洛水 total = scene_id 数量）
+	ExpectedTotal  int                  `json:"expected_total"` // 1..maxSeq 应有条数（洛水 originalTotal = 原文序号行数）
+	MinSeq         int                  `json:"min_seq"`        // 洛水 minNum
+	MaxSeq         int                  `json:"max_seq"`        // 洛水 maxNum
+	Missing        []int                `json:"missing"`        // 缺失：序号范围内缺席的编号
+	Extra          []int                `json:"extra"`          // 洛水「多余（越界）」；V88 无原文序号行对照，恒为空
+	Duplicates     []int                `json:"duplicates"`     // 重复：同一编号出现多次
+	Invalid        []int                `json:"invalid"`        // 异常ID：seq <= 0
+	Passed         bool                 `json:"passed"`         // 洛水 passed = 无缺失/多余/重复
 }
 
 // CheckStoryboardShots 对单集分镜做序号完整性检查，只读不写库。
@@ -41,11 +32,12 @@ func CheckStoryboardShots(shots []StoryboardShot) (StoryboardCheckReport, error)
 		return StoryboardCheckReport{}, fmt.Errorf("%w: 本集还没有分镜，请先生成内容", ErrInvalidState)
 	}
 	report := StoryboardCheckReport{
-		Total:     len(shots),
-		Missing:   []int{},
-		Extra:     []int{},
-		Duplicates: []int{},
-		Invalid:   []int{},
+		SourceCoverage: CheckStoryboardSourceCoverage(Chapter{}, false, shots),
+		Total:          len(shots),
+		Missing:        []int{},
+		Extra:          []int{},
+		Duplicates:     []int{},
+		Invalid:        []int{},
 	}
 	counts := make(map[int]int, len(shots))
 	for _, shot := range shots {
@@ -203,18 +195,18 @@ func FillMissingStoryboardShot(ctx context.Context, store Store, owner, projectI
 		}
 	}
 	shot := StoryboardShot{
-		ID:          newScreenplayID("sb_shot"),
-		StoryboardID: storyboard.ID,
-		ProjectID:   storyboard.ProjectID,
+		ID:            newScreenplayID("sb_shot"),
+		StoryboardID:  storyboard.ID,
+		ProjectID:     storyboard.ProjectID,
 		OwnerUsername: storyboard.OwnerUsername,
-		Seq:         seq,
-		Duration:    duration,
-		Characters:  strings.TrimSpace(draft.Characters),
-		Scene:       strings.TrimSpace(draft.Scene),
-		Props:       strings.TrimSpace(draft.Props),
-		VideoDesc:   strings.TrimSpace(draft.VideoDesc),
-		ImagePrompt: strings.TrimSpace(draft.ImagePrompt),
-		Line:        strings.TrimSpace(draft.Line),
+		Seq:           seq,
+		Duration:      duration,
+		Characters:    strings.TrimSpace(draft.Characters),
+		Scene:         strings.TrimSpace(draft.Scene),
+		Props:         strings.TrimSpace(draft.Props),
+		VideoDesc:     strings.TrimSpace(draft.VideoDesc),
+		ImagePrompt:   strings.TrimSpace(draft.ImagePrompt),
+		Line:          strings.TrimSpace(draft.Line),
 	}
 	insertAt := len(storyboard.Shots)
 	for index := range storyboard.Shots {

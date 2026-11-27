@@ -31,3 +31,134 @@ export function buildPresetSelectionPayload(channelSelection, groupId, ids) {
     [groupId]: { enabled: Array.from(new Set((Array.isArray(ids) ? ids : []).map(id => String(id ?? '').trim()).filter(Boolean))) }
   };
 }
+
+const YZCM_MODEL_KINDS = new Set(['text', 'image', 'video', 'audio', 'asr']);
+
+export function yzcmModelSelectionId(model) {
+  const kind = String(model?.kind ?? '').trim().toLowerCase();
+  const modelId = String(model?.modelId ?? '').trim();
+  if (!YZCM_MODEL_KINDS.has(kind) || !modelId) return '';
+  const canonical = `yzcm:${kind}:${modelId}`;
+  const explicit = String(model?.id ?? '').trim();
+  return !explicit || explicit === canonical ? canonical : '';
+}
+
+function yzcmServerRowId(model) {
+  const canonical = yzcmModelSelectionId(model);
+  return canonical && String(model?.id ?? '').trim() === canonical ? canonical : '';
+}
+
+export function mergeYZCMSelectionModels(current, searchRows) {
+  const byId = new Map();
+  for (const model of Array.isArray(current) ? current : []) {
+    const id = yzcmServerRowId(model);
+    if (id) byId.set(id, { ...model, id });
+  }
+  for (const row of Array.isArray(searchRows) ? searchRows : []) {
+    if (row?.adapted !== true || row?.allowed !== true) continue;
+    if (row?.provider && row.provider !== 'yzcm') continue;
+    if (row?.catalogSource && row.catalogSource !== 'yzcm_saved') continue;
+    const id = yzcmModelSelectionId(row);
+    if (!id) continue;
+    byId.set(id, { ...(byId.get(id) || {}), ...row, id });
+  }
+  return [...byId.values()];
+}
+
+export function buildYZCMSelectionOperations(existingModels, selectedModels) {
+  const existing = new Map();
+  for (const model of Array.isArray(existingModels) ? existingModels : []) {
+    const id = yzcmServerRowId(model);
+    if (id) existing.set(id, model);
+  }
+  const selected = new Map();
+  for (const model of Array.isArray(selectedModels) ? selectedModels : []) {
+    const id = yzcmModelSelectionId(model);
+    if (id) selected.set(id, model);
+  }
+  const operations = [];
+  for (const [id, model] of existing) {
+    const before = model.selectedForConfigPage !== false;
+    const after = selected.has(id);
+    if (before !== after) operations.push({ type: 'update', id, patch: { selectedForConfigPage: after } });
+  }
+  for (const [id, model] of selected) {
+    if (existing.has(id)) continue;
+    operations.push({ type: 'create', payload: { kind: String(model.kind), modelId: String(model.modelId) } });
+  }
+  return operations;
+}
+
+export function applyYZCMSelectionOperation(models, operation) {
+  const rows = Array.isArray(models) ? models : [];
+  if (operation?.type === 'create') {
+    const id = yzcmModelSelectionId(operation.payload);
+    return id ? [...rows, { ...operation.payload, id, selectedForConfigPage: true }] : rows;
+  }
+  if (operation?.type === 'update') {
+    return rows.map(model => model.id === operation.id ? { ...model, ...operation.patch } : model);
+  }
+  return rows;
+}
+
+export async function executeYZCMSelectionOperations({
+  existingModels, selectedModels, create, update, refresh, onModels
+}) {
+  let localModels = Array.isArray(existingModels) ? existingModels : [];
+  let operationError = null;
+  try {
+    for (const operation of buildYZCMSelectionOperations(localModels, selectedModels)) {
+      if (operation.type === 'create') await create(operation.payload);
+      else await update(operation.id, operation.patch);
+      localModels = applyYZCMSelectionOperation(localModels, operation);
+      onModels?.(localModels);
+    }
+  } catch (error) {
+    operationError = error;
+  }
+  let refreshError = null;
+  try {
+    const refreshed = await refresh();
+    if (Array.isArray(refreshed)) {
+      localModels = refreshed;
+      onModels?.(localModels);
+    }
+  } catch (error) {
+    refreshError = error;
+  }
+  if (operationError) throw operationError;
+  if (refreshError) throw refreshError;
+  return localModels;
+}
+
+export function restrictedCredentialPatch(value, clear) {
+  if (clear) return { clearCredential: true };
+  const credential = String(value ?? '').trim();
+  if (!credential) throw new TypeError('请输入 API Key');
+  return { credential };
+}
+
+export function settleCatalogKeyDraft(drafts, modelId, submitted, focused) {
+  const current = drafts || {};
+  if (focused || String(current[modelId] ?? '').trim() !== String(submitted ?? '').trim()) return current;
+  return { ...current, [modelId]: '' };
+}
+
+export function setCatalogKeyRequestState(states, modelId, patch) {
+  const current = states || {};
+  return { ...current, [modelId]: { ...(current[modelId] || {}), ...(patch || {}) } };
+}
+
+export function catalogKeySubmissionStatus({
+  submitted, currentDraft, submittedRevision, currentRevision, focused, succeeded
+}) {
+  const current = submittedRevision === currentRevision
+    && String(submitted ?? '') === String(currentDraft ?? '');
+  const clearDraft = current && succeeded === true && focused !== true;
+  return {
+    current,
+    clearDraft,
+    clearTouched: clearDraft,
+    showError: current && succeeded !== true
+  };
+}

@@ -3222,6 +3222,12 @@ func (c *BatchAutomationCoordinator) fetchAutomationSource(ctx context.Context, 
 	// 和其它阶段都会 revision+1，继续用快照的旧 revision 写会把自己制造的写入判成
 	// 冲突。每次进入本阶段先回读最新快照，后续写入再由 _withRetry 兜底。
 	book = c.refreshAutomationBook(ctx, owner, batchID, book)
+	if groupID := firstMetadataString(book.SourceMetadata, "multimodeGroupId"); groupID != "" && book.SourceMetadata["multiModeSourceState"] == "pending" {
+		if err := c.resolveMultiModeBookSource(ctx, owner, groupID, firstMetadataString(book.SourceMetadata, "multimodeSourceKey")); err != nil {
+			return book, err
+		}
+		book = c.refreshAutomationBook(ctx, owner, batchID, book)
+	}
 	if isBatchCustomCopy(book) {
 		original, err := reuseCustomCopyOriginal(ctx, c.store, owner, batchID, book)
 		if err != nil {
@@ -3474,7 +3480,11 @@ func (c *BatchAutomationCoordinator) ensureAudioPlan(ctx context.Context, owner,
 	if len(lines) == 0 {
 		return "", 0, fmt.Errorf("正文没有可测量的生产行")
 	}
-	model, ok := configuredTTSModel(ctx, c.ttsStore, owner)
+	resolved := resolveTTS(ctx, c.ttsStore, owner, batchFactoryAudioSettingString(book.SettingsState.Patch["ttsModelId"]))
+	if err := resolved.err(); err != nil {
+		return "", 0, err
+	}
+	model, ok := resolved.model, resolved.state == ttsCustom
 	semanticHash := automationTTSSemanticHash(lines, model, ok)
 	if hasReusableAudioPlan(book) {
 		var artifactID string
@@ -4044,6 +4054,9 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 					if pinned == "" && !hasVerifiedBatchOriginal(book) {
 						fetched, fetchErr := c.fetchAutomationSource(ctx, owner, batchID, book, true)
 						if fetchErr != nil {
+							if c.scheduleMultiModeSourceWait(entry, fetchErr, persist) {
+								continue
+							}
 							fail("fetch_original", fetchErr, "自动获取正文失败")
 							continue
 						}
@@ -4138,7 +4151,7 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 				}
 				// 幂等：已经发布成功的书，在重新执行/误点执行时直接跳过，
 				// 避免在 N8 重复创建合集。强制重生成时才允许重新发布。
-				if !jobForceRegenerate && !frozenComicUpload(jobRunMode, entry) &&
+				if !jobForceRegenerate && !hasScopedComicStyleOutputs(batchfactoryv11.ResolveSettings(batch.SettingsState.Patch, book.SettingsState.Patch)) && !hasFrozenComicStyles(entry) && !frozenComicUpload(jobRunMode, entry) &&
 					jobRunMode == "full_submit" &&
 					batchfactoryv11.EffectiveProductionMode(batch.SettingsState.Patch, book.SettingsState.Patch) == "comic" {
 					if record, collectionID, published := c.publishedComicRecord(ctx, owner, batchID, book.ID); published {
@@ -4150,11 +4163,12 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 						continue
 					}
 				}
-				frozenUpload := frozenComicUpload(jobRunMode, entry)
+				multiStyleRun := hasScopedComicStyleOutputs(batchfactoryv11.ResolveSettings(batch.SettingsState.Patch, book.SettingsState.Patch)) || hasFrozenComicStyles(entry)
+				frozenUpload := !multiStyleRun && frozenComicUpload(jobRunMode, entry)
 				if frozenUpload && entry["stage"] == "waiting_submit" && c.automationSubmitDeferred(job) {
 					continue
 				}
-				if !frozenUpload && entryStatus == "scheduled" && entry["stage"] == "waiting_submit" {
+				if !multiStyleRun && !frozenUpload && entryStatus == "scheduled" && entry["stage"] == "waiting_submit" {
 					if c.automationSubmitDeferred(job) {
 						continue
 					}
@@ -4251,6 +4265,9 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 					fetchedBook, fetchErr := c.fetchAutomationSource(fetchCtx, owner, batchID, book, true)
 					cancel()
 					if fetchErr != nil {
+						if c.scheduleMultiModeSourceWait(entry, fetchErr, persist) {
+							continue
+						}
 						fail("fetch_original", fetchErr, "自动获取正文失败")
 						continue
 					}
@@ -4284,7 +4301,8 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 					// 本轮补齐提示词后仍缺失的页数；storyboard_only 收尾必须保留它，
 					// 不能把「部分页缺提示词」写成「每页提示词已完成」。
 					comicPromptMissing := 0
-					switch selectComicPreparationAction(book, effective) {
+					comicPreparation := selectComicPreparationAction(book, effective)
+					switch comicPreparation {
 					case comicPreparationBootstrap:
 						identityIssue := batchfactoryv11.ComicAssetIdentityIssue(book)
 						identityRecovery := identityIssue != ""
@@ -4388,7 +4406,13 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 							entry["stage"], entry["updatedAt"] = "comic_prompt_recovery", c.now()
 							persist()
 						})
-						partialResult, recoveryErr := c.stages.RunMissingComicPromptExtraction(stageCtx, owner, batchID, book.ID)
+						var partialResult batchfactoryv11.ComicPromptExtractionResult
+						var recoveryErr error
+						if hasMultipleComicStyles(effective) && firstMetadataString(book.SourceMetadata, "comicSharedStoryboardKey") != comicSharedStoryboardKey(book, effective) {
+							partialResult, recoveryErr = c.stages.RunComicPromptExtraction(stageCtx, owner, batchID, book.ID)
+						} else {
+							partialResult, recoveryErr = c.stages.RunMissingComicPromptExtraction(stageCtx, owner, batchID, book.ID)
+						}
 						cancel()
 						if recoveryErr != nil {
 							// 只有「一页都没补上」才允许整本失败；部分成功时失败页只记账，
@@ -4411,6 +4435,14 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 						entry["stage"], entry["message"], entry["updatedAt"] = "comic_resume", "已复用完整漫画资产和分页，继续补齐图片", c.now()
 						persist()
 					}
+					if comicPromptMissing == 0 && hasMultipleComicStyles(effective) {
+						var sharedErr error
+						book, sharedErr = c.confirmComicSharedStory(ctx, owner, batchID, book, effective, comicPreparation != comicPreparationReady)
+						if sharedErr != nil {
+							fail("comic_prompt_recovery", sharedErr, "共用漫画分镜准备失败")
+							continue
+						}
+					}
 					if jobRunMode == "storyboard_only" {
 						message := "已完成漫画资产、分页与每页提示词"
 						if comicPromptMissing > 0 {
@@ -4421,6 +4453,26 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 							appendAutomationBookLog(entry, c.now(), "ready_for_images", message)
 						}
 						entry["status"], entry["stage"], entry["message"], entry["updatedAt"] = "completed", "ready_for_images", message, c.now()
+						persist()
+						continue
+					}
+					if hasScopedComicStyleOutputs(effective) || hasFrozenComicStyles(entry) {
+						result, styleErr := c.runComicStyleOutputs(ctx, owner, batchID, book, effective, entry, persist, jobRunMode == "full_submit", jobSubmitDeferred)
+						if styleErr != nil {
+							fail("comic_images", styleErr, fmt.Sprintf("%d/%d 种画风已完成，其余画风可续跑", result.Completed, result.Total))
+							continue
+						}
+						clearAutomationFailure(entry)
+						entry["status"], entry["stage"], entry["message"], entry["updatedAt"] = "completed", "ready_for_upload", fmt.Sprintf("%d 种画风合集已完成，等待上传", result.Total), c.now()
+						if jobRunMode == "full_submit" {
+							if jobSubmitDeferred {
+								entry["status"], entry["stage"], entry["message"] = "scheduled", "waiting_submit", "各画风合集已完成，等待定时上传"
+							} else {
+								entry["stage"], entry["message"] = "published", fmt.Sprintf("%d/%d 种画风合集已上传", result.Published, result.Total)
+							}
+						}
+						delete(entry, "retryRequested")
+						delete(entry, "retryAt")
 						persist()
 						continue
 					}

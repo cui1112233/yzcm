@@ -13,6 +13,7 @@ import (
 var ErrAccessDenied = errors.New("没有此项目的操作权限")
 
 type Chapter struct {
+	ScriptGeneration               *ScriptGeneration       `json:"script_generation,omitempty"`
 	PlanningPromptID               string                  `json:"planning_prompt_id,omitempty"`
 	PlanningPromptDigest           string                  `json:"planning_prompt_digest,omitempty"`
 	PlanningConfigDigest           string                  `json:"planning_config_digest,omitempty"`
@@ -40,10 +41,17 @@ type MemberGrant struct {
 	Edit     bool   `json:"edit"`
 	Generate bool   `json:"generate"`
 }
+type AssistantToolRun struct {
+	Name    string `json:"name"`
+	OK      bool   `json:"ok"`
+	Summary string `json:"summary,omitempty"`
+}
 type AssistantMessage struct {
-	Role        string             `json:"role"`
-	Content     string             `json:"content"`
+	Role        string              `json:"role"`
+	Content     string              `json:"content"`
 	Suggestions []AssistantNavigate `json:"suggestions,omitempty"`
+	// Tools 记录本轮助手实际读取过的只读工具，供前端展示；不改变作品数据。
+	Tools []AssistantToolRun `json:"tools,omitempty"`
 	// Kind 仅用于对话智能展示（question=助手追问 / compacted=历史折叠占位），
 	// 空值表示普通消息；omitempty 保证旧数据与旧客户端完全兼容。
 	Kind string `json:"kind,omitempty"`
@@ -57,13 +65,18 @@ type AssistantNavigate struct {
 	Reason string `json:"reason,omitempty"`
 }
 type AuthoringAction struct {
-	Kind             string   `json:"kind"`
-	TargetID         string   `json:"target_id,omitempty"`
-	Content          string   `json:"content,omitempty"`
-	Chapter          *Chapter `json:"chapter,omitempty"`
-	Asset            *Asset   `json:"asset,omitempty"`
-	Shot             *Shot    `json:"shot,omitempty"`
-	ExpectedRevision int64    `json:"expected_revision"`
+	ContentEdit       *AssistantContentEdit      `json:"content_edit,omitempty"`
+	CreativeStructure *AssistantShotStructure    `json:"creative_structure,omitempty"`
+	CreativeShot      *AssistantCreativeShotEdit `json:"creative_shot,omitempty"`
+	Kind              string                     `json:"kind"`
+	TargetID          string                     `json:"target_id,omitempty"`
+	Content           string                     `json:"content,omitempty"`
+	Chapter           *Chapter                   `json:"chapter,omitempty"`
+	Asset             *Asset                     `json:"asset,omitempty"`
+	AssetOperation    string                     `json:"asset_operation,omitempty"`
+	AssetPrepared     bool                       `json:"asset_prepared,omitempty"`
+	Shot              *Shot                      `json:"shot,omitempty"`
+	ExpectedRevision  int64                      `json:"expected_revision"`
 }
 type AssistantProposal struct {
 	ID       string            `json:"id"`
@@ -133,6 +146,7 @@ func (r *MemoryAuthoringRepository) List(_ context.Context) ([]AuthoringState, e
 }
 
 type AuthoringService struct {
+	Receipts         ScriptBatchReceipts
 	PlanningProgress PlanningProgressRepository
 	Store            Store
 	Repository       AuthoringRepository
@@ -147,11 +161,47 @@ func (s AuthoringService) Load(ctx context.Context, o, p string) (AuthoringState
 	if errors.Is(e, ErrNotFound) {
 		return AuthoringState{ProjectID: p, Owner: o, Chapters: []Chapter{}, Messages: []AssistantMessage{}, Proposals: []AssistantProposal{}, Members: []MemberGrant{}, Display: map[string]any{"editor_version": "studio", "active_tab": "source", "font_size": 14}}, nil
 	}
+	if e == nil {
+		normalizeAuthoringChapters(st.Chapters)
+		for i := range st.Proposals {
+			proposal := &st.Proposals[i]
+			if proposal.Status != "pending" {
+				continue
+			}
+			for _, action := range proposal.Actions {
+				if isAssistantContentAction(action.Kind) && validateAssistantContentAction(action) != nil {
+					proposal.Status = "stale"
+					break
+				}
+			}
+		}
+	}
 	return st, e
+}
+
+func normalizeAuthoringChapters(chapters []Chapter) {
+	now := time.Now()
+	for i := range chapters {
+		g := chapters[i].ScriptGeneration
+		if g != nil && g.Status == "running" && !now.Before(g.Deadline) {
+			g.Status = "unknown"
+			g.Error = "请求已超过等待时间，结果不确定，不会自动重发"
+		}
+	}
 }
 func (s AuthoringService) Save(ctx context.Context, o, p string, st AuthoringState, v int64) (AuthoringState, error) {
 	if _, e := s.Store.GetProject(ctx, o, p); e != nil {
 		return AuthoringState{}, e
+	}
+	old, err := s.Load(ctx, o, p)
+	if err != nil {
+		return AuthoringState{}, err
+	}
+	if old.Revision != v {
+		return AuthoringState{}, ErrRevisionConflict
+	}
+	if err := PreserveScriptGeneration(st.Chapters, old.Chapters); err != nil {
+		return AuthoringState{}, err
 	}
 	seen := map[string]bool{}
 	for _, c := range st.Chapters {
@@ -167,6 +217,13 @@ func (s AuthoringService) Save(ctx context.Context, o, p string, st AuthoringSta
 	}
 	st.ProjectID = p
 	st.Owner = o
+	if repo, ok := s.Repository.(*MySQLAuthoringRepository); ok {
+		actors := revokedSessionActors(old, st)
+		archiveChanged := old.Archived != st.Archived
+		if archiveChanged || len(actors) > 0 {
+			return repo.saveAndStopRequests(ctx, st, v, actors, archiveChanged)
+		}
+	}
 	return s.Repository.Save(ctx, st, v)
 }
 func (s AuthoringService) Resolve(ctx context.Context, actor, p, permission string) (string, error) {
@@ -209,21 +266,31 @@ func ValidateAuthoringActions(actions []AuthoringAction) error {
 	}
 	for _, a := range actions {
 		switch a.Kind {
-		case "document":
-			if strings.TrimSpace(a.Content) == "" {
-				return ErrEmptyContent
-			}
-		case "chapter":
-			if a.Chapter == nil || a.Chapter.ID == "" || a.Chapter.Title == "" {
-				return ErrInvalidArgument
+		case "document", "chapter":
+			if err := validateAssistantContentAction(a); err != nil {
+				return err
 			}
 		case "asset":
+			if !a.AssetPrepared {
+				return fmt.Errorf("%w: 资产方案缺少服务器准备的完整记录，请重新准备修改方案", ErrInvalidArgument)
+			}
+			if a.AssetOperation != "" && a.AssetOperation != "update" && a.AssetOperation != "add" && a.AssetOperation != "delete" {
+				return ErrInvalidArgument
+			}
 			if a.Asset == nil || a.TargetID == "" {
 				return ErrInvalidArgument
 			}
 		case "shot":
 			if a.Shot == nil || a.TargetID == "" {
 				return ErrInvalidArgument
+			}
+		case "creative_shot_structure":
+			if e := validateShotStructure(a); e != nil {
+				return e
+			}
+		case "creative_shot":
+			if e := validateCreativeShotAction(a); e != nil {
+				return e
 			}
 		default:
 			return fmt.Errorf("%w: 不支持的助手动作 %s", ErrInvalidArgument, a.Kind)
@@ -241,6 +308,10 @@ func (s AuthoringService) WithLock(ctx context.Context, o, p string, fn func() e
 	return fn()
 }
 func (s AuthoringService) Apply(ctx context.Context, o, p, id string, v int64, confirmed bool) (AuthoringState, error) {
+	return s.ApplyAs(ctx, o, o, p, id, v, confirmed)
+}
+
+func (s AuthoringService) ApplyAs(ctx context.Context, actor, o, p, id string, v int64, confirmed bool) (AuthoringState, error) {
 	var out AuthoringState
 	if !confirmed {
 		return out, fmt.Errorf("%w: 请确认编辑内容", ErrInvalidArgument)
@@ -274,30 +345,42 @@ func (s AuthoringService) Apply(ctx context.Context, o, p, id string, v int64, c
 		}
 		a := proposal.Actions[0]
 		switch a.Kind {
-		case "chapter":
-			found := false
-			for i, c := range st.Chapters {
-				if c.ID == a.Chapter.ID {
-					st.Chapters[i] = *a.Chapter
-					found = true
-				}
+		case "creative_shot_structure":
+			committer, ok := s.Store.(AuthoringShotStructureCommitter)
+			if !ok {
+				return ErrInvalidState
 			}
-			if !found {
-				return ErrNotFound
+			out, e = committer.CommitAuthoringShotStructure(ctx, s.Repository, o, p, id, v)
+			if e == nil {
+				e = InvalidateAuthoringContent(ctx, s.Store, o, p, "storyboard")
 			}
-		case "document":
-			doc, e := s.Store.ActiveDocument(ctx, o, p)
-			if e != nil && !errors.Is(e, ErrNotFound) {
-				return e
+			return e
+		case "creative_shot":
+			committer, ok := s.Store.(AuthoringShotCommitter)
+			if !ok {
+				return ErrInvalidState
 			}
-			if doc.Revision != a.ExpectedRevision {
-				return ErrRevisionConflict
+			out, e = committer.CommitAuthoringShot(ctx, s.Repository, o, p, id, v)
+			return e
+		case "chapter", "document":
+			committer, ok := s.Store.(AuthoringContentCommitter)
+			if !ok {
+				return ErrInvalidState
 			}
-			if _, e = PublishChapterScripts(ctx, s.Store, o, p, a.Content); e != nil {
-				return e
+			out, e = committer.CommitAuthoringContent(ctx, s.Repository, actor, o, p, id, v)
+			if e == nil {
+				e = InvalidateAuthoringContent(ctx, s.Store, o, p, a.Kind)
 			}
+			return e
 		case "asset":
-			if _, e = s.Store.UpdateAsset(ctx, o, p, a.TargetID, *a.Asset, a.ExpectedRevision); e != nil {
+			if committer, ok := s.Store.(AuthoringAssetCommitter); ok {
+				out, e = committer.CommitAuthoringAsset(ctx, s.Repository, o, p, id, v)
+				if e == nil {
+					e = InvalidateAuthoringContent(ctx, s.Store, o, p, "asset")
+				}
+				return e
+			}
+			if e = applyAssistantAssetMemory(ctx, s.Store, o, p, a); e != nil {
 				return e
 			}
 		case "shot":
@@ -323,16 +406,6 @@ func (s AuthoringService) Apply(ctx context.Context, o, p, id string, v int64, c
 			}
 			if _, e = s.Store.UpdateShot(ctx, o, p, a.TargetID, *a.Shot); e != nil {
 				return e
-			}
-		}
-		if a.Kind == "chapter" {
-			for _, c := range st.Chapters {
-				if strings.TrimSpace(c.ScriptText) != "" {
-					if _, e = PublishChapterCollection(ctx, s.Store, o, p, st.Chapters); e != nil {
-						return e
-					}
-					break
-				}
 			}
 		}
 		st.Proposals[index].Status = "applied"

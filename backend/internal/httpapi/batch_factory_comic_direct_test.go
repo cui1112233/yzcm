@@ -94,7 +94,7 @@ func TestComicDirectUploadsInChunksAndPublishesOnce(t *testing.T) {
 		t.Fatalf("second status=%d body=%s", second.Code, second.Body.String())
 	}
 	secondResult := decodeBody[comicDirectResponse](t, second)
-	if secondResult.CarouselID != 9001 || secondResult.Name != "崔家铭1115-第一本" || secondResult.TotalUploaded != 3 {
+	if secondResult.CarouselID != 9001 || secondResult.Name != "AIGC-崔家铭1115-第一本" || secondResult.TotalUploaded != 3 {
 		t.Fatalf("second=%+v", secondResult)
 	}
 	if len(client.creates) != 1 {

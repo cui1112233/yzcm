@@ -18,7 +18,7 @@ import { loadCachedTheme, persistCachedTheme, selectThemePreference } from '../s
 import { applyWindowBackgroundMotion, effectiveWindowBackgroundMotion, normalizeWindowBackgroundId, readWindowBackgroundMotion, windowBackgroundStyle, windowVideoDefinition } from '../styles/window-background.js';
 import { getRouteAccessState, shouldPromptLoginForApiFailure } from './routeAccess.js';
 import { navigateToHomeLogin } from './loginNavigation.js';
-import { AccountCenterLayout } from './AccountCenterLayout';
+import { AccountCenterLayout, AccountImpersonationBanner, AccountImpersonationPending, useAccountImpersonation } from './AccountCenterLayout';
 import WorkModeMenu from './WorkModeMenu';
 import { captureAccountCenterOrigin, isAccountCenterPath, normalizeAccountCenterReturnPath } from './accountCenterNavigation.js';
 import { shouldAutoCollapseAgentNavigation } from './agentNavigation.js';
@@ -34,6 +34,7 @@ const navItems = [
   // document navigation so the SPA cannot swap in a stale React-only page.
   { href: '/novel-fetch', icon: BookOpen, label: '批量测书', reload: true },
   { href: '/novel-creation', icon: FilePenLine, label: '小说创作' },
+  { href: '/script-editor', icon: FilePenLine, label: '剧本编辑' },
   { href: '/batch-factory', icon: Clapperboard, label: '水货生产' },
   { href: '/comic-screenplay', icon: FilePenLine, label: '漫剧创作' },
   { href: '/agent', icon: Bot, label: 'CM 画布' },
@@ -98,6 +99,8 @@ export function UserLayout({ children }) {
   const pathname = window.location.pathname;
   const isAccountCenterRoute = isAccountCenterPath(pathname);
   const isLoggedIn = Boolean(username);
+  const hasLoginToken = Boolean(getToken());
+  const { status: impersonation, error: impersonationError, retry: retryImpersonation } = useAccountImpersonation(hasLoginToken);
   const isHome = pathname === '/';
   const isAgentRoute = pathname === '/agent' || pathname === '/agent/canvas' || pathname === '/agent/chat';
   const isAgentCanvasRoute = pathname === '/agent/canvas';
@@ -465,7 +468,9 @@ export function UserLayout({ children }) {
   }
 
   const showLoginCard = !isLoggedIn && isHome && loginDialogOpen;
+  const identityReady = !hasLoginToken || impersonation !== null;
   const pageContent = routeAccess.canRenderPage ? content : null;
+  const identityPending = <AccountImpersonationPending error={impersonationError} onRetry={retryImpersonation} />;
   const loginOverlay = showLoginCard ? (
     <div className="legacy-login-overlay nebula-login-overlay">
       <div className="login-modal nebula-login-modal" ref={loginCardRef} onPointerMove={updateLoginCardParallax} onPointerLeave={resetLoginCardParallax}>
@@ -501,9 +506,10 @@ export function UserLayout({ children }) {
     return (
       <ConfigProvider theme={createAntTheme(theme, systemMode)}>
         <div className={`home-shell${windowBackgroundId !== 'none' ? ' has-window-background' : ''}${windowBackgroundId === 'custom' ? ' is-custom-window-background' : ''}`} style={shellBackgroundStyle}>
-          {isValidElement(children) ? cloneElement(children, { theme, isLoggedIn, onOpenLogin: openLoginDialog }) : content}
+          <AccountImpersonationBanner status={impersonation} />
+          {identityReady ? (isValidElement(children) ? cloneElement(children, { theme, isLoggedIn, onOpenLogin: openLoginDialog }) : content) : identityPending}
           {loginOverlay}
-          <ProductUpdateModal enabled={isLoggedIn} />
+          <ProductUpdateModal enabled={isLoggedIn && identityReady} />
         </div>
       </ConfigProvider>
     );
@@ -514,10 +520,10 @@ export function UserLayout({ children }) {
       <ConfigProvider theme={createAntTheme(theme, systemMode)}>
         <div className={`legacy-shell account-center-shell${windowBackgroundId !== 'none' ? ' has-window-background' : ''}${windowBackgroundId === 'custom' ? ' is-custom-window-background' : ''}${videoBackgroundClass}`} style={shellBackgroundStyle}>
           <WindowVideoBackground backgroundId={windowBackgroundId} />
-          <AccountCenterLayout account={account} username={username} avatar={displayAvatar} pathname={pathname} onReturn={returnToWorkbench} onLogout={handleLogout}>{pageContent}</AccountCenterLayout>
+          <AccountCenterLayout account={account} username={username} avatar={displayAvatar} pathname={pathname} onReturn={returnToWorkbench} onLogout={handleLogout} impersonation={impersonation} impersonationRequired={hasLoginToken} impersonationError={impersonationError} onRetryImpersonation={retryImpersonation}>{pageContent}</AccountCenterLayout>
         </div>
         {loginOverlay}
-        <ProductUpdateModal enabled={isLoggedIn} />
+        <ProductUpdateModal enabled={isLoggedIn && identityReady} />
       </ConfigProvider>
     );
   }
@@ -525,6 +531,7 @@ export function UserLayout({ children }) {
   return (
     <ConfigProvider theme={createAntTheme(theme, systemMode)}>
       <div className={`legacy-shell${windowBackgroundId !== 'none' ? ' has-window-background' : ''}${windowBackgroundId === 'custom' ? ' is-custom-window-background' : ''}${videoBackgroundClass}`} style={shellBackgroundStyle}>
+      <AccountImpersonationBanner status={impersonation} />
       <WindowVideoBackground backgroundId={windowBackgroundId} />
       <aside className={`legacy-sidebar${effectiveSidebarCollapsed ? ' collapsed' : ''}`}>
         <div className="legacy-brand">
@@ -573,7 +580,7 @@ export function UserLayout({ children }) {
                 if (!isAccountCenterRoute) {
                   enterAccountCenter();
                 }
-                window.history.pushState({}, '', '/profile');
+                window.history.pushState({}, '', '/account');
                 window.dispatchEvent(new PopStateEvent('popstate'));
               }}
             >
@@ -589,12 +596,12 @@ export function UserLayout({ children }) {
             <div className="legacy-userbar" aria-hidden="true" />
             <div className={`legacy-global-status legacy-global-status--${globalStatus.tone}`} role="status" aria-live="polite">{globalStatus.text}</div>
           </header> : null}
-          <section className={`legacy-content${isAgentRoute ? ' legacy-content--agent' : ''}${isAgentCanvasRoute ? ' legacy-content--agent-canvas' : ''}${isAICutRoute ? ' legacy-content--aicut' : ''}`}>{pageContent}</section>
+          <section className={`legacy-content${isAgentRoute ? ' legacy-content--agent' : ''}${isAgentCanvasRoute ? ' legacy-content--agent-canvas' : ''}${isAICutRoute ? ' legacy-content--aicut' : ''}`}>{identityReady ? pageContent : identityPending}</section>
         </main>
-        {isLoggedIn && pathname !== '/' && petVisible ? <CmPenguinCompanion username={username} accountSessionKey={accountSessionKey} /> : null}
+        {isLoggedIn && identityReady && pathname !== '/' && petVisible ? <CmPenguinCompanion username={username} accountSessionKey={accountSessionKey} /> : null}
       </Fragment>
       {loginOverlay}
-      <ProductUpdateModal enabled={isLoggedIn} />
+      <ProductUpdateModal enabled={isLoggedIn && identityReady} />
       </div>
     </ConfigProvider>
   );

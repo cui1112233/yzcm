@@ -8,20 +8,73 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/auth"
 )
 
+type accountCenterIdentityKey struct{}
+
+func AccountCenterIdentityFromContext(ctx context.Context) (accountcenter.RequestIdentity, bool) {
+	identity, ok := ctx.Value(accountCenterIdentityKey{}).(accountcenter.RequestIdentity)
+	return identity, ok && identity.Actor.Username != ""
+}
+
+// AccountCenterMiddleware requires a valid account-center identity in addition
+// to ordinary bridge authentication. Existing routes can migrate independently.
+func (a BridgeAuth) AccountCenterMiddleware(next http.Handler) http.Handler {
+	return a.middleware(next, true)
+}
+
+func (a BridgeAuth) accountCenterContext(ctx context.Context, username string) (context.Context, error) {
+	if a.AccountCenterStore == nil {
+		return ctx, errors.New("account center store unavailable")
+	}
+	if existing, ok := AccountCenterIdentityFromContext(ctx); ok {
+		if strings.EqualFold(existing.Actor.Username, username) {
+			return ctx, nil
+		}
+		ctx = context.WithValue(ctx, accountCenterIdentityKey{}, accountcenter.RequestIdentity{})
+	}
+	actor, err := a.AccountCenterStore.ResolveIdentity(ctx, username)
+	if err != nil {
+		return ctx, err
+	}
+	if !strings.EqualFold(actor.Username, username) || !actor.Active || actor.ArchivedAt != nil {
+		return ctx, accountcenter.ErrForbidden
+	}
+	identity := accountcenter.RequestIdentity{Actor: actor, Subject: actor}
+	return context.WithValue(ctx, accountCenterIdentityKey{}, identity), nil
+}
+
+// authorizeAccountCenter applies the policy to a server-resolved target. A
+// missing target is represented by its zero identity and denied like any other
+// unauthorized target.
+func authorizeAccountCenter(w http.ResponseWriter, r *http.Request, action accountcenter.Action, target accountcenter.PolicyTarget) bool {
+	identity, ok := AccountCenterIdentityFromContext(r.Context())
+	if !ok || !(accountcenter.Policy{}).Can(identity.Subject, action, target) {
+		writeAccountCenterForbidden(w)
+		return false
+	}
+	return true
+}
+
+func writeAccountCenterForbidden(w http.ResponseWriter) {
+	writeAuthError(w, http.StatusForbidden, "无权执行此操作")
+}
+
 type AuthOptions struct {
-	Store           auth.Store
-	Profiles        *MemberProfileStore
-	Now             func() time.Time
-	SessionResolver func(context.Context, string) (BridgeIdentity, error)
-	MFAFile         string
-	PasskeyFile     string
-	RateLimiter     *authRateLimiter
+	Store              auth.Store
+	AccountCenterStore accountcenter.Store
+	Profiles           *MemberProfileStore
+	Now                func() time.Time
+	SessionResolver    func(context.Context, string) (BridgeIdentity, error)
+	MFAFile            string
+	PasskeyFile        string
+	RateLimiter        *authRateLimiter
 }
 
 func authAccountPayload(account auth.Account, profiles *MemberProfileStore) map[string]any {
@@ -70,6 +123,18 @@ func authAccountPayload(account auth.Account, profiles *MemberProfileStore) map[
 }
 
 func RegisterAuthRoutes(root *http.ServeMux, options AuthOptions) {
+	accountPayload := func(ctx context.Context, account auth.Account) map[string]any {
+		payload := authAccountPayload(account, options.Profiles)
+		setFormalAccountFields(ctx, options.AccountCenterStore, payload, accountcenter.Identity{}, false)
+		if options.AccountCenterStore == nil {
+			return payload
+		}
+		payload["role"] = "member"
+		if identity, err := options.AccountCenterStore.ResolveIdentity(ctx, account.Username); err == nil {
+			setFormalAccountFields(ctx, options.AccountCenterStore, payload, identity, false)
+		}
+		return payload
+	}
 	now := options.Now
 	if now == nil {
 		now = time.Now
@@ -152,7 +217,7 @@ func RegisterAuthRoutes(root *http.ServeMux, options AuthOptions) {
 		}
 		limiter.reset(authRateScopeLogin, ipKey)
 		limiter.reset(authRateScopeLogin, userKey)
-		payload := authAccountPayload(account, options.Profiles)
+		payload := accountPayload(r.Context(), account)
 		payload["token"] = token
 		writeJSON(w, http.StatusOK, payload)
 	})
@@ -221,12 +286,21 @@ func RegisterAuthRoutes(root *http.ServeMux, options AuthOptions) {
 			writeAuthError(w, http.StatusUnauthorized, "Passkey 登录失败")
 			return
 		}
-		payload := authAccountPayload(account, options.Profiles)
+		payload := accountPayload(r.Context(), account)
 		payload["token"] = token
 		writeJSON(w, http.StatusOK, payload)
 	})
 
 	root.HandleFunc("GET /api/login/session", func(w http.ResponseWriter, r *http.Request) {
+		if _, switched := switchedBridgeIdentity(r); switched {
+			identity, _ := AccountCenterIdentityFromContext(r.Context())
+			subject := identity.Subject
+			payload := authAccountPayload(auth.Account{Username: subject.Username, Active: true}, options.Profiles)
+			setFormalAccountFields(r.Context(), options.AccountCenterStore, payload, subject, true)
+			payload["impersonationId"] = identity.ImpersonationID
+			writeJSON(w, http.StatusOK, payload)
+			return
+		}
 		if options.Store == nil {
 			writeAuthError(w, http.StatusServiceUnavailable, "登录服务暂不可用")
 			return
@@ -239,11 +313,7 @@ func RegisterAuthRoutes(root *http.ServeMux, options AuthOptions) {
 			// would recursively validate the same invalid token.
 			if options.SessionResolver != nil && r.Header.Get("X-Qiantie-Auth-Bridge") != "1" {
 				if identity, resolveErr := options.SessionResolver(r.Context(), token); resolveErr == nil {
-					role := "member"
-					if identity.IsOwner {
-						role = "dev"
-					}
-					writeJSON(w, http.StatusOK, map[string]any{"username": identity.Username, "active": true, "isOwner": identity.IsOwner, "role": role, "displayName": identity.Username, "avatarUrl": nil, "effectivePermissions": []string{}})
+					writeJSON(w, http.StatusOK, accountPayload(r.Context(), auth.Account{Username: identity.Username, IsOwner: identity.IsOwner, Active: true}))
 					return
 				}
 			}
@@ -257,8 +327,60 @@ func RegisterAuthRoutes(root *http.ServeMux, options AuthOptions) {
 			writeAuthError(w, http.StatusUnauthorized, "登录已失效，请重新登录")
 			return
 		}
-		writeJSON(w, http.StatusOK, authAccountPayload(account, options.Profiles))
+		writeJSON(w, http.StatusOK, accountPayload(r.Context(), account))
 	})
+}
+
+func legacyAccountRole(role string) string {
+	switch role {
+	case accountcenter.RoleFounder, accountcenter.RoleDeveloper:
+		return "dev"
+	case accountcenter.RoleManager:
+		return "manager"
+	default:
+		return "member"
+	}
+}
+
+func setFormalAccountFields(ctx context.Context, store accountcenter.Store, payload map[string]any, identity accountcenter.Identity, switched bool) {
+	role := "组员"
+	capabilities := []string{}
+	switch identity.Role {
+	case accountcenter.RoleFounder:
+		role = "开发创始"
+	case accountcenter.RoleDeveloper:
+		role = "开发者"
+	case accountcenter.RoleManager:
+		role = "管理者"
+	}
+	if identity.Username != "" {
+		payload["role"] = legacyAccountRole(identity.Role)
+		payload["displayName"] = firstText(identity.DisplayName, identity.Username)
+		if identity.AvatarURL != "" || switched {
+			payload["avatarUrl"] = identity.AvatarURL
+		}
+	}
+	if identity.Active && identity.ArchivedAt == nil && !switched {
+		switch identity.Role {
+		case accountcenter.RoleFounder:
+			capabilities = append(capabilities, "team_governance", "account_governance", "platform_admin", "create_team")
+		case accountcenter.RoleDeveloper:
+			capabilities = append(capabilities, "team_governance", "account_governance")
+			if reader, ok := store.(accountcenter.PlatformGrantReader); ok {
+				grants, err := reader.PlatformGrants(ctx, identity.Username)
+				if err == nil && slices.Contains(grants, accountcenter.GrantCapabilityPlatformAdmin) {
+					capabilities = append(capabilities, "platform_admin")
+				}
+				if err == nil && slices.Contains(grants, accountcenter.GrantCapabilityTeamCreate) {
+					capabilities = append(capabilities, "create_team")
+				}
+			}
+		case accountcenter.RoleManager:
+			capabilities = append(capabilities, "team_governance")
+		}
+	}
+	payload["canonicalRole"] = role
+	payload["capabilities"] = capabilities
 }
 
 func bearerToken(r *http.Request) string {
