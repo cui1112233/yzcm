@@ -7,6 +7,7 @@ import { getMemberCenter } from '../../shared/api/member';
 import { FANKE_VIDEO_MODELS } from './shuihuo/providerModelBinding';
 import { PageHeader, Panel, RoleBadge } from './accountCenterShared';
 import { getPresetCardState } from './api-config-preset-state';
+import { loadApiConfigPage } from './api-config-initial-load.js';
 import { isCatalogModelAvailable, modelNeedsNoCredential } from './apiConfigCatalogMerge';
 import ApiIntegrationSettings from './ApiIntegrationSettings';
 
@@ -45,6 +46,8 @@ function ModelQuotaStatus({ quota, error }) {
 
 export default function ApiConfigPage() {
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const [memberError, setMemberError] = useState('');
   const [config, setConfig] = useState(null);
   const [center, setCenter] = useState(null);
   const [models, setModels] = useState([]);
@@ -113,25 +116,30 @@ export default function ApiConfigPage() {
 
   useEffect(() => {
     let alive = true;
-    Promise.all([getConfig(), getMemberCenter()]).then(async ([nextConfig, nextCenter]) => {
-      if (!alive) return;
-      setConfig(nextConfig);
-      setCenter(nextCenter);
-      if (canManageModelCatalog(nextConfig)) {
-        const [nextModels, nextQuotas] = await Promise.all([
-          listManagedModels(),
-          getManagedModelQuotas().then(data => ({ data })).catch(error => ({ error }))
-        ]);
+    const whileAlive = callback => (...args) => { if (alive) callback(...args); };
+    void loadApiConfigPage({
+      getConfig, getMemberCenter, canManage: canManageModelCatalog,
+      listModels: listManagedModels, getQuotas: getManagedModelQuotas
+    }, {
+      config: whileAlive(setConfig),
+      center: whileAlive(setCenter),
+      models: whileAlive(nextModels => {
         setModels(nextModels);
         const h3 = nextModels.find(model => model.id === 'minimax-h3-video');
         if (h3 && !dirtyRef.current['minimax-h3-video']) setPresetWorkflowIds(current => ({ ...current, 'minimax-h3-video': h3.workflowId || DEFAULT_H3_WORKFLOW_ID }));
         const fanke = nextModels.find(model => model.id === 'fanke-video-api');
         if (fanke && !dirtyRef.current['fanke-video-api']) setPresetModelIds(current => ({ ...current, 'fanke-video-api': fanke.modelId || FANKE_VIDEO_MODELS[0].value }));
-        if (nextQuotas.error) setQuotaError(nextQuotas.error.message || '额度查询失败');
-        else { setQuotas(nextQuotas.data || []); setQuotaError(''); }
-      }
-    }).catch(error => message.error(error.message || 'API 配置加载失败'))
-      .finally(() => { if (alive) setLoading(false); });
+      }),
+      quotas: whileAlive(nextQuotas => { setQuotas(nextQuotas || []); setQuotaError(''); }),
+      quotaError: whileAlive(error => setQuotaError(error.message || '额度查询失败')),
+      quotaLoading: whileAlive(setQuotaLoading),
+      error: whileAlive((stage, error) => {
+        const reason = error.message || '请求失败，请刷新重试';
+        if (stage === 'member') setMemberError(`身份详情读取失败：${reason}`);
+        else setLoadError(`${stage === 'config' ? 'API 配置' : '模型目录'}加载失败：${reason}`);
+      }),
+      ready: whileAlive(() => setLoading(false))
+    });
     return () => { alive = false; };
   }, []);
 
@@ -277,9 +285,11 @@ export default function ApiConfigPage() {
   }
 
   if (loading) return <div className="account-center-page"><Skeleton active paragraph={{ rows: 9 }} /></div>;
+  if (loadError || !config) return <div className="account-center-page api-config-page"><Alert type="error" showIcon message="API 配置尚未就绪" description={loadError || '未取得有效配置，请刷新重试'} /></div>;
 
   return <div className="account-center-page api-config-page">
     <PageHeader title="API 配置" subtitle="统一管理平台预设模型与各渠道 API 接口；业务页面按凭证自动读取可用模型。" />
+    {memberError ? <Alert type="warning" showIcon message={memberError} /> : null}
     {!canManageApi ? <div className="ac-managed-api-card">
       <span><ShieldCheck size={28} /></span>
       <div><div><h2>模型服务由团队托管</h2>{member ? <RoleBadge canonicalRole={member.canonicalRole} /> : null}</div><p>你可在获授权的业务下拉框中选择管理员已配置凭证的模型；不会显示 API Key。</p></div>
