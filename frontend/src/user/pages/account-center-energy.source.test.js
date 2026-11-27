@@ -23,3 +23,32 @@ test('account overview and energy are canonical routes inside the existing accou
   for (const old of ['./MemberCenterPage.jsx', './UsageStatsPage.jsx']) assert.equal(existsSync(new URL(old, import.meta.url)), false);
   for (const text of [app, layout, source('./ProfilePage.jsx')]) assert.doesNotMatch(text, /会员中心|用量与制作|会员权益/);
 });
+
+test('account overview exposes every region in approved reference 01 without mock values', () => {
+  const overview = source('./AccountOverviewPage.jsx');
+  for (const region of [
+    'pc-overview-identity',
+    'pc-overview-balance',
+    'pc-overview-trend',
+    'pc-overview-ranking',
+    'pc-overview-connection',
+    'pc-overview-models',
+    'pc-overview-bills'
+  ]) assert.match(overview, new RegExp(region));
+  assert.match(overview, /DesignedEmptyState/);
+  assert.doesNotMatch(overview, /328\.60|96\.40|24\.80|6\.20/);
+});
+
+test('energy page exposes the all-team dashboard regions in approved reference 05', () => {
+  const energy = source('./EnergyBillingPage.jsx');
+  for (const region of [
+    'pc-platform-consumption',
+    'pc-platform-metrics',
+    'pc-platform-trend',
+    'pc-platform-ranking',
+    'pc-platform-teams',
+    'pc-platform-ledger'
+  ]) assert.match(energy, new RegExp(region));
+  assert.match(energy, /全平台团队消耗/);
+  assert.doesNotMatch(energy, /486\.20|32\.80|186\.40/);
+});

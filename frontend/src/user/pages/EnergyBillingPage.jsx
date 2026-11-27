@@ -4,6 +4,7 @@ import {
   ENERGY_LEDGER_PAGE_SIZE, ENERGY_TEAM_PAGE_SIZE, exportEnergyLedgerPage, getAccountOverview, getEnergyTeams,
   loadEnergyDashboard, normalizeEnergyFilters
 } from '../../shared/api/accountCenterEnergy.js';
+import { DesignedEmptyState, GlassPanel } from '../components/PersonalCenterVisuals.jsx';
 import { FEATURE_LABELS, PageHeader, Panel, RoleBadge } from './accountCenterShared.jsx';
 import {
   canSelectEnergyTeam, energyAmount, energyRoleLabel, energyTime, EnergyMetrics, EnergyPager, EnergyQueryState,
@@ -48,7 +49,7 @@ function EnergyFiltersForm({ ownOnly, applied, onApply }) {
       setError('');
     } catch (invalid) { setError(invalid.message); }
   }
-  return <Panel title="筛选账单">
+  return <Panel title="筛选账单" className="pc-platform-filters">
     <form onSubmit={apply} className="energy-filter">
       <label>开始日期<Input type="date" {...field('from')} /></label>
       <label>结束日期（不含当天）<Input type="date" {...field('to')} /></label>
@@ -91,7 +92,7 @@ function LedgerPanel({ ledger, filters, subject, onPage }) {
     } finally { exportRequest.current = null; }
   }
   const exportedPage = download.page;
-  return <Panel title="账单明细" action={<Button disabled={!ledger.entries.length} loading={download.loading} onClick={exportPage}>导出当前页 CSV</Button>}>
+  return <Panel title="账单明细" className="pc-platform-ledger" action={<Button disabled={!ledger.entries.length} loading={download.loading} onClick={exportPage}>导出当前页 CSV</Button>}>
     <p className="energy-hint">CSV 仅导出当前页，每页最多 {ledger.limit} 条。{ledger.hasMore ? '后面还有记录。' : '当前页后暂无更多记录。'}</p>
     {download.error && <Alert showIcon type="error" message="CSV 导出失败" description={download.error} />}
     {exportedPage && <p role="status">已导出第 {Math.floor(exportedPage.offset / exportedPage.limit) + 1} 页，每页最多 {exportedPage.limit} 条。
@@ -167,8 +168,8 @@ export default function EnergyBillingPage() {
     setTeamOffset(0);
   }
 
-  return <div className="account-center-page energy-page">
-    <PageHeader title="能量与账单" actions={<Button onClick={overview.retry}>刷新账单</Button>} />
+  return <div className={`account-center-page energy-page pc-platform-consumption ${selectTeam ? 'is-platform-scope' : 'is-team-scope'}`}>
+    <PageHeader title={selectTeam ? '全平台团队消耗' : '能量与账单'} subtitle={selectTeam ? '查看各团队余额与能量使用情况' : '查看所属团队余额与真实核账记录'} actions={<Button onClick={overview.retry}>刷新账单</Button>} />
     <EnergyQueryState query={overview} label="账号与团队" />
     {current && <>
       <Panel title={ready?.summary.team?.name || (scope === current.team?.id ? current.team?.name : '') || '团队能量'}
@@ -176,25 +177,30 @@ export default function EnergyBillingPage() {
         <EnergyRecharge url={current.rechargeUrl} />
       </Panel>
       {(selectTeam || scope) && <EnergyFiltersForm ownOnly={current.subject.role === 'member'} applied={applied} onApply={applyFilters} />}
-      {selectTeam && <EnergyTeamCards currentTeamId={currentTeamId} selectedTeamId={selectedTeamId}
+      {selectTeam && <div className="pc-platform-teams"><EnergyTeamCards currentTeamId={currentTeamId} selectedTeamId={selectedTeamId}
         onSelect={changeTeam} teams={directory.data} onPage={setTeamOffset} member={criteria.member} activeSummary={ready?.summary}>
         <EnergyQueryState query={directory} label="团队目录" />
-      </EnergyTeamCards>}
+      </EnergyTeamCards></div>}
       {selectTeam && detailForbidden && !replaceMissingTeam
         ? <Alert showIcon type="warning" message="所选团队账单无法查看"
           description={applied.member ? '请从团队卡片切换团队，或清除成员筛选。' : '请从团队卡片切换团队。'} />
         : <EnergyQueryState query={dashboard} label="所选团队账单" />}
       {!scope && !currentTeamId && (!selectTeam || teams?.length > 0) && <>
         <p className="ac-empty">{selectTeam ? '当前账号没有所属团队，请选择一个团队查看账单' : '当前账号没有可查询的所属团队'}</p>
-        <EnergyMetrics data={current} />
+        <div className="pc-platform-metrics"><EnergyMetrics data={current} /></div>
       </>}
       {ready && <>
         <p className="energy-hint">{energyTime(ready.summary.filter.from)} 至 {energyTime(ready.summary.filter.to)}（不含结束时间）</p>
-        <EnergyMetrics data={ready.summary} member={criteria.member} />
-        <Panel title="团队成员能量消耗排行">
-          <EnergyRanking ranking={ready.ranking} />
-          <EnergyPager page={ready.ranking} onPage={setRankingOffset} label="排行" />
-        </Panel>
+        <div className="pc-platform-metrics"><EnergyMetrics data={ready.summary} member={criteria.member} /></div>
+        <div className="pc-platform-analysis">
+          <GlassPanel className="pc-platform-trend" title={selectTeam ? '各团队消耗趋势' : '团队消耗趋势'} icon="trend">
+            <DesignedEmptyState icon="trend" title="趋势数据暂未接通" description="当前接口提供真实汇总、排行与账单，时间序列接通后会在这里显示。" />
+          </GlassPanel>
+          <Panel title="团队成员能量消耗排行" className="pc-platform-ranking">
+            <EnergyRanking ranking={ready.ranking} />
+            <EnergyPager page={ready.ranking} onPage={setRankingOffset} label="排行" />
+          </Panel>
+        </div>
         <LedgerPanel key={dashboardKey} ledger={ready.ledger} filters={filters} subject={current.subject} onPage={setLedgerOffset} />
       </>}
     </>}
