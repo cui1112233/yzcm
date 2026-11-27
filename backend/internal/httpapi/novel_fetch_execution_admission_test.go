@@ -24,7 +24,7 @@ func admissionTestStore(t *testing.T) *novelfetchworkshop.MemoryStore {
 	if e := s.PutConfig(ctx, "alice", map[string]any{"appConfig": map[string]any{"rewrite": map[string]any{"default_template_id": "plain", "process_line_count": 1}}, "knowledgeLibraries": map[string]any{"rewrite_templates": map[string]any{"profiles": []any{map[string]any{"id": "plain", "prompt": "保持原文", "response_mode": "plain_text"}}}}}); e != nil {
 		t.Fatal(e)
 	}
-	if e := s.PutDocument(ctx, "alice", novelfetchworkshop.Document{BookID: "123", Original: "首行原文", Meta: map[string]any{"status": "failed", "originalStatus": "done", "aiStatus": "failed", "aiCount": 1}}); e != nil {
+	if e := s.PutDocument(ctx, "alice", novelfetchworkshop.Document{BookID: "123", Original: "首行原文", Gender: "女频", Meta: map[string]any{"style": "现代甜文", "status": "failed", "originalStatus": "done", "aiStatus": "failed", "aiCount": 1}}); e != nil {
 		t.Fatal(e)
 	}
 	return s
@@ -99,8 +99,12 @@ func TestExecutionAdmissionConcurrentGenerateQueuesOneWorkerCall(t *testing.T) {
 	default:
 		t.Fatal("no durable queue job")
 	}
-	if job.SensitiveAIEnabled || job.AutoSubmit {
-		t.Fatalf("direct generation enabled unrequested paid repair/upload: %+v", job)
+	cfg, err := novelfetchworkshop.ReadWorkflowConfig(context.Background(), s, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.SensitiveAIEnabled != novelFetchSensitiveAIEnabled(cfg) || job.AutoSubmit {
+		t.Fatalf("direct generation lost configured sensitive setting or enabled upload: %+v", job)
 	}
 	raw, _ := json.Marshal(job)
 	if !strings.Contains(string(raw), `"generateOnly":true`) {

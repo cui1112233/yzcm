@@ -115,7 +115,7 @@ func firstKnowledgeText(library map[string]any, fields ...string) string {
 	return ""
 }
 
-func rewritePlan(settings map[string]any, versionID string, index int) rewriteRuntimePlan {
+func rewritePlan(settings map[string]any, versionID string, index int, documents ...Document) rewriteRuntimePlan {
 	app := mapOrEmpty(settings["appConfig"])
 	rewrite := mapOrEmpty(settings["rewrite"])
 	if configured := mapOrEmpty(app["rewrite"]); len(configured) > 0 {
@@ -142,6 +142,9 @@ func rewritePlan(settings map[string]any, versionID string, index int) rewriteRu
 		}
 	}
 	if plan.Method == "" {
+		plan.Method = rewriteString(rewrite["strategy"])
+	}
+	if plan.Method == "" || plan.Method == "auto" {
 		plan.Method = "instruction"
 	}
 	plan.StrategyName = map[string]string{"opening_instruction": "爆款开头", "high_imitation": "高仿改写", "instruction": "普通改文"}[plan.Method]
@@ -181,32 +184,30 @@ func rewritePlan(settings map[string]any, versionID string, index int) rewriteRu
 	if temporary := firstKnowledgeText(templates, "temporary_instructions"); temporary != "" {
 		plan.Instructions = append(plan.Instructions, "临时指令："+temporary)
 	}
-	if plan.Method == "opening_instruction" {
+	document := Document{}
+	if len(documents) > 0 {
+		document = documents[0]
+	}
+	if plan.Method == "opening_instruction" && rewriteString(rewrite["opening_phrase_mode"]) != "off" {
 		openingLibrary := knowledgeLibrary(settings, "opening_phrases")
-		if opening := firstKnowledgeText(openingLibrary, "items", "phrases"); opening != "" {
-			plan.Instructions = append(plan.Instructions, "爆款开头参考（只参考结构，不得照搬）："+opening)
-			for _, item := range append(arrayMap(openingLibrary["items"]), arrayMap(openingLibrary["phrases"])...) {
-				if rewriteItemText(item) == opening {
-					plan.OpeningPhraseName = rewriteItemName(item)
-					break
-				}
-			}
+		if item := selectRewriteReference(openingLibrary, []string{"items", "phrases"}, document, "opening_phrase_id", "opening_phrase_name"); item != nil {
+			plan.Instructions = append(plan.Instructions, "爆款开头参考（只参考结构，不得照搬）："+rewriteReferenceText(item))
+			plan.OpeningPhraseName = rewriteItemName(item)
 		}
 	}
 	if plan.Method == "high_imitation" {
 		highLibrary := knowledgeLibrary(settings, "high_imitation")
-		if high := firstKnowledgeText(highLibrary, "items", "prompts", "references"); high != "" {
-			plan.Instructions = append(plan.Instructions, "高仿参考（只参考结构，不得照搬）："+high)
-			for _, field := range []string{"items", "prompts", "references"} {
-				for _, item := range arrayMap(highLibrary[field]) {
-					if rewriteItemText(item) == high {
-						plan.HighImitationReferenceName = rewriteItemName(item)
-						break
-					}
-				}
-				if plan.HighImitationReferenceName != "" {
-					break
-				}
+		if instruction := highImitationSystemPrompt(highLibrary); instruction != "" {
+			contract := plan.SystemPrompt
+			if contract == "" {
+				contract = batchbook.RewriteSystem
+			}
+			plan.SystemPrompt = instruction + "\n\n" + contract
+		}
+		if rewriteString(rewrite["high_imitation_mode"]) != "off" {
+			if item := selectRewriteReference(highLibrary, []string{"references", "items"}, document, "high_imitation_reference_id", "high_imitation_reference_name"); item != nil {
+				plan.Instructions = append(plan.Instructions, "高仿参考（只参考结构，不得照搬）："+rewriteReferenceText(item))
+				plan.HighImitationReferenceName = rewriteItemName(item)
 			}
 		}
 	}
@@ -376,7 +377,7 @@ func GenerateAIRewritesForVersionsProcessed(ctx context.Context, store Store, ow
 	}
 	for _, versionID := range requested {
 		index, _ := strconv.Atoi(strings.TrimPrefix(versionID, "ai"))
-		plan := rewritePlan(settings, versionID, index)
+		plan := rewritePlan(settings, versionID, index, document)
 		if plan.TemplateID != "" && plan.TemplateName == "" {
 			return document, fmt.Errorf("所选改文模板不可用，请重新选择模板")
 		}

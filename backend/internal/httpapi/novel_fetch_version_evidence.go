@@ -36,6 +36,13 @@ func novelFetchVersionsSubmitted(doc novelfetchworkshop.Document, versions []str
 
 func novelFetchVersionsGenerated(ctx context.Context, store novelfetchworkshop.Store, owner string, doc novelfetchworkshop.Document, versions []string) bool {
 	for _, version := range novelFetchRequiredVersions(versions) {
+		if strings.HasPrefix(strings.ToLower(version), "ai") {
+			ready, err := novelfetchworkshop.AIRewriteVersionReady(ctx, store, owner, doc, version)
+			if err != nil || !ready {
+				return false
+			}
+			continue
+		}
 		if version == "original" && strings.TrimSpace(firstText(doc.ProcessedText, doc.Original)) != "" {
 			continue
 		}

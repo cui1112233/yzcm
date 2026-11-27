@@ -32,7 +32,7 @@ type ProcessJob struct {
 	MaxTxt             int               `json:"maxTxt"`
 	SensitiveAIEnabled bool              `json:"sensitiveAiEnabled"`
 	AutoSubmit         bool              `json:"autoSubmit,omitempty"`
-	SelectedVersions   []string          `json:"selectedVersions,omitempty"`
+	SelectedVersions   []string          `json:"selectedVersions"`
 	RewriteMethods     map[string]string `json:"rewriteMethods,omitempty"`
 	TextModelID        string            `json:"textModelId"`
 	Attempts           int               `json:"attempts"`

@@ -2,7 +2,8 @@ function defaultEnabled(value) {
   return typeof value === 'boolean' ? value : true;
 }
 
-export const NOVEL_FETCH_PROFILE_VERSIONS = ['original', 'ai1', 'ai2', 'ai3', 'ai4', 'ai5'];
+export const NOVEL_FETCH_AI_VERSION_LIMIT = 20;
+export const NOVEL_FETCH_PROFILE_VERSIONS = ['original', ...Array.from({ length: NOVEL_FETCH_AI_VERSION_LIMIT }, (_, index) => `ai${index + 1}`)];
 
 export function withNovelFetchVersionProfiles(bindings = {}) {
   const source = bindings && typeof bindings === 'object' ? bindings : {};

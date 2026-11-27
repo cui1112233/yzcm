@@ -267,7 +267,7 @@ func novelFetchAutomationEligible(document novelfetchworkshop.Document, now time
 	}
 	// 自动重试预算耗尽后必须由人工介入，不能因为 status=failed 又被扫描器
 	// 立刻捡回队列，否则“停止自动重试”实际上没有任何效果。
-	if meta["manualOnly"] == true || meta["manual_only"] == true {
+	if meta["manualOnly"] == true || meta["manual_only"] == true || meta["sensitiveManualRetryRequired"] == true {
 		return false
 	}
 	// 阶段重试表里的 manual_only 与 manualOnly 等价：模型确定性失败、AI

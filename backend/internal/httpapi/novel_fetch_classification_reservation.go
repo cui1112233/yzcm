@@ -3,6 +3,10 @@ package httpapi
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
+
+	"qiantie/backend/internal/batchfactoryv11"
 
 	"qiantie/backend/internal/novelfetchworkshop"
 )
@@ -26,6 +30,14 @@ func runWorkshopClassification(ctx context.Context, store novelfetchworkshop.Sto
 	if inFlight, _ := latest.Meta["classificationInFlight"].(bool); inFlight {
 		return fmt.Errorf("分类结果未知，请人工确认后手动重试")
 	}
+	// A failed classification is one attempt in this round. Explicit retry
+	// changes the queue state before allowing another attempt; scanners and
+	// reclaimed deliveries must not silently classify again.
+	classificationRetry := novelFetchRetrySchedule(latest.Meta)[novelFetchRetryStageClassify]
+	if !novelFetchClassificationResolved(latest) && (firstText(latest.Meta["status"]) == "waiting_classification" || intValue(classificationRetry["attempt"]) > 0 || novelFetchRetryStateIsManual(classificationRetry)) {
+		return errNovelFetchClassificationPending
+	}
+	ctx = batchfactoryv11.WithSingleAttempt(ctx)
 	// Start from current user decisions and retry/configuration state. Only the
 	// fetch caller may merge its newly prepared rule output, never stale labels.
 	if latest.Meta == nil {
@@ -42,6 +54,7 @@ func runWorkshopClassification(ctx context.Context, store novelfetchworkshop.Sto
 		}
 	}
 	*document = latest
+	priorClassificationError := firstText(document.Meta["classifyError"])
 	needsGender := genderNeedsResolution(document.Gender)
 	needsStyle := styleNeedsResolution(document.Meta)
 	paid := false
@@ -81,26 +94,41 @@ func runWorkshopClassification(ctx context.Context, store novelfetchworkshop.Sto
 			return provider.Complete(c, r)
 		})
 	}
-	if needsGender || needsStyle {
-		result := novelfetchworkshop.ClassifyBook(ctx, "", info, guardedJudge, guardedProvider)
+	if needsGender {
+		d := novelfetchworkshop.ResolveGender(ctx, "", info, guardedJudge)
 		if reservationErr != nil {
 			return reservationErr
 		}
-		if needsGender {
-			d := result.Gender
-			document.Gender = d.Gender
-			document.GenderSource = d.Source
-			document.GenderReason = d.Reason
-			document.GenderConfidence = d.Confidence
-		}
-		if needsStyle {
-			document.Meta["styleStatus"] = "processing"
-			recordNovelFetchStyleDecision(document.Meta, result.Style, nil)
-		}
+		document.Gender, document.GenderSource, document.GenderReason, document.GenderConfidence = d.Gender, d.Source, d.Reason, d.Confidence
 	}
+	if needsStyle {
+		d := novelfetchworkshop.ResolveStyle(ctx, info, guardedProvider)
+		if reservationErr != nil {
+			return reservationErr
+		}
+		recordNovelFetchStyleDecision(document.Meta, d, nil)
+	}
+
 	syncNovelFetchClassificationMetadata(document)
-	if novelFetchClassificationResolved(*document) {
+	resolved := novelFetchClassificationResolved(*document)
+	if resolved {
+		delete(document.Meta, "classifyError")
+		if priorClassificationError != "" && firstText(document.Meta["error"]) == priorClassificationError {
+			delete(document.Meta, "error")
+		}
 		clearNovelFetchTaskRetry(document.Meta, novelFetchRetryStageClassify)
+	} else {
+		reasons := []string{}
+		if genderNeedsResolution(document.Gender) {
+			reasons = append(reasons, document.GenderReason)
+		}
+		if styleNeedsResolution(document.Meta) {
+			reasons = append(reasons, firstText(document.Meta["styleError"]))
+		}
+		document.Meta["classifyError"] = strings.Join(reasons, "；")
+		document.Meta["status"], document.Meta["queueState"] = "waiting_classification", "waiting_classification"
+		document.Meta["error"] = firstText(document.Meta["classifyError"], errNovelFetchClassificationPending.Error())
+		scheduleNovelFetchTaskRetry(document.Meta, novelFetchRetryStageClassify, fmt.Errorf("%s", document.Meta["error"]), 0, time.Now().UTC())
 	}
 	delete(document.Meta, "classificationInFlight")
 	version, err := store.CompareAndSwapDocument(ctx, owner, *document)
@@ -112,5 +140,8 @@ func runWorkshopClassification(ctx context.Context, store novelfetchworkshop.Sto
 		return err
 	}
 	document.UpdatedAt = version
+	if !resolved {
+		return errNovelFetchClassificationPending
+	}
 	return nil
 }

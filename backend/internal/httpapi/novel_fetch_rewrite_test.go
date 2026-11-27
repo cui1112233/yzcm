@@ -19,7 +19,7 @@ func TestNovelFetchWorkshopGenerateAIRouteUsesGoProvider(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	secret := "test-secret"
 	store := novelfetchworkshop.NewMemoryStore()
-	if err := store.PutDocument(context.Background(), "tester", novelfetchworkshop.Document{BookID: "book-rewrite", Original: "原始正文"}); err != nil {
+	if err := store.PutDocument(context.Background(), "tester", novelfetchworkshop.Document{BookID: "book-rewrite", Original: "原始正文", Gender: "女频", Meta: map[string]any{"style": "现代甜文"}}); err != nil {
 		t.Fatal(err)
 	}
 	provider := rewriteProviderFunc(func(_ context.Context, request novelfetchworkshop.RewriteRequest) (string, error) {
@@ -352,7 +352,7 @@ func TestNovelFetchOriginalUsesEnabledSensitiveAIRepair(t *testing.T) {
 	}
 	if err := store.PutConfig(context.Background(), "tester", map[string]any{
 		"sensitive_rules": []any{map[string]any{"find": "出轨", "replace": "他说他关系越界了", "enabled": true}},
-		"sensitive_ai":    map[string]any{"enabled": true, "model": "[anti-2]gemini-3.8-flash"},
+		"sensitive_ai":    map[string]any{"enabled": true, "model": "[anti-2]gemini-3.8-flash", "context_chars": 12},
 	}); err != nil {
 		t.Fatal(err)
 	}

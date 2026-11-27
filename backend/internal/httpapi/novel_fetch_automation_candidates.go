@@ -27,7 +27,7 @@ func novelFetchRetrySafetyHoldStages(meta map[string]any, now time.Time) []strin
 // Summaries never enter PutDocument: hydrate and verify the exact snapshot first.
 func persistNovelFetchRetrySafetyHold(ctx context.Context, store novelfetchworkshop.Store, owner string, summary novelfetchworkshop.Document, now time.Time) (bool, error) {
 	status := strings.ToLower(firstText(summary.Meta["status"], summary.Meta["queueState"]))
-	if summary.Meta["manualOnly"] == true || summary.Meta["manual_only"] == true || status == "waiting_configuration" || status == "waiting_login" ||
+	if summary.Meta["manualOnly"] == true || summary.Meta["manual_only"] == true || summary.Meta["sensitiveManualRetryRequired"] == true || status == "waiting_configuration" || status == "waiting_login" ||
 		strings.EqualFold(firstText(summary.Meta["siteSubmitStatus"], summary.Meta["site_submit_status"]), "submitted") {
 		return false, nil
 	}

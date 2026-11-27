@@ -323,3 +323,14 @@ export function novelFetchCharCount(row = {}) {
   if (processed > 0) return String(processed);
   return '-';
 }
+
+export function novelFetchClassificationLabel(row = {}) {
+  const gender = String(row.gender || '').trim();
+  const style = String(row.style || '').trim();
+  const reason = row.classify_error || row.classifyError || '';
+  const validGender = ['男频', '女频', '男', '女'].includes(gender);
+  const validStyle = style && !['待判定', '待确认', '未知', '-'].includes(style);
+  const status = row.classify_status || row.classifyStatus || '';
+  if (reason && ['failed', 'pending_confirmation', 'waiting_classification'].includes(status)) return reason;
+  return validGender && validStyle ? '已完成' : (reason || '待判断');
+}

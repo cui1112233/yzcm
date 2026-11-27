@@ -96,8 +96,8 @@ func stageWorkshopSingleJob(ctx context.Context, store novelfetchworkshop.Store,
 	if !deferQueueState {
 		doc.Meta["status"], doc.Meta["queueState"], doc.Meta["currentProcessJobId"] = "queued", "queued", job.ID
 	}
-	doc.Meta["processSnapshot"] = map[string]any{"batch_id": job.BatchID, "schedule_id": job.ScheduleID, "platform_id": job.PlatformID, "max_txt": job.MaxTxt, "selected_versions": append([]string{}, job.SelectedVersions...), "rewrite_methods": job.RewriteMethods, "text_model_id": job.TextModelID, "sensitive_ai_enabled": job.SensitiveAIEnabled, "auto_submit": job.AutoSubmit, "generate_only": job.GenerateOnly}
-	doc.Meta["nextSelectedVersions"] = append([]string{}, job.SelectedVersions...)
+	doc.Meta["processSnapshot"] = map[string]any{"batch_id": job.BatchID, "schedule_id": job.ScheduleID, "platform_id": job.PlatformID, "max_txt": job.MaxTxt, "selected_versions": copyNovelFetchSelectedVersions(job.SelectedVersions), "rewrite_methods": job.RewriteMethods, "text_model_id": job.TextModelID, "sensitive_ai_enabled": job.SensitiveAIEnabled, "auto_submit": job.AutoSubmit, "generate_only": job.GenerateOnly}
+	doc.Meta["nextSelectedVersions"] = copyNovelFetchSelectedVersions(job.SelectedVersions)
 	delete(doc.Meta, "error")
 	appendNovelFetchDocumentLog(&doc, "queue_queued", "任务已进入后台队列", time.Now().UTC())
 	written, err := store.CompareAndSwapDocument(ctx, job.Owner, doc)
@@ -170,7 +170,6 @@ func queueWorkshopGenerate(w http.ResponseWriter, req *http.Request, store novel
 		job.ID = fmt.Sprintf("generate_%d", time.Now().UnixNano())
 		job.BookIDs = []string{id}
 		job.GenerateOnly = true
-		job.SensitiveAIEnabled = false
 		job.AutoSubmit = false
 		job.ScheduleID = ""
 		job.SelectedVersions = versions
@@ -282,11 +281,11 @@ func cancelWorkshopBookMarkers(ctx context.Context, queue novelfetchworkshop.Pro
 func missingWorkshopAIBodies(ctx context.Context, store novelfetchworkshop.Store, owner string, doc novelfetchworkshop.Document, versions []string) ([]string, error) {
 	missing := []string{}
 	for _, version := range selectedNovelFetchAIVersions(versions) {
-		body, err := novelfetchworkshop.ReadBodyText(ctx, store, owner, doc, version)
+		ready, err := novelfetchworkshop.AIRewriteVersionReady(ctx, store, owner, doc, version)
 		if err != nil {
 			return nil, err
 		}
-		if strings.TrimSpace(body) == "" {
+		if !ready {
 			missing = append(missing, version)
 		}
 	}

@@ -379,6 +379,11 @@ func scheduleNovelFetchDocumentRetry(ctx context.Context, store novelfetchworksh
 	if document.Meta == nil {
 		document.Meta = map[string]any{}
 	}
+	// Classification already records its one-shot failure with the result CAS.
+	// The worker may observe that same failure; do not count it a second time.
+	if stage == novelFetchRetryStageClassify && novelFetchRetryStateIsManual(novelFetchRetrySchedule(document.Meta)[stage]) {
+		return nil
+	}
 	scheduleNovelFetchTaskRetry(document.Meta, stage, failure, novelFetchAIRetryDelayHintSeconds(failure), now)
 	return store.PutDocument(ctx, owner, document)
 }

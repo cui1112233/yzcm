@@ -22,12 +22,12 @@ import {
 } from '../../shared/api/novelFetchWorkshop';
 import { createNovelFetchIntake } from '../../shared/api/batchFactory';
 import { listAvailableModels as listAvailableTextModels, modelSelectOptions } from '../../shared/api/modelCatalog';
-import { readNovelFetchProcessSettings, writeNovelFetchProcessSettings } from './novel-fetch-process-settings';
+import { readNovelFetchProcessSettings, writeNovelFetchProcessSettings, resolveNovelFetchTextModel, novelFetchTextModelError, resolveNovelFetchSelectedVersions } from './novel-fetch-process-settings';
 import { NovelFetchAutomationOptions } from './novel-fetch-automation-options.js';
-import { withNovelFetchConfigDefaults, withNovelFetchVersionProfiles } from './novel-fetch-config-defaults.js';
+import { withNovelFetchConfigDefaults, withNovelFetchVersionProfiles, NOVEL_FETCH_PROFILE_VERSIONS } from './novel-fetch-config-defaults.js';
 import { novelFetchAiVersions, novelFetchSensitiveComparisons, novelFetchSubmitDiagnostic, novelFetchTaskSummaryItems } from './novel-fetch-task-detail.js';
 import { novelFetchLatestJob, novelFetchProgressLines, novelFetchJobFinished, novelFetchJobState, novelFetchActionNotice } from './novel-fetch-progress.js';
-import { beijingDateKey, currentBatchBookIds, filterNovelFetchTasks, mergeNovelFetchQueueStatus, novelFetchBatchResultSummary, novelFetchCharCount, novelFetchCurrentBatchTaskDetail, novelFetchOriginalFetchRetry, novelFetchPollingPlan, novelFetchQueueSummary, novelFetchStageLabel, novelFetchSubmissionLabel, novelFetchTaskDateKey, novelFetchTaskStatus, novelFetchVersionReady, retainVisibleTaskIds, stoppableCurrentBatchBookIds, webSubmitStatusLabel, webSubmitRunStatusLabel } from './novel-fetch-status.js';
+import { beijingDateKey, currentBatchBookIds, filterNovelFetchTasks, mergeNovelFetchQueueStatus, novelFetchBatchResultSummary, novelFetchCharCount, novelFetchCurrentBatchTaskDetail, novelFetchOriginalFetchRetry, novelFetchPollingPlan, novelFetchQueueSummary, novelFetchStageLabel, novelFetchSubmissionLabel, novelFetchTaskDateKey, novelFetchTaskStatus, novelFetchVersionReady, novelFetchClassificationLabel, retainVisibleTaskIds, stoppableCurrentBatchBookIds, webSubmitStatusLabel, webSubmitRunStatusLabel } from './novel-fetch-status.js';
 import { singleVersionRetryPayload, submissionPreviewMatches } from './novel-fetch-submit.js';
 import { mergeDefaultUploadProfile, uploadSessionDisplayName } from './novel-fetch-upload-profile.js';
 import { describeWebSubmitExecution, describeWebSubmitReconcile, describeWebSubmitVisible } from './webSubmitFeedback.js';
@@ -57,10 +57,9 @@ const TABS = [
   { key: 'submit', label: '提交' },
   { key: 'logs', label: '记录' }
 ];
-// 产品只配置了原文 + AI1~AI5 五个文案版本，版本档案也只有这五项；
-// 后端虽然能按编号生成更多版本，但页面不应暴露没有档案的空版本。
-const AI_VERSION_KEYS = Array.from({ length: 5 }, (_, index) => `ai${index + 1}`);
-const AI_VERSIONS = ['original', ...AI_VERSION_KEYS];
+// Selection, persisted profile bindings and backend candidates share the same bounded versions.
+const AI_VERSIONS = NOVEL_FETCH_PROFILE_VERSIONS;
+const AI_VERSION_KEYS = AI_VERSIONS.filter(version => version !== 'original');
 const AI_VERSION_LABELS = Object.fromEntries([['original', '原文'], ...AI_VERSION_KEYS.map(key => [key, key.toUpperCase()])]);
 const REWRITE_METHOD_OPTIONS = [
   { value: 'auto', label: '自动轮换' },
@@ -707,14 +706,19 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
   const [ruleApplyScope, setRuleApplyScope] = useState('both');
   const [configSection, setConfigSection] = useState('workflow');
   const [selectedVersions, setSelectedVersions] = useState(() => {
-    const savedVersions = (savedProcessSettings.selectedVersions || []).filter(version => AI_VERSIONS.includes(version));
-    return savedVersions.length ? savedVersions : ['original', 'ai1'];
+    return resolveNovelFetchSelectedVersions(savedProcessSettings.selectedVersions, AI_VERSIONS);
   });
   const [batchFactorySourceVersion, setBatchFactorySourceVersion] = useState('sensitive');
   const [rewriteMethods, setRewriteMethods] = useState(() => savedProcessSettings.rewriteMethods);
   const [sensitiveAiProcessEnabled, setSensitiveAiProcessEnabled] = useState(() => savedProcessSettings.sensitiveAiProcessEnabled);
   const [textModel, setTextModel] = useState(() => savedProcessSettings.textModel);
   const [textModelOptions, setTextModelOptions] = useState([]);
+  const [textModelOptionsLoaded, setTextModelOptionsLoaded] = useState(false);
+  const [textModelLoadError, setTextModelLoadError] = useState('');
+  const textModelChoiceError = textModelLoadError || (textModelOptionsLoaded ? novelFetchTextModelError(textModel, textModelOptions) : '文本模型正在加载，请稍后再试');
+  const processTextModelOptions = textModel && !textModelOptions.some(option => option.value === textModel)
+    ? [{ value: textModel, label: `${textModel}（不可用）`, disabled: true }, ...textModelOptions]
+    : textModelOptions;
   const [currentBatch, setCurrentBatch] = useState(null);
   const [historyBatches, setHistoryBatches] = useState([]);
   const [taskView, setTaskView] = useState('current');
@@ -916,6 +920,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
     setConfigLoading(true);
     try {
       const data = await getWorkshopConfig();
+      setTextModel(current => resolveNovelFetchTextModel(current, data.settings?.text_model_id || data.settings?.textModelId || ''));
       const config = withNovelFetchConfigDefaults(data.appConfig || data.config || {});
       const aiConfig = data.aiConfig?.ai || data.aiConfig || config.ai || {};
       const catalogText = value => {
@@ -1086,19 +1091,20 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
       const items = data.platforms || data.items || data;
       if (Array.isArray(items) && items.length) setPlatformOptions(items.map(item => { const id = Number(item.id ?? item.platform_id ?? item.value); const name = item.name || item.platform_name || item.label || String(id); return { value: id, label: `${name} (${id})` }; }));
     }).catch(() => {});
-    listAvailableTextModels('text').then(models => {
-      const options = modelSelectOptions(models, 'text');
-      if (options.length) setTextModelOptions(options);
-    }).catch(() => {});
+    loadTextModelOptions();
+    if (activeTab !== 'config') loadConfig();
   }, []);
 
-  // 空选择或本地缓存的模型已下架时，回退到当前目录里第一个可用文本模型，
-  // 与后端“未显式选择时使用账号默认模型”的解析顺序保持一致。
-  useEffect(() => {
-    if (!textModelOptions.length) return;
-    if (textModel && textModelOptions.some(option => option.value === textModel)) return;
-    setTextModel(textModelOptions[0].value);
-  }, [textModel, textModelOptions]);
+  async function loadTextModelOptions() {
+    try {
+      const models = await listAvailableTextModels('text');
+      setTextModelOptions(modelSelectOptions(models, 'text'));
+      setTextModelLoadError('');
+    } catch (error) {
+      setTextModelLoadError(error.message || '读取文本模型失败，请重新打开模型列表刷新');
+    } finally { setTextModelOptionsLoaded(true); }
+  }
+
 
   useEffect(() => {
     const onVisibilityChange = () => setDocumentHidden(document.hidden);
@@ -1209,6 +1215,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
     }
   }
   async function handleProcess() {
+    if (textModelChoiceError) return message.warning(textModelChoiceError);
     const values = await processForm.validateFields();
     const resolvedInput = prepareInput(values);
     if (!resolvedInput) return;
@@ -1297,6 +1304,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
     } finally { setProcessing(false); }
   }
   async function handleScheduleProcess() {
+    if (!editingScheduleId && textModelChoiceError) return message.warning(textModelChoiceError);
     const values = await processForm.validateFields();
     const resolvedInput = editingScheduleId ? null : prepareInput(values);
     if (!editingScheduleId && !resolvedInput) return;
@@ -1357,19 +1365,19 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
       message.warning('当前没有可处理的任务，请先勾选任务');
       return;
     }
-    // 这个入口此前是“直接异步提交”，页面上没有任何弹窗；用户点完只看到按钮转圈，
-    // 看起来像没反应。先给确认弹窗（写明处理条数与降级规则），确认后再提交。
+    // 明确处理范围；接口完成后按逐版本结果报告，失败保留现有正文。
     Modal.confirm({
       title: '敏感词 AI 修复',
-      content: `将对 ${ids.length} 个任务重新执行敏感词 AI 修复；AI 失败时自动使用替换词，仍失败则保留原文并标记待人工确认。确认开始？`,
+      content: `将对 ${ids.length} 个任务的原文重新执行敏感词 AI 修复；失败时保留现有正文并显示原因。确认开始？`,
       okText: '开始修复',
       cancelText: '取消',
       onOk: async () => {
         setTaskActionBusy('sensitive-repair');
         try {
-          await reprocessWorkshopSensitive(ids, true);
+          const result = await reprocessWorkshopSensitive(ids, true);
+          const notice = describeRuleApplyResult(result, '敏感词 AI 修复已完成');
           await loadTasks();
-          message.success('敏感词 AI 修复已加入处理');
+          message[notice.type](notice.message);
         } catch (error) {
           message.error(error.message || '敏感词 AI 修复失败');
           throw error;
@@ -1969,7 +1977,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
   const versionConfigPanel = <div className="novel-fetch-panel novel-fetch-version-config-panel">
     <div className="novel-fetch-public-heading"><div><Typography.Title level={4}>版本对应配置档</Typography.Title><Typography.Text type="secondary">管理默认上传配置档和各版本的配置档绑定，统一使用右上角保存。</Typography.Text></div></div>
     <Space wrap><Button onClick={() => handleWebSubmit(syncWebSubmitConfigs, '已同步批量后台配置')}>同步批量后台配置</Button><Button onClick={syncWebSubmitOrganizations}>同步组织归属</Button><Button onClick={() => handleWebSubmit(syncWebSubmitStyles, '已同步批量风格类型')}>同步批量风格类型</Button></Space>
-    <div className="novel-fetch-version-profile-grid"><label>默认上传配置档<Select value={selectedUploadProfile || undefined} placeholder="选择默认配置档" options={uploadProfiles.map(profile => ({ value: String(profile.id || profile.name), label: profile.name || profile.id }))} onChange={value => { setSelectedUploadProfile(value); setConfigDirty(true); }} /></label>{AI_VERSIONS.map(version => <label key={version}>{AI_VERSION_LABELS[version]} 配置档<Select allowClear value={profileBindings[version] || undefined} placeholder="跟随默认配置档" options={uploadProfiles.map(profile => ({ value: String(profile.id || profile.name), label: profile.name || profile.id }))} onChange={value => { setProfileBindings(current => ({ ...withNovelFetchVersionProfiles(current), [version]: value || '' })); setConfigDirty(true); }} /></label>)}</div><Typography.Text type="secondary">原文和 AI1-AI5 均可单独指定；未绑定版本统一跟随默认配置档。</Typography.Text><Typography.Text type="secondary">提示词请在“提示词配置”中编辑；全部修改统一点击右上角“保存配置”。</Typography.Text>
+    <div className="novel-fetch-version-profile-grid"><label>默认上传配置档<Select value={selectedUploadProfile || undefined} placeholder="选择默认配置档" options={uploadProfiles.map(profile => ({ value: String(profile.id || profile.name), label: profile.name || profile.id }))} onChange={value => { setSelectedUploadProfile(value); setConfigDirty(true); }} /></label>{AI_VERSIONS.map(version => <label key={version}>{AI_VERSION_LABELS[version]} 配置档<Select allowClear value={profileBindings[version] || undefined} placeholder="跟随默认配置档" options={uploadProfiles.map(profile => ({ value: String(profile.id || profile.name), label: profile.name || profile.id }))} onChange={value => { setProfileBindings(current => ({ ...withNovelFetchVersionProfiles(current), [version]: value || '' })); setConfigDirty(true); }} /></label>)}</div><Typography.Text type="secondary">原文和 AI1-AI20 均可单独指定；未绑定版本统一跟随默认配置档。</Typography.Text><Typography.Text type="secondary">提示词请在“提示词配置”中编辑；全部修改统一点击右上角“保存配置”。</Typography.Text>
   </div>;
   const submissionStatus = [
     { key: 'environment', label: '环境', value: webSubmitEnvironment ? '已检测' : '待检测' },
@@ -2014,7 +2022,8 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
         <div className="novel-fetch-public-heading"><div><Typography.Title level={4}>批量输入</Typography.Title></div><Typography.Text type="secondary">平台ID：{selectedPlatform || '—'}</Typography.Text></div>
         <div className="novel-fetch-public-grid novel-fetch-public-grid--three">
           <Form.Item name="platform" label="平台"><Select options={platformOptions} onChange={value => setSelectedPlatform(String(value || ''))} /></Form.Item>
-          <label className="novel-fetch-field"><span>文本模型</span><Select value={textModel || undefined} onChange={setTextModel} options={textModelOptions} placeholder="使用账号默认模型" /></label>
+          <label className="novel-fetch-field"><span>文本模型</span><Select value={textModel || undefined} onChange={setTextModel} options={processTextModelOptions} onOpenChange={open => { if (open) loadTextModelOptions(); }} status={textModelOptionsLoaded && textModelChoiceError ? 'error' : undefined} placeholder="选择文本模型" /></label>
+          {textModelOptionsLoaded && textModelChoiceError ? <Alert type="warning" showIcon message={textModelChoiceError} /> : null}
           <div className="novel-fetch-field novel-fetch-top-login"><span>视频管理系统登录</span><div className="novel-fetch-login-inline"><span className={uploadSession?.status === 'ready' ? 'is-ready' : ''}>● {uploadSessionDisplayName(uploadSession)}</span><Button size="small" onClick={openUploadManager}>管理</Button></div></div>
         </div>
         <div className="novel-fetch-public-grid novel-fetch-public-grid--two novel-fetch-input-format-row"><label className="novel-fetch-field"><span>输入格式</span><Select value={inputFormat} options={INPUT_FORMAT_OPTIONS.map(item => ({ value: item.value, label: item.label }))} onChange={setInputFormat} /></label><div className="novel-fetch-input-summary"><span>有效 <b>{localInputPreview.validRows}</b> 本</span>{localInputPreview.duplicateIds ? <span className="is-warning">重复 {localInputPreview.duplicateIds}</span> : null}{localInputPreview.emptyIdRows ? <span className="is-warning">空 ID {localInputPreview.emptyIdRows}</span> : null}</div></div>
@@ -2131,7 +2140,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
           { title: '平台', width: 110, render: (_, row) => row.platformName || row.platform_name || '-' },
           { title: '风格', width: 110, dataIndex: 'style', render: value => value || '待判定' },
           { title: '男女频', width: 90, dataIndex: 'gender', render: value => value || '待确认' },
-          { title: 'AI 判断', width: 110, render: (_, row) => row.classify_status === 'done' || row.classifyStatus === 'done' || (row.gender && row.style && row.style !== '待判定') ? '已完成' : row.classify_error || row.classifyError || '待判断' },
+          { title: 'AI 判断', width: 110, render: (_, row) => novelFetchClassificationLabel(row) },
           { title: '原文', width: 220, render: (_, row) => { const retry = novelFetchOriginalFetchRetry(row); return <Space size={4} direction="vertical"><Tag color={statusColor(row.originalStatus || row.original_status)}>{novelFetchStageLabel(row.originalStatus || row.original_status || '未抓取')}</Tag><Typography.Text type="secondary">{novelFetchCharCount(row)}</Typography.Text>{retry.nextRetryAt ? <Typography.Text type="warning" title={retry.error || undefined}>下次自动抓取：{formatScheduleTime(retry.nextRetryAt)}{retry.attempts ? `（第 ${retry.attempts} 次）` : ''}</Typography.Text> : null}</Space>; } },
           { title: 'AI 文案', width: 120, render: (_, row) => <Tag color={statusColor(row.aiStatus || row.ai_status)}>{row.aiGeneratedCount || row.ai_generated_count ? `${row.aiGeneratedCount || row.ai_generated_count} 版` : novelFetchStageLabel(row.aiStatus || row.ai_status || '未生成')}</Tag> },
           { title: '网站提交', width: 120, render: (_, row) => novelFetchSubmissionLabel(row) },

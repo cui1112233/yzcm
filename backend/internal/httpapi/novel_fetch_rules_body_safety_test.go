@@ -36,6 +36,13 @@ func (s *rulesBodyFaultStore) PutDocument(c context.Context, o string, d novelfe
 	}
 	return s.MemoryStore.PutDocument(c, o, d)
 }
+func (s *rulesBodyFaultStore) CompareAndSwapDocument(c context.Context, o string, d novelfetchworkshop.Document) (string, error) {
+	if s.documentError != nil {
+		return "", s.documentError
+	}
+	return s.MemoryStore.CompareAndSwapDocument(c, o, d)
+}
+
 func rulesBodySetup(t *testing.T, d novelfetchworkshop.Document) *rulesBodyFaultStore {
 	t.Helper()
 	s := &rulesBodyFaultStore{MemoryStore: novelfetchworkshop.NewMemoryStore()}

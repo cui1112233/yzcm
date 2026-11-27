@@ -406,6 +406,9 @@ func ApplySensitiveRulesForScopeWithDetails(text string, settings map[string]any
 		// can loop forever when a replacement contains the original find text
 		// (for example, find="A", replace="A说明").
 		source := result
+		edits := []sensitiveRuleEdit{}
+		newItems := []map[string]any{}
+		delta := 0
 		var builder strings.Builder
 		cursor := 0
 		for {
@@ -422,20 +425,37 @@ func ApplySensitiveRulesForScopeWithDetails(text string, settings map[string]any
 			start := len([]rune(source[:index])) + 1
 			end := start + len([]rune(find)) - 1
 			changes++
-			items = append(items, map[string]any{
-				"hit_index": len(items) + 1,
-				"keyword":   find,
-				"start":     start,
-				"end":       end,
-				"before":    before,
-				"after":     after,
-				"status":    "done",
-				"source":    "system_rule",
-				"error":     "",
+			edits = append(edits, sensitiveRuleEdit{start: start - 1, end: end, size: len([]rune(replace))})
+			newItems = append(newItems, map[string]any{
+				"hit_index":     len(items) + len(newItems) + 1,
+				"repair_start":  start - 1 + delta,
+				"repair_end":    start - 1 + delta + len([]rune(replace)),
+				"repair_delete": strings.TrimSpace(replace) == "",
+				"keyword":       find,
+				"start":         start,
+				"end":           end,
+				"before":        before,
+				"after":         after,
+				"status":        "done",
+				"source":        "system_rule",
+				"error":         "",
 			})
+			delta += len([]rune(replace)) - len([]rune(find))
 			cursor = index + len(find)
 		}
+		if len(edits) > 0 {
+			moveSensitiveRepairItems(items, edits)
+		}
+		items = append(items, newItems...)
 		result = builder.String()
+	}
+	finalRunes := []rune(result)
+	for _, item := range items {
+		left, right := sensitiveRepairInt(item["repair_start"]), sensitiveRepairInt(item["repair_end"])
+		item["repair_text"] = string(finalRunes[left:right])
+		if left == right {
+			item["repair_delete"] = true
+		}
 	}
 	return result, changes, items
 }
@@ -603,6 +623,11 @@ func SetSensitiveDetails(meta map[string]any, items []map[string]any, count int)
 	if fixedCount < 0 {
 		fixedCount = 0
 	}
+	// Existing task/detail clients prefer these flat counters over nested
+	// records, so refresh both compatibility spellings from the same hits.
+	meta["sensitiveHitCount"], meta["sensitive_hit_count"] = count, count
+	meta["sensitiveFixedCount"], meta["sensitive_fixed_count"] = fixedCount, fixedCount
+	meta["sensitiveFailedCount"], meta["sensitive_failed_count"] = failedCount, failedCount
 	meta["sensitiveHits"] = map[string]any{"mode": mode, "status": "done", "hit_count": count, "updated_at": updated, "hits": hits}
 	status := "done"
 	if failedCount > 0 {

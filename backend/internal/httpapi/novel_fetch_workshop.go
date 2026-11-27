@@ -713,7 +713,7 @@ func (worker workshopProcessWorker) process(parent context.Context, job novelfet
 		_ = updateWorkshopTaskRuntimeState(ctx, worker.store, job.Owner, bookID, "completed", "")
 		progress = append(progress, workshopProgressItem("success", "处理完成", bookID, bookName))
 		worker.registry.put(job.Owner, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": "running", "queue_state": "running", "started_at": startedAt, "updated_at": worker.processNow().UTC().Format(time.RFC3339Nano), "attempts": job.Attempts, "steps": progress, "progress": progress})
-		if job.AutoSubmit && worker.autoSubmit != nil && !worker.bookCancelled(ctx, job.Owner, bookID) {
+		if job.AutoSubmit && (job.SelectedVersions == nil || len(job.SelectedVersions) > 0) && worker.autoSubmit != nil && !worker.bookCancelled(ctx, job.Owner, bookID) {
 			if err := checkOwnership(); err != nil {
 				return err
 			}
@@ -1022,6 +1022,9 @@ func (worker *workshopProcessWorker) execute(ctx context.Context, job novelfetch
 		if err != nil {
 			return err
 		}
+		if err := workshopSensitiveManualRepairHold(doc); err != nil {
+			return err
+		}
 		if doc.Meta["manualOnly"] == true || novelFetchRetryScheduleHasManualHold(doc.Meta) {
 			return errWorkshopRetryHeld
 		}
@@ -1036,10 +1039,8 @@ func (worker *workshopProcessWorker) execute(ctx context.Context, job novelfetch
 		if worker.resolveRewriteProvider == nil {
 			return errors.New("未配置文本模型")
 		}
-		provider, err := worker.resolveRewriteProvider(ctx, job.Owner)
-		if err != nil {
-			return err
-		}
+		provider, providerErr := worker.resolveRewriteProvider(ctx, job.Owner)
+		classificationProvider := workshopClassificationProviderForResult(provider, providerErr)
 		for _, bookID := range job.BookIDs {
 			if worker.bookCancelled(ctx, job.Owner, bookID) {
 				continue
@@ -1055,6 +1056,9 @@ func (worker *workshopProcessWorker) execute(ctx context.Context, job novelfetch
 			if len(pending) == 0 {
 				continue
 			}
+			if err := holdWorkshopGenerateSensitiveFailure(ctx, worker.store, job.Owner, doc); err != nil {
+				return err
+			}
 			original, readErr := novelfetchworkshop.ReadBodyText(ctx, worker.store, job.Owner, doc, "original")
 			if readErr != nil {
 				return readErr
@@ -1062,10 +1066,20 @@ func (worker *workshopProcessWorker) execute(ctx context.Context, job novelfetch
 			if strings.TrimSpace(original) == "" {
 				return errors.New("请先抓取原文，再生成 AI 改文")
 			}
+			var judge novelfetchworkshop.AIGenderJudge
+			if worker.resolveGenderJudge != nil {
+				judge = worker.resolveGenderJudge(ctx, job.Owner)
+			}
+			if err := prepareWorkshopDocumentClassification(ctx, worker.store, job.Owner, bookID, judge, classificationProvider); err != nil {
+				return err
+			}
+			if providerErr != nil {
+				return providerErr
+			}
 			if err := reserveWorkshopAI(ctx, worker.store, job, bookID); err != nil {
 				return err
 			}
-			if _, err = novelfetchworkshop.GenerateAIRewritesForVersionsProcessed(ctx, worker.store, job.Owner, bookID, pending, provider, workshopRewriteProcessor(worker.store, job.Owner, bookID, job.SensitiveAIEnabled, provider), job.RewriteMethods); err != nil {
+			if _, err := novelfetchworkshop.GenerateAIRewritesForVersionsProcessed(ctx, worker.store, job.Owner, bookID, pending, provider, workshopRewriteProcessor(worker.store, job.Owner, bookID, job.SensitiveAIEnabled, provider), job.RewriteMethods); err != nil {
 				if errors.Is(err, novelfetchworkshop.ErrRewriteValidation) {
 					return fmt.Errorf("AI 返回异常: %w", err)
 				}
@@ -1085,11 +1099,16 @@ func (worker *workshopProcessWorker) execute(ctx context.Context, job novelfetch
 			if coversRetry {
 				versions = saved
 			}
-			if firstText(document.Meta["autoSubmitReadyFingerprint"]) == novelFetchUploadReadyFingerprint(ctx, worker.store, job.Owner, document, versions) {
+			if firstText(document.Meta["autoSubmitReadyFingerprint"]) == novelFetchUploadReadyFingerprint(ctx, worker.store, job.Owner, document, versions) && novelFetchVersionsGenerated(ctx, worker.store, job.Owner, document, versions) {
 				_ = appendWorkshopTaskLog(ctx, worker.store, job.Owner, job.BookIDs[0], "upload_resume", "正文已完成，跳过原文和改文生成，仅继续上传")
 				return nil
 			}
 		}
+	}
+	var classificationProvider novelfetchworkshop.RewriteProvider
+	if worker.resolveRewriteProvider != nil {
+		provider, err := worker.resolveRewriteProvider(ctx, job.Owner)
+		classificationProvider = workshopClassificationProviderForResult(provider, err)
 	}
 	var sensitiveProvider novelfetchworkshop.RewriteProvider
 	if job.SensitiveAIEnabled && worker.resolveRewriteProvider != nil {
@@ -1127,7 +1146,7 @@ func (worker *workshopProcessWorker) execute(ctx context.Context, job novelfetch
 			if worker.resolveGenderJudge != nil {
 				judge = worker.resolveGenderJudge(ctx, job.Owner)
 			}
-			if err := executeWorkshopDocumentFetch(ctx, worker.store, job.Owner, bookID, worker.fetcher, job.MaxTxt, job.SensitiveAIEnabled, sensitiveProvider, judge, sensitiveProvider); err != nil {
+			if err := executeWorkshopDocumentFetch(ctx, worker.store, job.Owner, bookID, worker.fetcher, job.MaxTxt, job.SensitiveAIEnabled, sensitiveProvider, judge, classificationProvider); err != nil {
 				return err
 			}
 		}
@@ -1139,22 +1158,10 @@ func (worker *workshopProcessWorker) execute(ctx context.Context, job novelfetch
 		if worker.resolveGenderJudge != nil {
 			judge = worker.resolveGenderJudge(ctx, job.Owner)
 		}
-		var classificationProvider novelfetchworkshop.RewriteProvider
-		if worker.resolveRewriteProvider != nil {
-			classificationProvider, _ = worker.resolveRewriteProvider(ctx, job.Owner)
+		if err := prepareWorkshopDocumentClassification(ctx, worker.store, job.Owner, bookID, judge, classificationProvider); err != nil {
+			return err
 		}
-		if document, getErr := worker.store.GetDocument(ctx, job.Owner, bookID); getErr == nil && novelFetchClassificationResolved(document) {
-			if originalReady {
-				_ = appendWorkshopTaskLog(ctx, worker.store, job.Owner, bookID, "classification_skipped", "已有分类信息，跳过判断")
-			}
-		} else {
-			_ = appendWorkshopTaskLog(ctx, worker.store, job.Owner, bookID, "classification_started", "开始判断男女频和题材风格")
-			if err := ensureWorkshopDocumentClassification(ctx, worker.store, job.Owner, bookID, judge, classificationProvider); err != nil {
-				_ = appendWorkshopTaskLog(ctx, worker.store, job.Owner, bookID, "classification_failed", err.Error())
-				return err
-			}
-			_ = appendWorkshopTaskLog(ctx, worker.store, job.Owner, bookID, "classification_completed", "男女频和题材风格判断完成")
-		}
+
 		if worker.bookCancelled(ctx, job.Owner, bookID) {
 			continue
 		}
@@ -1167,11 +1174,11 @@ func (worker *workshopProcessWorker) execute(ctx context.Context, job novelfetch
 		}
 		pendingAI := make([]string, 0, len(selectedAI))
 		for _, versionID := range selectedAI {
-			text, bodyErr := novelfetchworkshop.ReadBodyText(ctx, worker.store, job.Owner, document, versionID)
+			ready, bodyErr := novelfetchworkshop.AIRewriteVersionReady(ctx, worker.store, job.Owner, document, versionID)
 			if bodyErr != nil {
 				return bodyErr
 			}
-			if strings.TrimSpace(text) != "" {
+			if ready {
 				continue
 			}
 			pendingAI = append(pendingAI, versionID)
@@ -2342,6 +2349,81 @@ func sensitiveServiceUnavailable(err error) bool {
 // model then refines each hit line and the audit item records the source,
 // model and attempt count shown by the workbench.
 func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.RewriteProvider, settings map[string]any, bookID, text string, items []map[string]any, bookVars map[string]any) (string, []map[string]any) {
+	ai := mapOrEmpty(settings["sensitive_ai"])
+	if len(ai) == 0 {
+		ai = mapOrEmpty(mapOrEmpty(settings["appConfig"])["sensitive_ai"])
+	}
+	if ai["enabled"] != true || len(items) == 0 {
+		return text, items
+	}
+	planned, records, err := novelfetchworkshop.PrepareSensitiveAIRepairItems(text, items, toInt(ai["context_chars"]), toInt(ai["max_hits_per_task"]))
+	if err != nil {
+		failed := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			copy := cloneAnyMap(item)
+			copy["status"] = "failed"
+			copy["ai_status"] = "failed"
+			copy["error_code"] = "location_mismatch"
+			copy["error"] = err.Error()
+			failed = append(failed, copy)
+		}
+		return text, failed
+	}
+	if len(planned) == 0 {
+		return text, records
+	}
+	processed, repaired := applySensitiveAIRepairPrepared(ctx, provider, settings, bookID, text, planned, bookVars)
+	for _, group := range repaired {
+		members, _ := group["repair_member_indices"].([]int)
+		for _, index := range members {
+			record := records[index]
+			for _, key := range []string{"status", "source", "model", "attempt", "error", "error_code", "fallback_used", "masked", "after"} {
+				if value, ok := group[key]; ok {
+					record[key] = value
+				}
+			}
+			record["ai_before"], record["ai_after"] = group["repair_text"], group["after"]
+			if group["status"] == "failed" || strings.Contains(firstText(group["source"]), "fallback") {
+				record["ai_status"] = "failed"
+				if group["status"] == "done" {
+					record["fallback_used"] = true
+				}
+			} else if group["status"] == "done" {
+				record["ai_status"] = "done"
+			}
+		}
+	}
+	return processed, records
+}
+
+func sensitivePreparedSnippet(item map[string]any) string {
+	if text, ok := item["repair_text"].(string); ok {
+		return text
+	}
+	text, _ := item["before"].(string)
+	return text
+}
+func sensitiveRepairTokenBudget(groups []map[string]any) int {
+	hits := 0
+	for _, group := range groups {
+		members, _ := group["repair_member_indices"].([]int)
+		if len(members) == 0 {
+			hits++
+		} else {
+			hits += len(members)
+		}
+	}
+	budget := hits * 300
+	if budget < 1200 {
+		budget = 1200
+	}
+	if budget > 8000 {
+		budget = 8000
+	}
+	return budget
+}
+
+func applySensitiveAIRepairPrepared(ctx context.Context, provider novelfetchworkshop.RewriteProvider, settings map[string]any, bookID, text string, items []map[string]any, bookVars map[string]any) (string, []map[string]any) {
 	if len(items) == 0 {
 		return text, items
 	}
@@ -2372,10 +2454,6 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 	if maxAttempts > 3 {
 		maxAttempts = 3
 	}
-	contextChars := toInt(ai["context_chars"])
-	if contextChars < 0 {
-		contextChars = 0
-	}
 	maxHits := toInt(ai["max_hits_per_task"])
 	if maxHits <= 0 {
 		maxHits = len(items)
@@ -2401,7 +2479,7 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 			item["source"] = "ai_group"
 			item["model"] = model
 			keyword := strings.TrimSpace(fmt.Sprint(item["keyword"]))
-			snippet := sensitiveContextSnippet(strings.TrimSpace(fmt.Sprint(item["before"])), keyword, contextChars)
+			snippet := sensitivePreparedSnippet(item)
 			outputs = append(outputs, fmt.Sprintf("%d. 命中词：%s\n原片段：%s", len(outputs)+1, keyword, snippet))
 		}
 		userPrompt := strings.NewReplacer(
@@ -2424,7 +2502,7 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 		} else {
 			// 源码的敏感词整组请求不限制输出长度；这里按命中数估算，并在
 			// 上游报长度截断时翻倍，避免命中较多时整组结果必然失败。
-			maxTokens := len(active) * 300
+			maxTokens := sensitiveRepairTokenBudget(active)
 			if maxTokens < 1200 {
 				maxTokens = 1200
 			}
@@ -2437,7 +2515,7 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 				output = strings.TrimSpace(output)
 				if lastErr != nil {
 					// 服务不可用时立即停止，避免同一故障连续烧掉全部重试次数。
-					if sensitiveServiceUnavailable(lastErr) {
+					if novelFetchRetryResultUnknown(lastErr) || sensitiveServiceUnavailable(lastErr) {
 						break
 					}
 					if strings.Contains(lastErr.Error(), "长度截断") && maxTokens < 8000 {
@@ -2471,7 +2549,7 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 				}
 				unsafe := false
 				for index, repairedText := range repaired {
-					if strings.TrimSpace(repairedText) == "" || containsSensitiveKeyword(repairedText, strings.TrimSpace(fmt.Sprint(active[index]["keyword"]))) {
+					if strings.TrimSpace(repairedText) == "" || containsSensitiveRepairKeyword(repairedText, active[index]) {
 						unsafe = true
 						break
 					}
@@ -2486,11 +2564,10 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 			}
 		}
 		if lastErr != nil {
-			fallbackSafe := strings.TrimSpace(output) != ""
+			fallbackSafe := strings.TrimSpace(output) != "" && !(batchfactoryv11.SingleAttempt(ctx) && novelFetchRetryResultUnknown(lastErr))
 			for _, item := range active {
 				after := strings.TrimSpace(fmt.Sprint(item["after"]))
-				keyword := strings.TrimSpace(fmt.Sprint(item["keyword"]))
-				if after == "" || containsSensitiveKeyword(after, keyword) {
+				if after == "" || containsSensitiveRepairKeyword(after, item) {
 					fallbackSafe = false
 					break
 				}
@@ -2500,14 +2577,14 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 					item["attempt"] = attempts
 					item["source"] = "deterministic_fallback"
 					item["status"] = "done"
-					item["error"] = lastErr.Error()
+					item["error"] = safeSensitiveModelFailure(lastErr)
 				}
 				return text, items
 			}
 			for _, item := range active {
 				item["attempt"] = attempts
 				item["status"] = "failed"
-				item["error"] = lastErr.Error()
+				item["error"] = safeSensitiveModelFailure(lastErr)
 			}
 			return text, items
 		}
@@ -2517,7 +2594,6 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 			item["status"] = "done"
 			item["error"] = ""
 			text, searchCursor = replaceSensitiveHit(text, searchCursor, item, repaired[index])
-			item["after"] = repaired[index]
 		}
 		return text, items
 	}
@@ -2537,8 +2613,7 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 		item["source"] = "ai"
 		item["model"] = model
 		keyword := strings.TrimSpace(fmt.Sprint(item["keyword"]))
-		before := strings.TrimSpace(fmt.Sprint(item["before"]))
-		before = sensitiveContextSnippet(before, keyword, contextChars)
+		before := sensitivePreparedSnippet(item)
 		userPrompt := strings.NewReplacer(
 			"{book_id}", bookID,
 			"{book_name}", firstText(bookVars["book_name"], bookVars["bookName"]),
@@ -2556,11 +2631,11 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 		} else {
 			for attempts < maxAttempts {
 				attempts++
-				output, lastErr = provider.Complete(ctx, novelfetchworkshop.RewriteRequest{SystemPrompt: prompt.BatchFactorySensitiveSystemPrompt(), UserPrompt: userPrompt, Temperature: temperature, MaxTokens: 1200})
+				output, lastErr = provider.Complete(ctx, novelfetchworkshop.RewriteRequest{SystemPrompt: prompt.BatchFactorySensitiveSystemPrompt(), UserPrompt: userPrompt, Temperature: temperature, MaxTokens: sensitiveRepairTokenBudget([]map[string]any{item})})
 				output = strings.TrimSpace(output)
 				if lastErr != nil {
 					// 服务不可用时立即停止，避免同一故障连续烧掉全部重试次数。
-					if sensitiveServiceUnavailable(lastErr) {
+					if novelFetchRetryResultUnknown(lastErr) || sensitiveServiceUnavailable(lastErr) {
 						break
 					}
 					continue
@@ -2576,7 +2651,7 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 					userPrompt += "\n\n上次返回不合格。只返回改写后的短片段或 {\"fixed_text\":\"...\"}，不要解释。"
 					continue
 				}
-				if containsSensitiveKeyword(output, keyword) {
+				if containsSensitiveRepairKeyword(output, item) {
 					userPrompt += "\n\n上次返回仍包含命中词。必须彻底改写该词，只返回改写后的短片段。"
 					continue
 				}
@@ -2584,12 +2659,12 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 			}
 		}
 		item["attempt"] = attempts
-		if lastErr != nil || output == "" || containsSensitiveKeyword(output, keyword) {
+		if lastErr != nil || output == "" || containsSensitiveRepairKeyword(output, item) {
 			item["status"] = "failed"
 			// firstText 只识别字符串，error 必须显式取文本，否则真实失败原因会被吞掉。
 			message := "AI 返回为空或仍包含命中敏感词"
 			if lastErr != nil {
-				message = lastErr.Error()
+				message = safeSensitiveModelFailure(lastErr)
 			}
 			item["error"] = message
 			return
@@ -2623,13 +2698,31 @@ func applySensitiveAIRepair(ctx context.Context, provider novelfetchworkshop.Rew
 			continue
 		}
 		text, searchCursor = replaceSensitiveHit(text, searchCursor, item, outputs[index])
-		item["after"] = outputs[index]
 	}
 	return text, items
 }
 
 func containsSensitiveKeyword(output, keyword string) bool {
 	return strings.TrimSpace(keyword) != "" && strings.Contains(strings.ToLower(output), strings.ToLower(keyword))
+}
+func containsSensitiveRepairKeyword(output string, item map[string]any) bool {
+	switch keywords := item["repair_keywords"].(type) {
+	case []string:
+		for _, keyword := range keywords {
+			if containsSensitiveKeyword(output, keyword) {
+				return true
+			}
+		}
+		return false
+	case []any:
+		for _, keyword := range keywords {
+			if containsSensitiveKeyword(output, firstText(keyword)) {
+				return true
+			}
+		}
+		return false
+	}
+	return containsSensitiveKeyword(output, firstText(item["keyword"]))
 }
 
 func sensitiveContextSnippet(text, keyword string, contextChars int) string {
@@ -2653,20 +2746,15 @@ func sensitiveContextSnippet(text, keyword string, contextChars int) string {
 	return string(runes[start:end])
 }
 
-func replaceSensitiveHit(text string, cursor int, item map[string]any, output string) (string, int) {
-	target := fmt.Sprint(item["after"])
-	if target == "" {
-		target = fmt.Sprint(item["before"])
+func replaceSensitiveHit(text string, delta int, item map[string]any, output string) (string, int) {
+	processed, next, err := novelfetchworkshop.ApplySensitiveAIRepairItem(text, delta, item, output)
+	if err != nil {
+		item["status"] = "failed"
+		item["ai_status"] = "failed"
+		item["error_code"] = "location_mismatch"
+		item["error"] = err.Error()
 	}
-	index := strings.Index(text[cursor:], target)
-	if index >= 0 {
-		index += cursor
-		return text[:index] + output + text[index+len(target):], index + len(output)
-	}
-	if index := strings.Index(text, target); index >= 0 {
-		return text[:index] + output + text[index+len(target):], index + len(output)
-	}
-	return text, cursor
+	return processed, next
 }
 
 func sensitiveMinInt(a, b int) int {
@@ -2681,7 +2769,23 @@ func processWorkshopConfiguredText(ctx context.Context, store novelfetchworkshop
 	if err != nil {
 		return text, nil, nil, err
 	}
-	processed, trace, sensitiveItems := novelfetchworkshop.ProcessConfiguredText(text, scope, settings)
+	var processed string
+	var trace, sensitiveItems []map[string]any
+	if sensitiveAIEnabled {
+		processed, trace, sensitiveItems = novelfetchworkshop.ProcessSensitiveTextBeforeFormatting(text, scope, settings)
+	} else {
+		processed, trace, sensitiveItems = novelfetchworkshop.ProcessConfiguredText(text, scope, settings)
+	}
+	finish := func() (string, []map[string]any, []map[string]any, error) {
+		if sensitiveAIEnabled {
+			formatted, stages := novelfetchworkshop.FormatConfiguredTextAfterSensitive(processed, scope, settings)
+			processed = formatted
+			if len(stages) > 1 {
+				trace = append(trace, stages[1:]...)
+			}
+		}
+		return processed, trace, sensitiveItems, nil
+	}
 	if sensitiveAIEnabled && len(sensitiveItems) > 0 {
 		ai := mapOrEmpty(settings["sensitive_ai"])
 		if len(ai) == 0 {
@@ -2708,6 +2812,11 @@ func processWorkshopConfiguredText(ctx context.Context, store novelfetchworkshop
 		}
 		trace = append(trace, map[string]any{"stage": "sensitive_ai", "title": "敏感词 AI 修复", "changed": before != processed, "chars": len([]rune(processed)), "failed": failed})
 		if failed > 0 {
+			for _, item := range sensitiveItems {
+				if item["error_code"] == "location_mismatch" {
+					return processed, trace, sensitiveItems, errors.New(firstText(item["error"]))
+				}
+			}
 			if batchfactoryv11.SingleAttempt(ctx) {
 				for _, item := range sensitiveItems {
 					if firstText(item["status"]) == "failed" {
@@ -2737,16 +2846,18 @@ func processWorkshopConfiguredText(ctx context.Context, store novelfetchworkshop
 					item["source"] = "fallback"
 				}
 				item["status"] = "done"
+				item["ai_status"] = "failed"
+				item["fallback_used"] = true
 				resolved++
 			}
 			if resolved == failed {
 				trace = append(trace, map[string]any{"stage": "sensitive_fallback", "title": "敏感词自动兜底", "changed": true, "chars": len([]rune(processed)), "resolved": resolved, "masked": masked})
-				return processed, trace, sensitiveItems, nil
+				return finish()
 			}
 			return processed, trace, sensitiveItems, fmt.Errorf("敏感词 AI 修复失败 %d 处，已停止后续处理", failed)
 		}
 	}
-	return processed, trace, sensitiveItems, nil
+	return finish()
 }
 
 func workshopRewriteProcessor(store novelfetchworkshop.Store, owner, bookID string, sensitiveAIEnabled bool, provider novelfetchworkshop.RewriteProvider) novelfetchworkshop.RewriteTextProcessor {
@@ -3383,7 +3494,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusOK, jobView)
 			return
 		}
-		processJob := novelfetchworkshop.ProcessJob{ID: id, Owner: identity.Username, BatchID: batchID, BookIDs: bookIDs, PlatformID: input.PlatformID, MaxTxt: input.MaxTxt, SensitiveAIEnabled: input.SensitiveAIEnabled, AutoSubmit: true, SelectedVersions: input.SelectedVersions, RewriteMethods: input.RewriteMethods, TextModelID: textModelID}
+		processJob := novelfetchworkshop.ProcessJob{ID: id, Owner: identity.Username, BatchID: batchID, BookIDs: bookIDs, PlatformID: input.PlatformID, MaxTxt: input.MaxTxt, SensitiveAIEnabled: input.SensitiveAIEnabled, AutoSubmit: input.SelectedVersions == nil || len(input.SelectedVersions) > 0, SelectedVersions: input.SelectedVersions, RewriteMethods: input.RewriteMethods, TextModelID: textModelID}
 		bookIDs = nil
 		for _, bookID := range processJob.BookIDs {
 			snapshot := processJob
@@ -4746,7 +4857,7 @@ func novelFetchClassificationResolved(document novelfetchworkshop.Document) bool
 }
 
 // canonicalNovelFetchAIVersion maps aliases such as ai01/ai001 to the
-// canonical ai1..ai5 identifier. Anything outside that range is rejected so a
+// canonical ai1..ai20 identifier. Anything outside that range is rejected so a
 // single job cannot request an unbounded number of AI rewrites per book.
 func canonicalNovelFetchAIVersion(value string) (string, bool) {
 	name := strings.ToLower(strings.TrimSpace(value))
@@ -4754,7 +4865,7 @@ func canonicalNovelFetchAIVersion(value string) (string, bool) {
 		return "", false
 	}
 	index, err := strconv.Atoi(strings.TrimPrefix(name, "ai"))
-	if err != nil || index < 1 || index > 5 {
+	if err != nil || index < 1 || index > 20 {
 		return "", false
 	}
 	return "ai" + strconv.Itoa(index), true
@@ -4763,6 +4874,9 @@ func canonicalNovelFetchAIVersion(value string) (string, bool) {
 // normalizeNovelFetchAIVersions validates user supplied versions and collapses
 // zero-padded aliases (ai01, ai001, ...) to the same canonical version.
 func normalizeNovelFetchAIVersions(values []string) ([]string, error) {
+	if values == nil {
+		return nil, nil
+	}
 	normalized := make([]string, 0, len(values))
 	seen := map[string]bool{}
 	for _, raw := range values {
@@ -4779,7 +4893,7 @@ func normalizeNovelFetchAIVersions(values []string) ([]string, error) {
 		}
 		canonical, ok := canonicalNovelFetchAIVersion(value)
 		if !ok {
-			return nil, fmt.Errorf("不支持的AI版本：%s（仅支持 ai1 到 ai5）", value)
+			return nil, fmt.Errorf("不支持的AI版本：%s（仅支持 ai1 到 ai20）", value)
 		}
 		if seen[canonical] {
 			continue

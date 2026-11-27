@@ -27,7 +27,7 @@ func TestWorkshopGenerateRouteUsesSavedCountAndPreservesOutputs(t *testing.T) {
 	ctx := context.Background()
 	store := novelfetchworkshop.NewMemoryStore()
 	store.PutConfig(ctx, "alice", map[string]any{"appConfig": map[string]any{"rewrite": map[string]any{"default_template_id": "plain", "process_line_count": 1}}, "knowledgeLibraries": map[string]any{"rewrite_templates": map[string]any{"profiles": []any{map[string]any{"id": "plain", "prompt": "保持原文", "response_mode": "plain_text"}}}}})
-	store.PutDocument(ctx, "alice", novelfetchworkshop.Document{BookID: "123", Original: "首行原文", Meta: map[string]any{"aiCount": 2}, Versions: map[string]any{"ai1": "旧版本"}})
+	store.PutDocument(ctx, "alice", novelfetchworkshop.Document{BookID: "123", Original: "首行原文", Gender: "女频", Meta: map[string]any{"aiCount": 2, "style": "现代甜文"}, Versions: map[string]any{"ai1": "旧版本"}})
 	provider := &countRouteRewriteProvider{}
 	mux := http.NewServeMux()
 	registerNovelFetchWorkshopRoutes(mux, store, novelfetchworkshop.NewMemoryQueue(), nil, nil, nil, provider, nil, "", nil, nil, nil)

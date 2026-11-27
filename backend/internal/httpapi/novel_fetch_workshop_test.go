@@ -1360,7 +1360,7 @@ func TestWorkshopProcessWorkerIsolatesFailedBookAndDefersOnlyThatBook(t *testing
 			http.Error(w, "temporary failure", http.StatusBadGateway)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "data": "可正常处理的正文", "bookinfo": map[string]any{"book_name": "成功书"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "data": "可正常处理的正文", "bookinfo": map[string]any{"book_name": "成功书", "category": "女频", "genre": "现代甜文"}})
 	}))
 	defer upstream.Close()
 	worker := &workshopProcessWorker{store: store, queue: queue, registry: newWorkshopProcessRegistry(), fetcher: &novelfetchworkshop.UpstreamFetcher{Client: upstream.Client(), Endpoint: upstream.URL}}
@@ -2803,10 +2803,10 @@ func TestNovelFetchStartCollapsesZeroPaddedAIVersions(t *testing.T) {
 	invalid := doNovelFetchRequest(t, handler, http.MethodPost, "/api/novel-fetch-workshop/process/start", map[string]any{
 		"inputText":         "12345678903\t书三",
 		"platform_id":       "15",
-		"selected_versions": []string{"ai6"},
+		"selected_versions": []string{"ai21"},
 	}, now, secret)
 	if invalid.Code != http.StatusBadRequest {
-		t.Fatalf("ai6 status=%d, want 400 body=%s", invalid.Code, invalid.Body.String())
+		t.Fatalf("ai21 status=%d, want 400 body=%s", invalid.Code, invalid.Body.String())
 	}
 }
 

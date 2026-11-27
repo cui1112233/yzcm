@@ -116,6 +116,8 @@ export function novelFetchTaskSummaryItems(data = {}) {
     ['原文错误码', first(meta.originalErrorCode, meta.original_error_code, meta.originalUpstreamCode, meta.original_upstream_code, meta.originalFetchErrorCode, meta.original_fetch_error_code, upstreamCode)],
     ['处理字数', raw > 0 ? `${processed} / ${raw}` : (processed > 0 ? String(processed) : '—')],
     ['敏感词状态', stageLabel(first(data.sensitiveStatus, data.sensitive_status, meta.sensitiveStatus, meta.sensitive_status))],
+    ['敏感词失败原因', first(meta.sensitiveError, meta.sensitive_error, data.sensitiveError, data.sensitive_error)],
+    ['待修复版本', Object.keys(meta.sensitiveManualRetryErrors || {}).sort().join('、')],
     ['敏感词模型', first(meta.sensitiveModel, meta.sensitive_model, sensitiveFixed.model, sensitiveHits.model)],
     ['命中 / 已处理', `${hitCount} / ${fixedCount}`],
     ['AI 状态', stageLabel(first(data.aiStatus, data.ai_status, meta.aiStatus, meta.ai_status))],

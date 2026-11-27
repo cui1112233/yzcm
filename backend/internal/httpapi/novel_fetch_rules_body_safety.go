@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"time"
 
 	"qiantie/backend/internal/novelfetchworkshop"
 )
@@ -63,8 +62,9 @@ func applyNovelFetchSafeRules(w http.ResponseWriter, req *http.Request, store no
 	}
 	settings, settingsErr := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 	var provider novelfetchworkshop.RewriteProvider
+	var providerErr error
 	if in.SensitiveAIEnabled && resolveProvider != nil {
-		provider, _ = resolveProvider(req)
+		provider, providerErr = resolveProvider(req)
 	}
 	ids = uniqueNovelFetchTaskIDs(ids)
 	scope := strings.ToLower(strings.TrimSpace(in.Scope))
@@ -79,7 +79,7 @@ func applyNovelFetchSafeRules(w http.ResponseWriter, req *http.Request, store no
 		appendResult := func(version, status string, err error) {
 			message := ""
 			if err != nil {
-				message = err.Error()
+				message = safeSensitiveFailureText(err.Error())
 			}
 			results = append(results, novelFetchRuleVersionResult{BookID: id, VersionID: version, Status: status, Error: message})
 		}
@@ -127,6 +127,7 @@ func applyNovelFetchSafeRules(w http.ResponseWriter, req *http.Request, store no
 			versions = append(versions, ai...)
 		}
 		successful, bookReplacements := 0, 0
+		changes := []novelFetchSensitiveVersionChange{}
 		for _, version := range versions {
 			if settingsErr != nil {
 				appendResult(version, "failed", fmt.Errorf("读取规则配置失败: %w", settingsErr))
@@ -163,11 +164,38 @@ func applyNovelFetchSafeRules(w http.ResponseWriter, req *http.Request, store no
 			if version == "original" {
 				textScope = "original"
 			}
+			if in.SensitiveAIEnabled && providerErr != nil {
+				appendResult(version, "failed", fmt.Errorf("读取敏感词 AI 模型失败: %s", safeSensitiveModelFailure(providerErr)))
+				continue
+			}
 			if restore {
 				processed, _, items = novelfetchworkshop.ApplySensitiveRulesForScopeWithDetails(content, settings, "original")
-				processed, items = applySensitiveAIRepair(req.Context(), provider, settings, id, processed, items, map[string]any{"book_name": firstText(d.Meta["bookName"], d.Meta["book_name"], d.Meta["title"]), "style": firstText(d.Meta["style"]), "gender": d.Gender})
+				if in.SensitiveAIEnabled {
+					repairSettings := cloneAnyMap(settings)
+					ai := cloneAnyMap(mapOrEmpty(settings["sensitive_ai"]))
+					if len(ai) == 0 {
+						ai = cloneAnyMap(mapOrEmpty(mapOrEmpty(settings["appConfig"])["sensitive_ai"]))
+					}
+					ai["enabled"] = true
+					repairSettings["sensitive_ai"] = ai
+					processed, items = applySensitiveAIRepair(req.Context(), provider, repairSettings, id, processed, items, map[string]any{"book_name": firstText(d.Meta["bookName"], d.Meta["book_name"], d.Meta["title"]), "style": firstText(d.Meta["style"]), "gender": d.Gender})
+					for _, item := range items {
+						if item["status"] == "failed" || item["ai_status"] == "failed" {
+							processErr = fmt.Errorf("敏感词 AI 修复失败: %s", firstText(item["error"]))
+							break
+						}
+					}
+				}
 			} else {
 				processed, trace, items, processErr = processWorkshopConfiguredText(req.Context(), store, identity.Username, id, content, textScope, in.SensitiveAIEnabled, provider)
+			}
+			if in.SensitiveAIEnabled && processErr == nil {
+				for _, item := range items {
+					if item["status"] == "failed" || item["ai_status"] == "failed" {
+						processErr = fmt.Errorf("敏感词 AI 修复失败: %s", safeSensitiveFailureText(firstText(item["error"])))
+						break
+					}
+				}
 			}
 			if processErr != nil {
 				appendResult(version, "failed", fmt.Errorf("处理正文失败: %w", processErr))
@@ -178,33 +206,7 @@ func applyNovelFetchSafeRules(w http.ResponseWriter, req *http.Request, store no
 				appendResult(version, "failed", fmt.Errorf("保存正文失败: %w", saveErr))
 				continue
 			}
-			// No reference, metadata, or inline content changes before successful save.
-			d.BodyRefs[version] = ref
-			if version == "original" {
-				d.Original = processed
-				d.ProcessedText = processed
-				d.ProcessedChars = len([]rune(processed))
-				d.Meta["sensitiveReplacementCount"] = len(items)
-				d.Meta["sensitiveReplaced"] = len(items)
-				setSensitiveDetails(d.Meta, items, len(items))
-				if !restore {
-					d.Meta["rulesTrace"] = trace
-				}
-			} else {
-				if metadata, ok := d.Versions[version].(map[string]any); ok {
-					copy := map[string]any{}
-					for k, v := range metadata {
-						copy[k] = v
-					}
-					copy["text"] = processed
-					d.Versions[version] = copy
-				} else {
-					d.Versions[version] = processed
-				}
-				traces := mapOrEmpty(d.Meta["rulesTraceByVersion"])
-				traces[version] = trace
-				d.Meta["rulesTraceByVersion"] = traces
-			}
+			changes = append(changes, novelFetchSensitiveVersionChange{VersionID: version, Ref: ref, Trace: trace, Items: items})
 			successful++
 			bookReplacements += len(items)
 			appendResult(version, "success", nil)
@@ -215,23 +217,26 @@ func applyNovelFetchSafeRules(w http.ResponseWriter, req *http.Request, store no
 				bookFailed = true
 			}
 		}
-		if successful > 0 {
-			d.Meta["sensitiveProcessed"] = !bookFailed
-			if bookFailed {
-				d.Meta["sensitiveStatus"] = "partial"
-			} else {
-				d.Meta["sensitiveStatus"] = "done"
+		failureReasons := map[string]string{}
+		for _, result := range results[start:] {
+			if result.Status == "failed" {
+				failureReasons[result.VersionID] = result.Error
 			}
-			d.Logs = append(d.Logs, map[string]any{"type": "rules_processed", "at": time.Now().UTC().Format(time.RFC3339Nano), "scope": scope, "partial": bookFailed})
-			if saveErr := store.PutDocument(req.Context(), identity.Username, d); saveErr != nil {
+		}
+		coveredAll := !restore && scope == "both" && !bookFailed && len(changes) == len(versions) && len(versions) > 0
+		if len(changes) > 0 || (in.SensitiveAIEnabled && len(failureReasons) > 0) {
+			metadataErr := saveNovelFetchSensitiveMetadata(req.Context(), store, identity.Username, id, novelFetchSensitiveMetadataUpdate{Changes: changes, Failures: failureReasons, ExplicitAI: in.SensitiveAIEnabled, CoveredAll: coveredAll, Restore: restore, Scope: scope})
+			if metadataErr != nil {
 				bookFailed = true
-				for i := start; i < len(results); i++ {
-					if results[i].Status == "success" {
-						results[i].Status = "failed"
-						results[i].Error = fmt.Sprintf("正文已保存，但任务信息保存失败: %v", saveErr)
+				for index := start; index < len(results); index++ {
+					if results[index].Status == "success" {
+						results[index].Status = "failed"
+						results[index].Error = safeSensitiveFailureText("正文已保存，但任务信息保存失败: " + metadataErr.Error())
+					} else if results[index].Status == "failed" {
+						results[index].Error = safeSensitiveFailureText(results[index].Error + "; 保存敏感词失败状态失败: " + metadataErr.Error())
 					}
 				}
-			} else {
+			} else if len(changes) > 0 {
 				updated++
 				updatedIDs = append(updatedIDs, id)
 				replacements += bookReplacements
@@ -243,5 +248,5 @@ func applyNovelFetchSafeRules(w http.ResponseWriter, req *http.Request, store no
 			skipped++
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "requested": len(ids), "updated": updated, "failed": failed, "skipped": skipped, "task_ids": updatedIDs, "processed": updated, "applied": updated, "restored": restore, "replacements": replacements, "version_results": results})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": failed == 0, "requested": len(ids), "updated": updated, "failed": failed, "skipped": skipped, "task_ids": updatedIDs, "processed": updated, "applied": updated, "restored": restore, "replacements": replacements, "version_results": results})
 }
