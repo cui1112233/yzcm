@@ -19,7 +19,7 @@ const raceLedgerInsert = "INSERT INTO schema_migrations(version, checksum, appli
 func TestMigrationDuplicateDDLReadoptsExactShapeOnlyOnce(t *testing.T) {
 	for _, path := range []string{"adopt", "sql"} {
 		for _, code := range []uint16{1050, 1060} {
-			for _, shape := range []string{"valid", "false", "error", "duplicate-again"} {
+			for _, shape := range []string{"valid", "false", "error", "true-with-error", "duplicate-again"} {
 				t.Run(fmt.Sprintf("%s/%d/%s", path, code, shape), func(t *testing.T) {
 					db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 					if err != nil {
@@ -51,6 +51,8 @@ func TestMigrationDuplicateDDLReadoptsExactShapeOnlyOnce(t *testing.T) {
 							return true, nil
 						case "missing":
 							return false, nil
+						case "bigint-with-error":
+							return true, shapeError
 						default:
 							return false, shapeError
 						}
@@ -76,6 +78,8 @@ func TestMigrationDuplicateDDLReadoptsExactShapeOnlyOnce(t *testing.T) {
 						probe.WillReturnRows(sqlmock.NewRows([]string{"column_type"}).AddRow("missing"))
 					case "error":
 						probe.WillReturnRows(sqlmock.NewRows([]string{"column_type"}).AddRow("varchar(10)"))
+					case "true-with-error":
+						probe.WillReturnRows(sqlmock.NewRows([]string{"column_type"}).AddRow("bigint-with-error"))
 					default:
 						probe.WillReturnError(duplicate)
 					}
@@ -95,8 +99,11 @@ func TestMigrationDuplicateDDLReadoptsExactShapeOnlyOnce(t *testing.T) {
 						if err == nil || !errors.As(err, &original) || original.Number != code {
 							t.Fatalf("lost original duplicate error: %v", err)
 						}
-						if shape == "error" && !errors.Is(err, shapeError) {
+						if (shape == "error" || shape == "true-with-error") && !errors.Is(err, shapeError) {
 							t.Fatalf("lost exact-shape rejection: %v", err)
+						}
+						if shape == "false" && errors.Unwrap(err) != duplicate {
+							t.Fatalf("false adoption must return original cause without attempting a ledger write: %v", err)
 						}
 					}
 					if calls != 2 {

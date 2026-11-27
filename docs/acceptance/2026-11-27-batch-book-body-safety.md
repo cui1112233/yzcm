@@ -67,3 +67,7 @@
 ## 实施时对计划的具体调整
 
 项目实际使用 storage.Migration/schema_migrations，因此沿用并增加 `1200005`，不引入第二套 Goose 执行器；前端使用实际 node:test，不另装 Vitest。没有发现现有 React 页面调用正文容量清理接口，因此只扩展清理响应 objectsPending/objectsHeld，未新增不必要的清理页面，也未留下未使用的提示辅助函数。
+
+## 第二批更新说明
+
+本记录的后续事项以同日 execution-safety 验收记录为准；持久预算、执行准入、正文引用读取与摘要同步已在第二批实现并验证。4001 仍待其他运行任务结束后统一切换。详见 [第二批验收](2026-11-27-batch-book-execution-safety.md)。
