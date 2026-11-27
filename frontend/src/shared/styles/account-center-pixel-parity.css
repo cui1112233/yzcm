@@ -168,11 +168,17 @@
 .pc-security-row > div, .pc-security-recovery-email > div { display: grid; gap: 4px; }
 .pc-security-row small, .pc-security-recovery-email small { color: var(--pc-muted); }
 .pc-security-auth > .ac-session-list { margin: 0 22px 18px; padding-top: 10px; }
+.pc-security .ac-session-list { display: grid; gap: 8px; }
+.pc-security .ac-session-list > div { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 58px; padding: 10px 12px; border: 1px solid rgba(132, 202, 255, .17); border-radius: 12px; background: rgba(15, 37, 82, .35); }
+.pc-security .ac-session-list > div > div { display: grid; min-width: 0; gap: 4px; }
+.pc-security .ac-session-list strong { overflow: hidden; color: var(--pc-text); text-overflow: ellipsis; white-space: nowrap; }
+.pc-security .ac-session-list small { overflow: hidden; color: var(--pc-muted); text-overflow: ellipsis; white-space: nowrap; }
+.pc-security .ac-session-icon { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid rgba(103, 225, 255, .3); border-radius: 11px; color: var(--pc-cyan); background: rgba(77, 220, 255, .07); }
 .pc-security-recovery-email { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 13px; margin: 20px 22px 14px; }
 .pc-security-recovery-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 0 22px 14px; }
 .pc-security-recovery-actions a { padding: 11px 14px; border: 1px solid rgba(132, 202, 255, .3); border-radius: 11px; color: #b9edff; background: rgba(35, 75, 143, .3); text-align: center; text-decoration: none; }
 .pc-security-recovery > p { margin: 0 22px 20px; color: var(--pc-muted); line-height: 1.6; }
-.pc-security-devices > .ac-session-list { margin: 14px 22px 20px; }
+.pc-security-devices > .ac-session-list { max-height: 326px; margin: 14px 22px 20px; overflow: auto; padding-right: 3px; }
 .pc-security-activity-empty { display: grid; min-height: 170px; place-items: center; align-content: center; gap: 8px; padding: 24px; color: var(--pc-muted); text-align: center; }
 .pc-security-activity-empty svg { color: var(--pc-success); filter: drop-shadow(0 0 12px rgba(88, 230, 169, .3)); }
 .pc-security-activity-empty strong { color: var(--pc-text); }

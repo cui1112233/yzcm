@@ -9,6 +9,7 @@ test('uses the same server-authorized team groups and account actions on both pa
   assert.match(accounts, /directory\.teams\.map/);
   assert.match(accounts, /directory\.ungrouped/);
   assert.match(accounts, /account\.actions\.map/);
+  assert.match(accounts, /canonicalRole=\{ROLE_LABELS\[role\] \|\| role\}/);
   assert.match(accounts, /team\.actions\.map/);
   assert.match(accounts, /value \?\? '暂不可用'/);
   assert.match(teams, /<AccountRolePage[^>]*teamsOnly/);

@@ -138,7 +138,7 @@ export default function AccountRolePage({ title = '账号与角色', teamsOnly =
   const columns = [
     { title: '登录账号', dataIndex: 'username' },
     { title: '显示名称', dataIndex: 'displayName' },
-    { title: '角色', dataIndex: 'role', render: role => <RoleBadge canonicalRole={role} compact /> },
+    { title: '角色', dataIndex: 'role', render: role => <RoleBadge canonicalRole={ROLE_LABELS[role] || role} compact /> },
     { title: '状态', render: (_, account) => <Space direction="vertical" size={0}>
       {account.archivedAt ? '已归档' : account.active ? '启用' : '停用'}
       {account.historical && <Tag>历史归属</Tag>}
