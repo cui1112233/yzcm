@@ -268,9 +268,16 @@ func (s *MySQLStore) DeleteDocuments(ctx context.Context, owner string, ids []st
 
 func (s *MySQLStore) GetConfig(ctx context.Context, owner string) (map[string]any, error) {
 	var raw []byte
-	err := s.DB.QueryRowContext(ctx, `SELECT settings_json FROM novel_fetch_workshop_configs WHERE owner_username=?`, owner).Scan(&raw)
+	var pending bool
+	// Read the catalog and its migration phase from the same database snapshot.
+	err := s.DB.QueryRowContext(ctx, `SELECT c.settings_json,EXISTS(
+SELECT 1 FROM novel_fetch_legacy_config_migrations m WHERE m.owner_username=c.owner_username AND m.phase!='complete')
+FROM novel_fetch_workshop_configs c WHERE c.owner_username=?`, owner).Scan(&raw, &pending)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
+	}
+	if pending && s.ModelSecrets == nil {
+		return nil, fmt.Errorf("pending legacy video migration requires model configuration encryption")
 	}
 	var settings map[string]any
 	if len(raw) != 0 {
@@ -362,6 +369,12 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 		if err != nil {
 			return nil, err
 		}
+		if err := validateLegacyVideoDocument(settings); err != nil {
+			return nil, err
+		}
+		if err := validateLegacyVideoDocument(legacy); err != nil {
+			return nil, err
+		}
 		var candidates pendingLegacyVideos
 		if waiting {
 			candidates, err = s.migrationCandidates(state)
@@ -435,32 +448,14 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 	if err := s.ModelSecrets.OpenModelConfig(owner, settings); err != nil {
 		return nil, err
 	}
-	if ModelConfigText(settings, modelLegacyScrubPendingKey) != "" {
-		if err := s.scrubLegacyModelFile(ctx, owner, settings, state); err != nil {
+	hasScrubPlan := ModelConfigText(settings, modelLegacyScrubPendingKey) != ""
+	replaySettings := settings[legacyModelMigrationVersionKey] == legacyModelMigrationVersion && !checkFile && s.LegacyConfigDir != ""
+	if hasScrubPlan || state.Phase == LegacyFinalizing || replaySettings {
+		if err := s.finishLegacyMigration(ctx, owner, settings, state); err != nil {
 			return nil, fmt.Errorf("clean legacy model configuration: %w", err)
 		}
 		delete(settings, modelLegacyScrubPendingKey)
 		delete(settings, legacyModelScrubEntriesKey)
-	} else if (found && state.Phase == LegacyFinalizing) || (settings[legacyModelMigrationVersionKey] == legacyModelMigrationVersion && !checkFile) {
-		path, err := s.legacyModelFilePath(owner)
-		if err != nil {
-			return nil, err
-		}
-		if s.LegacyConfigLocker != nil {
-			s.LegacyConfigLocker.Lock()
-			defer s.LegacyConfigLocker.Unlock()
-		}
-		if err := s.finalizeLegacySettings(owner, path); err != nil {
-			return nil, err
-		}
-		if state.Phase == LegacyFinalizing {
-			if path == "" {
-				return nil, fmt.Errorf("legacy config directory unavailable during finalization")
-			}
-			if err := s.completeLegacyMigration(ctx, owner, "", state); err != nil {
-				return nil, err
-			}
-		}
 	}
 	return EnsureWorkshopDefaults(settings), nil
 }

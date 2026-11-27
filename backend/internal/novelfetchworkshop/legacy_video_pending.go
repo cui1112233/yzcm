@@ -84,7 +84,105 @@ func (s *MySQLStore) migrationCandidates(state LegacyConfigMigrationState) (pend
 	return pending, err
 }
 
+// A missing identity field can use a provider default. Explicit nulls, numbers
+// and objects have no trustworthy interpretation as destinations or model IDs.
+func validLegacyVideoFields(raw map[string]any) bool {
+	if raw == nil {
+		return false
+	}
+	for _, field := range []string{"id", "kind", "model", "modelId", "provider", "adapterKind", "catalogSource", "createUrl", "tasksUrl", "resultUrl", "baseUrl", "endpoint", "tasksEndpoint", "resultEndpoint", "workflowId"} {
+		if value, exists := raw[field]; exists {
+			if _, ok := value.(string); !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func validLegacyProviderIdentity(name string, raw map[string]any) bool {
+	if !validLegacyVideoFields(raw) {
+		return false
+	}
+	provider := ModelConfigText(raw, "provider")
+	return provider == "" || batchfactoryv11.NormalizeVideoProviderForHTTP(provider) == batchfactoryv11.NormalizeVideoProviderForHTTP(name)
+}
+
+func validateLegacyVideoDocument(doc map[string]any) error {
+	for _, container := range legacyCatalogContainers(doc) {
+		if value, exists := container["videoProviders"]; exists {
+			providers, ok := value.(map[string]any)
+			if !ok {
+				return fmt.Errorf("invalid legacy video provider list")
+			}
+			for name, item := range providers {
+				raw, _ := item.(map[string]any)
+				if !validLegacyProviderIdentity(name, raw) {
+					return fmt.Errorf("invalid legacy video provider identity")
+				}
+			}
+		}
+		catalog, _ := container["modelCatalog"].([]any)
+		for _, item := range catalog {
+			raw, _ := item.(map[string]any)
+			if ModelConfigText(raw, "kind") == "video" && !validLegacyVideoFields(raw) {
+				return fmt.Errorf("invalid legacy video catalog identity")
+			}
+		}
+	}
+	return nil
+}
+
+// The previous writer stopped normalizing nonlocal provider rows at a
+// missing key. Recognize that exact generated identity using its original
+// provider fields; an independently stored row still needs file evidence.
+func (source pendingVideoSource) producedRow(row map[string]any) bool {
+	if !validLegacyVideoFields(row) || !validLegacyVideoFields(source.Raw) {
+		return false
+	}
+	canonical := source.model()
+	if reflect.DeepEqual(row, canonical) {
+		return true
+	}
+	if !source.Video || hasLegacyCredentialValue(row) || hasLegacyCredentialValue(source.Raw) {
+		return false
+	}
+	provider := ModelConfigText(canonical, "provider")
+	if provider == batchfactoryv11.VideoProviderDoubaoLocal {
+		return false
+	}
+	old := cloneMap(canonical)
+	old["endpoint"] = ModelConfigText(source.Raw, "createUrl")
+	old["tasksEndpoint"] = ModelConfigText(source.Raw, "tasksUrl")
+	old["resultEndpoint"] = ModelConfigText(source.Raw, "resultUrl")
+	if provider != batchfactoryv11.VideoProviderPersonalAPI {
+		old["modelId"] = ModelConfigText(source.Raw, "model")
+	}
+	delete(old, "adapterKind")
+	delete(old, "catalogSource")
+	for _, field := range []string{"id", "kind", "modelId", "provider", "baseUrl", "endpoint", "tasksEndpoint", "resultEndpoint", "workflowId", "adapterKind", "catalogSource"} {
+		if ModelConfigText(old, field) != ModelConfigText(row, field) {
+			return false
+		}
+	}
+	return true
+}
+
+func (p pendingLegacyVideos) orphanRows() []map[string]any {
+	var orphan []map[string]any
+	for _, item := range p.Rows {
+		row, _ := item.(map[string]any)
+		if !slices.ContainsFunc(p.Sources, func(source pendingVideoSource) bool { return source.producedRow(row) }) {
+			orphan = append(orphan, row)
+		}
+	}
+	return orphan
+}
+
 func (p pendingLegacyVideos) fileReady(file map[string]any) bool {
+	if validateLegacyVideoDocument(file) != nil {
+		return false
+	}
 	sources := collectLegacyVideoCandidates(file)
 	matches := func(model map[string]any) bool {
 		for _, source := range sources {
@@ -97,14 +195,13 @@ func (p pendingLegacyVideos) fileReady(file map[string]any) bool {
 		}
 		return false
 	}
-	for _, item := range p.Rows {
-		row, _ := item.(map[string]any)
-		if !matches(row) {
+	for _, row := range p.orphanRows() {
+		if !validLegacyVideoFields(row) || !matches(row) {
 			return false
 		}
 	}
 	for _, saved := range p.Sources {
-		if !matches(saved.model()) {
+		if !validLegacyVideoFields(saved.Raw) || (saved.Video && !validLegacyProviderIdentity(saved.Provider, saved.Raw)) || !matches(saved.model()) {
 			return false
 		}
 	}
@@ -140,12 +237,8 @@ func (p pendingLegacyVideos) prepareRows(rows, boundRows []any, migration *legac
 			restored = append(restored, source.model)
 		}
 	}
-	sourceModels := restored
-	for _, item := range p.Rows {
-		row, _ := item.(map[string]any)
-		if _, found := findLegacyTarget(row, sourceModels); !found {
-			restored = append(restored, row)
-		}
+	for _, row := range p.orphanRows() {
+		restored = append(restored, row)
 	}
 	existing := active
 	for _, item := range restored {

@@ -368,22 +368,7 @@ func TestLegacyConfigMigrationStateUpgradesPendingEnvelope(t *testing.T) {
 	const owner = "upgrade-video"
 	row := map[string]any{"id": "video", "kind": "video", "modelId": "old-model", "provider": "personal_api", "endpoint": "https://fixture.example.test/video", "credential": "fixture-original"}
 	pending := map[string]any{"Rows": []any{row}, "Sources": []any{map[string]any{"container": 0, "index": 1, "Raw": row}}}
-	plain, err := json.Marshal(pending)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ciphertext, fp, err := store.ModelSecrets.SealLegacyConflict(owner, novelfetchworkshop.LegacyConflictSource{Document: "db:novel_fetch_workshop_configs", Field: "modelCatalogLegacyVideoPending"}, string(plain))
-	if err != nil {
-		t.Fatal(err)
-	}
-	doc := map[string]any{"modelCatalogSecretVersion": "bound-v3", "modelCatalog": []any{}, "modelCatalogLegacyVideoPending": map[string]any{"ciphertext": ciphertext, "fingerprint": fp}}
-	raw, err := json.Marshal(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.DB.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_configs(owner_username,settings_json,created_at,updated_at) VALUES(?,?,NOW(6),NOW(6))`, owner, raw); err != nil {
-		t.Fatal(err)
-	}
+	seedPendingEnvelope(t, store, owner, pending)
 	offline := novelfetchworkshop.NewMySQLStore(store.DB)
 	offline.ModelSecrets = store.ModelSecrets
 	if _, err := offline.GetConfig(ctx, owner); err == nil {
@@ -412,5 +397,74 @@ func TestLegacyConfigMigrationStateUpgradesPendingEnvelope(t *testing.T) {
 	rows := modelCatalog(settings)
 	if err != nil || len(rows) != 1 || rows[0]["credential"] != "fixture-original" {
 		t.Fatal("old envelope did not resume", err)
+	}
+}
+
+func TestLegacyConfigMigrationStateNoCodecReaderDuringDiscovery(t *testing.T) {
+	store := stateTestStore(t)
+	const owner = "first-preference"
+	ctx := context.Background()
+	if _, err := store.DB.Exec(`INSERT INTO novel_fetch_workshop_configs(owner_username,settings_json,created_at,updated_at) VALUES(?, '{"modelCatalog":[{"id":"v","kind":"video","provider":"personal_api","modelId":"fixture","endpoint":"https://fixture.invalid/video"}]}',NOW(6),NOW(6))`, owner); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.DiscoverLegacyConfigMigration(ctx, owner); err != nil || !found {
+		t.Fatal("preference-first discovery", err)
+	}
+	cfg, err := novelfetchworkshop.NewMySQLStore(store.DB).GetConfig(ctx, owner)
+	if err == nil || len(modelCatalog(cfg)) != 0 {
+		t.Fatal("unconfigured reader exposed staged video")
+	}
+}
+
+func seedPendingEnvelope(t *testing.T, store *novelfetchworkshop.MySQLStore, owner string, pending map[string]any) {
+	t.Helper()
+	ctx := context.Background()
+	plain, err := json.Marshal(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, fp, err := store.ModelSecrets.SealLegacyConflict(owner, novelfetchworkshop.LegacyConflictSource{Document: "db:novel_fetch_workshop_configs", Field: "modelCatalogLegacyVideoPending"}, string(plain))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := map[string]any{"modelCatalogSecretVersion": "bound-v3", "modelCatalog": []any{}, "modelCatalogLegacyVideoPending": map[string]any{"ciphertext": ciphertext, "fingerprint": fp}}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_configs(owner_username,settings_json,created_at,updated_at) VALUES(?,?,NOW(6),NOW(6))`, owner, raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLegacyConfigMigrationStateOldProviderEnvelopeRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store := stateTestStore(t)
+	owner := "keyless-upgrade"
+	provider := map[string]any{"model": "fixture-video", "createUrl": "https://fixture.invalid/create"}
+	row := map[string]any{"id": "legacy-video:personal_api", "kind": "video", "provider": "personal_api", "modelId": "fixture-video", "displayName": "fixture-video", "endpoint": "https://fixture.invalid/create", "tasksEndpoint": "", "resultEndpoint": "", "workflowId": "", "enabled": true, "credentialStatus": "needs_reentry", "credentialRecoveryReason": "legacy_missing"}
+	seedPendingEnvelope(t, store, owner, map[string]any{"Rows": []any{row}, "Sources": []any{map[string]any{"video": true, "provider": "personal_api", "container": 2, "Raw": provider}}})
+	if _, err := store.GetConfig(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(store.LegacyConfigDir, owner), 0700); err != nil {
+		t.Fatal(err)
+	}
+	provider["apiKey"] = "synthetic-restored"
+	raw, err := json.Marshal(map[string]any{"videoProviders": map[string]any{"personal_api": provider}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.LegacyConfigDir, owner, "api-config.json"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := store.GetConfig(ctx, owner)
+	rows := modelCatalog(settings)
+	if err != nil || len(rows) != 1 || rows[0]["credential"] != "synthetic-restored" || firstText(rows[0]["tasksEndpoint"]) == "" || firstText(rows[0]["resultEndpoint"]) == "" {
+		t.Fatal("old generated row did not restore to one verified model", err)
+	}
+	state, found, err := store.LegacyConfigMigrationState(ctx, owner)
+	if err != nil || !found || state.Phase != "complete" {
+		t.Fatal("upgraded state did not complete", err)
 	}
 }

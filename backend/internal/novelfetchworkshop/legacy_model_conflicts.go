@@ -251,7 +251,7 @@ func legacySourceMatchesModel(source legacySourceEntry, target map[string]any) b
 	return true
 }
 
-func (s *MySQLStore) verifyLegacySource(ctx context.Context, owner, document string, source legacySourceEntry, target map[string]any) bool {
+func (s *MySQLStore) verifyLegacySource(ctx context.Context, tx *sql.Tx, owner, document string, source legacySourceEntry, target map[string]any) bool {
 	if len(source.ConflictIDs) == 0 {
 		return legacySourceMatchesModel(source, target)
 	}
@@ -260,7 +260,7 @@ func (s *MySQLStore) verifyLegacySource(ctx context.Context, owner, document str
 		return false
 	}
 	for field, key := range keys {
-		record, err := readLegacyConflict(ctx, s.DB, owner, source.ConflictIDs[field], false)
+		record, err := readLegacyConflict(ctx, tx, owner, source.ConflictIDs[field], false)
 		if err != nil || !s.legacyConflictMatches(owner, conflictSource(document, source, field), key, record) {
 			return false
 		}
@@ -268,9 +268,9 @@ func (s *MySQLStore) verifyLegacySource(ctx context.Context, owner, document str
 	return true
 }
 
-func (s *MySQLStore) legacyConflictRecordsIntact(ctx context.Context, owner string, ids map[string]string) bool {
+func (s *MySQLStore) legacyConflictRecordsIntact(ctx context.Context, tx *sql.Tx, owner string, ids map[string]string) bool {
 	for _, id := range ids {
-		record, err := readLegacyConflict(ctx, s.DB, owner, id, false)
+		record, err := readLegacyConflict(ctx, tx, owner, id, false)
 		if err != nil || !record.ciphertext.Valid {
 			return false
 		}

@@ -3,6 +3,7 @@ package novelfetchworkshop
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -66,6 +67,11 @@ func legacyVideoProviderRows(container map[string]any) []any {
 		model := map[string]any{"id": "legacy-video:" + provider, "kind": "video", "modelId": row.Model,
 			"displayName": row.Model, "provider": provider, "endpoint": row.CreateURL, "tasksEndpoint": row.TasksURL,
 			"resultEndpoint": row.ResultURL, "workflowId": row.WorkflowID, "credential": row.APIKey, "enabled": true}
+		for _, field := range []string{"adapterKind", "catalogSource"} {
+			if value, ok := fields[field]; ok {
+				model[field] = value
+			}
+		}
 		if err != nil {
 			markLegacyKeyReentry(model, "legacy_video_configuration_unusable")
 		}
@@ -449,7 +455,7 @@ func hasLegacyCredentialValue(row map[string]any) bool {
 	return false
 }
 
-func (s *MySQLStore) applyLegacyScrubEntry(ctx context.Context, owner, document string, containers []map[string]any, entry legacyScrubEntry, targets map[string]map[string]any) bool {
+func (s *MySQLStore) applyLegacyScrubEntry(ctx context.Context, tx *sql.Tx, owner, document string, containers []map[string]any, entry legacyScrubEntry, targets map[string]map[string]any) bool {
 	if entry.Container < 0 || entry.Container >= len(containers) || entry.TargetID == "" && len(entry.ConflictIDs) == 0 {
 		return false
 	}
@@ -465,7 +471,7 @@ func (s *MySQLStore) applyLegacyScrubEntry(ctx context.Context, owner, document 
 		if !ok {
 			return false
 		}
-		if !s.verifyLegacySource(ctx, owner, document, legacySourceEntry{legacyScrubEntry: entry, raw: fields, model: source}, targets[entry.TargetID]) {
+		if !s.verifyLegacySource(ctx, tx, owner, document, legacySourceEntry{legacyScrubEntry: entry, raw: fields, model: source}, targets[entry.TargetID]) {
 			return false
 		}
 		delete(providers, entry.Provider)
@@ -479,7 +485,7 @@ func (s *MySQLStore) applyLegacyScrubEntry(ctx context.Context, owner, document 
 		return false
 	}
 	row, _ := catalog[entry.Index].(map[string]any)
-	if legacyEntryDigest(row) != entry.Digest || !s.verifyLegacySource(ctx, owner, document, legacySourceEntry{legacyScrubEntry: entry, raw: row, model: row}, targets[entry.TargetID]) {
+	if legacyEntryDigest(row) != entry.Digest || !s.verifyLegacySource(ctx, tx, owner, document, legacySourceEntry{legacyScrubEntry: entry, raw: row, model: row}, targets[entry.TargetID]) {
 		return false
 	}
 	for _, key := range []string{"credential", "apiKey", "credentialRef"} {
@@ -489,7 +495,10 @@ func (s *MySQLStore) applyLegacyScrubEntry(ctx context.Context, owner, document 
 	return true
 }
 
-func (s *MySQLStore) scrubLegacyModelFile(ctx context.Context, owner string, settings map[string]any, state LegacyConfigMigrationState) error {
+// Hold the owner config and migration row locks across file work. A reader
+// may have loaded its settings before a different reader committed a new
+// scrub plan. Validate both snapshots before using targets or touching files.
+func (s *MySQLStore) finishLegacyMigration(ctx context.Context, owner string, settings map[string]any, state LegacyConfigMigrationState) error {
 	if s.LegacyConfigLocker != nil {
 		s.LegacyConfigLocker.Lock()
 		defer s.LegacyConfigLocker.Unlock()
@@ -498,6 +507,59 @@ func (s *MySQLStore) scrubLegacyModelFile(ctx context.Context, owner string, set
 	if err != nil {
 		return err
 	}
+	if path == "" {
+		return fmt.Errorf("legacy config directory unavailable during finalization")
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var raw []byte
+	if err := tx.QueryRowContext(ctx, `SELECT settings_json FROM novel_fetch_workshop_configs WHERE owner_username=? FOR UPDATE`, owner).Scan(&raw); err != nil {
+		return err
+	}
+	var current map[string]any
+	if err := json.Unmarshal(raw, &current); err != nil {
+		return err
+	}
+	locked, found, err := readMigrationState(tx.QueryRowContext(ctx, migrationStateQuery+" FOR UPDATE", owner))
+	if err != nil {
+		return err
+	}
+	if found != (state.Owner != "") || locked.Phase != state.Phase || locked.Revision != state.Revision || configRevision(current) != configRevision(settings) ||
+		!reflect.DeepEqual(current[modelLegacyScrubPendingKey], settings[modelLegacyScrubPendingKey]) || !reflect.DeepEqual(current[legacyModelScrubEntriesKey], settings[legacyModelScrubEntriesKey]) {
+		return ErrConfigConflict
+	}
+	expected := ModelConfigText(current, modelLegacyScrubPendingKey)
+	if expected == "" && current[legacyModelScrubEntriesKey] != nil {
+		return ErrConfigConflict
+	}
+	if found && locked.Phase != LegacyFinalizing && locked.Phase != LegacyComplete {
+		return ErrConfigConflict
+	}
+	if expected != "" {
+		if err := s.scrubLegacyModelFile(ctx, tx, owner, path, settings); err != nil {
+			return err
+		}
+	}
+	if err := s.finalizeLegacySettings(owner, path); err != nil {
+		return err
+	}
+	if expected != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE novel_fetch_workshop_configs SET settings_json=JSON_REMOVE(settings_json,'$.modelCatalogLegacyScrubPending','$.modelCatalogLegacyScrubEntries') WHERE owner_username=?`, owner); err != nil {
+			return err
+		}
+	}
+	if locked.Phase == LegacyFinalizing {
+		if err := s.moveLegacyMigration(ctx, tx, &locked, LegacyComplete); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *MySQLStore) scrubLegacyModelFile(ctx context.Context, tx *sql.Tx, owner, path string, settings map[string]any) error {
 	document, err := readLegacyModelDocument(path)
 	if err != nil {
 		return err
@@ -525,12 +587,12 @@ func (s *MySQLStore) scrubLegacyModelFile(ctx context.Context, owner string, set
 	for _, entry := range entries {
 		receipt := legacyEntryDigest(entry)
 		if completed[receipt] == expected {
-			if !s.legacyConflictRecordsIntact(ctx, owner, entry.ConflictIDs) {
+			if !s.legacyConflictRecordsIntact(ctx, tx, owner, entry.ConflictIDs) {
 				unresolved = true
 			}
 			continue
 		}
-		if !s.applyLegacyScrubEntry(ctx, owner, fileConflictDocument(path), containers, entry, targets) {
+		if !s.applyLegacyScrubEntry(ctx, tx, owner, fileConflictDocument(path), containers, entry, targets) {
 			unresolved = true
 			continue
 		}
@@ -553,39 +615,7 @@ func (s *MySQLStore) scrubLegacyModelFile(ctx context.Context, owner string, set
 	if len(entries) == 0 && ModelConfigText(document, modelLegacyScrubDoneKey) != expected {
 		return fmt.Errorf("legacy credential cleanup has no matching completion record")
 	}
-	if err := s.finalizeLegacySettings(owner, path); err != nil {
-		return err
-	}
-	return s.completeLegacyMigration(ctx, owner, expected, state)
-}
-
-func (s *MySQLStore) completeLegacyMigration(ctx context.Context, owner, expected string, state LegacyConfigMigrationState) error {
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if expected != "" {
-		result, err := tx.ExecContext(ctx, `UPDATE novel_fetch_workshop_configs
-SET settings_json=JSON_REMOVE(settings_json, '$.modelCatalogLegacyScrubPending', '$.modelCatalogLegacyScrubEntries')
-WHERE owner_username=? AND JSON_UNQUOTE(JSON_EXTRACT(settings_json, '$.modelCatalogLegacyScrubPending'))=?`, owner, expected)
-		if err != nil {
-			return err
-		}
-		n, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n != 1 {
-			return ErrConfigConflict
-		}
-	}
-	if state.Phase == LegacyFinalizing {
-		if err := s.moveLegacyMigration(ctx, tx, &state, LegacyComplete); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *MySQLStore) finalizeLegacySettings(owner, path string) error {

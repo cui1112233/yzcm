@@ -146,6 +146,9 @@ func (s *MySQLStore) discoverLegacyConfigMigration(ctx context.Context, owner st
 	if err = json.Unmarshal(raw, &settings); err != nil {
 		return state, false, err
 	}
+	if err := validateLegacyVideoDocument(settings); err != nil {
+		return state, false, err
+	}
 	candidates, err := s.databaseVideoCandidates(owner, settings)
 	if err != nil {
 		return state, false, err
