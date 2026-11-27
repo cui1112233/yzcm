@@ -44,3 +44,15 @@
 ## 本地更新约束
 
 最终复核：4001 仍是 `c33aa9d3`，PID 42620；漫画批次 `batch_e81b39fe61edf53eac87919dd4b95c4c` 的作业仍为 running。候选已完成独立构建和隔离验收，尚未切换 4001；保留原运行任务。没有推送或生产发布。
+
+## 2026-11-27 21:34 用户要求执行后的运行验收
+
+此前的运行阻塞已解除。执行时发现其他聊天先后把 4001 更新至 `5435f1fc`、`3362a59f`；本轮核验以当前真实进程为准，没有用先前的 `fe1f5a37` 候选覆盖较新的源码。
+
+- 本轮固定最新源码 `e30693fe867b8a3169b57c4e80edc3a23c8ad4c7`，独立构建 Go embed 候选；正文、storage、app 包测试通过，相关 HTTP 回归 **302 通过、14 跳过、0 失败**。扩展选择集增加配置迁移及重启后任务编号保护；跳过项含需要专门 MySQL/Redis 环境的集成测试。
+- 新候选在隔离 4027 的真实会话验收通过：health 正常，正文/规则正确，缺失队列明确返回 503，运行 SHA 与清单一致。没有真实外部调用，验收后已停止候选。
+- 切换前只读检查：自动化作业无 running，图片无未过期生成租约，分镜无 running，Novel Fetch Redis pending/processing 均为 0。
+- 检查时另一个聊天已将 4001 切至 `3362a59f`。Git 精确比较确认 `3362a59f` 与 `e30693fe` 在 `backend/`、`frontend/`、`pets/` 无差异；同时验证 `0ecdcf9a`、`fe1f5a37` 和重启任务编号修复 `be25d4c1` 均是当前版本祖先。因此保留已更新进程，不重复重启。
+- 实际 4001：PID **36428**，运行 SHA 与 manifest SHA 均为 `3362a59f`，前端入口 `/assets/user-EHDqCuoe.js`。health、漫画页、测书页及签名批次 runtime-summary 均为 HTTP 200。运行文件 SHA256 为 `1b25dbbfebd3a0414c52ebdb3fac6f30397cb01f4532749c25f436eb04f9959b`。
+- 当前正文记录 125 条；已发布草稿 169 条。已有任务仍保留 completed=10 / failed=42 / stopped=8；没有把历史失败改写为成功，也未手动重试旧任务、生成或上传。
+- 证据：`_local-archive-20261028/batch-book-reference-20261127/body-safety/execution-e30693fe/live-latest-acceptance.json`。本轮只更新和验证本地 4001，没有推送 Git 或公开发布。
