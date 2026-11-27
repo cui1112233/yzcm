@@ -3852,7 +3852,8 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 							return
 						case <-ticker.C:
 							last, _ := stallLast.Load().(time.Time)
-							if !automationProgressStalled(last, c.now()) {
+							stage, _ := stallStage.Load().(string)
+							if !automationProgressStalledInStage(last, c.now(), stage) {
 								continue
 							}
 							stallLast.Store(last)
@@ -4087,9 +4088,8 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 						fail("text_process", err, err.Error())
 						continue
 					}
-					textCtx, cancel := context.WithTimeout(ctx, stageTimeout)
-					result, err := c.textEnsure(textCtx, req)
-					cancel()
+					// The workflow bounds each phase; rendering must not consume the upload deadline.
+					result, err := c.textEnsure(ctx, req)
 					if result.Collection.ID != "" {
 						entry["textCollectionId"] = result.Collection.ID
 					}
@@ -4104,6 +4104,11 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 					if err != nil {
 						if ctx.Err() != nil {
 							fail(result.Stage, err, err.Error())
+							continue
+						}
+						if scheduleTextLocalRecovery(entry, result.Stage, err, c.now()) {
+							appendAutomationBookLog(entry, c.now(), result.Stage, automationStringValue(entry["message"], err.Error()))
+							persist()
 							continue
 						}
 						entry["status"], entry["stage"], entry["error"], entry["message"], entry["updatedAt"] = "failed", result.Stage, err.Error(), err.Error(), c.now()
@@ -6071,6 +6076,7 @@ func resetRetryableAutomationBooks(books map[string]any, only map[string]bool, n
 			delete(entry, "needsManual")
 			resetAutomationManualPageRetryBudget(entry)
 			delete(entry, "contentPolicyRetryCount")
+			delete(entry, "textRecoveryAttempts")
 			delete(entry, "retryAt")
 			delete(entry, "retryReason")
 			// 人工重试同样重置“批次末尾回补”的预算与等待标记。
