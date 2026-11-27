@@ -3028,7 +3028,11 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			return aiJudge
 		}
 		resolved, err := aiJudgeResolver(ctx, owner)
-		if err == nil && resolved != nil {
+		if err != nil {
+			// Preserve configuration failures without falling back to a different model.
+			return func(context.Context, novelfetchworkshop.BookInfo) (string, error) { return "", err }
+		}
+		if resolved != nil {
 			return resolved
 		}
 		return aiJudge
@@ -4836,7 +4840,25 @@ func syncNovelFetchClassificationMetadata(document *novelfetchworkshop.Document)
 	if document.Meta == nil {
 		document.Meta = map[string]any{}
 	}
+	if genderNeedsResolution(document.Gender) && strings.TrimSpace(document.GenderReason) != "" {
+		// The detail view reads these metadata fields even while gender is pending.
+		// Keep the failed diagnosis without replacing a saved gender/style label.
+		priorError := firstText(document.Meta["genderError"])
+		if currentError := firstText(document.Meta["classifyError"]); currentError == "" ||
+			(priorError != "" && currentError == priorError && firstText(document.Meta["genderReason"]) == priorError) {
+			document.Meta["classifyError"] = document.GenderReason
+		}
+		document.Meta["genderReason"] = document.GenderReason
+		document.Meta["genderError"] = document.GenderReason
+	}
 	if strings.TrimSpace(document.Gender) != "" && !genderNeedsResolution(document.Gender) {
+		// Clear only the error this helper previously recorded for unresolved gender.
+		// A newer style/other classification error must survive gender resolution.
+		if genderError := firstText(document.Meta["genderError"]); genderError != "" &&
+			firstText(document.Meta["classifyError"]) == genderError && firstText(document.Meta["genderReason"]) == genderError {
+			delete(document.Meta, "classifyError")
+		}
+		delete(document.Meta, "genderError")
 		if document.GenderConfidence <= 0 && (document.GenderSource == novelfetchworkshop.GenderManual || document.GenderSource == novelfetchworkshop.GenderBookInfo) {
 			document.GenderConfidence = 1
 		}

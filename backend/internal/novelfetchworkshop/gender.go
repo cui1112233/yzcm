@@ -132,17 +132,25 @@ func ResolveGender(ctx context.Context, manual string, info BookInfo, judge AIGe
 	if (category != "" && genre != "" && category != genre) || category == "" && genre == "" {
 		if judge != nil {
 			response, err := judge(ctx, info)
-			if err == nil {
-				aiResult := parseGenderAIResult(response)
-				if aiResult.Gender != "" {
-					decision := DecideGender("", info, aiResult.Gender)
-					if decision.Source == GenderAI {
-						decision.Confidence = aiResult.Confidence
-						decision.Reason = aiResult.Reason
-						return decision
-					}
+			if err != nil {
+				reason := safeStyleError(err)
+				// Configuration errors may contain provider details or credentials.
+				// Keep the actionable missing-key diagnosis as a fixed safe message.
+				if strings.Contains(err.Error(), "重新填写 Key") {
+					reason = "文本模型需要在 API 配置中重新填写 Key"
+				}
+				return GenderDecision{Gender: "待确认", Source: GenderUnknown, Reason: "AI 男女频判断失败：" + reason}
+			}
+			aiResult := parseGenderAIResult(response)
+			if aiResult.Gender != "" {
+				decision := DecideGender("", info, aiResult.Gender)
+				if decision.Source == GenderAI {
+					decision.Confidence = aiResult.Confidence
+					decision.Reason = aiResult.Reason
+					return decision
 				}
 			}
+			return GenderDecision{Gender: "待确认", Source: GenderUnknown, Reason: "AI 未返回有效男女频，请检查模型响应格式"}
 		}
 		return GenderDecision{Gender: "待确认", Source: GenderUnknown, Reason: "分类信息无法确定且 AI 未返回有效判断"}
 	}

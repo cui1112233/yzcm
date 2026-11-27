@@ -254,7 +254,7 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			writeAPIConfigError(w, accountcenter.ErrInvalid)
 			return
 		}
-		settings, err := store.GetConfig(req.Context(), access.identity.Subject.Username)
+		settings, err := novelfetchworkshop.ReadRuntimeConfig(req.Context(), store, access.identity.Subject.Username)
 		if err != nil {
 			writeAuthError(w, http.StatusServiceUnavailable, "模型配置暂不可用")
 			return
@@ -488,6 +488,51 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			return
 		}
 		owner := access.identity.Subject.Username
+		repairPatch := patch
+		if !access.custom {
+			// A prefix is not proof that this is an approved managed row. Keep
+			// the original row authorization and bind it to the repair's CAS.
+			current, err := novelfetchworkshop.ReadRuntimeConfig(req.Context(), store, owner)
+			if err != nil {
+				writeAuthError(w, http.StatusServiceUnavailable, "模型配置暂不可用")
+				return
+			}
+			found := false
+			for _, row := range modelCatalog(current) {
+				if row["id"] != req.PathValue("modelId") {
+					continue
+				}
+				if !isManagedYZCMModel(row) {
+					writeAccountCenterForbidden(w)
+					return
+				}
+				found = true
+				break
+			}
+			if !found {
+				writeJSON(w, http.StatusNotFound, map[string]any{"error": "模型不存在"})
+				return
+			}
+			repairPatch = cloneAnyMap(patch)
+			repairPatch[novelfetchworkshop.ConfigRevisionKey] = firstText(current[novelfetchworkshop.ConfigRevisionKey], "0")
+		}
+		if repair, ok := store.(interface {
+			TryPatchBoundTextCredential(context.Context, string, string, map[string]any) (map[string]any, bool, error)
+		}); ok {
+			model, handled, err := repair.TryPatchBoundTextCredential(req.Context(), owner, req.PathValue("modelId"), repairPatch)
+			if err != nil {
+				if errors.Is(err, novelfetchworkshop.ErrConfigConflict) {
+					writeAuthError(w, http.StatusConflict, "模型配置已变化，请刷新后重新填写 Key")
+				} else {
+					writeAuthError(w, http.StatusServiceUnavailable, "文本模型凭证保存失败，请稍后重试")
+				}
+				return
+			}
+			if handled {
+				writeJSON(w, http.StatusOK, map[string]any{"model": public(access, model)})
+				return
+			}
+		}
 		settings, err := store.GetConfig(req.Context(), owner)
 		if err != nil {
 			writeAuthError(w, http.StatusServiceUnavailable, "模型配置暂不可用")
@@ -628,7 +673,7 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			writeJSON(w, http.StatusOK, map[string]any{"quotas": []any{}})
 			return
 		}
-		settings, err := store.GetConfig(req.Context(), access.identity.Subject.Username)
+		settings, err := novelfetchworkshop.ReadRuntimeConfig(req.Context(), store, access.identity.Subject.Username)
 		if err != nil {
 			writeJSON(w, http.StatusOK, map[string]any{"quotas": []any{}})
 			return
