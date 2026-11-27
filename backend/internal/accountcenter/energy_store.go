@@ -8,8 +8,8 @@ import (
 const energyHasCost = `r.reconciled_at IS NOT NULL AND r.actual_cost IS NOT NULL`
 
 const energyAggregate = `COALESCE(SUM(CASE WHEN ` + energyHasCost + ` THEN r.actual_cost ELSE 0 END),0) AS actual_cost,
-COUNT(r.request_id),COUNT(CASE WHEN ` + energyHasCost + ` THEN 1 END),
-COUNT(r.request_id)-COUNT(CASE WHEN ` + energyHasCost + ` THEN 1 END)`
+COUNT(r.request_id) AS request_count,COUNT(CASE WHEN ` + energyHasCost + ` THEN 1 END) AS reconciled_count,
+COUNT(r.request_id)-COUNT(CASE WHEN ` + energyHasCost + ` THEN 1 END) AS pending_count`
 
 var _ energyReadStore = (*MySQLStore)(nil)
 
@@ -20,8 +20,15 @@ func (s *MySQLStore) energyTeam(ctx context.Context, id string) (EnergyTeam, err
 	return team, recordError(err)
 }
 
-func (s *MySQLStore) energyHasMember(ctx context.Context, filter EnergyFilter) (bool, error) {
+func (s *MySQLStore) energyHasMember(ctx context.Context, filter EnergyFilter, currentOnly bool) (bool, error) {
 	var found bool
+	if currentOnly {
+		err := s.db.QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1 FROM account_center_memberships m JOIN accounts a ON a.username=m.active_username
+LEFT JOIN account_center_profiles p ON p.username=a.username
+WHERE m.team_id=? AND m.active_username=? AND a.active=TRUE AND p.archived_at IS NULL)`, filter.TeamID, filter.Member).Scan(&found)
+		return found, err
+	}
 	if filter.TeamID == "" {
 		window, args := energyUsageWindow(filter)
 		err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM account_center_memberships WHERE username=?)
@@ -94,8 +101,14 @@ FROM yzcm_usage_requests r WHERE `+where+` ORDER BY r.created_at DESC,r.request_
 
 func (s *MySQLStore) energyRanking(ctx context.Context, filter EnergyFilter, page EnergyPage) ([]EnergyRankingEntry, error) {
 	where, args := energyTeamWhere(filter)
-	rows, err := s.db.QueryContext(ctx, `SELECT r.owner,`+energyAggregate+`
-FROM yzcm_usage_requests r WHERE `+where+` GROUP BY r.owner ORDER BY actual_cost DESC,r.owner ASC LIMIT ? OFFSET ?`,
+	// YZCM consumption receipts carry non-negative deductions. Keep real zero
+	// deductions, and omit anomalous negative amounts from the consumption rank.
+	rows, err := s.db.QueryContext(ctx, `SELECT owner,actual_cost,request_count,reconciled_count,pending_count,
+RANK() OVER (ORDER BY actual_cost DESC) AS consumption_rank
+FROM (SELECT r.owner,`+energyAggregate+`
+FROM yzcm_usage_requests r WHERE `+where+` AND NOT (`+energyHasCost+` AND r.actual_cost < 0)
+GROUP BY r.owner HAVING reconciled_count > 0) ranked
+ORDER BY actual_cost DESC,owner ASC LIMIT ? OFFSET ?`,
 		append(args, page.Limit+1, page.Offset)...)
 	if err != nil {
 		return nil, err
@@ -103,8 +116,8 @@ FROM yzcm_usage_requests r WHERE `+where+` GROUP BY r.owner ORDER BY actual_cost
 	defer rows.Close()
 	entries := make([]EnergyRankingEntry, 0, page.Limit)
 	for rows.Next() {
-		entry := EnergyRankingEntry{Rank: page.Offset + len(entries) + 1, EnergyTotals: EnergyTotals{Unit: EnergyUnit}}
-		if err := rows.Scan(&entry.Username, &entry.ActualCost, &entry.RequestCount, &entry.ReconciledCount, &entry.PendingCount); err != nil {
+		entry := EnergyRankingEntry{EnergyTotals: EnergyTotals{Unit: EnergyUnit}}
+		if err := rows.Scan(&entry.Username, &entry.ActualCost, &entry.RequestCount, &entry.ReconciledCount, &entry.PendingCount, &entry.Rank); err != nil {
 			return nil, err
 		}
 		entries = append(entries, entry)

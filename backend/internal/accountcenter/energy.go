@@ -138,9 +138,10 @@ type EnergyLedger struct {
 
 type EnergyRanking struct {
 	EnergyPage
-	Team    EnergyTeam           `json:"team"`
-	Filter  EnergyFilter         `json:"filter"`
-	Entries []EnergyRankingEntry `json:"entries"`
+	Team        EnergyTeam           `json:"team"`
+	Filter      EnergyFilter         `json:"filter"`
+	Entries     []EnergyRankingEntry `json:"entries"`
+	EmptyReason string               `json:"emptyReason,omitempty"`
 }
 
 type EnergyTeams struct {
@@ -152,7 +153,7 @@ type EnergyTeams struct {
 
 type energyReadStore interface {
 	energyTeam(context.Context, string) (EnergyTeam, error)
-	energyHasMember(context.Context, EnergyFilter) (bool, error)
+	energyHasMember(context.Context, EnergyFilter, bool) (bool, error)
 	energyTotals(context.Context, EnergyFilter) (EnergyTotals, error)
 	energyLedger(context.Context, EnergyFilter, EnergyPage, bool) ([]EnergyLedgerEntry, error)
 	energyRanking(context.Context, EnergyFilter, EnergyPage) ([]EnergyRankingEntry, error)
@@ -170,7 +171,6 @@ type energyView uint8
 const (
 	energySummaryView energyView = iota
 	energyLedgerView
-	energyRankingView
 )
 
 func NewEnergyService(store Store, wallet EnergyWallet, now func() time.Time) *EnergyService {
@@ -232,7 +232,7 @@ func (s *EnergyService) Ledger(ctx context.Context, subject Identity, query Ener
 }
 
 func (s *EnergyService) Ranking(ctx context.Context, subject Identity, query EnergyQuery) (EnergyRanking, error) {
-	filter, page, team, err := s.scope(ctx, subject, query, energyRankingView)
+	filter, page, team, err := s.scope(ctx, subject, query, energySummaryView)
 	if err != nil {
 		return EnergyRanking{}, err
 	}
@@ -240,7 +240,14 @@ func (s *EnergyService) Ranking(ctx context.Context, subject Identity, query Ene
 	if err != nil {
 		return EnergyRanking{}, err
 	}
-	return EnergyRanking{EnergyPage: page.withMore(len(entries)), Team: team, Filter: filter, Entries: entries[:min(len(entries), page.Limit)]}, nil
+	result := EnergyRanking{EnergyPage: page.withMore(len(entries)), Team: team, Filter: filter, Entries: entries[:min(len(entries), page.Limit)]}
+	if len(entries) == 0 {
+		result.EmptyReason = "no_reconciled_consumption"
+		if page.Offset != 0 {
+			result.EmptyReason = "page_out_of_range"
+		}
+	}
+	return result, nil
 }
 
 func (s *EnergyService) Teams(ctx context.Context, subject Identity, query EnergyQuery) (EnergyTeams, error) {
@@ -254,7 +261,7 @@ func (s *EnergyService) Teams(ctx context.Context, subject Identity, query Energ
 	if filter.TeamID != "" {
 		filter, page, _, err = s.scope(ctx, subject, query, energySummaryView)
 	} else if filter.Member != "" {
-		err = s.authorizeMember(ctx, filter)
+		err = s.authorizeMember(ctx, filter, false)
 	}
 	if err != nil {
 		return EnergyTeams{}, err
@@ -285,13 +292,11 @@ func (s *EnergyService) scope(ctx context.Context, subject Identity, query Energ
 	if filter.TeamID == "" || !energyAllTeams(subject) && filter.TeamID != subject.TeamID {
 		return filter, page, team, ErrForbidden
 	}
-	if subject.Role == RoleMember && view != energyRankingView {
+	if subject.Role == RoleMember && view == energyLedgerView {
 		if filter.Member != "" && !strings.EqualFold(filter.Member, subject.Username) {
 			return filter, page, team, ErrForbidden
 		}
-		if view == energyLedgerView || filter.Member != "" {
-			filter.Member = subject.Username
-		}
+		filter.Member = subject.Username
 	}
 	team, err = s.store.energyTeam(ctx, filter.TeamID)
 	if err != nil {
@@ -301,14 +306,14 @@ func (s *EnergyService) scope(ctx context.Context, subject Identity, query Energ
 		return filter, page, team, ErrForbidden
 	}
 	filter.TeamID = team.ID
-	return filter, page, team, s.authorizeMember(ctx, filter)
+	return filter, page, team, s.authorizeMember(ctx, filter, subject.Role == RoleMember)
 }
 
-func (s *EnergyService) authorizeMember(ctx context.Context, filter EnergyFilter) error {
+func (s *EnergyService) authorizeMember(ctx context.Context, filter EnergyFilter, currentOnly bool) error {
 	if filter.Member == "" {
 		return nil
 	}
-	allowed, err := s.store.energyHasMember(ctx, filter)
+	allowed, err := s.store.energyHasMember(ctx, filter, currentOnly)
 	if err != nil {
 		return err
 	}

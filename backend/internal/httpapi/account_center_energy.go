@@ -131,8 +131,8 @@ func writeAccountEnergyCSV(w http.ResponseWriter, value accountcenter.EnergyLedg
 		if entry.ActualCost != nil {
 			amount = *entry.ActualCost
 		}
-		cells := []string{energyCSVText(entry.RequestID), energyCSVText(entry.Owner), entry.At.UTC().Format(time.RFC3339Nano),
-			energyCSVText(entry.Feature), energyCSVText(entry.Model), entry.Status, amount}
+		cells := []string{energyCSVText(entry.RequestID), energyCSVText(entry.Owner), energyCSVText(entry.At.UTC().Format(time.RFC3339Nano)),
+			energyCSVText(entry.Feature), energyCSVText(entry.Model), energyCSVText(entry.Status), amount}
 		if includeActor {
 			cells = append(cells, energyCSVText(entry.ActorUsername))
 		}
@@ -144,11 +144,18 @@ func writeAccountEnergyCSV(w http.ResponseWriter, value accountcenter.EnergyLedg
 }
 
 func energyCSVText(value string) string {
-	if trimmed := strings.TrimLeftFunc(value, unicode.IsSpace); trimmed != "" && strings.ContainsRune("=+-@", rune(trimmed[0])) {
-		return "'" + value
-	}
-	if len(value) != 0 && strings.ContainsRune("\t\r\n", rune(value[0])) {
-		return "'" + value
+	for _, leading := range value {
+		if unicode.IsControl(leading) {
+			return "'" + value
+		}
+		if leading == '\uFEFF' || unicode.IsSpace(leading) {
+			continue
+		}
+		// Include fullwidth and other compatible forms of formula prefixes.
+		if strings.ContainsRune("=+-@＝＋－＠﹦﹢﹣﹫−", leading) {
+			return "'" + value
+		}
+		break
 	}
 	return value
 }

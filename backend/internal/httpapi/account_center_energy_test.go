@@ -2,8 +2,10 @@ package httpapi
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -42,18 +44,25 @@ func TestAccountCenterEnergyMySQLScopesAndPrecision(t *testing.T) {
 		exec(`INSERT INTO accounts(username,password_hash,password_algorithm,is_owner,active,created_at,updated_at) VALUES (?,'fixture','fixture',?,TRUE,NOW(6),NOW(6))`, name, role == "founder")
 		exec(`INSERT INTO account_center_profiles(username,display_name,role) VALUES (?,?,?)`, name, name, role)
 	}
+	for _, name := range []string{"peer-a", "equal-a", "zero-a", "negative-a", "inactive-a"} {
+		exec(`INSERT INTO accounts(username,password_hash,password_algorithm,is_owner,active,created_at,updated_at) VALUES (?,'fixture','fixture',FALSE,?,NOW(6),NOW(6))`, name, name != "inactive-a")
+		exec(`INSERT INTO account_center_profiles(username,display_name,role) VALUES (?,?,'member')`, name, name)
+	}
 	directory := accountcenter.NewMySQLStore(db)
 	for _, group := range []string{"a", "b"} {
 		if err := directory.CreateTeam(ctx, accountcenter.Team{ID: "team-" + group, Name: "team-" + group, CreatedBy: "founder", ManagerUsername: "lead-" + group}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for name, team := range map[string]string{"founder": "team-a", "developer": "team-a", "member-a": "team-a", "member-b": "team-b", "transferred": "team-a"} {
+	for name, team := range map[string]string{"founder": "team-a", "developer": "team-a", "member-a": "team-a", "member-b": "team-b", "transferred": "team-a", "peer-a": "team-a", "equal-a": "team-a", "zero-a": "team-a", "negative-a": "team-a", "inactive-a": "team-a"} {
 		if err := directory.AddMembership(ctx, accountcenter.Membership{Username: name, TeamID: team}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	const at = "2026-11-06 08:00:00"
+	const peerAt = "2026-12-07 08:00:00"
+	const rankAt = "2026-12-08 08:00:00"
+	const pendingAt = "2026-12-09 08:00:00"
 	for _, row := range []struct {
 		id, owner, team, model, at string
 		cost, settled              any
@@ -64,6 +73,16 @@ func TestAccountCenterEnergyMySQLScopesAndPrecision(t *testing.T) {
 		{"own-pending", "member-a", "team-a", "pending", at, nil, nil},
 		{"foreign-charge", "member-b", "team-b", "fixture", at, "2.0000000000", at},
 		{"outside-window", "member-a", "team-a", "fixture", "2026-10-05 00:00:00", "500.0000000000", at},
+		{"peer-aggregate", "peer-a", "team-a", "fixture", peerAt, "1.2500000000", peerAt},
+		{"peer-rank", "peer-a", "team-a", "fixture", rankAt, "0.5000000001", rankAt},
+		{"peer-negative-anomaly", "peer-a", "team-a", "fixture", rankAt, "-2.0000000000", rankAt},
+		{"peer-pending", "peer-a", "team-a", "fixture", rankAt, nil, nil},
+		{"peer-missing-amount", "peer-a", "team-a", "fixture", rankAt, nil, rankAt},
+		{"equal-rank", "equal-a", "team-a", "fixture", rankAt, "0.5000000001", rankAt},
+		{"zero-rank", "zero-a", "team-a", "fixture", rankAt, "0.0000000000", rankAt},
+		{"negative-only", "negative-a", "team-a", "fixture", rankAt, "-1.0000000000", rankAt},
+		{"pending-with-ranked", "lead-a", "team-a", "fixture", rankAt, "500.0000000000", nil},
+		{"pending-without-ranked", "lead-a", "team-a", "fixture", pendingAt, nil, nil},
 	} {
 		exec(`INSERT INTO yzcm_usage_requests(request_id,owner,team_id,actor_username,model,feature,credential_hash,created_at,http_status,actual_cost,cost_currency,reconciled_at)
 VALUES(?,?,?,'founder',?,'fixture',?, ?,200,?,'CNY',?)`, row.id, row.owner, row.team, row.model, strings.Repeat("0", 64), row.at, row.cost, row.settled)
@@ -121,7 +140,55 @@ VALUES(?,?,?,'founder',?,'fixture',?, ?,200,?,'CNY',?)`, row.id, row.owner, row.
 		t.Fatalf("member ledger did not restrict detail to the subject: %s", memberLedger)
 	}
 	get("member-a", "energy/ledger?member=transferred", nil, http.StatusForbidden)
-	get("member-a", "energy?member=transferred", nil, http.StatusForbidden)
+	for _, resource := range []string{"overview", "energy", "energy/ranking"} {
+		path := "/api/account-center/" + resource
+		peer := impersonationRequest(api, http.MethodGet, path+"?member=peer-a&from=2026-12-07&to=2026-12-08", "member-a", "", nil)
+		if peer.Code != http.StatusOK || !strings.Contains(peer.Body.String(), `"actualCost":"1.2500000000"`) || strings.Contains(peer.Body.String(), "actorUsername") {
+			t.Errorf("%s did not authorize a current peer's aggregate: %d %s", resource, peer.Code, peer.Body)
+		}
+		unknown := get("member-a", resource+"?member=no-such-member", nil, http.StatusForbidden)
+		for _, target := range []string{"member-b", "transferred", "inactive-a"} {
+			denial := impersonationRequest(api, http.MethodGet, path+"?member="+target, "member-a", "", nil)
+			if denial.Code != http.StatusForbidden || denial.Body.String() != unknown {
+				t.Errorf("%s disclosed cross-team, former, or inactive member %s: %d %s", resource, target, denial.Code, denial.Body)
+			}
+		}
+	}
+	get("member-a", "energy/ledger?member=peer-a", nil, http.StatusForbidden)
+	get("member-a", "energy/ledger?format=csv&member=peer-a", nil, http.StatusForbidden)
+	const rankingWindow = "energy/ranking?from=2026-12-08&to=2026-12-09"
+	for _, page := range []struct {
+		offset       string
+		user, amount string
+		rank         int
+		pending      int64
+	}{{"0", "equal-a", "0.5000000001", 1, 0}, {"1", "peer-a", "0.5000000001", 1, 2}, {"2", "zero-a", "0.0000000000", 3, 0}} {
+		var result struct {
+			Entries []accountcenter.EnergyRankingEntry
+		}
+		body := get("member-a", rankingWindow+"&limit=1&offset="+page.offset, nil, http.StatusOK)
+		if err := json.Unmarshal([]byte(body), &result); err != nil || len(result.Entries) != 1 {
+			t.Errorf("unexpected ranking page: %s (%v)", body, err)
+			continue
+		}
+		entry := result.Entries[0]
+		if entry.Username != page.user || entry.Rank != page.rank || entry.ActualCost != page.amount || entry.ReconciledCount != 1 || entry.PendingCount != page.pending {
+			t.Errorf("ranking did not preserve ties, legitimate zero, or filter anomalous charges: %s", body)
+		}
+	}
+	if body := get("member-a", rankingWindow+"&offset=3", nil, http.StatusOK); !containsAll(body, `"entries":[]`, `"emptyReason":"page_out_of_range"`) {
+		t.Errorf("pending-only or negative-only members polluted the ranking: %s", body)
+	}
+	if body := get("lead-a", "energy/ledger?from=2026-12-08&to=2026-12-09&member=negative-a", nil, http.StatusOK); !containsAll(body, `"actualCost":"-1.0000000000"`) {
+		t.Errorf("ranking cleanup changed the ledger's retained amount: %s", body)
+	}
+	const pendingWindow = "?from=2026-12-09&to=2026-12-10"
+	if body := get("member-a", "energy/ranking"+pendingWindow, nil, http.StatusOK); !containsAll(body, `"entries":[]`, `"emptyReason":"no_reconciled_consumption"`) {
+		t.Errorf("a pending-only window received a consumption ranking: %s", body)
+	}
+	if body := get("member-a", "energy"+pendingWindow, nil, http.StatusOK); !containsAll(body, `"pendingCount":1`, `"reconciledCount":0`) {
+		t.Errorf("pending requests disappeared from the team summary: %s", body)
+	}
 	get("transferred", "energy/ledger?teamId=team-a", nil, http.StatusForbidden)
 	if own := get("transferred", "energy/ledger", nil, http.StatusOK); !strings.Contains(own, `"entries":[]`) || strings.Contains(own, "other-charge") {
 		t.Fatalf("historical receipts moved into the subject's new team: %s", own)
@@ -162,9 +229,44 @@ VALUES(?,?,?,'founder',?,'fixture',?, ?,200,?,'CNY',?)`, row.id, row.owner, row.
 		t.Fatalf("switched ledger did not use subject scope: %s versus %s", switched, memberLedger)
 	}
 	get("founder", "energy/teams", cookie, http.StatusForbidden)
+	get("founder", "energy?member=transferred", cookie, http.StatusForbidden)
 	exec(`UPDATE account_center_teams SET archived_at=NOW(6) WHERE id='team-a'`)
 	get("member-a", "energy?teamId=team-a", nil, http.StatusForbidden)
 	if historic := get("founder", "energy?teamId=team-a", nil, http.StatusOK); !strings.Contains(historic, `"actualCost":"12345678901234.2234567891"`) {
 		t.Fatalf("archiving removed authorized historical usage: %s", historic)
+	}
+}
+
+func TestAccountCenterEnergyCSVRoundTripProtectsEveryTextColumn(t *testing.T) {
+	numeric := "-0.1250000000"
+	for _, test := range []struct {
+		input  string
+		escape bool
+	}{
+		{"=样本", true}, {"+样本", true}, {"-样本", true}, {"@样本", true},
+		{"＝样本", true}, {"＋样本", true}, {"－样本", true}, {"＠样本", true},
+		{"﹦样本", true}, {"﹢样本", true}, {"﹣样本", true}, {"﹫样本", true}, {"−样本", true},
+		{"  \ufeff　＠样本,\"引号\"", true}, {"  \t样本", true}, {" \ufeff\r样本", true}, {" \n样本", true},
+		{"普通中文,\"引号\"", false}, {"  普通中文", false},
+	} {
+		t.Run(test.input, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			writeAccountEnergyCSV(response, accountcenter.EnergyLedger{Entries: []accountcenter.EnergyLedgerEntry{{
+				RequestID: test.input, Owner: test.input, Feature: test.input, Model: test.input, Status: test.input, ActorUsername: test.input, ActualCost: &numeric,
+			}}}, true)
+			records, err := csv.NewReader(response.Body).ReadAll()
+			if err != nil || len(records) != 2 || len(records[1]) != 8 || records[1][6] != numeric || records[0][6] != "actualCost" {
+				t.Fatalf("unexpected CSV shape or modified decimal: %q, %v", records, err)
+			}
+			want := test.input
+			if test.escape {
+				want = "'" + want
+			}
+			for _, column := range []int{0, 1, 3, 4, 5, 7} {
+				if records[1][column] != want {
+					t.Errorf("text column %s round-tripped as %q, want %q", records[0][column], records[1][column], want)
+				}
+			}
+		})
 	}
 }
