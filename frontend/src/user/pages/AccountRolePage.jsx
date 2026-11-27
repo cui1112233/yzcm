@@ -163,12 +163,12 @@ export default function AccountRolePage({ title = '账号与角色', teamsOnly =
   const allAccounts = [...teams.flatMap(team => team.accounts || []), ...ungrouped];
   const activeAccounts = allAccounts.filter(account => account.active && !account.archivedAt).length;
   const monthConsumption = allAccounts.reduce((total, account) => total + (Number(account.monthConsumption) || 0), 0);
-  const filteredTeams = teams.map(team => ({
+  const filteredTeams = directory ? directory.teams.map(team => ({
     ...team,
     accounts: normalizedQuery
       ? (team.accounts || []).filter(account => [account.username, account.displayName, ROLE_LABELS[account.role], team.name].some(value => String(value || '').toLowerCase().includes(normalizedQuery)))
       : (team.accounts || [])
-  })).filter(team => !normalizedQuery || team.name.toLowerCase().includes(normalizedQuery) || team.accounts.length);
+  })).filter(team => !normalizedQuery || team.name.toLowerCase().includes(normalizedQuery) || team.accounts.length) : [];
   const filteredUngrouped = normalizedQuery
     ? ungrouped.filter(account => [account.username, account.displayName, ROLE_LABELS[account.role]].some(value => String(value || '').toLowerCase().includes(normalizedQuery)))
     : ungrouped;
