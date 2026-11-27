@@ -67,7 +67,7 @@ func enqueueWorkshopRetries(ctx context.Context, store novelfetchworkshop.Store,
 func enqueueWorkshopRetriesWhere(ctx context.Context, store novelfetchworkshop.Store, queue novelfetchworkshop.ProcessQueue, owner string, ids []string, sensitiveAI bool, eligible func(novelfetchworkshop.Document) bool) (workshopRetryQueueResult, error) {
 	ids = uniqueNovelFetchTaskIDs(ids)
 	result := workshopRetryQueueResult{Requested: len(ids), TaskIDs: []string{}, Jobs: []map[string]any{}, Errors: map[string]string{}, OK: true}
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return result, err
 	}

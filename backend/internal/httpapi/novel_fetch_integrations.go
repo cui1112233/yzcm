@@ -397,7 +397,7 @@ func RegisterNovelFetchIntegrations(root *http.ServeMux, middleware BridgeAuth, 
 }
 
 func mustGetNovelFetchConfig(req *http.Request, store novelfetchworkshop.Store, owner string) map[string]any {
-	settings, err := store.GetConfig(req.Context(), owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, owner)
 	if err != nil || settings == nil {
 		return map[string]any{}
 	}

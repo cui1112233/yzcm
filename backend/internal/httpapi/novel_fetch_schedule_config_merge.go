@@ -11,7 +11,7 @@ import (
 // settings snapshot. A cancelled/deleted schedule must not be resurrected.
 func saveNovelFetchScheduleItem(ctx context.Context, store novelfetchworkshop.Store, owner string, item map[string]any) error {
 	for attempt := 0; attempt < 3; attempt++ {
-		current, err := store.GetConfig(ctx, owner)
+		current, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 		if err != nil {
 			return err
 		}
@@ -46,7 +46,7 @@ func saveNovelFetchScheduleItem(ctx context.Context, store novelfetchworkshop.St
 		if !found {
 			return nil
 		}
-		if err = store.PutConfig(ctx, owner, current); !errors.Is(err, novelfetchworkshop.ErrConfigConflict) {
+		if err = novelfetchworkshop.WriteWorkflowConfig(ctx, store, owner, current); !errors.Is(err, novelfetchworkshop.ErrConfigConflict) {
 			return err
 		}
 	}

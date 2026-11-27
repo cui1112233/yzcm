@@ -328,7 +328,7 @@ func GenerateAIRewritesForVersionsProcessed(ctx context.Context, store Store, ow
 		return Document{}, errors.New("请先抓取原文，再生成 AI 改文")
 	}
 	document = normalizeDocument(document)
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return document, err
 	}

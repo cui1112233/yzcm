@@ -40,7 +40,7 @@ func registerNovelFetchLegacyWorkflowRoutes(mux *http.ServeMux, store novelfetch
 
 	mux.HandleFunc("GET /api/novel-fetch-workshop/batches/current", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取当前批次配置失败"})
 			return
@@ -228,7 +228,11 @@ func registerNovelFetchLegacyWorkflowRoutes(mux *http.ServeMux, store novelfetch
 
 	mux.HandleFunc("GET /api/novel-fetch-workshop/schedules", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		cfg, _ := store.GetConfig(req.Context(), identity.Username)
+		cfg, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取定时任务失败"})
+			return
+		}
 		schedules, _ := cfg["novel_fetch_schedules"].([]any)
 		if schedules == nil {
 			schedules = []any{}
@@ -241,7 +245,7 @@ func registerNovelFetchLegacyWorkflowRoutes(mux *http.ServeMux, store novelfetch
 		if err := decodeNovelFetchJSON(w, req, &item); err != nil {
 			return
 		}
-		cfg, err := store.GetConfig(req.Context(), identity.Username)
+		cfg, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取定时任务配置失败"})
 			return
@@ -262,7 +266,7 @@ func registerNovelFetchLegacyWorkflowRoutes(mux *http.ServeMux, store novelfetch
 		item["updatedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
 		schedules = append(schedules, item)
 		cfg["novel_fetch_schedules"] = schedules
-		if err := store.PutConfig(req.Context(), identity.Username, cfg); err != nil {
+		if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, cfg); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存定时任务失败"})
 			return
 		}
@@ -301,7 +305,7 @@ func registerNovelFetchLegacyWorkflowRoutes(mux *http.ServeMux, store novelfetch
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "资料库类型或条目ID不能为空"})
 			return
 		}
-		cfg, err := store.GetConfig(req.Context(), identity.Username)
+		cfg, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取资料库失败：" + err.Error()})
 			return
@@ -315,7 +319,7 @@ func registerNovelFetchLegacyWorkflowRoutes(mux *http.ServeMux, store novelfetch
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		if err := store.PutConfig(req.Context(), identity.Username, cfg); err != nil {
+		if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, cfg); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "优化结果保存失败：" + err.Error()})
 			return
 		}
@@ -481,7 +485,7 @@ func syncTargetConfigProfiles(req *http.Request, store novelfetchworkshop.Store,
 	if !hasItems || len(items) == 0 {
 		return nil, fmt.Errorf("目标站未返回可用配置档")
 	}
-	settings, err := store.GetConfig(req.Context(), identity.Username)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 	if err != nil {
 		return nil, fmt.Errorf("读取提交配置失败")
 	}
@@ -516,7 +520,7 @@ func syncTargetConfigProfiles(req *http.Request, store novelfetchworkshop.Store,
 	web["upload_profiles"] = append(local, groups...)
 	app["web_submit"] = web
 	settings["appConfig"] = app
-	if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+	if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, settings); err != nil {
 		return nil, fmt.Errorf("保存配置档失败")
 	}
 	return map[string]any{"ok": true, "settings": web, "groups": groups, "output": []string{fmt.Sprintf("已从视频管理系统同步 %d 个配置档", len(groups))}}, nil
@@ -524,7 +528,11 @@ func syncTargetConfigProfiles(req *http.Request, store novelfetchworkshop.Store,
 
 func updateSchedule(w http.ResponseWriter, req *http.Request, store novelfetchworkshop.Store, remove bool) {
 	identity, _ := BridgeIdentityFromContext(req.Context())
-	cfg, _ := store.GetConfig(req.Context(), identity.Username)
+	cfg, readErr := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
+	if readErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取定时任务失败"})
+		return
+	}
 	raw, _ := cfg["novel_fetch_schedules"].([]any)
 	id := req.PathValue("id")
 	out := make([]any, 0, len(raw))
@@ -570,7 +578,7 @@ func updateSchedule(w http.ResponseWriter, req *http.Request, store novelfetchwo
 		return
 	}
 	cfg["novel_fetch_schedules"] = out
-	if err := store.PutConfig(req.Context(), identity.Username, cfg); err != nil {
+	if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, cfg); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存定时任务失败"})
 		return
 	}
@@ -587,7 +595,7 @@ func workshopScheduleTerminal(status string) bool {
 
 func cancelWorkshopSchedule(w http.ResponseWriter, req *http.Request, store novelfetchworkshop.Store, queue novelfetchworkshop.ProcessQueue) {
 	identity, _ := BridgeIdentityFromContext(req.Context())
-	cfg, err := store.GetConfig(req.Context(), identity.Username)
+	cfg, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取定时任务失败"})
 		return
@@ -654,7 +662,7 @@ func cancelWorkshopSchedule(w http.ResponseWriter, req *http.Request, store nove
 		item["updatedAt"] = item["cancelled_at"]
 		item["message"] = "定时任务已取消；已生成内容保留"
 		cfg["novel_fetch_schedules"] = schedules
-		if err := store.PutConfig(req.Context(), identity.Username, cfg); err != nil {
+		if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, cfg); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存取消状态失败，请重试"})
 			return
 		}
@@ -723,7 +731,7 @@ func updateTaskMeta(w http.ResponseWriter, req *http.Request, store novelfetchwo
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "AI 数量须为 1 到 20"})
 		return
 	}
-	cfg, err := store.GetConfig(req.Context(), identity.Username)
+	cfg, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取 AI 数量配置失败"})
 		return

@@ -1358,6 +1358,16 @@ func TestManualProcessStartKeepsSurvivorOfLateCancellation(t *testing.T) {
 			if r.Code != http.StatusAccepted || !slices.Equal(scheduleStringSlice(view["book_ids"]), []string{cancelRaceB}) || mapOrEmpty(view["skipped_book_reasons"])[cancelRaceA] != "cancelled" {
 				t.Errorf("start=%d accepted=%v skipped=%v", r.Code, view["book_ids"], view["skipped_book_reasons"])
 			}
+			if timing == "after import read" {
+				latest, err := store.GetConfig(ctx, "tester")
+				if err != nil {
+					t.Fatal(err)
+				}
+				paused := mapOrEmpty(latest[novelFetchAutomationConfigKey])
+				if paused["enabled"] != false || firstText(paused["updated_at"]) == "" {
+					t.Fatalf("start overwrote the newer auto-pause: %v", paused)
+				}
+			}
 			job, err := queue.manualImportTestQueue.Claim(ctx, time.Millisecond)
 			if err != nil || !slices.Equal(job.BookIDs, []string{cancelRaceB}) || job.ID != view["id"] {
 				t.Fatalf("admitted=%v job=%v err=%v", job.BookIDs, job.ID, err)

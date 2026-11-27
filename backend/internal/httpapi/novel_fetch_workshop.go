@@ -966,7 +966,7 @@ func workshopProgressItem(level, message, bookID, bookName string) map[string]an
 
 func novelFetchConfiguredConcurrency(ctx context.Context, store novelfetchworkshop.Store, owner string, taskCount int) int {
 	concurrency := 4
-	if settings, err := store.GetConfig(ctx, owner); err == nil {
+	if settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner); err == nil {
 		if configured := toInt(mapOrEmpty(settings["fetch"])["concurrency"]); configured > 0 {
 			concurrency = configured
 		}
@@ -1593,7 +1593,7 @@ func updateNovelFetchScheduleRuntimeStatus(ctx context.Context, store novelfetch
 	if strings.TrimSpace(scheduleID) == "" {
 		return nil
 	}
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return err
 	}
@@ -1625,7 +1625,7 @@ func updateNovelFetchScheduleRuntimeStatus(ctx context.Context, store novelfetch
 		return nil
 	}
 	settings["novel_fetch_schedules"] = schedules
-	return store.PutConfig(ctx, owner, settings)
+	return novelfetchworkshop.WriteWorkflowConfig(ctx, store, owner, settings)
 }
 
 const (
@@ -1689,7 +1689,7 @@ func dispatchDueNovelFetchSchedules(ctx context.Context, store novelfetchworksho
 	if len(readbacks) > 0 {
 		readback = readbacks[0]
 	}
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return err
 	}
@@ -2082,7 +2082,10 @@ func workshopProcessResult(ctx context.Context, store novelfetchworkshop.Store, 
 // 再在保存阶段重复解析和查库。手工导入沿用已有任务的跳过规则：
 // 已取消的书只能由明确的重试操作恢复。普通失败且缺正文的书仍可导入。
 func workshopProcessParsedResult(ctx context.Context, store novelfetchworkshop.Store, queue novelfetchworkshop.ProcessQueue, owner string, documents []novelfetchworkshop.Document, parsed, emptyIDs, duplicates int, platformID, batchID string, metadata workshopInputMetadata, selectedVersions ...[]string) (map[string]any, []string, []string, error) {
-	settings, _ := store.GetConfig(ctx, owner)
+	settings, configErr := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
+	if configErr != nil {
+		return nil, nil, nil, fmt.Errorf("读取批次设置失败: %w", configErr)
+	}
 	if settings == nil {
 		settings = map[string]any{}
 	}
@@ -2156,9 +2159,10 @@ func workshopProcessParsedResult(ctx context.Context, store novelfetchworkshop.S
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	settings["novel_fetch_current_batch_id"] = batchID
-	settings["novel_fetch_current_batch_at"] = time.Now().UTC().Format(time.RFC3339Nano)
-	_ = store.PutConfig(ctx, owner, settings)
+	settings, err = saveNovelFetchCurrentBatch(ctx, store, owner, batchID, time.Now().UTC())
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("保存当前批次失败: %w", err)
+	}
 	result := map[string]any{
 		"batch_id": batchID, "current_batch_id": batchID,
 		"auto_queue_enabled": novelFetchAutomationEnabled(settings),
@@ -2175,6 +2179,24 @@ func workshopProcessParsedResult(ctx context.Context, store novelfetchworkshop.S
 	return result, processBookIDs, skippedBookIDs, nil
 }
 
+// Import can race a stop/settings save. Merge only batch identity into the
+// latest preference revision, preserving newer pause, schedule and rule edits.
+func saveNovelFetchCurrentBatch(ctx context.Context, store novelfetchworkshop.Store, owner, batchID string, at time.Time) (map[string]any, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		current, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
+		if err != nil {
+			return nil, err
+		}
+		current["novel_fetch_current_batch_id"] = batchID
+		current["novel_fetch_current_batch_at"] = at.UTC().Format(time.RFC3339Nano)
+		err = novelfetchworkshop.WriteWorkflowConfig(ctx, store, owner, current)
+		if errors.Is(err, novelfetchworkshop.ErrConfigConflict) {
+			continue
+		}
+		return current, err
+	}
+	return nil, novelfetchworkshop.ErrConfigConflict
+}
 func novelFetchProcessingFingerprint(settings map[string]any) string {
 	app := mapOrEmpty(settings["appConfig"])
 	rules := map[string]any{
@@ -2655,7 +2677,7 @@ func sensitiveMinInt(a, b int) int {
 }
 
 func processWorkshopConfiguredText(ctx context.Context, store novelfetchworkshop.Store, owner, bookID, text, scope string, sensitiveAIEnabled bool, provider novelfetchworkshop.RewriteProvider) (string, []map[string]any, []map[string]any, error) {
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return text, nil, nil, err
 	}
@@ -2762,7 +2784,7 @@ func stageNovelFetchRaw(ctx context.Context, store novelfetchworkshop.Store, own
 }
 
 func novelFetchShortOriginalLimit(ctx context.Context, store novelfetchworkshop.Store, owner string) (int, bool) {
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return 0, false
 	}
@@ -2813,7 +2835,7 @@ func fetchNovelWithSettings(ctx context.Context, store novelfetchworkshop.Store,
 	}
 	configured := *fetcher
 	retries := 0
-	if settings, err := store.GetConfig(ctx, owner); err == nil {
+	if settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner); err == nil {
 		fetchConfig := mapOrEmpty(settings["fetch"])
 		if len(fetchConfig) == 0 {
 			fetchConfig = mapOrEmpty(mapOrEmpty(settings["appConfig"])["fetch"])
@@ -2898,7 +2920,7 @@ func executeWorkshopDocumentFetch(ctx context.Context, store novelfetchworkshop.
 		_ = appendWorkshopTaskLog(ctx, store, owner, bookID, "fetch_started", "开始获取原文")
 		// 平台 ID 可能只以名称形式存在（历史导入/批量工厂），这里按平台目录
 		// 自动换算，避免把任务发到默认书城后拿到错误的 400。
-		fetchSettings, _ := store.GetConfig(ctx, owner)
+		fetchSettings, _ := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 		platformID := novelFetchResolvedPlatformID(fetchSettings, document.Meta)
 		result, err = fetchNovelWithSettings(ctx, store, owner, fetcher, bookID, platformID, maxTxt)
 		if err != nil {
@@ -3036,7 +3058,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		worker := &workshopProcessWorker{store: store, queue: queue, registry: registry, fetcher: fetcher, resolveGenderJudge: resolveGenderJudgeFor, resolveRewriteProvider: resolveRewriteProviderFor}
 		worker.autoSubmit = func(ctx context.Context, job novelfetchworkshop.ProcessJob) error {
 			store := workshopStoreForProcess(ctx, store)
-			settings, err := store.GetConfig(ctx, job.Owner)
+			settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, job.Owner)
 			if err != nil {
 				return err
 			}
@@ -4080,7 +4102,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			return
 		}
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取预览规则失败"})
 			return
@@ -4126,14 +4148,14 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 
 	mux.HandleFunc("POST /api/novel-fetch-workshop/knowledge/repair-imported-sensitive", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, 500, map[string]any{"error": "读取规则失败"})
 			return
 		}
 		count, err := novelfetchworkshop.RepairImportedSensitive(settings)
 		if err == nil && count > 0 {
-			err = store.PutConfig(req.Context(), identity.Username, settings)
+			err = novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, settings)
 		}
 		if err != nil {
 			writeJSON(w, 409, map[string]any{"error": err.Error()})
@@ -4151,7 +4173,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			return
 		}
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, 500, map[string]any{"error": "读取资料失败"})
 			return
@@ -4162,7 +4184,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		}
 		report := novelfetchworkshop.RepairImportedKnowledge(settings, body.Apply)
 		if body.Apply && report.Repaired > 0 {
-			if err = store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+			if err = novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, settings); err != nil {
 				writeJSON(w, 409, map[string]any{"error": "保存修复失败，请重新检查：" + err.Error()})
 				return
 			}
@@ -4171,7 +4193,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 	})
 	mux.HandleFunc("GET /api/novel-fetch-workshop/knowledge/summary", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取知识库失败"})
 			return
@@ -4181,7 +4203,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 
 	mux.HandleFunc("GET /api/novel-fetch-workshop/knowledge/{kind}", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取知识库失败"})
 			return
@@ -4205,7 +4227,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		if item == nil {
 			item = input
 		}
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取知识库失败"})
 			return
@@ -4218,7 +4240,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+		if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, settings); err != nil {
 			writeWorkshopConfigSaveError(w, err, "保存知识库失败")
 			return
 		}
@@ -4227,7 +4249,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 
 	mux.HandleFunc("DELETE /api/novel-fetch-workshop/knowledge/{kind}/{id}", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取知识库失败"})
 			return
@@ -4240,7 +4262,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+		if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, settings); err != nil {
 			writeWorkshopConfigSaveError(w, err, "保存知识库失败")
 			return
 		}
@@ -4261,7 +4283,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": providerErr.Error()})
 			return
 		}
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取知识库失败"})
 			return
@@ -4278,7 +4300,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, status, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+		if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, settings); err != nil {
 			writeWorkshopConfigSaveError(w, err, "保存知识库失败")
 			return
 		}
@@ -4330,7 +4352,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		if item == nil {
 			item = input
 		}
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取开头词库失败"})
 			return
@@ -4340,7 +4362,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+		if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, settings); err != nil {
 			writeWorkshopConfigSaveError(w, err, "保存开头词库失败")
 			return
 		}
@@ -4349,7 +4371,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 
 	mux.HandleFunc("POST /api/novel-fetch-workshop/opening/normalize", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取开头词库失败"})
 			return
@@ -4375,7 +4397,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		libraries["opening_phrases"] = library
 		settings["knowledgeLibraries"] = libraries
 		novelfetchworkshop.SyncKnowledgeConfigViews(settings, map[string]any{"knowledgeLibraries": map[string]any{"opening_phrases": library}})
-		if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+		if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, settings); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "保存规范化开头词失败"})
 			return
 		}
@@ -4507,7 +4529,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 
 	mux.HandleFunc("GET /api/novel-fetch-workshop/platforms", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取平台表失败"})
 			return
@@ -4531,7 +4553,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 
 	mux.HandleFunc("GET /api/novel-fetch-workshop/config", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadRuntimeConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取设置失败"})
 			return
@@ -4659,7 +4681,7 @@ func saveNovelFetchConfig(w http.ResponseWriter, req *http.Request, store novelf
 		}
 	}
 	settings["appConfig"] = appPatch
-	current, err := store.GetConfig(req.Context(), identity.Username)
+	current, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取设置失败"})
 		return
@@ -4689,7 +4711,7 @@ func saveNovelFetchConfig(w http.ResponseWriter, req *http.Request, store novelf
 	// a restart and are visible from either workbench.
 	novelfetchworkshop.SyncKnowledgeConfigViews(merged, settings)
 	novelfetchworkshop.EnsureSensitiveRuleReplacements(merged)
-	if err := store.PutConfig(req.Context(), identity.Username, merged); err != nil {
+	if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, merged); err != nil {
 		if errors.Is(err, novelfetchworkshop.ErrConfigConflict) {
 			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "code": "CONFIG_CONFLICT"})
 			return
@@ -4897,7 +4919,7 @@ func applyNovelFetchSensitiveRulesDetailed(ctx context.Context, store novelfetch
 	if store == nil {
 		return text, 0, []map[string]any{}, nil
 	}
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return text, 0, []map[string]any{}, err
 	}
@@ -5591,4 +5613,11 @@ func decodeNovelFetchJSON(w http.ResponseWriter, req *http.Request, target any) 
 	req.Body = http.MaxBytesReader(w, req.Body, 64<<20)
 	decoder := json.NewDecoder(req.Body)
 	return decoder.Decode(target)
+}
+
+func (s manualImportStore) GetWorkflowConfig(ctx context.Context, owner string) (map[string]any, error) {
+	return novelfetchworkshop.ReadWorkflowConfig(ctx, s.Store, owner)
+}
+func (s manualImportStore) PutWorkflowConfig(ctx context.Context, owner string, cfg map[string]any) error {
+	return novelfetchworkshop.WriteWorkflowConfig(ctx, s.Store, owner, cfg)
 }

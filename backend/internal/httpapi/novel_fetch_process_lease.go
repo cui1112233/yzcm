@@ -107,3 +107,17 @@ func (s workshopProcessLeaseStore) PutDocument(ctx context.Context, owner string
 	}
 	return s.Store.PutDocument(ctx, owner, doc)
 }
+
+func (s workshopProcessLeaseStore) GetWorkflowConfig(ctx context.Context, owner string) (map[string]any, error) {
+	return novelfetchworkshop.ReadWorkflowConfig(ctx, s.Store, owner)
+}
+
+func (s workshopProcessLeaseStore) PutWorkflowConfig(ctx context.Context, owner string, cfg map[string]any) error {
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	if err := s.checkOwnership(); err != nil {
+		return err
+	}
+	return novelfetchworkshop.WriteWorkflowConfig(ctx, s.Store, owner, cfg)
+}

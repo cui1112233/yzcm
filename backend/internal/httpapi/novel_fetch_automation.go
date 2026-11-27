@@ -35,7 +35,7 @@ func novelFetchSensitiveAIEnabled(settings map[string]any) bool {
 }
 
 func saveNovelFetchAutomationEnabled(ctx context.Context, store novelfetchworkshop.Store, owner string, enabled bool) error {
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return err
 	}
@@ -46,7 +46,7 @@ func saveNovelFetchAutomationEnabled(ctx context.Context, store novelfetchworksh
 	automation["enabled"] = enabled
 	automation["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 	settings[novelFetchAutomationConfigKey] = automation
-	return store.PutConfig(ctx, owner, settings)
+	return novelfetchworkshop.WriteWorkflowConfig(ctx, store, owner, settings)
 }
 
 func novelFetchAutomationVersions(settings map[string]any) []string {
@@ -182,7 +182,7 @@ func saveNovelFetchOriginalFailure(ctx context.Context, store novelfetchworkshop
 			markNovelFetchOriginalManual(&document, "failed", "原文连续获取失败已停止自动重试，请检查书籍来源是否有效后手动重试", now)
 			break
 		}
-		settings, err := store.GetConfig(ctx, owner)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 		if err != nil {
 			return "", err
 		}
@@ -548,7 +548,7 @@ func dispatchNovelFetchAutomationOwner(ctx context.Context, store novelfetchwork
 			log.Printf("novel fetch automation: reaped %d stale processing jobs owner=%s", reaped, owner)
 		}
 	}
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -718,7 +718,7 @@ func dispatchNovelFetchManualQueue(ctx context.Context, store novelfetchworkshop
 	if queue == nil || len(ids) == 0 {
 		return nil, ids, nil
 	}
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1016,7 +1016,7 @@ func novelFetchAutomationStatusScoped(ctx context.Context, store novelfetchworks
 	}); ok {
 		settings, documents, err = reader.AutomationStatusInputs(ctx, owner)
 	} else {
-		settings, err = store.GetConfig(ctx, owner)
+		settings, err = novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 		if err == nil {
 			documents, err = store.ListDocuments(ctx, owner)
 		}

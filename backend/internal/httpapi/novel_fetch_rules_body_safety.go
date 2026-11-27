@@ -61,7 +61,7 @@ func applyNovelFetchSafeRules(w http.ResponseWriter, req *http.Request, store no
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取任务失败"})
 		return
 	}
-	settings, settingsErr := store.GetConfig(req.Context(), identity.Username)
+	settings, settingsErr := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 	var provider novelfetchworkshop.RewriteProvider
 	if in.SensitiveAIEnabled && resolveProvider != nil {
 		provider, _ = resolveProvider(req)

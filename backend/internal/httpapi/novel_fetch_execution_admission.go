@@ -150,7 +150,7 @@ func queueWorkshopGenerate(w http.ResponseWriter, req *http.Request, store novel
 		if e != nil {
 			return e
 		}
-		cfg, e := store.GetConfig(ctx, owner.Username)
+		cfg, e := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner.Username)
 		if e != nil {
 			return e
 		}
@@ -470,4 +470,12 @@ func checkWorkshopRetryBudget(ctx context.Context, store novelfetchworkshop.Stor
 		return errWorkshopRetryDeferred
 	}
 	return nil
+}
+
+func (s workshopBookExecutionStore) GetWorkflowConfig(ctx context.Context, owner string) (map[string]any, error) {
+	return novelfetchworkshop.ReadWorkflowConfig(ctx, s.Store, owner)
+}
+
+func (s workshopBookExecutionStore) PutWorkflowConfig(ctx context.Context, owner string, cfg map[string]any) error {
+	return novelfetchworkshop.WriteWorkflowConfig(ctx, s.Store, owner, cfg)
 }
