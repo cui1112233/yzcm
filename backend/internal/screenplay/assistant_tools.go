@@ -29,12 +29,18 @@ func IsAssistantReadTool(name string) bool {
 	case "get_current_screenplay", "analyze_screenplay", "get_editor_status", "get_shot_numbers", "get_shot_detail", "read_assets", "read_shot_video_prompts", "read_shot_image_prompts", "get_all_shots_voicetext":
 		return true
 	}
-	return false
+	return IsAssistantReviewReadTool(name)
 }
 
 // ReadAssistantTool has no generator, filesystem path, owner override or write
 // operation. Its identity always comes from the already-authorized HTTP scope.
 func ReadAssistantTool(ctx context.Context, store Store, owner, project, name string, raw json.RawMessage) (AssistantToolRun, map[string]any, error) {
+	return (StoryboardService{Store: store}).ReadAssistantTool(ctx, owner, project, name, raw)
+}
+
+// ReadAssistantTool uses the same chapter repository as generation when it is configured.
+func (s StoryboardService) ReadAssistantTool(ctx context.Context, owner, project, name string, raw json.RawMessage) (AssistantToolRun, map[string]any, error) {
+	store := s.Store
 	run := AssistantToolRun{Name: name}
 	invalid := func(reason string) (AssistantToolRun, map[string]any, error) {
 		return run, nil, fmt.Errorf("%w: %s", ErrInvalidArgument, reason)
@@ -90,12 +96,20 @@ func ReadAssistantTool(ctx context.Context, store Store, owner, project, name st
 	if json.Unmarshal(raw, &args) != nil {
 		return invalid("工具参数无效")
 	}
+	review := IsAssistantReviewReadTool(name)
+	if review {
+		if err := validateAssistantReviewArgs(name, args, fields); err != nil {
+			return invalid(err.Error())
+		}
+	}
 	wantedIDs := map[string]bool{}
 	if _, hasIDs := fields["shot_ids"]; hasIDs {
-		switch name {
-		case "get_shot_numbers", "read_shot_video_prompts", "read_shot_image_prompts", "get_all_shots_voicetext":
-		default:
-			return invalid("此工具不接受shot_ids；镜头详情请使用单个shot_id")
+		if !review {
+			switch name {
+			case "get_shot_numbers", "read_shot_video_prompts", "read_shot_image_prompts", "get_all_shots_voicetext":
+			default:
+				return invalid("此工具不接受shot_ids；镜头详情请使用单个shot_id")
+			}
 		}
 		if _, mixed := fields["shot_numbers"]; mixed {
 			return invalid("shot_ids不能与shot_numbers混用")
@@ -110,6 +124,9 @@ func ReadAssistantTool(ctx context.Context, store Store, owner, project, name st
 			if id == "" || strings.TrimSpace(id) != id || len(id) > 256 {
 				return invalid("镜头ID必须是1至256字节的真实字符串，不能含首尾空白")
 			}
+			if review && wantedIDs[id] {
+				return invalid("审核镜头ID不能重复")
+			}
 			wantedIDs[id] = true
 		}
 	}
@@ -120,6 +137,9 @@ func ReadAssistantTool(ctx context.Context, store Store, owner, project, name st
 	for _, n := range args.ShotNumbers {
 		if n < 1 {
 			return invalid("镜头序号必须大于0")
+		}
+		if review && wanted[n] {
+			return invalid("审核镜头序号不能重复")
 		}
 		wanted[n] = true
 	}
@@ -216,6 +236,23 @@ func ReadAssistantTool(ctx context.Context, store Store, owner, project, name st
 		}
 		if name == "get_editor_status" {
 			data["media_counts_verified"] = false
+			sort.SliceStable(boards, func(i, j int) bool {
+				if boards[i].EpisodeNo != boards[j].EpisodeNo {
+					return boards[i].EpisodeNo < boards[j].EpisodeNo
+				}
+				return boards[i].Engine < boards[j].Engine
+			})
+			summaries := []map[string]any{}
+			for _, board := range boards {
+				if len(summaries) == 200 {
+					data["truncated"] = true
+					break
+				}
+				summaries = append(summaries, map[string]any{
+					"episode_no": board.EpisodeNo, "engine": board.Engine, "revision": board.Revision, "shot_count": len(board.Shots),
+				})
+			}
+			data["storyboards"] = summaries
 		}
 		return finish(fmt.Sprintf("已读取作品：%d项资产、%d个分镜", matched, shotCount))
 	}
@@ -225,7 +262,7 @@ func ReadAssistantTool(ctx context.Context, store Store, owner, project, name st
 	}
 	matches := []Storyboard{}
 	for _, board := range boards {
-		if args.Episode == 0 || board.EpisodeNo == args.Episode {
+		if (args.Episode == 0 || board.EpisodeNo == args.Episode) && (!review || args.Engine == "" || board.Engine == args.Engine) {
 			matches = append(matches, board)
 		}
 	}
@@ -239,6 +276,36 @@ func ReadAssistantTool(ctx context.Context, store Store, owner, project, name st
 	data["episode_no"] = board.EpisodeNo
 	data["engine"] = board.Engine
 	data["revision"] = board.Revision
+	var reviewAssets assistantReviewAssets
+	if review {
+		data["result_kind"] = "review_input"
+		data["review_status"] = "unverified"
+		data["storyboard_id"] = board.ID
+		data["shot_scope"] = "whole_board"
+		if len(wantedIDs) > 0 || len(wanted) > 0 {
+			data["shot_scope"] = "selected_shots"
+		}
+		switch name {
+		case "compare_original_vs_voicetext", "review_voice_emotions":
+			if err := s.addAssistantReviewOriginal(ctx, p, board, data, text); err != nil {
+				return run, nil, err
+			}
+		case "review_image_prompts":
+			data["scene_description_available"] = false
+			data["focus"] = "all"
+			if args.Focus != "" {
+				data["focus"] = args.Focus
+			}
+		case "review_video_prompts":
+			data["platform_moderation_verified"] = false
+		case "review_asset_bindings":
+			assets, err := store.ListAssets(ctx, owner, project, "")
+			if err != nil {
+				return run, nil, err
+			}
+			reviewAssets = indexAssistantReviewAssets(assets)
+		}
+	}
 	sort.SliceStable(board.Shots, func(i, j int) bool { return board.Shots[i].Seq < board.Shots[j].Seq })
 	rows := []map[string]any{}
 	matched := 0
@@ -260,6 +327,9 @@ func ReadAssistantTool(ctx context.Context, store Store, owner, project, name st
 		matched++
 		if len(shot.ID) > 256 {
 			return invalid("保存的镜头编号超出范围")
+		}
+		if review && (wanted[shot.Seq] && foundNumbers[shot.Seq] || wantedIDs[shot.ID] && foundIDs[shot.ID]) {
+			return invalid("所选镜头编号有歧义")
 		}
 		foundNumbers[shot.Seq] = true
 		foundIDs[shot.ID] = true
@@ -293,6 +363,12 @@ func ReadAssistantTool(ctx context.Context, store Store, owner, project, name st
 			row["voice_actor"] = text(shot.VoiceActor)
 			row["emotion"] = text(shot.Emotion)
 		}
+		if review {
+			addAssistantReviewShot(row, shot, name, text)
+			if name == "review_asset_bindings" {
+				row["bindings"] = reviewAssets.bindings(shot, text, func() { data["truncated"] = true })
+			}
+		}
 		rows = append(rows, row)
 	}
 	if matched == 0 && (args.ShotID != "" || len(wanted) > 0) {
@@ -311,5 +387,8 @@ func ReadAssistantTool(ctx context.Context, store Store, owner, project, name st
 	data["shots"] = rows
 	data["matched_total"] = matched
 	data["board_shot_total"] = len(board.Shots)
+	if review {
+		return finish(fmt.Sprintf("已读取第%d集%d个镜头的审核资料", board.EpisodeNo, len(rows)))
+	}
 	return finish(fmt.Sprintf("已读取第%d集%d个镜头", board.EpisodeNo, len(rows)))
 }

@@ -315,7 +315,7 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 		if !decode(w, r, &in) {
 			return
 		}
-		run, data, e := assistantReadScopedTool(r.Context(), store, o, r.PathValue("id"), in.Tool, in.Args)
+		run, data, e := assistantReadScopedTool(r.Context(), svc, o, r.PathValue("id"), in.Tool, in.Args)
 		if e != nil {
 			authoringError(w, e)
 			return
@@ -569,14 +569,24 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 						if len(parsed.Actions) > 0 {
 							return screenplay.ErrInvalidArgument
 						}
-						run, detail, toolErr := assistantReadScopedTool(r.Context(), store, o, st.ProjectID, parsed.Tool, parsed.ToolArgs)
+						run, detail, toolErr := assistantReadScopedTool(r.Context(), svc, o, st.ProjectID, parsed.Tool, parsed.ToolArgs)
 						if toolErr != nil {
 							return toolErr
 						}
 						toolRuns = append(toolRuns, run)
-						contextData["tool_result"] = detail
-						payload, _ := json.Marshal(contextData)
-						retry, retryErr := (screenplayTextGenerator{owner: o, resolver: resolver}).Generate(r.Context(), screenplay.TextRequest{Model: project.ModelID, SystemPrompt: system, UserPrompt: string(payload) + "\n用户要求：" + user, JSONResponse: true, MaxOutputTokens: 16000, Temperature: 0.4})
+						review := screenplay.IsAssistantReviewReadTool(parsed.Tool)
+						responseSystem := system
+						responseData := contextData
+						if review {
+							responseSystem = prompt.ScreenplayAuthoringReviewReply
+							responseData = map[string]any{"review_tool": parsed.Tool}
+						}
+						responseData["tool_result"] = detail
+						payload, err := json.Marshal(responseData)
+						if err != nil {
+							return err
+						}
+						retry, retryErr := (screenplayTextGenerator{owner: o, resolver: resolver}).Generate(r.Context(), screenplay.TextRequest{Model: project.ModelID, SystemPrompt: responseSystem, UserPrompt: string(payload) + "\n用户要求：" + user, JSONResponse: true, MaxOutputTokens: 16000, Temperature: 0.4})
 						if retryErr != nil {
 							return retryErr
 						}
@@ -586,6 +596,9 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 						parsed = assistantWire{}
 						if json.Unmarshal([]byte(raw), &parsed) != nil || strings.TrimSpace(parsed.Reply) == "" {
 							return screenplay.ErrAIInvalidJSON
+						}
+						if review && (parsed.Tool != "" || len(parsed.Actions) > 0) {
+							return fmt.Errorf("%w: 审核数据只供回答，本轮不能继续调用工具或准备修改", screenplay.ErrInvalidArgument)
 						}
 						if strings.TrimSpace(parsed.Tool) != "" && !screenplay.IsAssistantAssetEditTool(parsed.Tool) && !screenplay.IsAssistantShotEditTool(parsed.Tool) {
 							return fmt.Errorf("%w: 本轮工具读取后必须直接回答", screenplay.ErrInvalidArgument)

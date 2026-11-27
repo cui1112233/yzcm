@@ -314,31 +314,45 @@ func (s *StoryboardService) CheckStoryboard(ctx context.Context, owner, project 
 	if err != nil {
 		return report, err
 	}
-	state, err := s.storyboardAuthoringState(ctx, p)
+	chapter, _, original, err := s.storyboardSourceChapter(ctx, p, board)
 	if err != nil {
 		return report, err
 	}
-	chapter := Chapter{}
-	original := false
+	report.SourceCoverage = CheckStoryboardSourceCoverage(chapter, original, board.Shots)
+	report.SourceCoverage.EpisodeNo = episode
+	return report, nil
+}
+
+// storyboardSourceChapter shares the saved episode/chapter selector across
+// source coverage and review inputs. A missing bound chapter is not guessed.
+func (s *StoryboardService) storyboardSourceChapter(ctx context.Context, p Project, board Storyboard) (Chapter, string, bool, error) {
+	state, err := s.storyboardAuthoringState(ctx, p)
+	if err != nil {
+		return Chapter{}, "", false, err
+	}
 	boundID := ""
-	// A saved generation may bind an episode to a different chapter. Respect it
-	// rather than quietly checking the chapter at the same position.
+	original := false
 	if history, ok := s.Store.(StoryboardGenerationStore); ok {
-		generations, e := history.LoadStoryboardGenerations(ctx, owner, project)
+		generations, e := history.LoadStoryboardGenerations(ctx, p.OwnerUsername, p.ID)
 		if e != nil {
-			return report, e
+			return Chapter{}, "", false, e
 		}
 		var latest *StoryboardGenerationAttempt
+		var latestRevision int64
 		for _, attempt := range generations.Attempts {
-			if attempt == nil || attempt.Engine != engine {
+			if attempt == nil || attempt.Engine != board.Engine {
 				continue
 			}
-			ep := attempt.Episodes[episode]
+			ep := attempt.Episodes[board.EpisodeNo]
 			if ep == nil || ep.Storyboard == nil || ep.Storyboard.ID != board.ID {
 				continue
 			}
-			if latest == nil || attempt.UpdatedAt.After(latest.UpdatedAt) {
-				latest = attempt
+			generated := ep.Storyboard
+			if generated.Revision > board.Revision || generated.SourceSHA256 != board.SourceSHA256 {
+				continue
+			}
+			if latest == nil || generated.Revision > latestRevision || generated.Revision == latestRevision && attempt.UpdatedAt.After(latest.UpdatedAt) {
+				latest, latestRevision = attempt, generated.Revision
 			}
 		}
 		if latest != nil {
@@ -348,13 +362,10 @@ func (s *StoryboardService) CheckStoryboard(ctx context.Context, owner, project 
 	}
 	if state != nil {
 		for i, c := range state.Chapters {
-			if (boundID != "" && c.ID == boundID) || (boundID == "" && i+1 == episode) {
-				chapter = c
-				break
+			if (boundID != "" && c.ID == boundID) || (boundID == "" && i+1 == board.EpisodeNo) {
+				return c, boundID, original, nil
 			}
 		}
 	}
-	report.SourceCoverage = CheckStoryboardSourceCoverage(chapter, original, board.Shots)
-	report.SourceCoverage.EpisodeNo = episode
-	return report, nil
+	return Chapter{}, boundID, original, nil
 }

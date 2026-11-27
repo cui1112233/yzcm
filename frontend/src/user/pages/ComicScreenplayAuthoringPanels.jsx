@@ -7,7 +7,7 @@ import { chapterHeadingMatches, splitSourceChapters } from './comic-screenplay-e
 import { loadComicScreenplayWorkspace } from '../../shared/api/comicScreenplay.js';
 import { applyComicProposal, generateComicChapter, getComicAssistant, getComicChapters, getComicDisplay, getComicTeam, planComicChapters, saveComicChapters, saveComicDisplay, saveComicTeam, sendComicAssistant } from '../../shared/api/comicScreenplayWorkflow.js';
 
-const assistantReadToolLabels={storyboard_failures:'分镜失败核对',get_current_screenplay:'读取当前剧本',analyze_screenplay:'分析剧本',get_editor_status:'读取编辑状态',get_shot_numbers:'读取镜头序号',get_shot_detail:'读取镜头详情',read_assets:'读取资产',read_shot_video_prompts:'读取视频提示词',read_shot_image_prompts:'读取图片提示词',get_all_shots_voicetext:'读取镜头台词'};
+const assistantReadToolLabels={storyboard_failures:'分镜失败核对',get_current_screenplay:'读取当前剧本',analyze_screenplay:'分析剧本',get_editor_status:'读取编辑状态',get_shot_numbers:'读取镜头序号',get_shot_detail:'读取镜头详情',read_assets:'读取资产',read_shot_video_prompts:'读取视频提示词',read_shot_image_prompts:'读取图片提示词',get_all_shots_voicetext:'读取镜头台词',compare_original_vs_voicetext:'对比原文与台词',review_voice_emotions:'审查配音情绪',review_image_prompts:'检查画面提示词',review_video_prompts:'检查视频提示词',review_asset_bindings:'检查资产绑定'};
 function AssistantShotPreview({edit}) {
   if(!edit)return null;
   const labels={character_ids:'绑定人物',scene_id:'绑定场景',prop_ids:'绑定道具',image_prompt:'画面提示词',video_desc:'视频提示词',line:'台词/旁白',voice_actor:'配音角色',emotion:'情绪'};
