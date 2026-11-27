@@ -56,6 +56,17 @@ test('restricted Key saving and errors are keyed per model while full mode keeps
   assert.match(full, /catalogModelSavingId === model\.id/);
 });
 
+test('restricted async completions are guarded by component epoch and preserve newer drafts', () => {
+  const settingsSource = fs.readFileSync(path.join(here, 'ApiIntegrationSettings.jsx'), 'utf8');
+  const restricted = settingsSource.slice(settingsSource.indexOf('function RestrictedApiIntegrationSettings'), settingsSource.indexOf('export default function ApiIntegrationSettings'));
+  assert.match(restricted, /mountedRef/);
+  assert.match(restricted, /epochRef/);
+  assert.match(restricted, /revisionRef/);
+  assert.match(restricted, /catalogKeySubmissionStatus/);
+  assert.match(restricted, /isActive/);
+  assert.match(restricted, /if \(status\.clearTouched\) touchedRef\.current\.delete\(model\.id\)/);
+});
+
 test('restricted selection saves only display selection or kind and model id', () => {
   assert.match(source, /executeYZCMSelectionOperations\(/);
   assert.match(source, /create: createManagedModel/);

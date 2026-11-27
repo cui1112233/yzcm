@@ -148,3 +148,17 @@ export function setCatalogKeyRequestState(states, modelId, patch) {
   const current = states || {};
   return { ...current, [modelId]: { ...(current[modelId] || {}), ...(patch || {}) } };
 }
+
+export function catalogKeySubmissionStatus({
+  submitted, currentDraft, submittedRevision, currentRevision, focused, succeeded
+}) {
+  const current = submittedRevision === currentRevision
+    && String(submitted ?? '') === String(currentDraft ?? '');
+  const clearDraft = current && succeeded === true && focused !== true;
+  return {
+    current,
+    clearDraft,
+    clearTouched: clearDraft,
+    showError: current && succeeded !== true
+  };
+}

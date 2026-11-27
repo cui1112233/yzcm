@@ -88,18 +88,22 @@ export default function ApiConfigPage() {
   useEffect(() => { modelIdsRef.current = presetModelIds; }, [presetModelIds]);
   useEffect(() => { baseURLsRef.current = presetBaseURLs; }, [presetBaseURLs]);
 
-  const refreshQuotaState = useCallback(async () => {
+  const refreshQuotaState = useCallback(async (lifecycle = null) => {
     if (!canManageApi) return;
+    const isActive = () => typeof lifecycle?.isActive !== 'function' || lifecycle.isActive();
     setQuotaLoading(true);
     try {
-      setQuotas(await getManagedModelQuotas());
+      const nextQuotas = await getManagedModelQuotas();
+      if (!isActive()) return;
+      setQuotas(nextQuotas);
       setQuotaError('');
     } catch (error) {
+      if (!isActive()) return;
       // 读取失败不能退化成“额度尚未查询”，否则用户会把服务异常当成没填 Key。
       setQuotaError(error.message || '额度查询失败');
       message.error(error.message || '额度查询失败');
     }
-    finally { setQuotaLoading(false); }
+    finally { if (isActive()) setQuotaLoading(false); }
   }, [canManageApi]);
 
   const applyModels = useCallback(nextModels => {
@@ -241,8 +245,9 @@ export default function ApiConfigPage() {
 
   // 目录模型凭证的唯一编辑入口（管理员）：写入 modelCatalog.credential，
   // 服务端据此重新计算 available，页面与 /api/models 下拉同时生效/消失。
-  async function saveCatalogCredential(model, key, clear) {
+  async function saveCatalogCredential(model, key, clear, lifecycle = null) {
     if (!canManageApi || !model?.id) throw new Error('无权修改目录模型凭证');
+    const isActive = () => typeof lifecycle?.isActive !== 'function' || lifecycle.isActive();
     const trimmed = String(key || '').trim();
     if (!clear && !trimmed) throw new Error('请输入 API Key');
     setCatalogModelSavingId(model.id);
@@ -251,30 +256,34 @@ export default function ApiConfigPage() {
         ? restrictedCredentialPatch(trimmed, clear)
         : (clear ? { clearCredential: true } : { credential: trimmed, enabled: true });
       await updateManagedModel(model.id, patch);
+      if (!isActive()) return;
       invalidateAvailableModelCatalog();
       await refreshModels();
+      if (!isActive()) return;
       message.success(clear ? '已清除目录 Key，该模型不再出现在下拉里' : '目录 Key 已保存，立即生效');
     } catch (error) {
-      message.error(error.message || '目录模型凭证保存失败');
+      if (isActive()) message.error(error.message || '目录模型凭证保存失败');
       throw error;
     } finally {
-      setCatalogModelSavingId('');
+      if (isActive()) setCatalogModelSavingId('');
     }
   }
 
-  async function saveYZCMSelection(selectedModels) {
+  async function saveYZCMSelection(selectedModels, lifecycle = null) {
     if (policy.mode !== 'restricted') throw new Error('当前账号不能修改 YZCM 展示选择');
+    const isActive = () => typeof lifecycle?.isActive !== 'function' || lifecycle.isActive();
     await executeYZCMSelectionOperations({
       existingModels: modelsRef.current,
       selectedModels,
       create: createManagedModel,
       update: updateManagedModel,
       refresh: async () => {
+        if (!isActive()) return null;
         const nextModels = await listManagedModels();
-        applyModels(nextModels);
+        if (isActive()) applyModels(nextModels);
         return nextModels;
       },
-      onModels: applyModels
+      onModels: nextModels => { if (isActive()) applyModels(nextModels); }
     });
   }
 

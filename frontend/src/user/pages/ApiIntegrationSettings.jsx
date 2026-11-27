@@ -5,7 +5,7 @@ import ApiCustomModelModal from './ApiCustomModelModal';
 import ApiPresetSelectionModal from './ApiPresetSelectionModal';
 import { API_CHANNEL_PRESETS, API_INTEGRATION_GROUPS } from './apiIntegrationSchema';
 import { channelEdits, mergeChannelEdit } from './apiIntegrationChannelEdits';
-import { buildPresetSelectionPayload, filterPresetsBySelection, selectedPresetIds, setCatalogKeyRequestState, settleCatalogKeyDraft } from './apiPresetSelection';
+import { buildPresetSelectionPayload, catalogKeySubmissionStatus, filterPresetsBySelection, selectedPresetIds, setCatalogKeyRequestState } from './apiPresetSelection';
 import { createRevisionTracker, sameText } from './hydrationGuard';
 import { isCatalogModelVisibleForManagement, isUserManagedCatalogModel, mergeGroupEntries, modelIdentity } from './apiConfigCatalogMerge';
 import { getApiIntegrations, revealApiIntegration, saveApiIntegrations } from '../../shared/api/apiIntegrations';
@@ -190,6 +190,21 @@ function RestrictedApiIntegrationSettings({
   const [keyRequests, setKeyRequests] = useState({});
   const touchedRef = useRef(new Set());
   const focusedRef = useRef(new Set());
+  const draftsRef = useRef({});
+  const revisionRef = useRef({});
+  const keyEpochRef = useRef({});
+  const selectionEpochRef = useRef(0);
+  const mountedRef = useRef(false);
+  const epochRef = useRef(0);
+  useEffect(() => {
+    mountedRef.current = true;
+    const epoch = ++epochRef.current;
+    return () => {
+      if (epochRef.current === epoch) mountedRef.current = false;
+      epochRef.current += 1;
+    };
+  }, []);
+  const isActive = epoch => mountedRef.current && epochRef.current === epoch;
   const selected = useMemo(
     () => (Array.isArray(models) ? models : []).filter(model => model?.selectedForConfigPage !== false),
     [models]
@@ -205,7 +220,12 @@ function RestrictedApiIntegrationSettings({
 
   async function commitKey(model) {
     if (!touchedRef.current.has(model.id) || !onSaveCatalogCredential) return;
-    const submitted = String(drafts[model.id] || '');
+    const submitted = String(draftsRef.current[model.id] || '');
+    const submittedRevision = revisionRef.current[model.id] || 0;
+    const componentEpoch = epochRef.current;
+    const requestEpoch = (keyEpochRef.current[model.id] || 0) + 1;
+    keyEpochRef.current[model.id] = requestEpoch;
+    const requestIsActive = () => isActive(componentEpoch) && keyEpochRef.current[model.id] === requestEpoch;
     const value = submitted.trim();
     if (!value && model.hasCredential !== true) {
       touchedRef.current.delete(model.id);
@@ -213,30 +233,55 @@ function RestrictedApiIntegrationSettings({
     }
     setKeyRequests(current => setCatalogKeyRequestState(current, model.id, { saving: true, error: '' }));
     try {
-      await onSaveCatalogCredential(model, value, !value);
-      setDrafts(current => settleCatalogKeyDraft(current, model.id, submitted, focusedRef.current.has(model.id)));
-      touchedRef.current.delete(model.id);
+      await onSaveCatalogCredential(model, value, !value, { isActive: requestIsActive });
+      if (!requestIsActive()) return;
+      const status = catalogKeySubmissionStatus({
+        submitted,
+        currentDraft: draftsRef.current[model.id],
+        submittedRevision,
+        currentRevision: revisionRef.current[model.id] || 0,
+        focused: focusedRef.current.has(model.id),
+        succeeded: true
+      });
+      if (status.clearDraft) {
+        draftsRef.current = { ...draftsRef.current, [model.id]: '' };
+        setDrafts(current => ({ ...current, [model.id]: '' }));
+      }
+      if (status.clearTouched) touchedRef.current.delete(model.id);
     } catch (error) {
-      setKeyRequests(current => setCatalogKeyRequestState(current, model.id, {
-        error: error?.message || '模型 Key 保存失败'
-      }));
+      if (!requestIsActive()) return;
+      const status = catalogKeySubmissionStatus({
+        submitted,
+        currentDraft: draftsRef.current[model.id],
+        submittedRevision,
+        currentRevision: revisionRef.current[model.id] || 0,
+        focused: focusedRef.current.has(model.id),
+        succeeded: false
+      });
+      if (status.showError) setKeyRequests(current => setCatalogKeyRequestState(current, model.id, {
+          error: error?.message || '模型 Key 保存失败'
+        }));
       // 草稿按模型 ID 保留，方便原地重试。
     } finally {
-      setKeyRequests(current => setCatalogKeyRequestState(current, model.id, { saving: false }));
+      if (requestIsActive()) setKeyRequests(current => setCatalogKeyRequestState(current, model.id, { saving: false }));
     }
   }
 
   async function confirmSelection(nextSelected) {
     if (!onSaveYZCMSelection) return;
+    const componentEpoch = epochRef.current;
+    const requestEpoch = ++selectionEpochRef.current;
+    const requestIsActive = () => isActive(componentEpoch) && selectionEpochRef.current === requestEpoch;
     setPresetSaving(true);
     try {
-      await onSaveYZCMSelection(nextSelected);
+      await onSaveYZCMSelection(nextSelected, { isActive: requestIsActive });
+      if (!requestIsActive()) return;
       setPresetOpen(false);
       message.success('展示模型已更新；已有 Key 和业务可用状态保持不变');
     } catch (error) {
-      message.error(error?.message || '模型选择保存失败');
+      if (requestIsActive()) message.error(error?.message || '模型选择保存失败');
     } finally {
-      setPresetSaving(false);
+      if (requestIsActive()) setPresetSaving(false);
     }
   }
 
@@ -249,7 +294,10 @@ function RestrictedApiIntegrationSettings({
       <div className="api-integration-toolbar">
         <span className="api-integration-count"><ShieldCheck size={14} aria-hidden="true" />已展示 {selected.length} 个模型</span>
         <Button className="api-channel-open api-preset-open" size="small" onClick={() => setPresetOpen(true)}>自定义预设</Button>
-        <Button size="small" icon={<RefreshCw size={14} />} loading={quotaLoading} onClick={onRefreshQuotas}>刷新额度</Button>
+        <Button size="small" icon={<RefreshCw size={14} />} loading={quotaLoading} onClick={() => {
+          const componentEpoch = epochRef.current;
+          void onRefreshQuotas?.({ isActive: () => isActive(componentEpoch) });
+        }}>刷新额度</Button>
       </div>
       <div className="api-integration-groups">
         {RESTRICTED_KIND_META.map(([kind, title]) => {
@@ -284,9 +332,15 @@ function RestrictedApiIntegrationSettings({
                           aria-label={`${model.displayName || model.id} API Key`}
                           onChange={event => {
                             touchedRef.current.add(model.id);
-                            setDrafts(current => ({ ...current, [model.id]: event.target.value }));
+                            revisionRef.current[model.id] = (revisionRef.current[model.id] || 0) + 1;
+                            draftsRef.current = { ...draftsRef.current, [model.id]: event.target.value };
+                            setDrafts(draftsRef.current);
+                            setKeyRequests(current => setCatalogKeyRequestState(current, model.id, { error: '' }));
                           }}
-                          onFocus={() => focusedRef.current.add(model.id)}
+                          onFocus={() => {
+                            focusedRef.current.add(model.id);
+                            revisionRef.current[model.id] = (revisionRef.current[model.id] || 0) + 1;
+                          }}
                           onBlur={() => {
                             focusedRef.current.delete(model.id);
                             void commitKey(model);

@@ -7,6 +7,7 @@ import {
   applyYZCMSelectionOperation,
   buildPresetSelectionPayload,
   buildYZCMSelectionOperations,
+  catalogKeySubmissionStatus,
   executeYZCMSelectionOperations,
   explicitPresetIds,
   filterPresetsBySelection,
@@ -169,4 +170,19 @@ test('selection operation and Key request state update only their model id', () 
     alpha: { saving: false, error: 'A failed' },
     beta: { saving: true, error: '' }
   });
+});
+
+test('same-model newer draft stays touched after an older success or failure', () => {
+  assert.deepEqual(catalogKeySubmissionStatus({
+    submitted: 'key-A', currentDraft: 'key-B', submittedRevision: 1, currentRevision: 2, focused: true, succeeded: true
+  }), { current: false, clearDraft: false, clearTouched: false, showError: false });
+  assert.deepEqual(catalogKeySubmissionStatus({
+    submitted: 'key-A', currentDraft: 'key-B', submittedRevision: 1, currentRevision: 2, focused: false, succeeded: false
+  }), { current: false, clearDraft: false, clearTouched: false, showError: false });
+  assert.deepEqual(catalogKeySubmissionStatus({
+    submitted: 'key-B', currentDraft: 'key-B', submittedRevision: 2, currentRevision: 2, focused: false, succeeded: true
+  }), { current: true, clearDraft: true, clearTouched: true, showError: false });
+  assert.deepEqual(catalogKeySubmissionStatus({
+    submitted: 'key-B', currentDraft: 'key-B', submittedRevision: 2, currentRevision: 2, focused: false, succeeded: false
+  }), { current: true, clearDraft: false, clearTouched: false, showError: true });
 });
