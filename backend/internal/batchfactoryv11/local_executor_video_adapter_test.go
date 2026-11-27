@@ -62,7 +62,7 @@ func TestProductionServiceAllowsLocalExecutorWithRelativeArtifactURL(t *testing.
 		LocalExecutor: NewLocalExecutorVideoAdapter(&fakeLocalVideoClient{}, ""),
 		Model:         FrozenVideoModel{MaxDuration: 15},
 	}
-	adapter, model, err := service.resolveProvider(context.Background(), "alice", VideoProviderDoubaoLocal)
+	adapter, model, err := service.resolveProvider(context.Background(), "alice", VideoProviderDoubaoLocal, "", false)
 	if err != nil {
 		t.Fatalf("local executor should support the built-in relative artifact route: %v", err)
 	}

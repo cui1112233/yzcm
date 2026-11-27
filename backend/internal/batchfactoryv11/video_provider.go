@@ -2,6 +2,10 @@ package batchfactoryv11
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -40,14 +44,15 @@ func wrapNotConfigured(err error) error {
 }
 
 type VideoProviderConfig struct {
-	ConfigID   string `json:"configId,omitempty"`
-	Provider   string
-	APIKey     string
-	Model      string
-	CreateURL  string
-	TasksURL   string
-	ResultURL  string
-	WorkflowID string
+	ConfigID    string `json:"configId,omitempty"`
+	ConfigOwner string `json:"-"`
+	Provider    string
+	APIKey      string
+	Model       string
+	CreateURL   string
+	TasksURL    string
+	ResultURL   string
+	WorkflowID  string
 }
 
 type VideoProviderRegistry interface {
@@ -59,6 +64,51 @@ type VideoProviderRegistry interface {
 // VideoModelResolver resolves a concrete account catalog entry on demand.
 type VideoModelResolver interface {
 	ResolveModel(context.Context, string, string, string) (VideoProviderConfig, error)
+}
+
+var ErrVideoModelNotFound = errors.New("video model selection is not in the current catalog")
+
+// ExactVideoModelResolver resolves only an internal model row ID.
+type ExactVideoModelResolver interface {
+	ResolveExactVideoModel(context.Context, string, string) (VideoProviderConfig, error)
+}
+
+type VideoExecutionBinding struct {
+	Owner        string `json:"owner,omitempty"`
+	RowID        string `json:"rowId,omitempty"`
+	Adapter      string `json:"adapter"`
+	Model        string `json:"model"`
+	TargetDigest string `json:"targetDigest"`
+}
+
+const videoSelectionBindingKey = "videoModelSelectionBinding"
+
+type savedVideoSelection struct {
+	Selection   string `json:"selection"`
+	RowID       string `json:"rowId"`
+	ScopeDigest string `json:"scopeDigest"`
+}
+
+func (binding VideoExecutionBinding) selectionDigest() string {
+	raw, _ := json.Marshal(binding)
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:])
+}
+
+func (config VideoProviderConfig) ExecutionBinding(owner string) *VideoExecutionBinding {
+	if config.ConfigID == "" {
+		return nil
+	}
+	if config.ConfigOwner != "" {
+		owner = config.ConfigOwner
+	}
+	parts, _ := json.Marshal([]string{config.Provider, config.Model, config.CreateURL, config.TasksURL, config.ResultURL, config.WorkflowID})
+	digest := sha256.Sum256(parts)
+	return &VideoExecutionBinding{Owner: owner, RowID: config.ConfigID, Adapter: config.Provider, Model: config.Model, TargetDigest: hex.EncodeToString(digest[:])}
+}
+
+func isLocalVideoModel(selection string) bool {
+	return VideoProviderForModel(selection, VideoProviderPersonalAPI) == VideoProviderDoubaoLocal
 }
 
 func NormalizeVideoProviderConfig(cfg VideoProviderConfig) (VideoProviderConfig, error) {

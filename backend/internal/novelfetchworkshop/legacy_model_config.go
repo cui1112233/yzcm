@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 
 	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/safepath"
@@ -19,6 +20,10 @@ import (
 const modelLegacyScrubPendingKey = "modelCatalogLegacyScrubPending"
 const modelLegacyScrubDoneKey = "modelCatalogLegacyScrubDone"
 const legacyVideoMigratedKey = "videoProviderLegacyMigrated"
+const legacyModelMigrationVersionKey = "modelCatalogLegacyMigrationVersion"
+const legacyModelScrubEntriesKey = "modelCatalogLegacyScrubEntries"
+const legacyModelScrubEntryDoneKey = "modelCatalogLegacyScrubEntryDone"
+const legacyModelMigrationVersion = "entry-v1"
 
 func hasLegacyVideoProviders(document map[string]any) bool {
 	for _, container := range legacyCatalogContainers(document) {
@@ -84,7 +89,14 @@ func legacyCatalogRows(document map[string]any) []any {
 }
 
 func legacyCatalogSecretDigest(document map[string]any) string {
-	hasSecret := hasLegacyVideoProviders(document)
+	hasVideoData := false
+	for _, container := range legacyCatalogContainers(document) {
+		if raw := container["videoProviders"]; raw != nil {
+			rows, ok := raw.(map[string]any)
+			hasVideoData = hasVideoData || !ok || len(rows) != 0
+		}
+	}
+	hasSecret := hasVideoData
 	for _, item := range legacyCatalogRows(document) {
 		model, _ := item.(map[string]any)
 		for _, field := range []string{"credential", "apiKey", "credentialRef"} {
@@ -96,7 +108,7 @@ func legacyCatalogSecretDigest(document map[string]any) string {
 	if !hasSecret {
 		return ""
 	}
-	if !hasLegacyVideoProviders(document) {
+	if !hasVideoData {
 		rows, _ := json.Marshal(legacyCatalogRows(document))
 		sum := sha256.Sum256(rows)
 		return hex.EncodeToString(sum[:])
@@ -150,7 +162,180 @@ func readLegacyModelDocument(path string) (map[string]any, error) {
 	return document, nil
 }
 
-func (s *MySQLStore) scrubLegacyModelFile(ctx context.Context, owner, expected string) error {
+type legacyScrubEntry struct {
+	Container      int    `json:"container"`
+	Index          int    `json:"index"`
+	Video          bool   `json:"video,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	Digest         string `json:"digest"`
+	TargetID       string `json:"targetId,omitempty"`
+	RecoveryReason string `json:"recoveryReason,omitempty"`
+}
+
+func legacyEntryDigest(value any) string {
+	raw, _ := json.Marshal(value)
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:])
+}
+
+func hasLegacyKey(row map[string]any) bool {
+	for _, field := range []string{"credential", "apiKey", "credentialRef"} {
+		if _, ok := row[field]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func findLegacyTarget(row map[string]any, rows []any) (map[string]any, bool) {
+	var match map[string]any
+	id := ModelConfigText(row, "id")
+	modelID := ModelConfigText(row, "modelId")
+	for _, item := range rows {
+		candidate, _ := item.(map[string]any)
+		candidateID := ModelConfigText(candidate, "id")
+		sameScope := sameLegacyModelScope(row, candidate) && modelID != "" && modelID == ModelConfigText(candidate, "modelId")
+		sameID := id != "" && id == candidateID
+		if !sameID && (!sameScope || id != "" && candidateID != "") {
+			continue
+		}
+		if !sameScope || match != nil {
+			return nil, true
+		}
+		match = candidate
+	}
+	return match, match != nil
+}
+
+func prepareLegacyModelEntries(rows []any, legacy map[string]any, preserveBoundRows bool) ([]any, []legacyScrubEntry) {
+	preserved := map[string]bool{}
+	if preserveBoundRows {
+		for _, item := range rows {
+			row, _ := item.(map[string]any)
+			preserved[ModelConfigText(row, "id")] = true
+		}
+	}
+	fileRows := legacyCatalogRows(legacy)
+	var imports []any
+	for _, item := range fileRows {
+		if row, ok := item.(map[string]any); ok {
+			if _, found := findLegacyTarget(row, rows); !found {
+				incoming := cloneMap(row)
+				delete(incoming, "credentialStatus")
+				delete(incoming, "credentialRecoveryReason")
+				if ModelConfigText(incoming, "credentialRef") != "" &&
+					ModelConfigText(incoming, "credential") == "" && ModelConfigText(incoming, "apiKey") == "" {
+					markLegacyKeyReentry(incoming, "legacy_reference_requires_key")
+				}
+				imports = append(imports, incoming)
+			}
+		}
+	}
+	rows = normalizeLegacyModelRows(append(rows, imports...))
+	entries := []legacyScrubEntry{}
+	appendEntry := func(entry legacyScrubEntry, value any, source map[string]any) {
+		entry.Digest = legacyEntryDigest(value)
+		if target, _ := findLegacyTarget(source, rows); target != nil {
+			entry.TargetID = ModelConfigText(target, "id")
+			if !preserved[entry.TargetID] {
+				entry.RecoveryReason = ModelConfigText(target, "credentialRecoveryReason")
+			}
+		}
+		entries = append(entries, entry)
+	}
+	for i, container := range legacyCatalogContainers(legacy) {
+		catalog, _ := container["modelCatalog"].([]any)
+		for index, item := range catalog {
+			if row, ok := item.(map[string]any); ok && hasLegacyKey(row) {
+				appendEntry(legacyScrubEntry{Container: i, Index: index}, row, row)
+			}
+		}
+		providers, _ := container["videoProviders"].(map[string]any)
+		names := make([]string, 0, len(providers))
+		for name := range providers {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			source := legacyVideoProviderRows(map[string]any{"videoProviders": map[string]any{name: providers[name]}})[0].(map[string]any)
+			appendEntry(legacyScrubEntry{Container: i, Video: true, Provider: name}, providers[name], source)
+		}
+	}
+	return rows, entries
+}
+
+func verifyLegacyScrubTarget(source, target map[string]any, recoveryReason string) bool {
+	if !sameLegacyModelScope(source, target) || ModelConfigText(source, "modelId") != ModelConfigText(target, "modelId") {
+		return false
+	}
+	if target["credentialStatus"] == "needs_reentry" {
+		return recoveryReason != "" && ModelConfigText(target, "credentialRecoveryReason") == recoveryReason &&
+			ModelConfigText(target, "credential") == "" && ModelConfigText(target, "apiKey") == ""
+	}
+	credential := ModelConfigText(target, "credential")
+	if credential == "" {
+		return !hasLegacyCredentialValue(source)
+	}
+	for _, field := range []string{"credential", "apiKey"} {
+		value, ok := source[field].(string)
+		if source[field] != nil && !ok || strings.TrimSpace(value) != "" && strings.TrimSpace(value) != credential {
+			return false
+		}
+	}
+	return ModelConfigText(source, "credential") == credential || ModelConfigText(source, "apiKey") == credential
+}
+
+func hasLegacyCredentialValue(row map[string]any) bool {
+	for _, field := range []string{"credential", "apiKey", "credentialRef"} {
+		raw := row[field]
+		if value, ok := raw.(string); raw != nil && (!ok || strings.TrimSpace(value) != "") {
+			return true
+		}
+	}
+	return false
+}
+
+func applyLegacyScrubEntry(containers []map[string]any, entry legacyScrubEntry, targets map[string]map[string]any) bool {
+	if entry.Container < 0 || entry.Container >= len(containers) || entry.TargetID == "" {
+		return false
+	}
+	container := containers[entry.Container]
+	if entry.Video {
+		providers, _ := container["videoProviders"].(map[string]any)
+		value, present := providers[entry.Provider]
+		if !present || legacyEntryDigest(value) != entry.Digest {
+			return false
+		}
+		source := legacyVideoProviderRows(map[string]any{"videoProviders": map[string]any{entry.Provider: value}})[0].(map[string]any)
+		if fields, ok := value.(map[string]any); !ok ||
+			ModelConfigText(source, "provider") == batchfactoryv11.VideoProviderDoubaoLocal && hasLegacyCredentialValue(fields) {
+			return false
+		}
+		if !verifyLegacyScrubTarget(source, targets[entry.TargetID], entry.RecoveryReason) {
+			return false
+		}
+		delete(providers, entry.Provider)
+		if len(providers) == 0 {
+			delete(container, "videoProviders")
+		}
+		return true
+	}
+	catalog, _ := container["modelCatalog"].([]any)
+	if entry.Index < 0 || entry.Index >= len(catalog) {
+		return false
+	}
+	row, _ := catalog[entry.Index].(map[string]any)
+	if legacyEntryDigest(row) != entry.Digest || !verifyLegacyScrubTarget(row, targets[entry.TargetID], entry.RecoveryReason) {
+		return false
+	}
+	for _, key := range []string{"credential", "apiKey", "credentialRef"} {
+		delete(row, key)
+	}
+	row["credentialStatus"] = "imported_or_needs_reentry"
+	return true
+}
+
+func (s *MySQLStore) scrubLegacyModelFile(ctx context.Context, owner string, settings map[string]any) error {
 	if s.LegacyConfigLocker != nil {
 		s.LegacyConfigLocker.Lock()
 		defer s.LegacyConfigLocker.Unlock()
@@ -166,31 +351,37 @@ func (s *MySQLStore) scrubLegacyModelFile(ctx context.Context, owner, expected s
 	if document == nil {
 		return fmt.Errorf("legacy model file is unavailable during credential cleanup")
 	}
-	if current := legacyCatalogSecretDigest(document); current != "" {
-		if current != expected {
-			return fmt.Errorf("legacy model file changed before credential cleanup")
+	expected := ModelConfigText(settings, modelLegacyScrubPendingKey)
+	encoded, _ := json.Marshal(settings[legacyModelScrubEntriesKey])
+	var entries []legacyScrubEntry
+	if err := json.Unmarshal(encoded, &entries); err != nil {
+		return err
+	}
+	targets := map[string]map[string]any{}
+	for _, value := range legacyCatalogRows(settings) {
+		row, _ := value.(map[string]any)
+		targets[ModelConfigText(row, "id")] = row
+	}
+	completed, _ := document[legacyModelScrubEntryDoneKey].(map[string]any)
+	if completed == nil {
+		completed = map[string]any{}
+	}
+	changed, unresolved := false, false
+	containers := legacyCatalogContainers(document)
+	for _, entry := range entries {
+		receipt := legacyEntryDigest(entry)
+		if completed[receipt] == expected {
+			continue
 		}
-		for _, container := range legacyCatalogContainers(document) {
-			delete(container, "videoProviders")
-			models, _ := container["modelCatalog"].([]any)
-			for _, item := range models {
-				model, ok := item.(map[string]any)
-				if !ok {
-					continue
-				}
-				removed := false
-				for _, field := range []string{"credential", "apiKey", "credentialRef"} {
-					if _, exists := model[field]; exists {
-						delete(model, field)
-						removed = true
-					}
-				}
-				if removed {
-					model["credentialStatus"] = "imported_or_needs_reentry"
-				}
-			}
+		if !applyLegacyScrubEntry(containers, entry, targets) {
+			unresolved = true
+			continue
 		}
-		document[modelLegacyScrubDoneKey] = expected
+		completed[receipt] = expected
+		changed = true
+	}
+	if changed {
+		document[legacyModelScrubEntryDoneKey] = completed
 		replace := s.ReplaceLegacyConfig
 		if replace == nil {
 			replace = replaceLegacyModelDocument
@@ -198,11 +389,15 @@ func (s *MySQLStore) scrubLegacyModelFile(ctx context.Context, owner, expected s
 		if err := replace(path, document); err != nil {
 			return err
 		}
-	} else if ModelConfigText(document, modelLegacyScrubDoneKey) != expected {
+	}
+	if unresolved || legacyCatalogSecretDigest(document) != "" {
+		return fmt.Errorf("legacy credentials still require verified recovery; original entries retained")
+	}
+	if len(entries) == 0 && ModelConfigText(document, modelLegacyScrubDoneKey) != expected {
 		return fmt.Errorf("legacy credential cleanup has no matching completion record")
 	}
 	_, err = s.DB.ExecContext(ctx, `UPDATE novel_fetch_workshop_configs
-SET settings_json=JSON_REMOVE(settings_json, '$.modelCatalogLegacyScrubPending')
+SET settings_json=JSON_REMOVE(settings_json, '$.modelCatalogLegacyScrubPending', '$.modelCatalogLegacyScrubEntries')
 WHERE owner_username=? AND JSON_UNQUOTE(JSON_EXTRACT(settings_json, '$.modelCatalogLegacyScrubPending'))=?`, owner, expected)
 	return err
 }
@@ -229,7 +424,8 @@ func replaceLegacyModelDocument(path string, document map[string]any) error {
 func (s *MySQLStore) ResumeLegacyModelCleanup(ctx context.Context) error {
 	rows, err := s.DB.QueryContext(ctx, `SELECT owner_username
 FROM novel_fetch_workshop_configs WHERE JSON_CONTAINS_PATH(settings_json, 'one', '$.modelCatalogLegacyScrubPending',
-'$.videoProviders', '$.settings.videoProviders', '$.appConfig.videoProviders', '$.settings.appConfig.videoProviders')`)
+'$.videoProviders', '$.settings.videoProviders', '$.appConfig.videoProviders', '$.settings.appConfig.videoProviders')
+OR (? AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(settings_json,'$.modelCatalogLegacyMigrationVersion')),'')!=?)`, s.LegacyConfigDir != "", legacyModelMigrationVersion)
 	if err != nil {
 		return err
 	}
@@ -255,7 +451,9 @@ FROM novel_fetch_workshop_configs WHERE JSON_CONTAINS_PATH(settings_json, 'one',
 func sameLegacyModelScope(left, right map[string]any) bool {
 	target := ModelCredentialDestination(left)
 	kind := ModelConfigText(left, "kind")
-	return kind != "" && target.Endpoint != "" && kind == ModelConfigText(right, "kind") &&
+	local := kind == "video" && ModelConfigText(left, "provider") == batchfactoryv11.VideoProviderDoubaoLocal &&
+		ModelConfigText(right, "provider") == batchfactoryv11.VideoProviderDoubaoLocal
+	return kind != "" && (target.Endpoint != "" || local) && kind == ModelConfigText(right, "kind") &&
 		ModelCredentialSource(left) == ModelCredentialSource(right) && target == ModelCredentialDestination(right)
 }
 

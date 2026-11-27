@@ -51,7 +51,7 @@ func loadProductionJob(ctx context.Context, q productionQueryer, owner, id strin
 	value.Owner = owner
 	value.Status = ProductionState(state)
 	value.Tasks = []ProductionTask{}
-	rows, err := q.QueryContext(ctx, `SELECT id,video_id,COALESCE(opening_variant_index,0),COALESCE(compilation_id,''),COALESCE(compilation_segment_key,''),provider,status,attempt,final_prompt_hash,compiled_prompt,COALESCE(compile_trace_json,'null'),COALESCE(reference_image_urls,'[]'),COALESCE(downgraded_asset_ids,'[]'),target_duration_seconds,requested_duration_seconds,actual_duration_seconds,COALESCE(provider_task_id,''),COALESCE(media_url,''),COALESCE(error_message,''),created_at,updated_at FROM batch_factory_v12_production_tasks task WHERE job_id=? AND owner_username=? AND NOT EXISTS (SELECT 1 FROM batch_factory_v12_hidden_production_tasks hidden WHERE hidden.task_id=task.id AND hidden.owner_username=task.owner_username) ORDER BY created_at,id`, id, owner)
+	rows, err := q.QueryContext(ctx, `SELECT id,video_id,COALESCE(opening_variant_index,0),COALESCE(compilation_id,''),COALESCE(compilation_segment_key,''),provider,status,attempt,final_prompt_hash,compiled_prompt,COALESCE(compile_trace_json,'null'),COALESCE(reference_image_urls,'[]'),COALESCE(downgraded_asset_ids,'[]'),target_duration_seconds,requested_duration_seconds,actual_duration_seconds,COALESCE(provider_task_id,''),COALESCE(media_url,''),COALESCE(error_message,''),created_at,updated_at,video_execution_binding FROM batch_factory_v12_production_tasks task WHERE job_id=? AND owner_username=? AND NOT EXISTS (SELECT 1 FROM batch_factory_v12_hidden_production_tasks hidden WHERE hidden.task_id=task.id AND hidden.owner_username=task.owner_username) ORDER BY created_at,id`, id, owner)
 	if err != nil {
 		return ProductionJob{}, err
 	}
@@ -60,8 +60,12 @@ func loadProductionJob(ctx context.Context, q productionQueryer, owner, id strin
 		var task ProductionTask
 		var taskState string
 		var references, downgraded, compileTrace string
-		if err := rows.Scan(&task.ID, &task.VideoID, &task.OpeningVariantIndex, &task.CompilationID, &task.CompilationSegmentKey, &task.Provider, &taskState, &task.Attempt, &task.FinalPromptHash, &task.CompiledPrompt, &compileTrace, &references, &downgraded, &task.TargetDurationSeconds, &task.RequestedDurationSeconds, &task.ActualDurationSeconds, &task.ProviderTaskID, &task.MediaURL, &task.ErrorMessage, &task.CreatedAt, &task.UpdatedAt); err != nil {
+		var binding []byte
+		if err := rows.Scan(&task.ID, &task.VideoID, &task.OpeningVariantIndex, &task.CompilationID, &task.CompilationSegmentKey, &task.Provider, &taskState, &task.Attempt, &task.FinalPromptHash, &task.CompiledPrompt, &compileTrace, &references, &downgraded, &task.TargetDurationSeconds, &task.RequestedDurationSeconds, &task.ActualDurationSeconds, &task.ProviderTaskID, &task.MediaURL, &task.ErrorMessage, &task.CreatedAt, &task.UpdatedAt, &binding); err != nil {
 			return ProductionJob{}, err
+		}
+		if len(binding) != 0 && json.Unmarshal(binding, &task.Binding) != nil {
+			return ProductionJob{}, ErrInvalid
 		}
 		if json.Unmarshal([]byte(references), &task.ReferenceImageURLs) != nil || json.Unmarshal([]byte(downgraded), &task.DowngradedAssetIDs) != nil {
 			return ProductionJob{}, ErrInvalid
@@ -147,7 +151,15 @@ func (s *MySQLStore) CreateProductionJob(ctx context.Context, value ProductionJo
 			}
 			compileTrace = string(encoded)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO batch_factory_v12_production_tasks(id,job_id,owner_username,video_id,opening_variant_index,compilation_id,compilation_segment_key,provider,attempt,final_prompt_hash,compiled_prompt,compile_trace_json,reference_image_urls,downgraded_asset_ids,target_duration_seconds,requested_duration_seconds,actual_duration_seconds,provider_task_id,media_url,status,error_message,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, task.ID, value.ID, value.Owner, task.VideoID, task.OpeningVariantIndex, nullableString(task.CompilationID), nullableString(task.CompilationSegmentKey), nullableString(task.Provider), task.Attempt, task.FinalPromptHash, task.CompiledPrompt, compileTrace, string(references), string(downgraded), task.TargetDurationSeconds, task.RequestedDurationSeconds, task.ActualDurationSeconds, nullableString(task.ProviderTaskID), nullableString(task.MediaURL), task.Status, nullableString(task.ErrorMessage), now, now); err != nil {
+		var binding any
+		if task.Binding != nil {
+			raw, err := json.Marshal(task.Binding)
+			if err != nil {
+				return ProductionJob{}, err
+			}
+			binding = string(raw)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO batch_factory_v12_production_tasks(id,job_id,owner_username,video_id,opening_variant_index,compilation_id,compilation_segment_key,provider,attempt,final_prompt_hash,compiled_prompt,compile_trace_json,reference_image_urls,downgraded_asset_ids,target_duration_seconds,requested_duration_seconds,actual_duration_seconds,provider_task_id,media_url,status,error_message,created_at,updated_at,video_execution_binding) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, task.ID, value.ID, value.Owner, task.VideoID, task.OpeningVariantIndex, nullableString(task.CompilationID), nullableString(task.CompilationSegmentKey), nullableString(task.Provider), task.Attempt, task.FinalPromptHash, task.CompiledPrompt, compileTrace, string(references), string(downgraded), task.TargetDurationSeconds, task.RequestedDurationSeconds, task.ActualDurationSeconds, nullableString(task.ProviderTaskID), nullableString(task.MediaURL), task.Status, nullableString(task.ErrorMessage), now, now, binding); err != nil {
 			return ProductionJob{}, err
 		}
 		if err := insertProductionEvent(ctx, tx, value.ID, task.ID, value.Owner, "created", "", string(task.Status), ""); err != nil {
@@ -294,7 +306,16 @@ func (s *MySQLStore) FailStaleProductionJobs(ctx context.Context, cutoff time.Ti
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	rows, err := tx.QueryContext(ctx, `SELECT j.id, j.owner_username, j.status FROM batch_factory_v12_production_jobs j WHERE j.status IN ('running','queued') AND j.updated_at < ? AND NOT EXISTS (SELECT 1 FROM batch_factory_v12_production_tasks t WHERE t.job_id=j.id AND t.status='running' AND t.updated_at >= ?)`, cutoff, cutoff)
+	// An accepted provider task can outlive this process. Only interrupted
+	// submissions without a provider receipt are eligible for stale cleanup.
+	rows, err := tx.QueryContext(ctx, `SELECT j.id, j.owner_username, j.status
+FROM batch_factory_v12_production_jobs j
+WHERE j.status IN ('running','queued') AND j.updated_at < ?
+  AND NOT EXISTS (
+    SELECT 1 FROM batch_factory_v12_production_tasks t
+    WHERE t.job_id=j.id AND t.status IN ('running','queued')
+      AND (COALESCE(t.provider_task_id,'') <> '' OR (t.status='running' AND t.updated_at >= ?))
+  )`, cutoff, cutoff)
 	if err != nil {
 		return 0, err
 	}
@@ -316,11 +337,23 @@ func (s *MySQLStore) FailStaleProductionJobs(ctx context.Context, cutoff time.Ti
 	now := time.Now().UTC()
 	var cleaned int64
 	for _, item := range stale {
-		if _, err := tx.ExecContext(ctx, `UPDATE batch_factory_v12_production_tasks SET status='failed', updated_at=? WHERE job_id=? AND status IN ('running','queued') AND updated_at < ?`, now, item.id, cutoff); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE batch_factory_v12_production_tasks SET status='failed', updated_at=? WHERE job_id=? AND status IN ('running','queued') AND COALESCE(provider_task_id,'')='' AND updated_at < ?`, now, item.id, cutoff); err != nil {
 			return cleaned, err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE batch_factory_v12_production_jobs SET status='failed', updated_at=? WHERE id=? AND status IN ('running','queued')`, now, item.id); err != nil {
+		result, err := tx.ExecContext(ctx, `UPDATE batch_factory_v12_production_jobs j SET status='failed', updated_at=?
+WHERE j.id=? AND j.status IN ('running','queued') AND NOT EXISTS (
+  SELECT 1 FROM batch_factory_v12_production_tasks t
+  WHERE t.job_id=j.id AND t.status IN ('running','queued') AND COALESCE(t.provider_task_id,'') <> ''
+)`, now, item.id)
+		if err != nil {
 			return cleaned, err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return cleaned, err
+		}
+		if affected == 0 {
+			continue
 		}
 		if err := insertProductionEvent(ctx, tx, item.id, "", item.owner, "state_changed", item.status, "failed", message); err != nil {
 			return cleaned, err

@@ -49,6 +49,7 @@ type recordingProductionPoller struct {
 
 type recordingLocalRetryClient struct {
 	inputs []LocalVideoJobInput
+	gets   int
 }
 
 func (c *recordingLocalRetryClient) CreateVideoJob(_ context.Context, _ string, input LocalVideoJobInput) (LocalVideoJob, error) {
@@ -60,6 +61,7 @@ func (c *recordingLocalRetryClient) CreateVideoJob(_ context.Context, _ string, 
 }
 
 func (c *recordingLocalRetryClient) GetVideoJob(context.Context, string, string) (LocalVideoJob, error) {
+	c.gets++
 	return LocalVideoJob{}, ErrNotFound
 }
 
@@ -453,21 +455,43 @@ type recordingVideoProviderRegistry struct {
 
 type expiringVideoModelRegistry struct {
 	recordingVideoProviderRegistry
-	checks int
+	checks               int
+	replaceWithSameModel bool
+}
+
+type selectedVideoModelRegistry struct {
+	recordingVideoProviderRegistry
+	rowID string
+}
+
+func (r *selectedVideoModelRegistry) ResolveModel(context.Context, string, string, string) (VideoProviderConfig, error) {
+	return NormalizeVideoProviderConfig(VideoProviderConfig{
+		ConfigID: r.rowID, ConfigOwner: "fixture-manager", Provider: VideoProviderPersonalAPI,
+		Model: DefaultPersonalVideoModel, APIKey: "test-only-key",
+	})
 }
 
 func (r *expiringVideoModelRegistry) ResolveModel(_ context.Context, _ string, provider, _ string) (VideoProviderConfig, error) {
 	r.checks++
-	if r.checks > 1 {
+	if r.checks > 1 && !r.replaceWithSameModel {
 		return VideoProviderConfig{}, ErrUnavailable
 	}
-	return NormalizeVideoProviderConfig(VideoProviderConfig{Provider: provider, Model: DefaultPersonalVideoModel, APIKey: "test-only-key"})
+	id := "first-row"
+	if r.checks > 1 {
+		id = "replacement-row"
+	}
+	return NormalizeVideoProviderConfig(VideoProviderConfig{ConfigID: id, Provider: provider, Model: DefaultPersonalVideoModel, APIKey: "test-only-key"})
 }
 
 func TestProductionRechecksVideoModelBeforeOutgoingRequest(t *testing.T) {
+	t.Run("disabled", func(t *testing.T) { testProductionRechecksVideoModel(t, false) })
+	t.Run("other row with same upstream model", func(t *testing.T) { testProductionRechecksVideoModel(t, true) })
+}
+
+func testProductionRechecksVideoModel(t *testing.T, replaceWithSameModel bool) {
 	ctx := context.Background()
 	store, batch, book, _ := seedCompiledVideo(t)
-	registry := &expiringVideoModelRegistry{}
+	registry := &expiringVideoModelRegistry{replaceWithSameModel: replaceWithSameModel}
 	var outgoing int
 	restore := safehttp.SetOutboundDecorator(func(http.RoundTripper) http.RoundTripper {
 		return durationProbeRoundTripper(func(*http.Request) (*http.Response, error) {
@@ -486,6 +510,91 @@ func TestProductionRechecksVideoModelBeforeOutgoingRequest(t *testing.T) {
 		if task.Status != ProductionFailed || task.ProviderTaskID != "" {
 			t.Fatal("expired model should fail before provider submission")
 		}
+	}
+}
+
+func TestProductionPollDoesNotUseGlobalFallbackForAnUnboundTask(t *testing.T) {
+	ctx := context.Background()
+	store, batch, book, video := seedCompiledVideo(t)
+	_, err := store.CreateProductionJob(ctx, ProductionJob{Owner: "alice", BatchID: batch.ID, BookID: book.ID,
+		RequestID: "historical-receipt", DirectorRevisionID: book.DirectorRevision.ID, Tasks: []ProductionTask{{
+			VideoID: video.ID, Provider: VideoProviderPersonalAPI, ProviderTaskID: "historic-provider-task", Status: ProductionRunning,
+		}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := &expiringVideoModelRegistry{checks: 2}
+	old := &recordingProductionPoller{ref: ProviderTaskRef{ProviderTaskID: "historic-provider-task", State: ProductionSucceeded}}
+	service := &ProductionService{Store: store, ProviderRegistry: registry, Poller: old}
+	status, err := service.GetBatchStatus(ctx, "alice", batch.ID)
+	if err != nil || old.calls != 0 || status.Jobs[0].Tasks[0].Status != ProductionRunning || status.Jobs[0].Tasks[0].ErrorMessage == "" {
+		t.Fatalf("old poller calls=%d status=%+v error=%v", old.calls, status, err)
+	}
+}
+
+func TestFormalVideoSelectionPrecedesLegacyLocalExecutor(t *testing.T) {
+	ctx := context.Background()
+	store, batch, book, video := seedCompiledVideo(t)
+	_, err := store.CreateProductionJob(ctx, ProductionJob{Owner: "alice", BatchID: batch.ID, BookID: book.ID,
+		RequestID: "older-local-task", DirectorRevisionID: book.DirectorRevision.ID, Tasks: []ProductionTask{{
+			VideoID: video.ID, Provider: VideoProviderDoubaoLocal, ProviderTaskID: "existing-local-provider-task", Status: ProductionRunning,
+			Binding: &VideoExecutionBinding{Adapter: VideoProviderDoubaoLocal, Model: DefaultVideoModelFor(VideoProviderDoubaoLocal), TargetDigest: "local-executor-v1"},
+		}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.SaveSettings(ctx, "alice", ScopeRef{Kind: ScopeBook, BatchID: batch.ID, BookID: book.ID}, SettingsUpdate{
+		Patch: SettingsPatch{"videoModelId": rawSetting(t, "yzcm:video:fixture"), "videoProvider": rawSetting(t, VideoProviderDoubaoLocal)}, ExpectedRevision: book.Revision,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := &expiringVideoModelRegistry{checks: 1}
+	client := &recordingLocalRetryClient{}
+	service := &ProductionService{Store: store, Compiler: &PromptCompilerService{Store: store},
+		ProviderRegistry: registry, LocalExecutor: NewLocalExecutorVideoAdapter(client, ""), Enabled: true}
+	if _, err := service.SubmitBookProductionWithProvider(ctx, "alice", batch.ID, book.ID, "no-legacy-dispatch", VideoProviderDoubaoLocal); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("unsupported formal selection should be unavailable: %v", err)
+	}
+	if len(client.inputs) != 0 || client.gets != 0 || registry.checks != 2 {
+		t.Fatalf("local submit calls=%d local poll calls=%d catalog checks=%d", len(client.inputs), client.gets, registry.checks)
+	}
+	jobs, err := store.ListProductionJobs(ctx, "alice", batch.ID)
+	if err != nil || len(jobs) != 1 || jobs[0].RequestID != "older-local-task" {
+		t.Fatalf("unexpected accepted production job: %v %v", jobs, err)
+	}
+}
+
+func TestLegacyVideoModelSelectionStaysPinnedAfterRetry(t *testing.T) {
+	ctx := context.Background()
+	store, batch, book, _ := seedCompiledVideo(t)
+	ref := ScopeRef{Kind: ScopeBook, BatchID: batch.ID, BookID: book.ID}
+	if _, err := store.SaveSettings(ctx, "alice", ref, SettingsUpdate{
+		Patch: SettingsPatch{"videoModelId": rawSetting(t, DefaultPersonalVideoModel)}, ExpectedRevision: book.Revision,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	registry := &selectedVideoModelRegistry{rowID: "original-row"}
+	calls := 0
+	restore := safehttp.SetOutboundDecorator(func(http.RoundTripper) http.RoundTripper {
+		return durationProbeRoundTripper(func(*http.Request) (*http.Response, error) {
+			calls++
+			return nil, errors.New("test transport does not dial")
+		})
+	})
+	defer restore()
+	service := &ProductionService{Store: store, Compiler: &PromptCompilerService{Store: store}, ProviderRegistry: registry, Enabled: true}
+	job, err := service.SubmitBookProductionWithProvider(ctx, "alice", batch.ID, book.ID, "first-pinned", VideoProviderPersonalAPI)
+	if err != nil || calls != 1 || len(job.Tasks) != 1 || job.Tasks[0].Binding == nil || job.Tasks[0].Binding.RowID != "original-row" {
+		t.Fatalf("first submit should bind the sole matching row, calls=%d err=%v", calls, err)
+	}
+	saved, err := store.GetBatch(ctx, "alice", batch.ID)
+	if err != nil || !strings.Contains(string(saved.Books[0].SettingsState.Patch[videoSelectionBindingKey]), "original-row") {
+		t.Fatalf("legacy picker did not retain its canonical row: %v", err)
+	}
+	registry.rowID = "replacement-row"
+	if _, err := service.SubmitBookProductionWithProvider(ctx, "alice", batch.ID, book.ID, "second-pinned", VideoProviderPersonalAPI); !errors.Is(err, ErrUnavailable) || calls != 1 {
+		t.Fatalf("same-name replacement was considered for a pinned selection, calls=%d err=%v", calls, err)
 	}
 }
 

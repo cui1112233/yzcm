@@ -120,6 +120,136 @@ VALUES (?,?,NOW(6),NOW(6))`, owner, settings); err != nil {
 	}
 }
 
+func TestAPIConfigPolicyMySQLMigratesFileOnlyVideoBesideBoundText(t *testing.T) {
+	ctx := context.Background()
+	db, _ := novelAttributionDatabase(t)
+	if err := storage.RunMigrations(ctx, db, storage.NovelFetchWorkshopMigrations()); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	store := novelfetchworkshop.NewMySQLStore(db)
+	store.ModelSecrets = NewUserConfigStore(dir).ModelConfigSecrets()
+	if err := store.PutConfig(ctx, "fixture", map[string]any{"modelCatalog": []any{
+		map[string]any{"id": "bound-text", "kind": "text", "modelId": "fixture-text", "baseUrl": "https://text.example.test/v1", "credential": "fixture-existing-text"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE novel_fetch_workshop_configs SET settings_json=JSON_REMOVE(settings_json, '$.videoProviderLegacyMigrated') WHERE owner_username='fixture'`); err != nil {
+		t.Fatal(err)
+	}
+	store.LegacyConfigDir = dir
+	if _, err := store.GetConfig(ctx, "fixture"); err != nil {
+		t.Fatalf("reading the bound text model while its old file is absent: %v", err)
+	}
+	path := filepath.Join(dir, "fixture", "api-config.json")
+	original := []byte(`{"settings":{"layout":{"removeEmptyLines":true},"videoProviders":{"personal_api":{"apiKey":"fixture-file-only-video","model":"fixture-video","createUrl":"https://video.example.test/create","tasksUrl":"https://video.example.test/tasks","resultUrl":"https://video.example.test/result/{id}"}}}}`)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	readRaw := func() (string, string) {
+		t.Helper()
+		var textCipher, videoCipher string
+		if err := db.QueryRowContext(ctx, `SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(settings_json,'$.modelCatalog[0].credential')),''),COALESCE(JSON_UNQUOTE(JSON_EXTRACT(settings_json,'$.modelCatalog[1].credential')),'') FROM novel_fetch_workshop_configs WHERE owner_username='fixture'`).Scan(&textCipher, &videoCipher); err != nil {
+			t.Fatal(err)
+		}
+		return textCipher, videoCipher
+	}
+	textBefore, _ := readRaw()
+	store.ReplaceLegacyConfig = func(string, map[string]any) error { return errors.New("fixture atomic replace failure") }
+	if _, err := store.GetConfig(ctx, "fixture"); err == nil {
+		t.Fatal("file replacement fault was not reported")
+	}
+	file, err := os.ReadFile(path)
+	textAfter, videoCipher := readRaw()
+	if err != nil || !bytes.Equal(file, original) || textAfter != textBefore || !bytes.HasPrefix([]byte(videoCipher), []byte("enc:v2:")) {
+		t.Fatal("file-only video must have its own committed ciphertext before any scrub")
+	}
+	store.ReplaceLegacyConfig = nil
+	if err := store.ResumeLegacyModelCleanup(ctx); err != nil {
+		t.Fatal(err)
+	}
+	config, err := store.GetConfig(ctx, "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := modelCatalog(config)
+	file, err = os.ReadFile(path)
+	textAgain, videoAgain := readRaw()
+	if err != nil || len(rows) != 2 || rows[1]["id"] != "legacy-video:personal_api" || rows[1]["credential"] != "fixture-file-only-video" ||
+		bytes.Contains(file, []byte("fixture-file-only-video")) || !bytes.Contains(file, []byte("removeEmptyLines")) ||
+		textAgain != textBefore || videoAgain != videoCipher {
+		t.Fatal("retry lost the expected model, ciphertext or preferences")
+	}
+}
+
+func TestAPIConfigPolicyMySQLScrubsOnlyProvenLegacyEntries(t *testing.T) {
+	ctx := context.Background()
+	db, _ := novelAttributionDatabase(t)
+	if err := storage.RunMigrations(ctx, db, storage.NovelFetchWorkshopMigrations()); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	config := NewUserConfigStore(dir)
+	store := novelfetchworkshop.NewMySQLStore(db)
+	store.ModelSecrets = config.ModelConfigSecrets()
+	if err := store.PutConfig(ctx, "fixture", map[string]any{"modelCatalog": []any{
+		map[string]any{"id": "conflicted", "kind": "text", "modelId": "current", "baseUrl": "https://active.example.test/v1", "credential": "fixture-current-key"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "fixture", "api-config.json")
+	original := []byte(`{"modelCatalog":[{"id":"conflicted","kind":"text","modelId":"old","baseUrl":"https://old.example.test/v1","credential":"fixture-conflicting-key"}],
+ "settings":{"videoProviders":{"personal_api":{"apiKey":"fixture-importable-key","model":"fixture-video","createUrl":"https://video.example.test/create"}}},"layout":{"compact":true}}`)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store.LegacyConfigDir = dir
+	if _, err := db.ExecContext(ctx, `CREATE TRIGGER fail_legacy_fixture BEFORE UPDATE ON novel_fetch_workshop_configs FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture write fault'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetConfig(ctx, "fixture"); err == nil {
+		t.Fatal("expected a failed model transaction")
+	}
+	file, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(file, original) {
+		t.Fatal("failed model transaction touched the only legacy keys")
+	}
+	if _, err := db.ExecContext(ctx, "DROP TRIGGER fail_legacy_fixture"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetConfig(ctx, "fixture"); err == nil {
+		t.Fatal("unverified scope conflict needs recovery")
+	}
+	partial, err := os.ReadFile(path)
+	if err != nil || !bytes.Contains(partial, []byte("fixture-conflicting-key")) || bytes.Contains(partial, []byte("fixture-importable-key")) ||
+		!bytes.Contains(partial, []byte("modelCatalogLegacyScrubEntryDone")) || !bytes.Contains(partial, []byte("compact")) {
+		t.Fatal("scrub should acknowledge only the proven video entry and leave the unresolved text and preferences")
+	}
+	var raw []byte
+	if err := db.QueryRowContext(ctx, "SELECT settings_json FROM novel_fetch_workshop_configs WHERE owner_username='fixture'").Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte("modelCatalogLegacyScrubEntries")) || !bytes.Contains(raw, []byte("legacy-video:personal_api")) ||
+		bytes.Contains(raw, []byte("fixture-conflicting-key")) || bytes.Contains(raw, []byte("fixture-importable-key")) {
+		t.Fatal("durable pending evidence or bound video is missing")
+	}
+	fresh := novelfetchworkshop.NewMySQLStore(db)
+	fresh.ModelSecrets, fresh.LegacyConfigDir = config.ModelConfigSecrets(), dir
+	if err := fresh.ResumeLegacyModelCleanup(ctx); err == nil {
+		t.Fatal("cold recovery must keep the unresolved conflict visible")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, partial) {
+		t.Fatal("replaying a partially scrubbed file should leave its evidence unchanged")
+	}
+}
+
 func TestAPIConfigPolicyMySQLMigratesLegacyVideoSettings(t *testing.T) {
 	ctx := context.Background()
 	db, _ := novelAttributionDatabase(t)

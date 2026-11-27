@@ -60,6 +60,13 @@ func TestAPIConfigPolicyMySQLVideoAliasesStoreOnlyBoundModels(t *testing.T) {
 			if bytes.Contains(initial, []byte("fixture-allowed-key")) || bytes.Contains(initial, []byte("videoProviders")) || !bytes.Contains(initial, []byte("enc:v2:")) {
 				t.Fatal("restricted video model was not stored only as bound ciphertext")
 			}
+			for _, list := range []string{"/api/config/models?kind=video", "/api/models?kind=video"} {
+				got := impersonationRequest(h, "GET", list, owner, "", nil)
+				if got.Code != http.StatusOK || !bytes.Contains(got.Body.Bytes(), []byte(`"available":false`)) ||
+					!bytes.Contains(got.Body.Bytes(), []byte(`"execution_adapter_unavailable"`)) {
+					t.Fatalf("%s showed a YZCM video model as executable: %s", list, got.Body.String())
+				}
+			}
 		}
 		if response := impersonationRequest(h, "PUT", path, "member", allow, nil); response.Code != http.StatusForbidden {
 			t.Fatalf("%s member config returned HTTP %d", version, response.Code)

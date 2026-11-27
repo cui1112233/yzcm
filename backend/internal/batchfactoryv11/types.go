@@ -77,6 +77,7 @@ type SettingsUpdate struct {
 	Patch            SettingsPatch `json:"patch"`
 	RestoreKeys      []string      `json:"restoreKeys,omitempty"`
 	ExpectedRevision int64         `json:"expectedRevision"`
+	videoSelection   *savedVideoSelection
 }
 type SettingsResult struct {
 	Scope    ScopeRef        `json:"scope"`

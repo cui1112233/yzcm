@@ -46,6 +46,8 @@ type FrozenVideoModel struct {
 	ID                 string `json:"id"`
 	MaxDuration        int    `json:"maxDuration"`
 	MaxReferenceImages int    `json:"maxReferenceImages"`
+	binding            *VideoExecutionBinding
+	key                string
 }
 
 type ProviderTaskRef struct {
@@ -58,27 +60,28 @@ type ProviderTaskRef struct {
 }
 
 type ProductionTask struct {
-	ID                       string          `json:"id"`
-	VideoID                  string          `json:"videoId"`
-	OpeningVariantIndex      int             `json:"openingVariantIndex,omitempty"`
-	Provider                 string          `json:"provider,omitempty"`
-	Status                   ProductionState `json:"status"`
-	Attempt                  int             `json:"attempt"`
-	FinalPromptHash          string          `json:"finalPromptHash"`
-	CompiledPrompt           string          `json:"-"`
-	CompilationID            string          `json:"compilationId,omitempty"`
-	CompilationSegmentKey    string          `json:"compilationSegmentKey,omitempty"`
-	CompileTrace             *H3CompileTrace `json:"compileTrace,omitempty"`
-	ReferenceImageURLs       []string        `json:"referenceImageUrls,omitempty"`
-	DowngradedAssetIDs       []string        `json:"downgradedAssetIds,omitempty"`
-	TargetDurationSeconds    float64         `json:"targetDurationSeconds,omitempty"`
-	RequestedDurationSeconds float64         `json:"requestedDurationSeconds,omitempty"`
-	ActualDurationSeconds    float64         `json:"actualDurationSeconds,omitempty"`
-	ProviderTaskID           string          `json:"providerTaskId,omitempty"`
-	MediaURL                 string          `json:"mediaUrl,omitempty"`
-	ErrorMessage             string          `json:"errorMessage,omitempty"`
-	CreatedAt                time.Time       `json:"createdAt"`
-	UpdatedAt                time.Time       `json:"updatedAt"`
+	ID                       string                 `json:"id"`
+	VideoID                  string                 `json:"videoId"`
+	OpeningVariantIndex      int                    `json:"openingVariantIndex,omitempty"`
+	Provider                 string                 `json:"provider,omitempty"`
+	Binding                  *VideoExecutionBinding `json:"-"`
+	Status                   ProductionState        `json:"status"`
+	Attempt                  int                    `json:"attempt"`
+	FinalPromptHash          string                 `json:"finalPromptHash"`
+	CompiledPrompt           string                 `json:"-"`
+	CompilationID            string                 `json:"compilationId,omitempty"`
+	CompilationSegmentKey    string                 `json:"compilationSegmentKey,omitempty"`
+	CompileTrace             *H3CompileTrace        `json:"compileTrace,omitempty"`
+	ReferenceImageURLs       []string               `json:"referenceImageUrls,omitempty"`
+	DowngradedAssetIDs       []string               `json:"downgradedAssetIds,omitempty"`
+	TargetDurationSeconds    float64                `json:"targetDurationSeconds,omitempty"`
+	RequestedDurationSeconds float64                `json:"requestedDurationSeconds,omitempty"`
+	ActualDurationSeconds    float64                `json:"actualDurationSeconds,omitempty"`
+	ProviderTaskID           string                 `json:"providerTaskId,omitempty"`
+	MediaURL                 string                 `json:"mediaUrl,omitempty"`
+	ErrorMessage             string                 `json:"errorMessage,omitempty"`
+	CreatedAt                time.Time              `json:"createdAt"`
+	UpdatedAt                time.Time              `json:"updatedAt"`
 }
 
 type ProductionJob struct {
@@ -185,18 +188,40 @@ type ProductionService struct {
 	Model            FrozenVideoModel
 }
 
-func (s *ProductionService) resolveProvider(ctx context.Context, owner, provider string, selections ...string) (ProductionAdapter, FrozenVideoModel, error) {
+func (s *ProductionService) resolveProvider(ctx context.Context, owner, provider, selection string, exact bool) (ProductionAdapter, FrozenVideoModel, error) {
 	provider = normalizeVideoProvider(provider)
 	resolver, live := s.ProviderRegistry.(VideoModelResolver)
-	lookup := func() (VideoProviderConfig, error) {
-		if live {
-			selection := ""
-			if len(selections) > 0 {
-				selection = selections[0]
-			}
-			return resolver.ResolveModel(ctx, owner, provider, selection)
+	var cfg VideoProviderConfig
+	var err error
+	if live && (selection != "" || provider != VideoProviderDoubaoLocal) {
+		selectedProvider := provider
+		if selection != "" {
+			selectedProvider = ""
 		}
-		return s.ProviderRegistry.Resolve(ctx, owner, provider)
+		if strict, ok := resolver.(ExactVideoModelResolver); exact && ok {
+			cfg, err = strict.ResolveExactVideoModel(ctx, owner, selection)
+		} else {
+			cfg, err = resolver.ResolveModel(ctx, owner, selectedProvider, selection)
+		}
+		if errors.Is(err, ErrVideoModelNotFound) && !exact && isLocalVideoModel(selection) {
+			provider = VideoProviderDoubaoLocal
+			err = nil
+		} else if err != nil {
+			return nil, FrozenVideoModel{}, err
+		} else {
+			provider = normalizeVideoProvider(cfg.Provider)
+			if cfg.ConfigID == "" || exact && cfg.ConfigID != selection {
+				return nil, FrozenVideoModel{}, fmt.Errorf("%w: 请重新选择视频模型", ErrUnavailable)
+			}
+		}
+	} else if !live && s.ProviderRegistry != nil && provider != VideoProviderDoubaoLocal {
+		cfg, err = s.ProviderRegistry.Resolve(ctx, owner, provider)
+	}
+	model := s.Model
+	model.key = cfg.APIKey
+	model.binding = cfg.ExecutionBinding(owner)
+	if model.MaxDuration <= 0 {
+		model.MaxDuration = 15
 	}
 	if provider == VideoProviderDoubaoLocal {
 		if s.LocalExecutor == nil || s.LocalExecutor.Client == nil {
@@ -205,30 +230,24 @@ func (s *ProductionService) resolveProvider(ctx context.Context, owner, provider
 		if err := s.LocalExecutor.EnsureAvailable(ctx, owner); err != nil {
 			return nil, FrozenVideoModel{}, err
 		}
-		model := s.Model
-		// The local executor has its own Doubao model identity; never inherit
-		// the personal Yadi model from static server configuration.
-		model.ID = "doubao-seedance"
-		if model.MaxDuration <= 0 {
-			model.MaxDuration = 15
+		model.ID = DefaultVideoModelFor(provider)
+		if model.binding != nil {
+			model.ID = cfg.Model
+		} else if live {
+			model.binding = &VideoExecutionBinding{Adapter: provider, Model: model.ID, TargetDigest: "local-executor-v1"}
 		}
 		return nil, model, nil
+	}
+	if err != nil && (provider != VideoProviderPersonalAPI || s.Adapter == nil) {
+		return nil, FrozenVideoModel{}, err
 	}
 	if provider == VideoProviderAutoDLH3 {
 		if s.ProviderRegistry == nil {
 			return nil, FrozenVideoModel{}, wrapNotConfigured(fmt.Errorf("%w: AutoDL H3 provider registry is unavailable", ErrUnavailable))
 		}
-		cfg, err := lookup()
-		if err != nil {
-			return nil, FrozenVideoModel{}, err
-		}
-		model := s.Model
 		model.ID = cfg.Model
 		if model.ID == "" {
 			model.ID = AutoDLH3Model
-		}
-		if model.MaxDuration <= 0 {
-			model.MaxDuration = 15
 		}
 		adapter := &AutoDLH3VideoAdapter{
 			CreateURL: cfg.CreateURL, TasksURL: cfg.TasksURL,
@@ -244,11 +263,6 @@ func (s *ProductionService) resolveProvider(ctx context.Context, owner, provider
 		if s.ProviderRegistry == nil {
 			return nil, FrozenVideoModel{}, wrapNotConfigured(fmt.Errorf("%w: YFAI Seedance provider registry is unavailable", ErrUnavailable))
 		}
-		cfg, err := lookup()
-		if err != nil {
-			return nil, FrozenVideoModel{}, err
-		}
-		model := s.Model
 		model.ID = cfg.Model
 		model.MaxDuration = 15
 		adapter := &YFAISeedanceAdapter{BaseURL: cfg.CreateURL, APIKey: cfg.APIKey, Model: cfg.Model}
@@ -260,26 +274,16 @@ func (s *ProductionService) resolveProvider(ctx context.Context, owner, provider
 	if provider != VideoProviderPersonalAPI {
 		return nil, FrozenVideoModel{}, fmt.Errorf("%w: unsupported video provider", ErrInvalid)
 	}
-	if s.ProviderRegistry != nil {
-		cfg, err := lookup()
-		if err == nil {
-			model := s.Model
-			model.ID = cfg.Model
-			if model.MaxDuration <= 0 {
-				model.MaxDuration = 15
-			}
-			adapter := &YadiVideoAdapter{
-				CreateURL: cfg.CreateURL, TasksURL: cfg.TasksURL, ResultURL: cfg.ResultURL,
-				APIKey: cfg.APIKey, Model: cfg.Model,
-			}
-			if err := adapter.Validate(); err != nil {
-				return nil, FrozenVideoModel{}, err
-			}
-			return adapter, model, nil
+	if s.ProviderRegistry != nil && err == nil {
+		model.ID = cfg.Model
+		adapter := &YadiVideoAdapter{
+			CreateURL: cfg.CreateURL, TasksURL: cfg.TasksURL, ResultURL: cfg.ResultURL,
+			APIKey: cfg.APIKey, Model: cfg.Model,
 		}
-		if live || s.Adapter == nil {
+		if err := adapter.Validate(); err != nil {
 			return nil, FrozenVideoModel{}, err
 		}
+		return adapter, model, nil
 	}
 	if s.Adapter == nil {
 		return nil, FrozenVideoModel{}, fmt.Errorf("%w: personal video provider is unavailable", ErrUnavailable)
@@ -293,6 +297,37 @@ func (s *ProductionService) repository() (ProductionRepository, error) {
 		return nil, ErrUnavailable
 	}
 	return repository, nil
+}
+
+func (s *ProductionService) prepareVideoSelection(ctx context.Context, owner, provider, selection string, ref ScopeRef, patch SettingsPatch, revision int64) (ProductionAdapter, FrozenVideoModel, error) {
+	if _, live := s.ProviderRegistry.(VideoModelResolver); !live {
+		return s.resolveProvider(ctx, owner, provider, selection, false)
+	}
+	var pinned savedVideoSelection
+	if raw := patch[videoSelectionBindingKey]; len(raw) != 0 && json.Unmarshal(raw, &pinned) != nil {
+		return nil, FrozenVideoModel{}, fmt.Errorf("%w: 请重新选择视频模型", ErrConflict)
+	}
+	exact := pinned.RowID != "" && selection == pinned.Selection
+	lookup := selection
+	if exact {
+		lookup = pinned.RowID
+	}
+	adapter, model, err := s.resolveProvider(ctx, owner, provider, lookup, exact)
+	if err != nil {
+		return nil, FrozenVideoModel{}, err
+	}
+	if exact && (model.binding == nil || model.binding.selectionDigest() != pinned.ScopeDigest) {
+		return nil, FrozenVideoModel{}, fmt.Errorf("%w: 视频模型归属或地址已变更，请重新选择", ErrConflict)
+	}
+	if !exact && selection != "" && model.binding != nil && model.binding.RowID != "" {
+		settings := SettingsUpdate{ExpectedRevision: revision, videoSelection: &savedVideoSelection{
+			Selection: selection, RowID: model.binding.RowID, ScopeDigest: model.binding.selectionDigest(),
+		}}
+		if _, err := s.Store.SaveSettings(ctx, owner, ref, settings); err != nil {
+			return nil, FrozenVideoModel{}, err
+		}
+	}
+	return adapter, model, nil
 }
 
 func productionError(err error) string {
@@ -507,6 +542,9 @@ func (s *ProductionService) SubmitBookProductionWithOptions(ctx context.Context,
 	effectiveSettings := ResolveSettings(batch.SettingsState.Patch, book.SettingsState.Patch)
 	selectedModel := strings.TrimSpace(rawString(effectiveSettings, "videoModelId", ""))
 	batchModel := strings.TrimSpace(rawString(batch.SettingsState.Patch, "videoModelId", ""))
+	if selectedModel == "" {
+		provider = normalizeVideoProvider(rawString(effectiveSettings, "videoProvider", provider))
+	}
 	if selectedModel != "" {
 		selectedProvider := normalizeVideoProvider(VideoProviderForModel(selectedModel, rawString(effectiveSettings, "videoProvider", provider)))
 		if selectedProvider != provider || selectedModel != batchModel {
@@ -518,10 +556,10 @@ func (s *ProductionService) SubmitBookProductionWithOptions(ctx context.Context,
 	// A retried VIDEO keeps its identity while the engine selected for the book
 	// may have changed. Record the switch (no credentials) so a release trace
 	// can prove the stored provider was not silently reused.
-	if current, statusErr := s.GetBatchStatus(ctx, owner, batchID); statusErr == nil {
+	if current, statusErr := repository.ListProductionJobs(ctx, owner, batchID); statusErr == nil {
 		var storedProvider, storedVideoID string
 		var latest time.Time
-		for _, job := range current.Jobs {
+		for _, job := range current {
 			for _, task := range job.Tasks {
 				if job.BookID != bookID || strings.TrimSpace(task.Provider) == "" {
 					continue
@@ -536,9 +574,19 @@ func (s *ProductionService) SubmitBookProductionWithOptions(ctx context.Context,
 		}
 	}
 
-	adapter, model, providerErr := s.resolveProvider(ctx, owner, provider, selectedModel)
+	selectionRef := ScopeRef{Kind: ScopeBook, BatchID: batchID, BookID: bookID}
+	selectionPatch, selectionRevision := book.SettingsState.Patch, book.Revision
+	if rawString(selectionPatch, "videoModelId", "") == "" {
+		selectionRef = ScopeRef{Kind: ScopeBatch, BatchID: batchID}
+		selectionPatch, selectionRevision = batch.SettingsState.Patch, batch.Revision
+	}
+	adapter, model, providerErr := s.prepareVideoSelection(ctx, owner, provider, selectedModel, selectionRef, selectionPatch, selectionRevision)
 	if providerErr != nil {
 		return ProductionJob{}, providerErr
+	}
+	_, live := s.ProviderRegistry.(VideoModelResolver)
+	if model.binding != nil {
+		provider = model.binding.Adapter
 	}
 	if provider != VideoProviderDoubaoLocal && adapter == nil {
 		return ProductionJob{}, ErrUnavailable
@@ -658,6 +706,7 @@ func (s *ProductionService) SubmitBookProductionWithOptions(ctx context.Context,
 
 	job := ProductionJob{ID: "", Owner: owner, BatchID: batchID, BookID: bookID, RequestID: requestID, DirectorRevisionID: book.DirectorRevision.ID, Status: ProductionQueued, Tasks: []ProductionTask{}, CreatedAt: now, UpdatedAt: now}
 	prompts := make(map[string]FinalPrompt, len(pendingVideos))
+	videoModels := make(map[string]FrozenVideoModel)
 	// buildTask compiles one VIDEO at one opening-variant index. Every compile
 	// happens before the job is persisted, so a failure aborts the whole
 	// submission instead of leaving a partial job behind.
@@ -666,7 +715,28 @@ func (s *ProductionService) SubmitBookProductionWithOptions(ctx context.Context,
 		if blockedVideos[key] {
 			return nil
 		}
-		limit := model.MaxReferenceImages
+		prepared := model
+		expectedSelection := selectedModel
+		taskProvider := provider
+		videoPatch := video.SettingsState.Patch
+		if videoSelection := strings.TrimSpace(rawString(videoPatch, "videoModelId", "")); live && videoSelection != "" {
+			expectedSelection = videoSelection
+			var exists bool
+			if prepared, exists = videoModels[video.ID]; !exists {
+				ref := ScopeRef{Kind: ScopeVideo, BatchID: batchID, BookID: bookID, VideoID: video.ID}
+				var err error
+				_, prepared, err = s.prepareVideoSelection(ctx, owner, provider, videoSelection, ref, videoPatch, video.Revision)
+				if err != nil {
+					return err
+				}
+				videoModels[video.ID] = prepared
+			}
+			taskProvider = prepared.binding.Adapter
+			if options.CompilationID != "" && taskProvider != VideoProviderAutoDLH3 {
+				return fmt.Errorf("%w: 当前视频模型不能使用 H3 编译结果", ErrConflict)
+			}
+		}
+		limit := prepared.MaxReferenceImages
 		if limit <= 0 {
 			limit = 3
 		}
@@ -700,12 +770,15 @@ func (s *ProductionService) SubmitBookProductionWithOptions(ctx context.Context,
 		if options.SanitizeVisualSafety {
 			prompt = sanitizeVideoPromptForModerationRetry(prompt)
 		}
-		selectedModel := rawString(prompt.EffectiveSettings.Values, "videoModelId", "")
-		if !VideoModelMatchesProviderModel(selectedModel, model.ID, provider) {
-			return fmt.Errorf("%w: selected video model %q is not available for provider %s", ErrConflict, selectedModel, provider)
+		promptSelection := strings.TrimSpace(rawString(prompt.EffectiveSettings.Values, "videoModelId", ""))
+		if live && promptSelection != expectedSelection {
+			return fmt.Errorf("%w: 请在书籍设置中重新选择视频模型", ErrConflict)
+		}
+		if !live && !VideoModelMatchesProviderModel(promptSelection, model.ID, provider) {
+			return fmt.Errorf("%w: selected video model %q is not available for provider %s", ErrConflict, promptSelection, provider)
 		}
 		prompts[key] = prompt
-		job.Tasks = append(job.Tasks, ProductionTask{VideoID: video.ID, OpeningVariantIndex: variantIndex, Provider: provider, Status: ProductionQueued, Attempt: 1, FinalPromptHash: prompt.SnapshotHash, CompiledPrompt: prompt.CompiledPrompt, CompilationID: prompt.CompilationID, CompilationSegmentKey: prompt.CompilationSegmentKey, CompileTrace: cloneH3CompileTrace(prompt.CompileTrace), ReferenceImageURLs: append([]string(nil), prompt.ReferenceImageURLs...), DowngradedAssetIDs: append([]string(nil), prompt.DowngradedAssetIDs...), TargetDurationSeconds: float64(prompt.DurationSeconds), RequestedDurationSeconds: float64(prompt.DurationSeconds), CreatedAt: now, UpdatedAt: now})
+		job.Tasks = append(job.Tasks, ProductionTask{VideoID: video.ID, OpeningVariantIndex: variantIndex, Provider: taskProvider, Binding: prepared.binding, Status: ProductionQueued, Attempt: 1, FinalPromptHash: prompt.SnapshotHash, CompiledPrompt: prompt.CompiledPrompt, CompilationID: prompt.CompilationID, CompilationSegmentKey: prompt.CompilationSegmentKey, CompileTrace: cloneH3CompileTrace(prompt.CompileTrace), ReferenceImageURLs: append([]string(nil), prompt.ReferenceImageURLs...), DowngradedAssetIDs: append([]string(nil), prompt.DowngradedAssetIDs...), TargetDurationSeconds: float64(prompt.DurationSeconds), RequestedDurationSeconds: float64(prompt.DurationSeconds), CreatedAt: now, UpdatedAt: now})
 		return nil
 	}
 	for _, video := range pendingVideos {
@@ -746,13 +819,24 @@ func (s *ProductionService) SubmitBookProductionWithOptions(ctx context.Context,
 		}
 		var ref ProviderTaskRef
 		var submitErr error
-		if provider == VideoProviderDoubaoLocal {
+		submitAdapter, submitModel := adapter, model
+		if live && task.Binding != nil {
+			prepared, overridden := videoModels[task.VideoID]
+			if !overridden {
+				prepared = model
+			}
+			submitAdapter, submitModel, submitErr = s.resolveProvider(ctx, owner, task.Binding.Adapter, task.Binding.RowID, true)
+			if submitErr == nil && (submitModel.binding == nil || *submitModel.binding != *task.Binding || submitModel.key != prepared.key) {
+				submitErr = fmt.Errorf("%w: 视频模型配置已变更，请重新发起", ErrConflict)
+			}
+		}
+		if submitErr == nil && task.Provider == VideoProviderDoubaoLocal {
 			sourceTaskID := "bf11:" + batchID + ":" + bookID + ":" + task.VideoID + ":" + task.ID
 			if task.OpeningVariantIndex > 0 {
 				sourceTaskID = fmt.Sprintf("%s#v%d", sourceTaskID, task.OpeningVariantIndex)
 			}
-			localModel := model.ID
-			if selectedModel := rawString(prompt.EffectiveSettings.Values, "videoModelId", ""); strings.TrimSpace(selectedModel) != "" {
+			localModel := submitModel.ID
+			if selectedModel := rawString(prompt.EffectiveSettings.Values, "videoModelId", ""); !live && strings.TrimSpace(selectedModel) != "" {
 				localModel = strings.TrimSpace(selectedModel)
 			}
 			ref, submitErr = s.LocalExecutor.Submit(ctx, owner, LocalVideoJobInput{
@@ -764,17 +848,7 @@ func (s *ProductionService) SubmitBookProductionWithOptions(ctx context.Context,
 				Resolution:         EffectiveVideoResolution(prompt.EffectiveSettings.Values),
 				ReferenceImageURLs: append([]string(nil), prompt.ReferenceImageURLs...),
 			})
-		} else {
-			submitAdapter := adapter
-			submitModel := model
-			_, live := s.ProviderRegistry.(VideoModelResolver)
-			if live {
-				selection := strings.TrimSpace(rawString(prompt.EffectiveSettings.Values, "videoModelId", selectedModel))
-				submitAdapter, submitModel, submitErr = s.resolveProvider(ctx, owner, provider, selection)
-				if submitErr == nil && selection == selectedModel && submitModel.ID != model.ID {
-					submitErr = fmt.Errorf("%w: video model changed while preparing submission", ErrConflict)
-				}
-			}
+		} else if submitErr == nil {
 			// 梵客视频按书选的型号优先于账号目录里的默认型号；旧值（无后缀）继续用默认型号。
 			if !live && provider == VideoProviderYFAISeedance && s.ProviderRegistry != nil {
 				if fanKeModel := FanKeModelFromSelection(rawString(prompt.EffectiveSettings.Values, "videoModelId", "")); fanKeModel != "" {
@@ -1092,17 +1166,20 @@ func (s *ProductionService) reconcileBatch(ctx context.Context, repository Produ
 			var ref ProviderTaskRef
 			var pollErr error
 			provider := normalizeVideoProvider(task.Provider)
-			if provider == VideoProviderDoubaoLocal {
+			_, live := s.ProviderRegistry.(VideoModelResolver)
+			if live {
+				ref, pollErr = s.pollBoundVideo(ctx, owner, task)
+			} else if task.Binding != nil {
+				pollErr = fmt.Errorf("%w: 视频任务的配置暂不可核对", ErrUnavailable)
+			} else if provider == VideoProviderDoubaoLocal {
 				if s.LocalExecutor == nil {
 					pollErr = fmt.Errorf("%w: Doubao local executor is offline", ErrUnavailable)
 				} else {
 					ref, pollErr = s.LocalExecutor.Poll(ctx, owner, task.ProviderTaskID)
 				}
 			} else if s.ProviderRegistry != nil {
-				adapter, model, resolveErr := s.resolveProvider(ctx, owner, provider)
-				if resolveErr != nil && s.Poller != nil {
-					ref, pollErr = s.Poller.Poll(ctx, s.Model, ProviderTaskRef{ProviderTaskID: task.ProviderTaskID, State: task.Status, MediaURL: task.MediaURL, RequestedDurationSeconds: task.RequestedDurationSeconds})
-				} else if resolveErr != nil {
+				adapter, model, resolveErr := s.resolveProvider(ctx, owner, provider, "", false)
+				if resolveErr != nil {
 					pollErr = resolveErr
 				} else if poller, ok := adapter.(ProductionPoller); !ok {
 					pollErr = fmt.Errorf("%w: provider does not support polling", ErrUnavailable)
@@ -1125,6 +1202,8 @@ func (s *ProductionService) reconcileBatch(ctx context.Context, repository Produ
 				updated.MediaURL = strings.TrimSpace(ref.MediaURL)
 				if updated.Status == ProductionFailed {
 					updated.ErrorMessage = productionError(errors.New(strings.TrimSpace(ref.ErrorMessage)))
+				} else {
+					updated.ErrorMessage = ""
 				}
 				if ref.ActualDurationSeconds > 0 {
 					updated.ActualDurationSeconds = ref.ActualDurationSeconds
@@ -1142,4 +1221,23 @@ func (s *ProductionService) reconcileBatch(ctx context.Context, repository Produ
 		}
 	}
 	return nil
+}
+
+func (s *ProductionService) pollBoundVideo(ctx context.Context, owner string, task ProductionTask) (ProviderTaskRef, error) {
+	if task.Binding == nil || task.Binding.Adapter != task.Provider {
+		return ProviderTaskRef{}, fmt.Errorf("%w: 旧任务缺少可核对的视频配置，暂停查询", ErrUnavailable)
+	}
+	binding := task.Binding
+	adapter, model, err := s.resolveProvider(ctx, owner, binding.Adapter, binding.RowID, true)
+	if err != nil || model.binding == nil || *model.binding != *binding {
+		return ProviderTaskRef{}, fmt.Errorf("%w: 视频任务原配置暂不可用，暂停查询", ErrUnavailable)
+	}
+	if binding.Adapter == VideoProviderDoubaoLocal {
+		return s.LocalExecutor.Poll(ctx, owner, task.ProviderTaskID)
+	}
+	poller, ok := adapter.(ProductionPoller)
+	if !ok {
+		return ProviderTaskRef{}, fmt.Errorf("%w: 视频任务执行器不支持查询", ErrUnavailable)
+	}
+	return poller.Poll(ctx, model, ProviderTaskRef{ProviderTaskID: task.ProviderTaskID, State: task.Status, MediaURL: task.MediaURL, RequestedDurationSeconds: task.RequestedDurationSeconds})
 }

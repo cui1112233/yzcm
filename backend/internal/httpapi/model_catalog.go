@@ -807,7 +807,7 @@ func readModelCatalog(req *http.Request, store novelfetchworkshop.Store, userCon
 		}
 		// 唯一可用性口径：凭证填了就生效；[off] 已下线与空凭证都不进页面也不进下拉。
 		public := publicManagedModel(model)
-		if public["available"] != true {
+		if public["available"] != true && public["unavailableReason"] == nil {
 			continue
 		}
 		result = append(result, public)
@@ -934,11 +934,13 @@ func integrationChannelModels(ctx context.Context, kind string, userConfig *User
 		if modelID != "" && modelID != "本地服务" && modelID != "自定义渠道" {
 			displayName = label + " · " + modelID
 		}
-		result = append(result, map[string]any{
+		item := map[string]any{
 			"id": id, "kind": kind, "displayName": displayName, "modelId": modelID,
 			"baseUrl": baseURL, "provider": "api_integrations", "enabled": true,
 			"configured": true, "hasCredential": true, "channel": id,
-		})
+		}
+		setVideoExecutionAvailability(item, item)
+		result = append(result, item)
 	}
 
 	for _, preset := range integrationChannelPresets {
@@ -1103,6 +1105,7 @@ func publicManagedModel(model map[string]any) map[string]any {
 	result := redactAPIConfig(model).(map[string]any)
 	result["hasCredential"] = managedModelHasCredential(model)
 	result["available"] = managedModelAvailable(model)
+	setVideoExecutionAvailability(result, model)
 	result["capabilities"] = publicModelCapabilities(model)
 	return result
 }
@@ -1140,7 +1143,7 @@ func managedModelNeedsNoCredential(model map[string]any) bool {
 // 2) 填了凭证就生效；3) 本地执行器无需凭证。
 // 本页不再写入 enabled=false：清空 Key 就是停用，enabled 只用于承接旧数据。
 func managedModelAvailable(model map[string]any) bool {
-	if managedModelRetired(model) {
+	if managedModelRetired(model) || videoExecutionUnavailableReason(model) != "" {
 		return false
 	}
 	if _, present := model["enabled"]; present && !normalizedModelEnabled(model["enabled"]) {

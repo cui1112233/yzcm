@@ -124,9 +124,22 @@ func publicRestrictedModel(model map[string]any) map[string]any {
 
 func publicRuntimeModel(model map[string]any) map[string]any {
 	enabled, set := model["enabled"]
-	return map[string]any{"id": modelString(model, "id"), "modelId": modelString(model, "modelId"),
+	item := map[string]any{"id": modelString(model, "id"), "modelId": modelString(model, "modelId"),
 		"displayName": modelString(model, "displayName"), "kind": modelString(model, "kind"),
 		"available": model["available"] == true || managedModelAvailable(model), "enabled": !set || normalizedModelEnabled(enabled)}
+	setVideoExecutionAvailability(item, model)
+	return item
+}
+
+func setVideoExecutionAvailability(result, model map[string]any) {
+	reason := videoExecutionUnavailableReason(model)
+	if reason == "" && model["unavailableReason"] == "execution_adapter_unavailable" {
+		reason = "execution_adapter_unavailable"
+	}
+	if reason != "" {
+		result["available"] = false
+		result["unavailableReason"] = reason
+	}
 }
 
 func allowedInputFields(input map[string]any, fields ...string) bool {
@@ -188,7 +201,8 @@ func containsConfigField(input any, included func(string) bool) bool {
 
 func isManagedModelField(key string) bool {
 	switch apiConfigField(key) {
-	case "modelcatalog", "modelcatalogversion", "modelcatalogsecretversion", "modelcataloglegacyscrubpending", "modelcataloglegacyscrubdone", "videoproviders", "videoproviderlegacymigrated", "credentialref":
+	case "modelcatalog", "modelcatalogversion", "modelcatalogsecretversion", "modelcataloglegacyscrubpending", "modelcataloglegacyscrubdone",
+		"modelcataloglegacymigrationversion", "modelcataloglegacyscrubentries", "modelcataloglegacyscrubentrydone", "videoproviders", "videoproviderlegacymigrated", "credentialref":
 		return true
 	}
 	return false
@@ -211,8 +225,8 @@ func redactAPIConfig(v any) any {
 		for key, item := range value {
 			_, boolValue := item.(bool)
 			configuredFlag := boolValue && strings.Contains(apiConfigField(key), "hasapikey")
-			if (!apiSecretField(key) || configuredFlag) && key != "modelCatalogSecretVersion" && key != "modelCatalogLegacyScrubPending" &&
-				key != "modelCatalogLegacyScrubDone" && key != "videoProviders" && key != "videoProviderLegacyMigrated" {
+			if (!apiSecretField(key) || configuredFlag) && key != "modelCatalogSecretVersion" && !strings.HasPrefix(key, "modelCatalogLegacy") &&
+				key != "videoProviders" && key != "videoProviderLegacyMigrated" {
 				out[key] = redactAPIConfig(item)
 			}
 		}
@@ -280,7 +294,7 @@ func compatibilityModels(value any, access apiConfigAccess) []map[string]any {
 			result = append(result, publicManagedModel(model))
 		case access.allowed && isManagedYZCMModel(model):
 			result = append(result, publicRestrictedModel(model))
-		case access.identity.Subject.Role == accountcenter.RoleMember && (model["available"] == true || managedModelAvailable(model)):
+		case access.identity.Subject.Role == accountcenter.RoleMember && (model["available"] == true || managedModelAvailable(model) || videoExecutionUnavailableReason(model) != ""):
 			result = append(result, publicRuntimeModel(model))
 		}
 	}
@@ -296,7 +310,9 @@ func redactCompatibilityConfig(value any, access apiConfigAccess) any {
 			case "modelcatalog":
 				out[key] = compatibilityModels(child, access)
 				continue
-			case "modelcatalogsecretversion", "modelcataloglegacyscrubpending", "modelcataloglegacyscrubdone", "videoproviders", "videoproviderlegacymigrated", "importedsensitiverepairbackup", "importedknowledgerepairbackup":
+			case "modelcatalogsecretversion", "modelcataloglegacyscrubpending", "modelcataloglegacyscrubdone",
+				"modelcataloglegacymigrationversion", "modelcataloglegacyscrubentries", "modelcataloglegacyscrubentrydone",
+				"videoproviders", "videoproviderlegacymigrated", "importedsensitiverepairbackup", "importedknowledgerepairbackup":
 				continue
 			case "baseurl", "endpoint", "apiformat", "provider", "tasksendpoint", "resultendpoint", "requesttemplate", "responsemapping", "voiceclonerequesttemplate", "voicecloneresponsemapping", "adapterkind", "credentialref", "parameterschema", "workflowid", "routing", "customchannels", "apiintegrations":
 				if !access.custom {

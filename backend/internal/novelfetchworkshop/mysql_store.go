@@ -271,6 +271,7 @@ func (s *MySQLStore) GetWorkflowConfig(ctx context.Context, owner string) (map[s
 	var raw []byte
 	err := s.DB.QueryRowContext(ctx, `SELECT JSON_REMOVE(settings_json,
  '$.modelCatalog', '$.settings.modelCatalog', '$.appConfig.modelCatalog', '$.settings.appConfig.modelCatalog', '$.modelCatalogSecretVersion', '$.modelCatalogLegacyScrubPending',
+ '$.modelCatalogLegacyScrubEntries', '$.modelCatalogLegacyMigrationVersion',
  '$.videoProviders', '$.settings.videoProviders', '$.appConfig.videoProviders', '$.settings.appConfig.videoProviders')
 FROM novel_fetch_workshop_configs WHERE owner_username=?`, owner).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -315,7 +316,9 @@ func (s *MySQLStore) ReadBoundModelConfig(ctx context.Context, owner string) (ma
 
 func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[string]any) (map[string]any, error) {
 	currentVersion := settings[ModelSecretVersionKey] == ModelSecretVersion
-	if !currentVersion || settings[legacyVideoMigratedKey] != true || hasLegacyVideoProviders(settings) {
+	checkFile := s.LegacyConfigDir != "" && settings[legacyModelMigrationVersionKey] != legacyModelMigrationVersion
+	needsDBMigration := !currentVersion || hasLegacyVideoProviders(settings)
+	if needsDBMigration || checkFile {
 		path, err := s.legacyModelFilePath(owner)
 		if err != nil {
 			return nil, err
@@ -327,6 +330,7 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 		if legacy == nil && ModelConfigText(settings, modelLegacyScrubPendingKey) != "" {
 			return nil, fmt.Errorf("legacy model file is unavailable during credential cleanup")
 		}
+		fileChecked := legacy != nil
 		rows := legacyCatalogRows(settings)
 		hasCatalog := hasLegacyVideoProviders(settings)
 		for _, container := range legacyCatalogContainers(settings) {
@@ -335,31 +339,27 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 				break
 			}
 		}
-		if !hasCatalog && !currentVersion && settings[ModelSecretVersionKey] != "bound-v2" {
-			for _, item := range legacyCatalogRows(legacy) {
-				if model, ok := item.(map[string]any); ok {
-					copy := cloneMap(model)
-					delete(copy, "credential")
-					delete(copy, "apiKey")
-					rows = append(rows, copy)
-				}
+		if (needsDBMigration || fileChecked) && (currentVersion || hasCatalog || len(rows) > 0 || len(legacy) > 0 || settings[legacyVideoMigratedKey] == true) {
+			previouslyBound := currentVersion || settings[ModelSecretVersionKey] == "bound-v2"
+			if !previouslyBound && len(rows) > 0 {
+				mergeLegacyModelKeys(rows, legacyCatalogRows(legacy))
 			}
-		}
-		if !currentVersion && settings[ModelSecretVersionKey] != "bound-v2" && len(rows) > 0 {
-			mergeLegacyModelKeys(rows, legacyCatalogRows(legacy))
-		}
-		digest := legacyCatalogSecretDigest(legacy)
-		if currentVersion || hasCatalog || len(rows) > 0 || len(legacy) > 0 {
-			settings["modelCatalog"] = normalizeLegacyModelRows(rows)
+			rows, entries := prepareLegacyModelEntries(rows, legacy, previouslyBound)
+			digest := legacyCatalogSecretDigest(legacy)
+			settings["modelCatalog"] = rows
 			if digest != "" {
 				pending := ModelConfigText(settings, modelLegacyScrubPendingKey)
 				if pending != "" && pending != digest && pending != priorLegacyModelDigest(legacy) {
 					return nil, fmt.Errorf("legacy model file changed before credential cleanup")
 				}
 				settings[modelLegacyScrubPendingKey] = digest
+				settings[legacyModelScrubEntriesKey] = entries
 			}
 			settings[legacyVideoMigratedKey] = true
-			if err := s.PutConfig(ctx, owner, settings); err != nil {
+			if fileChecked {
+				settings[legacyModelMigrationVersionKey] = legacyModelMigrationVersion
+			}
+			if err := s.putConfig(ctx, owner, settings, true); err != nil {
 				return nil, err
 			}
 			return s.GetConfig(ctx, owner)
@@ -368,16 +368,21 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 	if err := s.ModelSecrets.OpenModelConfig(owner, settings); err != nil {
 		return nil, err
 	}
-	if digest := ModelConfigText(settings, modelLegacyScrubPendingKey); digest != "" {
-		if err := s.scrubLegacyModelFile(ctx, owner, digest); err != nil {
+	if ModelConfigText(settings, modelLegacyScrubPendingKey) != "" {
+		if err := s.scrubLegacyModelFile(ctx, owner, settings); err != nil {
 			return nil, fmt.Errorf("clean legacy model configuration: %w", err)
 		}
 		delete(settings, modelLegacyScrubPendingKey)
+		delete(settings, legacyModelScrubEntriesKey)
 	}
 	return EnsureWorkshopDefaults(settings), nil
 }
 
 func (s *MySQLStore) PutConfig(ctx context.Context, owner string, settings map[string]any) error {
+	return s.putConfig(ctx, owner, settings, false)
+}
+
+func (s *MySQLStore) putConfig(ctx context.Context, owner string, settings map[string]any, migrating bool) error {
 	if settings == nil {
 		settings = map[string]any{}
 	}
@@ -408,8 +413,22 @@ func (s *MySQLStore) PutConfig(ctx context.Context, owner string, settings map[s
 	}
 	updated := cloneMap(settings)
 	if s.ModelSecrets != nil {
-		if pending := ModelConfigText(previous, modelLegacyScrubPendingKey); pending != "" && (previous[legacyVideoMigratedKey] == true || ModelConfigText(updated, modelLegacyScrubPendingKey) == "") {
+		if !migrating && (hasLegacyVideoProviders(previous) || ModelConfigText(previous, modelLegacyScrubPendingKey) != "") {
+			return ErrConfigConflict
+		}
+		if !migrating {
+			for _, key := range []string{modelLegacyScrubPendingKey, legacyModelScrubEntriesKey, legacyModelMigrationVersionKey} {
+				delete(updated, key)
+			}
+		}
+		if pending := ModelConfigText(previous, modelLegacyScrubPendingKey); pending != "" && (previous[legacyModelMigrationVersionKey] == legacyModelMigrationVersion || ModelConfigText(updated, modelLegacyScrubPendingKey) == "") {
 			updated[modelLegacyScrubPendingKey] = pending
+			if entries, ok := previous[legacyModelScrubEntriesKey]; ok {
+				updated[legacyModelScrubEntriesKey] = entries
+			}
+		}
+		if previous[legacyModelMigrationVersionKey] == legacyModelMigrationVersion {
+			updated[legacyModelMigrationVersionKey] = legacyModelMigrationVersion
 		}
 		for _, nested := range legacyCatalogContainers(updated)[1:] {
 			delete(nested, "modelCatalog")

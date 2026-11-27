@@ -100,7 +100,7 @@ func writeVideoConfigAlias(w http.ResponseWriter, r *http.Request, accounts acco
 	}
 	if isManagedYZCMModel(row) {
 		view["runtimeAvailable"] = false
-		view["runtimeReason"] = "adapter_unavailable"
+		view["runtimeReason"] = videoExecutionUnavailableReason(row)
 	}
 	writeJSON(w, http.StatusOK, view)
 }

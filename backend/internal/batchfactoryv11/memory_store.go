@@ -88,6 +88,10 @@ func productionRequestKey(owner, batchID, bookID, requestID string) string {
 func cloneProductionJob(value ProductionJob) ProductionJob {
 	value.Tasks = append([]ProductionTask(nil), value.Tasks...)
 	for index := range value.Tasks {
+		if binding := value.Tasks[index].Binding; binding != nil {
+			copy := *binding
+			value.Tasks[index].Binding = &copy
+		}
 		value.Tasks[index].ReferenceImageURLs = append([]string(nil), value.Tasks[index].ReferenceImageURLs...)
 		value.Tasks[index].DowngradedAssetIDs = append([]string(nil), value.Tasks[index].DowngradedAssetIDs...)
 		value.Tasks[index].CompileTrace = cloneH3CompileTrace(value.Tasks[index].CompileTrace)
@@ -190,6 +194,7 @@ func (s *MemoryStore) UpdateProductionTask(_ context.Context, owner, jobID, task
 	found := false
 	for index := range job.Tasks {
 		if job.Tasks[index].ID == taskID {
+			task.Binding = job.Tasks[index].Binding
 			job.Tasks[index] = task
 			found = true
 			break

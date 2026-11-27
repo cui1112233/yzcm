@@ -583,7 +583,7 @@ func shuihuoTextModelConfigured(config map[string]any) bool {
 // disagree with the admin model page.
 func shuihuoModelKindConfigured(config map[string]any, kind string) bool {
 	for _, model := range shuihuoCollection(config, "modelCatalog", nil) {
-		if !strings.EqualFold(modelString(model, "kind"), kind) || model["enabled"] != true {
+		if !strings.EqualFold(modelString(model, "kind"), kind) || model["enabled"] != true || videoExecutionUnavailableReason(model) != "" {
 			continue
 		}
 		if modelString(model, "modelId") == "" {
@@ -2996,6 +2996,10 @@ func copySafeShuihuoModels(models []map[string]any, fields []string, includeSecr
 			copy["credentialConfigured"] = credentialConfigured
 			endpointConfigured := modelString(model, "endpoint") != "" || modelString(model, "baseUrl") != "" || strings.EqualFold(modelString(model, "adapterKind"), "local_executor_video")
 			copy["providerConfigured"] = modelString(model, "modelId") != "" && endpointConfigured
+			if model["kind"] == "video" {
+				copy["available"] = managedModelAvailable(model)
+				setVideoExecutionAvailability(copy, model)
+			}
 		}
 		result = append(result, copy)
 	}
