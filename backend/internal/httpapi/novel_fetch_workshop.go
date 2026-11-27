@@ -2892,7 +2892,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			now := time.Now().UTC().Format(time.RFC3339Nano)
 			registry.put(identity.Username, job.ID, map[string]any{"id": job.ID, "batch_id": job.BatchID, "status": "queued", "queue_state": "queued", "started_at": now, "updated_at": now, "steps": []any{}, "progress": []any{}})
 		}
-		status, err := novelFetchAutomationStatus(req.Context(), store, registry, identity.Username)
+		status, err := novelFetchAutomationStatus(req.Context(), store, registry, identity.Username, queue)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取全自动状态失败"})
 			return
@@ -2905,7 +2905,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存全自动状态失败"})
 			return
 		}
-		status, err := novelFetchAutomationStatus(req.Context(), store, registry, identity.Username)
+		status, err := novelFetchAutomationStatus(req.Context(), store, registry, identity.Username, queue)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取全自动状态失败"})
 			return
@@ -3328,7 +3328,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			}
 		}
 		for i, job := range jobs {
-			jobs[i] = manualWorkshopJobView(req.Context(), store, identity.Username, job)
+			jobs[i] = verifiedWorkshopJobView(req.Context(), store, queue, identity.Username, job)
 		}
 		latest := map[string]any{}
 		if len(jobs) > 0 {
@@ -3354,7 +3354,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 				return
 			}
 		}
-		writeJSON(w, http.StatusOK, manualWorkshopJobView(req.Context(), store, identity.Username, job))
+		writeJSON(w, http.StatusOK, verifiedWorkshopJobView(req.Context(), store, queue, identity.Username, job))
 	})
 
 	mux.HandleFunc("GET /api/novel-fetch-workshop/runs", func(w http.ResponseWriter, req *http.Request) {
@@ -3402,7 +3402,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			BatchID: strings.TrimSpace(query.Get("batch_id")),
 			Date:    strings.TrimSpace(query.Get("date")),
 		}
-		status, err := novelFetchAutomationStatusScoped(req.Context(), store, registry, identity.Username, scope)
+		status, err := novelFetchAutomationStatusScoped(req.Context(), store, registry, identity.Username, scope, queue)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取任务队列失败"})
 			return

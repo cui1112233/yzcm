@@ -911,11 +911,11 @@ func novelFetchScopedRunMatches(run novelfetchworkshop.RunRecord, scope novelFet
 	return true
 }
 
-func novelFetchAutomationStatus(ctx context.Context, store novelfetchworkshop.Store, registry *workshopProcessRegistry, owner string) (map[string]any, error) {
-	return novelFetchAutomationStatusScoped(ctx, store, registry, owner, novelFetchQueueScope{})
+func novelFetchAutomationStatus(ctx context.Context, store novelfetchworkshop.Store, registry *workshopProcessRegistry, owner string, queues ...novelfetchworkshop.ProcessQueue) (map[string]any, error) {
+	return novelFetchAutomationStatusScoped(ctx, store, registry, owner, novelFetchQueueScope{}, queues...)
 }
 
-func novelFetchAutomationStatusScoped(ctx context.Context, store novelfetchworkshop.Store, registry *workshopProcessRegistry, owner string, scope novelFetchQueueScope) (map[string]any, error) {
+func novelFetchAutomationStatusScoped(ctx context.Context, store novelfetchworkshop.Store, registry *workshopProcessRegistry, owner string, scope novelFetchQueueScope, queues ...novelfetchworkshop.ProcessQueue) (map[string]any, error) {
 	var settings map[string]any
 	var documents []novelfetchworkshop.Document
 	var err error
@@ -992,6 +992,9 @@ func novelFetchAutomationStatusScoped(ctx context.Context, store novelfetchworks
 				break
 			}
 		}
+	}
+	if len(queues) > 0 {
+		latest = verifiedWorkshopJobView(ctx, store, queues[0], owner, latest)
 	}
 	activeJobID := ""
 	status := strings.ToLower(firstText(latest["status"], latest["queue_state"]))

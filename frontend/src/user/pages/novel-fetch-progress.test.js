@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { novelFetchProgressLines } from './novel-fetch-progress.js';
+import { novelFetchLatestJob, novelFetchProgressLines } from './novel-fetch-progress.js';
 
 test('formats live progress with time, book name, id and message', () => {
   const lines = novelFetchProgressLines({
@@ -19,6 +19,27 @@ test('formats live progress with time, book name, id and message', () => {
 test('falls back to job state when no progress entries exist', () => {
   assert.deepEqual(novelFetchProgressLines({ status: 'queued' }), ['任务已进入队列，等待执行。']);
   assert.deepEqual(novelFetchProgressLines(null), ['暂无正在处理的任务。']);
+});
+
+test('shows queue verification failures instead of stale running progress', () => {
+  const stale = { status: 'failed', status_reason: 'queue_missing', error: '原队列任务已不存在，请手动重试。', progress: [{ message: '正在处理旧任务' }] };
+  assert.deepEqual(novelFetchProgressLines(stale), ['原队列任务已不存在，请手动重试。']);
+  assert.deepEqual(novelFetchProgressLines({ status: 'queued', queue_check_error: '队列状态暂时无法核对，请稍后刷新。' }), ['队列状态暂时无法核对，请稍后刷新。']);
+});
+
+test('an empty latest response clears the previous live job', () => {
+  assert.equal(novelFetchLatestJob({ latest: {}, jobs: [] }), null);
+  assert.equal(novelFetchLatestJob({}), null);
+  assert.deepEqual(novelFetchLatestJob({ latest: { id: 'live', status: 'running' } }), { id: 'live', status: 'running' });
+});
+
+test('older interrupted history never hides the latest live progress', () => {
+  const lines = novelFetchProgressLines([
+    { id: 'live', status: 'running', progress: [{ message: '当前书籍正在处理' }] },
+    { id: 'old', status: 'failed', status_reason: 'queue_missing', error: '旧任务已中断' }
+  ]);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /当前书籍正在处理/);
 });
 
 test('aggregates live logs for every book in the current batch', () => {

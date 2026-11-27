@@ -4,8 +4,17 @@ function progressTime(value) {
   return date.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+export function novelFetchLatestJob(data = {}) {
+  const latest = data?.latest;
+  return latest && typeof latest === 'object' && Object.keys(latest).length ? latest : null;
+}
+
 export function novelFetchProgressLines(jobOrJobs, taskRows = []) {
   const jobs = (Array.isArray(jobOrJobs) ? jobOrJobs : [jobOrJobs]).filter(Boolean);
+  const latestJob = jobs[0];
+  if (latestJob?.status_reason === 'queue_missing' || latestJob?.queue_check_error) {
+    return [String(latestJob.queue_check_error || latestJob.error)];
+  }
   const entries = jobs.flatMap(job => Array.isArray(job?.progress) ? job.progress : (Array.isArray(job?.steps) ? job.steps : []));
   if (Array.isArray(taskRows)) {
     for (const row of taskRows) {
