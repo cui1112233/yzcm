@@ -69,7 +69,8 @@ func TestYZCMModelCatalogRouteAuthAndValidation(t *testing.T) {
 func TestYZCMModelCatalogHTTPMySQLReadsOnlySavedRows(t *testing.T) {
 	ctx := context.Background()
 	db, _ := novelAttributionDatabase(t)
-	if err := storage.RunMigrations(ctx, db, storage.YZCMModelCatalogMigrations()); err != nil {
+	migrations := append(storage.YZCMModelCatalogMigrations(), storage.YZCMModelCatalogPrecisionMigration())
+	if err := storage.RunMigrations(ctx, db, migrations); err != nil {
 		t.Fatal(err)
 	}
 	store := &yzcmmodels.Store{DB: db}

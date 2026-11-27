@@ -48,3 +48,14 @@ func TestYZCMModelCatalogSnapshotRequiresValidCompleteRecords(t *testing.T) {
 		t.Fatal("accepted a catalog without valid source time")
 	}
 }
+
+func TestYZCMModelCatalogValidatesUnroundedSourceTime(t *testing.T) {
+	base := time.Date(2026, 10, 1, 5, 4, 37, 0, time.UTC)
+	snapshot := Snapshot{Complete: true, Models: []Model{}, SourceUpdatedAt: base.Add(900 * time.Nanosecond)}
+	if err := validateSnapshot(snapshot, base.Add(100*time.Nanosecond)); err == nil {
+		t.Fatal("a future instant in the same microsecond was accepted")
+	}
+	if err := validateSnapshot(snapshot, snapshot.SourceUpdatedAt); err != nil {
+		t.Fatalf("a source timestamp equal to observation time was rejected: %v", err)
+	}
+}

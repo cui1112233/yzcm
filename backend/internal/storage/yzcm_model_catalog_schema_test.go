@@ -17,14 +17,15 @@ func TestYZCMModelCatalogMigrationRegistered(t *testing.T) {
 	if len(migrations) != 1 || migrations[0].Version != 8800413 {
 		t.Fatalf("unexpected YZCM catalog migration: %+v", migrations)
 	}
-	count := 0
-	for _, migration := range AppMigrations() {
-		if migration.Version == 8800413 {
-			count++
-		}
+	if got := ChecksumFor(migrations[0]); got != "de5293ca7f66778f84661a47f4087bcb542be27c3601e1ef8b9a238e6e3cabf4" {
+		t.Fatalf("migration 8800413 checksum changed: %s", got)
 	}
-	if count != 1 {
-		t.Fatalf("migration 8800413 registered %d times", count)
+	counts := map[int]int{}
+	for _, migration := range AppMigrations() {
+		counts[migration.Version]++
+	}
+	if counts[8800413] != 1 || counts[8800414] != 1 || YZCMModelCatalogPrecisionMigration().Version != 8800414 {
+		t.Fatalf("catalog migrations registered %d/%d times", counts[8800413], counts[8800414])
 	}
 }
 
@@ -57,10 +58,82 @@ func (f yzcmTestSource) Fetch(ctx context.Context) (yzcmmodels.Snapshot, error) 
 func yzcmCatalogTestStore(t *testing.T) *yzcmmodels.Store {
 	t.Helper()
 	db := energyMigrationTestDatabase(t)
-	if err := RunMigrations(context.Background(), db, YZCMModelCatalogMigrations()); err != nil {
+	if err := RunMigrations(context.Background(), db, append(YZCMModelCatalogMigrations(), YZCMModelCatalogPrecisionMigration())); err != nil {
 		t.Fatal(err)
 	}
 	return &yzcmmodels.Store{DB: db}
+}
+
+func TestYZCMModelCatalogPrecisionMigrationMySQLResumeAndLegacy(t *testing.T) {
+	for _, phase := range []string{"fresh", "alter committed", "head table committed", "backfill committed", "head seeded"} {
+		t.Run(phase, func(t *testing.T) {
+			db := energyMigrationTestDatabase(t)
+			ctx := context.Background()
+			if err := RunMigrations(ctx, db, YZCMModelCatalogMigrations()); err != nil {
+				t.Fatal(err)
+			}
+			legacyAt := time.Date(2026, 10, 1, 5, 4, 37, 871000, time.UTC)
+			exec := func(statement string, args ...any) sql.Result {
+				t.Helper()
+				result, err := db.ExecContext(ctx, statement, args...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return result
+			}
+			exec(`INSERT INTO yzcm_model_sync_runs (id,provenance,status,started_at_us,finished_at_us,source_updated_at_us,model_count)
+VALUES (1,'yzcm_relay','succeeded',?,?,?,1),(2,'yzcm_relay','succeeded',?,?,?,1)`, legacyAt.UnixMicro(), legacyAt.UnixMicro(), legacyAt.UnixMicro(),
+				legacyAt.UnixMicro(), legacyAt.UnixMicro(), legacyAt.UnixMicro())
+			exec(`INSERT INTO yzcm_model_catalog (sync_run_id,kind,model_id,display_name,adapted,allowed,availability_reason)
+VALUES (1,'text','legacy-shadow','旧候选',TRUE,TRUE,'adapted_and_allowed'), (2,'text','legacy-active','当前目录',TRUE,TRUE,'adapted_and_allowed')`)
+			migration := YZCMModelCatalogPrecisionMigration()
+			steps := map[string]int{"fresh": 0, "alter committed": 1, "head table committed": 2, "backfill committed": 3, "head seeded": 4}[phase]
+			for _, statement := range migration.SQL[:steps] {
+				exec(statement)
+			}
+			for range 2 {
+				if err := RunMigrations(ctx, db, []Migration{migration}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var checksum string
+			if err := db.QueryRowContext(ctx, `SELECT checksum FROM schema_migrations WHERE version=8800414`).Scan(&checksum); err != nil || checksum != ChecksumFor(migration) {
+				t.Fatalf("invalid resumed migration checksum: %q %v", checksum, err)
+			}
+			var backfilled int
+			if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM yzcm_model_sync_runs WHERE source_updated_at_ns=? AND snapshot_digest IS NULL`, legacyAt.UnixMicro()*1000).Scan(&backfilled); err != nil || backfilled != 2 {
+				t.Fatalf("legacy timestamp backfill: %d %v", backfilled, err)
+			}
+			store := &yzcmmodels.Store{DB: db}
+			assertLegacy := func() {
+				t.Helper()
+				page, err := store.Search(ctx, yzcmmodels.Query{})
+				if err != nil || page.SnapshotID != 2 || page.SourceUpdatedAt == nil || !page.SourceUpdatedAt.Equal(legacyAt) ||
+					len(page.Models) != 1 || page.Models[0].ModelID != "legacy-active" {
+					t.Fatalf("legacy directory changed: %+v %v", page, err)
+				}
+			}
+			assertLegacy()
+			candidate := yzcmmodels.Snapshot{Complete: true, SourceUpdatedAt: legacyAt.Add(900 * time.Nanosecond), Models: []yzcmmodels.Model{
+				{ModelID: "legacy-active", DisplayName: "当前目录", Kind: "text", Adapted: true, Allowed: true},
+			}}
+			source := yzcmTestSource(func(context.Context) (yzcmmodels.Snapshot, error) { return candidate, nil })
+			if run, err := store.Sync(ctx, source); err != nil || run.Status != "idempotent" {
+				t.Fatalf("same legacy payload was not idempotent: %+v %v", run, err)
+			}
+			candidate.Models[0].Allowed = false
+			if run, err := store.Sync(ctx, source); err == nil || run.FailureCode != "source_time_conflict" {
+				t.Fatalf("uncertain legacy microsecond overrode saved data: %+v %v", run, err)
+			}
+			assertLegacy()
+			candidate.SourceUpdatedAt = legacyAt.Add(time.Microsecond)
+			accepted := mustSyncYZCMCatalog(t, store, candidate)
+			page, err := store.Search(ctx, yzcmmodels.Query{})
+			if err != nil || page.SnapshotID != accepted.ID || len(page.Models) != 0 {
+				t.Fatalf("provably newer source could not remove old selection: %+v %v", page, err)
+			}
+		})
+	}
 }
 
 func mustSyncYZCMCatalog(t *testing.T, store *yzcmmodels.Store, snapshot yzcmmodels.Snapshot) yzcmmodels.SyncRun {
@@ -70,6 +143,122 @@ func mustSyncYZCMCatalog(t *testing.T, store *yzcmmodels.Store, snapshot yzcmmod
 		t.Fatalf("sync: %+v %v", run, err)
 	}
 	return run
+}
+
+func TestYZCMModelCatalogMySQLNanosecondOrderingAndTies(t *testing.T) {
+	base := time.Date(2026, 10, 1, 5, 4, 37, 0, time.UTC)
+	olderAt, newerAt := base.Add(100*time.Nanosecond), base.Add(900*time.Nanosecond)
+	model := func(id string) yzcmmodels.Model {
+		return yzcmmodels.Model{ModelID: id, DisplayName: id, Kind: "text", Adapted: true, Allowed: true}
+	}
+	older := yzcmmodels.Snapshot{Complete: true, SourceUpdatedAt: olderAt, Models: []yzcmmodels.Model{model("older")}}
+	newer := yzcmmodels.Snapshot{Complete: true, SourceUpdatedAt: newerAt, Models: []yzcmmodels.Model{model("newer"), model("second")}}
+	sync := func(t *testing.T, store *yzcmmodels.Store, snapshot yzcmmodels.Snapshot, status, failure string) yzcmmodels.SyncRun {
+		t.Helper()
+		run, err := store.Sync(context.Background(), yzcmTestSource(func(context.Context) (yzcmmodels.Snapshot, error) { return snapshot, nil }))
+		if run.Status != status || run.FailureCode != failure || (failure != "") != (err != nil) || run.SourceUpdatedAt == nil || !run.SourceUpdatedAt.Equal(snapshot.SourceUpdatedAt) {
+			t.Fatalf("want %s/%s at %s, got %+v %v", status, failure, snapshot.SourceUpdatedAt, run, err)
+		}
+		return run
+	}
+	assertNewer := func(t *testing.T, store *yzcmmodels.Store, id uint64) {
+		t.Helper()
+		fresh := &yzcmmodels.Store{DB: store.DB}
+		page, err := fresh.Search(context.Background(), yzcmmodels.Query{})
+		if err != nil || page.SnapshotID != id || len(page.Models) != 2 || page.Models[0].ModelID != "newer" ||
+			!page.SourceUpdatedAt.Equal(newerAt) || !page.Models[0].SourceUpdatedAt.Equal(newerAt) {
+			t.Fatalf("newest exact snapshot was lost: %+v %v", page, err)
+		}
+	}
+	t.Run("new arrives first", func(t *testing.T) {
+		store := yzcmCatalogTestStore(t)
+		first := sync(t, store, newer, "succeeded", "")
+		ignored := sync(t, store, older, "ignored", "")
+		var stamp int64
+		var reason string
+		if err := store.DB.QueryRow(`SELECT source_updated_at_ns,disposition FROM yzcm_model_sync_runs WHERE id=?`, ignored.ID).Scan(&stamp, &reason); err != nil || stamp != olderAt.UnixNano() || reason != "older_source_time" {
+			t.Fatalf("ignored run lost precise source time or reason: %d %q %v", stamp, reason, err)
+		}
+		assertNewer(t, store, first.ID)
+	})
+	t.Run("old arrives first", func(t *testing.T) {
+		store := yzcmCatalogTestStore(t)
+		sync(t, store, older, "succeeded", "")
+		second := sync(t, store, newer, "succeeded", "")
+		assertNewer(t, store, second.ID)
+	})
+	t.Run("equal source time", func(t *testing.T) {
+		store := yzcmCatalogTestStore(t)
+		first := sync(t, store, newer, "succeeded", "")
+		same := newer
+		same.Models = []yzcmmodels.Model{newer.Models[1], newer.Models[0]}
+		repeated := sync(t, store, same, "idempotent", "")
+		changed := newer
+		changed.Models = append([]yzcmmodels.Model(nil), newer.Models...)
+		changed.Models[0].Allowed = false
+		conflicting := sync(t, store, changed, "failed", "source_time_conflict")
+		var duplicateRows int
+		if err := store.DB.QueryRow(`SELECT COUNT(*) FROM yzcm_model_catalog WHERE sync_run_id IN (?,?)`, repeated.ID, conflicting.ID).Scan(&duplicateRows); err != nil || duplicateRows != 0 {
+			t.Fatalf("repeated or conflicting run wrote catalog rows: %d %v", duplicateRows, err)
+		}
+		assertNewer(t, store, first.ID)
+	})
+	t.Run("concurrent equal source time", func(t *testing.T) {
+		store := yzcmCatalogTestStore(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		ready, release := make(chan struct{}, 2), make(chan struct{})
+		type attempt struct {
+			run yzcmmodels.SyncRun
+			err error
+		}
+		results := make(chan attempt, 2)
+		for _, id := range []string{"same-instant-a", "same-instant-b"} {
+			go func(id string) {
+				other := &yzcmmodels.Store{DB: store.DB}
+				run, err := other.Sync(ctx, yzcmTestSource(func(ctx context.Context) (yzcmmodels.Snapshot, error) {
+					ready <- struct{}{}
+					select {
+					case <-release:
+						return yzcmmodels.Snapshot{Complete: true, SourceUpdatedAt: newerAt, Models: []yzcmmodels.Model{model(id)}}, nil
+					case <-ctx.Done():
+						return yzcmmodels.Snapshot{}, ctx.Err()
+					}
+				}))
+				results <- attempt{run, err}
+			}(id)
+		}
+		for range 2 {
+			select {
+			case <-ready:
+			case got := <-results:
+				t.Fatalf("sync ended before reaching concurrent source: %+v %v", got.run, got.err)
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+		}
+		close(release)
+		var winner uint64
+		conflicts := 0
+		for range 2 {
+			select {
+			case result := <-results:
+				if result.err == nil && result.run.Status == "succeeded" {
+					winner = result.run.ID
+				} else if errors.Is(result.err, yzcmmodels.ErrSourceTimeConflict) && result.run.Status == "failed" {
+					conflicts++
+				} else {
+					t.Fatalf("unexpected concurrent outcome: %+v %v", result.run, result.err)
+				}
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+		}
+		page, err := store.Search(ctx, yzcmmodels.Query{})
+		if err != nil || winner == 0 || conflicts != 1 || page.SnapshotID != winner || len(page.Models) != 1 {
+			t.Fatalf("concurrent tie was not serialized: winner=%d conflicts=%d page=%+v error=%v", winner, conflicts, page, err)
+		}
+	})
 }
 
 func TestYZCMModelCatalogMySQLSearchAndLastGood(t *testing.T) {
@@ -165,6 +354,7 @@ func TestYZCMModelCatalogMySQLConcurrentSyncAndRollback(t *testing.T) {
 	store := yzcmCatalogTestStore(t)
 	ctx := context.Background()
 	tick := time.Now().Add(-time.Minute).UTC().Truncate(time.Microsecond)
+	olderAt, newerAt := tick.Add(100*time.Nanosecond), tick.Add(900*time.Nanosecond)
 	snapshot := func(id string, at time.Time) yzcmmodels.Snapshot {
 		return yzcmmodels.Snapshot{Complete: true, SourceUpdatedAt: at, Models: []yzcmmodels.Model{{ModelID: id, DisplayName: id, Kind: "text", Allowed: true, Adapted: true}}}
 	}
@@ -183,7 +373,7 @@ func TestYZCMModelCatalogMySQLConcurrentSyncAndRollback(t *testing.T) {
 		_, err := otherStore.Sync(ctx, yzcmTestSource(func(context.Context) (yzcmmodels.Snapshot, error) {
 			close(slowStarted)
 			<-releaseSlow
-			return snapshot("older", tick), nil
+			return snapshot("older", olderAt), nil
 		}))
 		slowDone <- err
 	}()
@@ -197,13 +387,17 @@ func TestYZCMModelCatalogMySQLConcurrentSyncAndRollback(t *testing.T) {
 	if page, err := store.Search(ctx, yzcmmodels.Query{}); err != nil || page.SnapshotID != prior.ID || page.LastSync == nil || page.LastSync.Status != "running" {
 		t.Fatalf("a running sync replaced last-good: %+v %v", page, err)
 	}
-	latest := mustSyncYZCMCatalog(t, store, snapshot("newer", tick.Add(time.Second)))
+	latest := mustSyncYZCMCatalog(t, store, snapshot("newer", newerAt))
 	close(releaseSlow)
 	if err := <-slowDone; err != nil {
 		t.Fatal(err)
 	}
-	// An upstream timestamp older than the last-good remains stale even if its run started later.
-	_ = mustSyncYZCMCatalog(t, store, snapshot("late-obsolete", tick))
+	// An older upstream snapshot is ignored even if its run started later.
+	if run, err := store.Sync(ctx, yzcmTestSource(func(context.Context) (yzcmmodels.Snapshot, error) {
+		return snapshot("late-obsolete", olderAt), nil
+	})); err != nil || run.Status != "ignored" || run.Disposition != "older_source_time" {
+		t.Fatalf("older publication: %+v %v", run, err)
+	}
 	assertLatest := func() {
 		t.Helper()
 		page, err := store.Search(ctx, yzcmmodels.Query{})

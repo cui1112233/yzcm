@@ -24,6 +24,7 @@ var (
 	ErrInvalidQuery        = errors.New("invalid YZCM catalog query")
 	ErrCatalogChanged      = errors.New("YZCM catalog snapshot changed")
 	ErrSourceNotConfigured = errors.New("YZCM catalog sync source not configured")
+	ErrSourceTimeConflict  = errors.New("YZCM catalog source time has conflicting snapshots")
 )
 
 type Model struct {
@@ -72,6 +73,7 @@ type SyncRun struct {
 	SourceUpdatedAt *time.Time `json:"sourceUpdatedAt,omitempty"`
 	ModelCount      *int       `json:"modelCount,omitempty"`
 	FailureCode     string     `json:"failureCode,omitempty"`
+	Disposition     string     `json:"disposition,omitempty"`
 }
 
 type Page struct {
@@ -130,9 +132,9 @@ func availabilityReason(model Model) string {
 }
 
 func validateSnapshot(snapshot Snapshot, observedAt time.Time) error {
-	sourceAt := snapshot.SourceUpdatedAt.UTC().Truncate(time.Microsecond)
+	sourceAt := snapshot.SourceUpdatedAt.UTC()
 	if !snapshot.Complete || snapshot.Models == nil || len(snapshot.Models) > maxSnapshotModels ||
-		sourceAt.IsZero() || sourceAt.Year() < 1970 || sourceAt.After(observedAt) {
+		sourceAt.IsZero() || sourceAt.Before(time.Unix(0, 0)) || !sourceAt.Equal(time.Unix(0, sourceAt.UnixNano())) || sourceAt.After(observedAt) {
 		return errors.New("invalid YZCM catalog snapshot metadata")
 	}
 	type modelKey struct{ kind, id string }
@@ -148,9 +150,8 @@ func validateSnapshot(snapshot Snapshot, observedAt time.Time) error {
 	return nil
 }
 
-// Sync independently records each attempt and publishes rows and success in one
-// transaction. The last-good read is ordered by source time, then by attempt ID,
-// so a slower or older fetch cannot overwrite a newer snapshot.
+// Sync records each attempt. Publication compares the full source time against
+// the locked catalog head and atomically advances that head with the model rows.
 func (s *Store) Sync(ctx context.Context, source Source) (SyncRun, error) {
 	if source == nil {
 		return SyncRun{}, ErrSourceNotConfigured
@@ -174,17 +175,17 @@ func (s *Store) Sync(ctx context.Context, source Source) (SyncRun, error) {
 		// Provider errors may contain tokens or HTTP headers. Keep only the class.
 		return s.failSync(ctx, run, "source_error", errors.New("YZCM catalog source failed"))
 	}
-	if err := validateSnapshot(snapshot, nowUTC()); err != nil {
+	if err := validateSnapshot(snapshot, time.Now().UTC()); err != nil {
 		return s.failSync(ctx, run, "invalid_snapshot", err)
 	}
-	finished, err := s.publish(ctx, run.ID, snapshot)
+	completed, err := s.publish(ctx, run, snapshot)
 	if err != nil {
 		return s.failSync(ctx, run, "persistence_error", errors.New("could not publish YZCM catalog snapshot"))
 	}
-	sourceAt := time.UnixMicro(snapshot.SourceUpdatedAt.UnixMicro()).UTC()
-	count := len(snapshot.Models)
-	run.Status, run.FinishedAt, run.SourceUpdatedAt, run.ModelCount = "succeeded", &finished, &sourceAt, &count
-	return run, nil
+	if completed.FailureCode == "source_time_conflict" {
+		return completed, ErrSourceTimeConflict
+	}
+	return completed, nil
 }
 
 func nowUTC() time.Time { return time.Now().UTC().Truncate(time.Microsecond) }
@@ -208,38 +209,7 @@ SET status='failed', failure_code=?, finished_at_us=? WHERE id=? AND status='run
 	return run, cause
 }
 
-func (s *Store) publish(ctx context.Context, id uint64, snapshot Snapshot) (time.Time, error) {
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return time.Time{}, err
-	}
-	defer tx.Rollback()
-	insert, err := tx.PrepareContext(ctx, `INSERT INTO yzcm_model_catalog
-(sync_run_id, kind, model_id, display_name, adapted, allowed, availability_reason) VALUES (?,?,?,?,?,?,?)`)
-	if err != nil {
-		return time.Time{}, err
-	}
-	defer insert.Close()
-	for _, model := range snapshot.Models {
-		if _, err := insert.ExecContext(ctx, id, model.Kind, model.ModelID, model.DisplayName,
-			model.Adapted, model.Allowed, availabilityReason(model)); err != nil {
-			return time.Time{}, err
-		}
-	}
-	finished := nowUTC()
-	result, err := tx.ExecContext(ctx, `UPDATE yzcm_model_sync_runs
-SET status='succeeded', source_updated_at_us=?, finished_at_us=?, model_count=? WHERE id=? AND status='running'`,
-		snapshot.SourceUpdatedAt.UnixMicro(), finished.UnixMicro(), len(snapshot.Models), id)
-	if err != nil {
-		return time.Time{}, err
-	}
-	if count, err := result.RowsAffected(); err != nil || count != 1 {
-		return time.Time{}, errors.New("YZCM catalog sync run is no longer pending")
-	}
-	return finished, tx.Commit()
-}
-
-const runColumns = `id, status, provenance, started_at_us, finished_at_us, source_updated_at_us, model_count, failure_code`
+const runColumns = `id, status, provenance, started_at_us, finished_at_us, source_updated_at_ns, model_count, failure_code, disposition`
 
 func optionalTime(micros sql.NullInt64) *time.Time {
 	if !micros.Valid {
@@ -253,15 +223,20 @@ func readRun(row *sql.Row) (*SyncRun, error) {
 	var run SyncRun
 	var started int64
 	var finished, sourceAt, count sql.NullInt64
-	var reason sql.NullString
-	err := row.Scan(&run.ID, &run.Status, &run.Provenance, &started, &finished, &sourceAt, &count, &reason)
+	var reason, disposition sql.NullString
+	err := row.Scan(&run.ID, &run.Status, &run.Provenance, &started, &finished, &sourceAt, &count, &reason, &disposition)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	run.StartedAt, run.FinishedAt, run.SourceUpdatedAt, run.FailureCode = time.UnixMicro(started).UTC(), optionalTime(finished), optionalTime(sourceAt), reason.String
+	run.StartedAt, run.FinishedAt = time.UnixMicro(started).UTC(), optionalTime(finished)
+	run.FailureCode, run.Disposition = reason.String, disposition.String
+	if sourceAt.Valid {
+		at := time.Unix(0, sourceAt.Int64).UTC()
+		run.SourceUpdatedAt = &at
+	}
 	if count.Valid {
 		n := int(count.Int64)
 		run.ModelCount = &n
@@ -289,7 +264,7 @@ func (s *Store) Search(ctx context.Context, query Query) (Page, error) {
 		return Page{}, err
 	}
 	active, err := readRun(tx.QueryRowContext(ctx, `SELECT `+runColumns+` FROM yzcm_model_sync_runs
-WHERE status='succeeded' ORDER BY source_updated_at_us DESC, id DESC LIMIT 1`))
+WHERE id=(SELECT sync_run_id FROM yzcm_model_catalog_head WHERE slot=1) AND status='succeeded'`))
 	if err != nil {
 		return Page{}, err
 	}
