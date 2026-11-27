@@ -401,7 +401,7 @@ func TestV12RuntimeSummaryUsesConfiguredImageModel(t *testing.T) {
 	}}}); err != nil {
 		t.Fatal(err)
 	}
-	api := NewRouter(RouterOptions{BridgeSecret: "secret", Now: func() time.Time { return now }, Slice: 2, Store: store, NovelFetchStore: catalog})
+	api := NewRouter(RouterOptions{AccountCenterStore: activeModelTestAccounts("alice"), BridgeSecret: "secret", Now: func() time.Time { return now }, Slice: 2, Store: store, NovelFetchStore: catalog})
 	rec := signedJSONRequest(t, api, now, "alice", http.MethodGet, "/api/batch-factory/v12/batches/"+batch.ID+"/runtime-summary", nil)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"stage":"image","available":true`) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())

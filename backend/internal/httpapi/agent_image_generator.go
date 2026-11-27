@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/agentworkspace"
 	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/localartifact"
@@ -49,11 +50,16 @@ func agentLocalDoubaoImageModelForQuality(quality string) string {
 	}
 }
 
-func newAgentImageGenerator(store batchfactoryv11.Store, catalogStore novelfetchworkshop.Store, userConfig *UserConfigStore, executors *localexecutor.Service, files *localartifact.Store, assets agentworkspace.AssetStore, references agentworkspace.ReferenceURLProvider) AgentImageGenerator {
+func newAgentImageGenerator(store batchfactoryv11.Store, catalogStore novelfetchworkshop.Store, userConfig *UserConfigStore, executors *localexecutor.Service, files *localartifact.Store, assets agentworkspace.AssetStore, references agentworkspace.ReferenceURLProvider, accounts accountcenter.Store) AgentImageGenerator {
 	return func(ctx context.Context, owner string, input AgentImageGenerationInput) ([]string, int, error) {
 		ctx = imageRequestIdentity(ctx, owner, input.ProjectID)
 		// channel:/custom: 候选走 API 接口配置里的地址、Key 和模型名。
-		if target, matched, err := integrationChannelTargetFor(ctx, userConfig, owner, input.ModelID); matched {
+		if _, _, matched := splitIntegrationModelID(input.ModelID); matched {
+			modelOwner, err := ResolveAPIConfigOwner(ctx, accounts, owner)
+			if err != nil {
+				return nil, http.StatusForbidden, err
+			}
+			target, _, err := integrationChannelTargetFor(ctx, userConfig, modelOwner, input.ModelID)
 			if err != nil {
 				return nil, http.StatusUnprocessableEntity, err
 			}

@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -95,6 +97,122 @@ func TestAPIConfigPolicyMissingCenterFailsClosed(t *testing.T) {
 	}
 }
 
+func TestAPIConfigPolicyCustomKeysStayWithTheirModelTarget(t *testing.T) {
+	accounts := &authTestStore{account: auth.Account{Username: "founder", Active: true, IsOwner: true}}
+	h, _, _ := newImpersonationTestRouter(t, func(options *RouterOptions) {
+		options.AuthStore = accounts
+		options.Store = batchfactoryv11.NewMemoryStore()
+		options.UserConfigStore = NewUserConfigStore(t.TempDir())
+	})
+	request := func(method, path, body string, status int) {
+		t.Helper()
+		got := impersonationRequest(h, method, path, "founder", body, nil)
+		if got.Code != status {
+			t.Errorf("%s %s = %d, want %d", method, path, got.Code, status)
+		}
+	}
+	const path = "/api/config/models"
+	request("POST", path, `{"id":"new","kind":"audio","modelId":"test-audio","endpoint":"https://audio.example.test/v1","credentialRef":"invalid-configuration-field"}`, 403)
+	request("POST", path, `{"id":"audio","kind":"audio","modelId":"test-audio","endpoint":"https://audio.example.test/v1","credential":"fixture-key"}`, 201)
+	request("PATCH", path+"/audio", `{"endpoint":"https://audio.example.test/v2"}`, 403)
+	request("PATCH", path+"/audio", `{"endpoint":"https://audio.example.test/v2","credential":"fixture-new-key"}`, 200)
+	request("POST", "/api/shuihuo-production/admin/models", `{"kind":"audio","name":"test-audio","modelId":"fixture","credentialRef":"invalid-configuration-field"}`, 403)
+	request("POST", "/api/config", `{"settings":{"modelCatalog":[{"id":"read-only-model-catalog"}]},"notifications":{"soundEnabled":false}}`, 403)
+}
+
+func TestAPIConfigPolicyRevealRequiresSessionAndAudit(t *testing.T) {
+	accounts := &authTestStore{account: auth.Account{Username: "founder", Active: true, IsOwner: true}}
+	h, center, now := newImpersonationTestRouter(t, func(options *RouterOptions) {
+		options.BridgeSecret = "local-fixture"
+		options.AuthStore = accounts
+		options.UserConfigStore = NewUserConfigStore(t.TempDir())
+	})
+	create := impersonationRequest(h, "POST", "/api/config/models", "founder", `{"id":"fixture","kind":"text","modelId":"test","baseUrl":"https://text.example.test/v1","credential":"local-fixture-key"}`, nil)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("fixture model create: %d", create.Code)
+	}
+	const path = "/api/settings/api-integrations/reveal"
+	const payload = `{"key":"model:fixture"}`
+	bridge := httptest.NewRequest("POST", path, strings.NewReader(payload))
+	SignBridgeRequest(bridge, "founder", true, *now, "local-fixture")
+	accounts.session = auth.Session{Username: "founder", Token: "expired-fixture", ExpiresAt: now.Add(-time.Minute)}
+	makeBearer := func(token string) *http.Request {
+		req := httptest.NewRequest("POST", path, strings.NewReader(payload))
+		req.Header.Set("Authorization", "Bearer "+token)
+		return req
+	}
+	for _, request := range []*http.Request{bridge, makeBearer(""), makeBearer("expired-fixture"), makeBearer("unknown-fixture")} {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, request)
+		if response.Code != http.StatusUnauthorized || strings.Contains(response.Body.String(), "local-fixture-key") {
+			t.Fatalf("ordinary user session required, status %d", response.Code)
+		}
+	}
+	center.auditErr = errors.New("fixture audit unavailable")
+	if response := impersonationRequest(h, "POST", path, "founder", payload, nil); response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), "local-fixture-key") {
+		t.Fatalf("audit failure disclosed key, status %d", response.Code)
+	}
+}
+
+func TestAPIConfigPolicyWorkshopProjectionAndPreferenceEcho(t *testing.T) {
+	ctx := context.Background()
+	center := newModelOwnerTestCenter()
+	center.identities["founder"] = accountcenter.Identity{Username: "founder", Role: accountcenter.RoleFounder, Active: true}
+	center.identities["dev"] = accountcenter.Identity{Username: "dev", Role: accountcenter.RoleDeveloper, Active: true}
+	catalog := novelfetchworkshop.NewMemoryStore()
+	for _, owner := range []string{"founder", "dev", "manager"} {
+		rows := []any{map[string]any{"id": "managed-yzcm", "kind": "text", "modelId": "approved", "provider": "yzcm", "catalogSource": "yzcm_saved",
+			"baseUrl": "http://newapi.yzcm.site/v1", "credential": "private-key",
+			"capabilities": map[string]any{"privateAdvancedMark": "fixture-advanced"}},
+			map[string]any{"id": "custom-hidden", "kind": "text", "modelId": "custom", "baseUrl": "https://text.example.test/v1", "credential": "another-key"}}
+		if err := catalog.PutConfig(ctx, owner, map[string]any{"modelCatalog": rows}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := NewRouter(RouterOptions{AccountCenterStore: center, NovelFetchStore: catalog, SessionResolver: func(_ context.Context, raw string) (BridgeIdentity, error) {
+		owner, _, _ := strings.Cut(raw, ":")
+		return BridgeIdentity{Username: owner, IsOwner: owner == "founder"}, nil
+	}})
+	for _, role := range []string{"founder", "dev", "manager", "member"} {
+		t.Run(role, func(t *testing.T) {
+			const path = "/api/novel-fetch-workshop/config"
+			for _, compat := range []string{path, "/api/batch-rewrite/config"} {
+				response := impersonationRequest(h, "GET", compat, role, "", nil)
+				if response.Code != 200 || !strings.Contains(response.Body.String(), "managed-yzcm") || strings.Contains(response.Body.String(), "private-key") {
+					t.Fatalf("%s missing safe runtime/catalogue model: %d", compat, response.Code)
+				}
+				hasCustom := strings.Contains(response.Body.String(), "custom-hidden")
+				if (role == "dev" || role == "manager") && hasCustom || role == "founder" && !hasCustom || role != "founder" && strings.Contains(response.Body.String(), "privateAdvancedMark") {
+					t.Fatalf("%s projected wrong role fields for %s", compat, role)
+				}
+			}
+			get := impersonationRequest(h, "GET", path, role, "", nil)
+			var body struct {
+				AppConfig map[string]any `json:"appConfig"`
+			}
+			if err := json.Unmarshal(get.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			patch := map[string]any{"modelCatalog": body.AppConfig["modelCatalog"], "layout": map[string]any{"remove_empty_lines": true}}
+			raw, _ := json.Marshal(patch)
+			response := impersonationRequest(h, "POST", path, role, string(raw), nil)
+			if response.Code != 200 {
+				t.Fatalf("exact echo and layout preference should save for %s: %d", role, response.Code)
+			}
+			before, _ := catalog.GetConfig(ctx, role)
+			patch["modelCatalog"] = []any{map[string]any{"id": "forbidden-change", "baseUrl": "https://different.example.test/v1"}}
+			raw, _ = json.Marshal(patch)
+			response = impersonationRequest(h, "POST", path, role, string(raw), nil)
+			after, _ := catalog.GetConfig(ctx, role)
+			beforeJSON, _ := json.Marshal(before)
+			afterJSON, _ := json.Marshal(after)
+			if response.Code != 403 || !bytes.Equal(beforeJSON, afterJSON) {
+				t.Fatalf("mutated model echo must be rejected unchanged for %s", role)
+			}
+		})
+	}
+}
+
 func TestAPIConfigPolicyMySQLGrantEncryptionAndRuntime(t *testing.T) {
 	ctx := context.Background()
 	db, _ := novelAttributionDatabase(t)
@@ -168,8 +286,15 @@ func TestAPIConfigPolicyMySQLGrantEncryptionAndRuntime(t *testing.T) {
 	custom := `{"id":"custom","kind":"text","modelId":"custom-model","baseUrl":"https://trusted-fixture.invalid/v1","credential":"fixture-dev-custom","enabled":true}`
 	request("dev", "POST", catalog, custom, 201)
 	beforeDev := rawConfig("dev")
+	const workshopCompat = "/api/novel-fetch-workshop/config"
+	if response := request("dev", "GET", workshopCompat, "", 200); !bytes.Contains(response, []byte("custom-model")) {
+		t.Fatal("granted developer compatibility view omitted own custom model")
+	}
 	request("founder", "POST", developerGrant+"revoke_custom_api", "{}", 200)
 	request("dev", "PATCH", catalog+"/custom", `{"baseUrl":"https://forged.invalid"}`, 403)
+	if response := request("dev", "GET", workshopCompat, "", 200); bytes.Contains(response, []byte("custom-model")) {
+		t.Fatal("revoked developer retained custom model in compatibility view")
+	}
 	if !bytes.Equal(beforeDev, rawConfig("dev")) || bytes.Contains(beforeDev, []byte("fixture-dev-custom")) {
 		t.Fatal("developer secret unsealed or rejected write changed DB")
 	}
@@ -220,15 +345,29 @@ func TestAPIConfigPolicyMySQLGrantEncryptionAndRuntime(t *testing.T) {
 
 	// Formal account membership, rather than a legacy member copy, resolves the provider.
 	var owner string
-	resolve := NovelCreationTextResolver(accounts, nil, func(_ context.Context, username, _ string) (batchfactoryv11.DirectorProvider, error) {
+	resolve := NovelCreationTextResolver(center, func(_ context.Context, username, _ string) (batchfactoryv11.DirectorProvider, error) {
 		owner = username
 		return nil, nil
-	}, center)
+	})
 	if _, err := resolve(ctx, "member", "yzcm:text:first"); err != nil || owner != "manager" {
 		t.Fatalf("runtime owner = %q %v", owner, err)
 	}
 	if response := request("member", "GET", "/api/models?kind=text", "", 200); !bytes.Contains(response, []byte("yzcm:text:first")) || bytes.Contains(response, []byte("rotated-first")) || bytes.Contains(response, []byte("baseUrl")) {
 		t.Fatal("member runtime picker lost model or exposed private configuration")
+	}
+	managerConfig, err := workshop.GetConfig(ctx, "manager")
+	if err != nil {
+		t.Fatal(err)
+	}
+	managerConfig["modelCatalog"] = append(modelCatalog(managerConfig), map[string]any{
+		"id": "capacity-image", "kind": "image", "modelId": "fixture-image", "endpoint": "https://image.example.test/v1", "credential": "fixture-manager-image",
+	})
+	if err := workshop.PutConfig(ctx, "manager", managerConfig); err != nil {
+		t.Fatal(err)
+	}
+	capacity, err := resolveImageCapacityRequest(ctx, RouterOptions{AccountCenterStore: center, Store: batchfactoryv11.NewMemoryStore(), NovelFetchStore: workshop}, BridgeIdentity{Username: "member"}, "capacity-image", "9:16", "", false)
+	if err != nil || capacity.Owner != "member" || capacity.Credential != "fixture-manager-image" {
+		t.Fatalf("image capacity must choose the current team catalog and retain member attribution: %v", err)
 	}
 
 	// Legacy values become bound ciphertext before the first successful read.

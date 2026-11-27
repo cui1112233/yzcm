@@ -291,6 +291,12 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 		legacyAgentAssetObjects = agentworkspace.NewLocalAssetObjectStore(cfg.AgentAssetLocalDir)
 	}
 	novelFetchStore.LegacyConfigDir = cfg.ScriptHistoryDir
+	novelFetchStore.LegacyConfigLocker = userConfigStore.LegacyModelFileLocker()
+	cleanupCtx, cancelCleanup := context.WithTimeout(ctx, 5*time.Second)
+	if err := novelFetchStore.ResumeLegacyModelCleanup(cleanupCtx); err != nil {
+		log.Printf("legacy model credential cleanup remains pending: %v", err)
+	}
+	cancelCleanup()
 	if cfg.NovelFetchTOSEndpoint != "" || cfg.NovelFetchTOSRegion != "" || cfg.NovelFetchTOSBucket != "" || cfg.NovelFetchTOSAccessKey != "" || cfg.NovelFetchTOSSecretKey != "" {
 		bodyStore, bodyStoreErr := novelfetchworkshop.NewBodyTOSStore(novelfetchworkshop.BodyTOSConfig{Endpoint: cfg.NovelFetchTOSEndpoint, Region: cfg.NovelFetchTOSRegion, Bucket: cfg.NovelFetchTOSBucket, AccessKey: cfg.NovelFetchTOSAccessKey, SecretKey: cfg.NovelFetchTOSSecretKey})
 		if bodyStoreErr != nil {
@@ -417,10 +423,10 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	memberProfiles := httpapi.NewMemberProfileStore(cfg.MemberSystemDir)
 	memberProfiles.UsageReader = usageStore.ReadSummary
 	memberProfiles.TeamTokenReader = usageStore.TeamMonthTokens
-	novelCreationService := novelcreation.NewService(novelCreationStore, novelCreationRuntime, novelcreation.NewPipeline(novelcreation.ProviderResolver(httpapi.NovelCreationTextResolver(authStore, memberProfiles, textProviderForModel, accountCenterStore))))
+	novelCreationService := novelcreation.NewService(novelCreationStore, novelCreationRuntime, novelcreation.NewPipeline(novelcreation.ProviderResolver(httpapi.NovelCreationTextResolver(accountCenterStore, textProviderForModel))))
 	novelCreationService.ConfigureSystemPrompts(prompt.NewCatalog(cfg.PresetPath))
 	novelCreationService.ConfigureCoverGenerator(httpapi.NewNovelCoverGenerator(store, novelFetchStore, accountCenterStore))
-	novelCreationService.ConfigurePlayText(httpapi.NewNovelPlayText(novelcreation.ProviderResolver(httpapi.NovelCreationTextResolver(authStore, memberProfiles, textProviderForModel, accountCenterStore))))
+	novelCreationService.ConfigurePlayText(httpapi.NewNovelPlayText(novelcreation.ProviderResolver(httpapi.NovelCreationTextResolver(accountCenterStore, textProviderForModel))))
 	if cfg.AgentAssetTOSBucket != "" {
 		documentObjects, documentErr := novelcreation.NewTOSDocumentStore(novelcreation.DocumentTOSConfig{Endpoint: cfg.AgentAssetTOSEndpoint, Region: cfg.AgentAssetTOSRegion, Bucket: cfg.AgentAssetTOSBucket, AccessKey: cfg.AgentAssetTOSAccessKey, SecretKey: cfg.AgentAssetTOSSecretKey})
 		if documentErr != nil {
@@ -493,7 +499,7 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 		return imageCapacityController.WrapTransportWithTimeout(usageTracker.Wrap(base), timeout)
 	})
 	imagecapacity.SetEnabled(true)
-	usageCredential := httpapi.YZCMUsageCredentialResolver(userConfigStore, nil, nil, novelFetchStore.GetConfig)
+	usageCredential := httpapi.YZCMUsageCredentialResolver(userConfigStore, novelFetchStore.GetConfig)
 	usageTracker.ResolveCredential = func(ctx context.Context, subject, fingerprint string) (string, error) {
 		owner, err := httpapi.ResolveAPIConfigOwner(ctx, accountCenterStore, subject)
 		if err != nil {

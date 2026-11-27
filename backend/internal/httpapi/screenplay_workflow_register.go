@@ -34,15 +34,16 @@ func registerScreenplayWorkflow(root *http.ServeMux, auth BridgeAuth, options Ro
 	mediaStore, _ := options.Screenplay.(screenplay.MediaStore)
 	references, _ := options.AgentAssetObjects.(agentworkspace.ReferenceURLProvider)
 	media := &ScreenplayMediaWorkbench{Projects: options.Screenplay, Media: mediaStore, Cut: options.AICut, Objects: options.AgentAssetObjects, Assets: options.AgentAssets, ReferencesProvider: references, Catalog: catalog, ASR: options.AICutASR, Exports: options.AICutExport, Authoring: authoring, Production: productionRepo, Executors: options.LocalExecutors, Files: options.LocalArtifacts}
-	media.Images = newAgentImageGenerator(options.Store, catalog, options.UserConfigStore, options.LocalExecutors, options.LocalArtifacts, options.AgentAssets, references)
+	media.Images = newAgentImageGenerator(options.Store, catalog, options.UserConfigStore, options.LocalExecutors, options.LocalArtifacts, options.AgentAssets, references, options.AccountCenterStore)
 	media.VoiceDesigner = newScreenplayVoiceDesigner(catalog)
 	media.PositioningText = func(ctx context.Context, owner string, req screenplay.TextRequest) (screenplay.TextResponse, error) {
 		return (screenplayTextGenerator{owner: owner, resolver: resolver}).Generate(ctx, req)
 	}
 	var runner screenplay.BatchMediaRunner
 	if options.UserConfigStore != nil {
+		configs := runtimeUserConfig{accounts: options.AccountCenterStore, prefs: options.UserConfigStore, catalog: options.NovelFetchStore}
 		videoResolver := func(ctx context.Context, owner, modelKey string) (batchfactoryv11.VideoProviderConfig, error) {
-			config, err := options.UserConfigStore.GetConfig(ctx, owner)
+			config, err := configs.GetConfig(ctx, owner)
 			if err != nil {
 				return batchfactoryv11.VideoProviderConfig{}, err
 			}
@@ -50,8 +51,8 @@ func registerScreenplayWorkflow(root *http.ServeMux, auth BridgeAuth, options Ro
 		}
 		videoService := &scriptVideoService{resolver: videoResolver, localExecutor: options.LocalExecutors}
 		media.Video = videoService
-		media.Configs = options.UserConfigStore
-		runner = &screenplayVideoRunner{service: videoService, configs: options.UserConfigStore, repo: productionRepo, References: media.References, ReferenceIDs: media.ReferenceIDs, Subjects: media.VideoSubjects}
+		media.Configs = configs
+		runner = &screenplayVideoRunner{service: videoService, configs: configs, repo: productionRepo, References: media.References, ReferenceIDs: media.ReferenceIDs, Subjects: media.VideoSubjects}
 	}
 	runtime := &screenplay.ProductionRuntime{Store: options.Screenplay, Repository: productionRepo, Executor: func(owner string) screenplay.BatchExecutor {
 		return screenplay.BatchExecutor{Store: options.Screenplay, Generator: screenplayTextGenerator{owner: owner, resolver: resolver}, Media: runner, Finalizer: media}
@@ -78,7 +79,7 @@ func registerScreenplayWorkflow(root *http.ServeMux, auth BridgeAuth, options Ro
 	}
 	library := &ScreenplayAssetLibrary{Repository: libraryRepo, Media: media}
 	uploadRepo, _ := options.Screenplay.(screenplay.SubjectUploadRepository)
-	uploads := &ScreenplaySubjectUploadService{Repository: uploadRepo, Library: library, Configs: options.UserConfigStore, Runner: subjectupload.NewClient()}
+	uploads := &ScreenplaySubjectUploadService{Repository: uploadRepo, Library: library, Configs: media.Configs, Runner: subjectupload.NewClient()}
 	if redis, err := mergeworker.NewRedisStore(options.RedisURL, "qiantie:screenplay:subject-upload"); err == nil {
 		uploads.RedisDo = subjectUploadRedisDo(redis.Do)
 	}

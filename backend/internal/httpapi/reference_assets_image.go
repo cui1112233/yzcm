@@ -80,7 +80,12 @@ func registerReferenceAssetImageGenerateRoute(root *http.ServeMux, middleware Br
 			writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "taskId": localReferenceAssetImageTaskPrefix + job.ID, "status": "processing"})
 			return
 		}
-		settings := readReferenceAssetImageSettingsForModel(req.Context(), store, identity.Username, catalogStore, toString(input["imageModelId"]))
+		modelOwner, err := ResolveAPIConfigOwner(req.Context(), middleware.AccountCenterStore, identity.Username)
+		if err != nil {
+			writeAccountCenterForbidden(w)
+			return
+		}
+		settings := readReferenceAssetImageSettingsForModel(req.Context(), store, modelOwner, catalogStore, toString(input["imageModelId"]))
 		operationCtx, finishImage := beginImageRequestOperation(req.Context())
 		req = req.WithContext(operationCtx)
 		imageSucceeded := false

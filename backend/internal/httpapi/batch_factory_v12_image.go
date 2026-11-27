@@ -92,10 +92,7 @@ func configuredBatchImages(ctx context.Context, store batchfactoryv11.Store, cat
 	if model == nil {
 		return nil, http.StatusServiceUnavailable, withErrorCode(fmt.Errorf("图片模型未配置；%s", setupHintImage), ErrorCodeImageModelNotConfigured)
 	}
-	endpointRaw := modelString(model, "endpoint")
-	if endpointRaw == "" {
-		endpointRaw = modelString(model, "baseUrl")
-	}
+	endpointRaw := novelfetchworkshop.ModelCredentialDestination(model).Endpoint
 	endpoint, err := shuihuoImageGenerationEndpoint(endpointRaw)
 	if err != nil {
 		return nil, http.StatusUnprocessableEntity, fmt.Errorf("图片模型生成接口格式不正确")

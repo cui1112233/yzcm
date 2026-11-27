@@ -376,8 +376,6 @@ function NovelFetchConfigPanel({ form, effectiveValues, dirty, onDirty, versionP
       <section hidden={section !== 'ai'}>
         <Typography.Title level={5}>AI 接口参数</Typography.Title>
         <div className="novel-fetch-config-grid">
-          <Form.Item name={['ai', 'base_url']} label="AI 基础接口"><Input /></Form.Item>
-          <Form.Item name={['ai', 'model']} label="AI 模型"><Input /></Form.Item>
           <Form.Item name={['ai', 'timeout_seconds']} label="超时（秒）"><InputNumber min={1} max={900} style={{ width: '100%' }} /></Form.Item>
           <Form.Item name={['ai', 'max_concurrency']} label="最大并发"><InputNumber min={1} max={50} style={{ width: '100%' }} /></Form.Item>
           <Form.Item name={['ai', 'retry_times']} label="重试次数"><InputNumber min={0} max={10} style={{ width: '100%' }} /></Form.Item>
@@ -393,7 +391,6 @@ function NovelFetchConfigPanel({ form, effectiveValues, dirty, onDirty, versionP
           <Form.Item name={['ai', 'enable_thinking']} valuePropName="checked" noStyle><label><input type="checkbox" /> 启用思考</label></Form.Item>
           <Form.Item name={['ai', 'disable_thinking']} valuePropName="checked" noStyle><label><input type="checkbox" /> 禁用思考</label></Form.Item>
         </Space>
-        <Form.Item name={['ai', 'extra_body_json']} label="额外 JSON"><Input.TextArea rows={5} className="mono" /></Form.Item>
       </section>
       <section hidden={section !== 'catalog'}>
         <Typography.Title level={5}>平台与风格目录</Typography.Title>
@@ -1851,7 +1848,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
     if (configLoading) return;
     setConfigLoading(true);
     try {
-      const values = configForm.getFieldsValue(true);
+      const values = configForm.getFieldsValue({ strict: true });
       const parseCatalog = value => {
         if (Array.isArray(value)) return value;
         if (!String(value || '').trim()) return [];
@@ -1859,13 +1856,19 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
         if (!Array.isArray(parsed)) throw new Error('平台/风格目录必须是 JSON 数组');
         return parsed;
       };
-      const rewrite = { ...(values.rewrite || {}) };
-      rewrite.method_sequence = String(rewrite.method_sequence_text || '')
-        .split(',').map(item => item.trim()).filter(Boolean);
-      delete rewrite.method_sequence_text;
+      const draft = { ...values };
+      if (values.rewrite?.method_sequence_text !== undefined) {
+        const { method_sequence_text, ...rewrite } = values.rewrite;
+        draft.rewrite = {
+          ...rewrite,
+          method_sequence: String(method_sequence_text || '').split(',').map(item => item.trim()).filter(Boolean)
+        };
+      }
+      if (values.platforms !== undefined) draft.platforms = parseCatalog(values.platforms);
+      if (values.styles !== undefined) draft.styles = parseCatalog(values.styles);
       const versionProfiles = withNovelFetchVersionProfiles(profileBindings);
-      const saved = await saveWorkshopConfig({ ...values, rewrite, web_submit: { ...(values.web_submit || {}), selected_profile: selectedUploadProfile, profile_bindings: versionProfiles, version_profiles: versionProfiles }, platforms: parseCatalog(values.platforms), styles: parseCatalog(values.styles) });
-      const savedSettings = saved?.settings || { ...values, rewrite };
+      const saved = await saveWorkshopConfig({ ...draft, web_submit: { ...(values.web_submit || {}), selected_profile: selectedUploadProfile, profile_bindings: versionProfiles, version_profiles: versionProfiles } });
+      const savedSettings = saved?.settings || draft;
       const savedRewrite = { ...(savedSettings.rewrite || {}) };
       savedRewrite.method_sequence_text = Array.isArray(savedRewrite.method_sequence)
         ? savedRewrite.method_sequence.join(',')

@@ -96,7 +96,8 @@ func TestAICutEditPlanRouteIsMountedByApplicationRouter(t *testing.T) {
 	store, now := newEditPlanRouteFixture(t)
 	provider := &editPlanTestProvider{result: `{"summary":{"sourceDurationMs":2000,"estimatedDurationMs":1800},"operations":[],"warnings":[]}`}
 	api := NewRouter(RouterOptions{
-		BridgeSecret: "secret", Now: func() time.Time { return now }, AICut: store,
+		AccountCenterStore: activeModelTestAccounts("alice"),
+		BridgeSecret:       "secret", Now: func() time.Time { return now }, AICut: store,
 		TextProviderResolver: func(context.Context, string, string) (batchfactoryv11.DirectorProvider, error) { return provider, nil },
 	})
 	response := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/ai-cut/projects/cut-1/edit-plans", map[string]any{"clientRequestId": "router-1", "modelId": "text-main", "expectedRevision": 1, "assetIds": []string{"asset-1"}, "goal": "自动剪辑", "targetDurationMs": 1800, "aspectRatio": "9:16"})

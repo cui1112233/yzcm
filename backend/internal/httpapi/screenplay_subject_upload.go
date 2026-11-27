@@ -26,7 +26,7 @@ import (
 type ScreenplaySubjectUploadService struct {
 	Repository screenplay.SubjectUploadRepository
 	Library    *ScreenplayAssetLibrary
-	Configs    *UserConfigStore
+	Configs    runtimeConfigReader
 	Runner     subjectupload.Runner
 	RedisDo    subjectUploadRedisDo
 }

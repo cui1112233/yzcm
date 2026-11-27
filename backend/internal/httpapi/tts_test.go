@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,7 +42,10 @@ func TestConfiguredTTSModelUsesEnabledManagedAudioModel(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	model, ok := configuredTTSModel(context.Background(), store, "tts-owner")
+	model, ok, err := configuredTTSModel(context.Background(), store, "tts-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok || model["endpoint"] != "https://enabled.example" {
 		t.Fatalf("model=%#v ok=%v", model, ok)
 	}
@@ -160,9 +164,27 @@ func TestTTSRouteUsesConfiguredAudioModelEndToEnd(t *testing.T) {
 	}}}); err != nil {
 		t.Fatal(err)
 	}
-	api := NewRouter(RouterOptions{BridgeSecret: "secret", Now: func() time.Time { return now }, NovelFetchStore: store})
+	api := NewRouter(RouterOptions{AccountCenterStore: activeModelTestAccounts("tts-user"), BridgeSecret: "secret", Now: func() time.Time { return now }, NovelFetchStore: store})
 	rec := signedJSONRequest(t, api, now, "tts-user", http.MethodPost, "/api/tts", map[string]any{"input": "你好"})
 	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "audio/mpeg" || rec.Body.String() != "configured-audio" {
 		t.Fatalf("status=%d content-type=%q body=%q", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+}
+
+func TestTTSRouteUnavailableCatalogDoesNotCallDefaultProvider(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	var defaultCalls atomic.Int32
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		defaultCalls.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer fallback.Close()
+	previousEndpoint := defaultTTSEndpoint
+	defaultTTSEndpoint = fallback.URL
+	defer func() { defaultTTSEndpoint = previousEndpoint }()
+	api := NewRouter(RouterOptions{BridgeSecret: "secret", Now: func() time.Time { return now }, NovelFetchStore: novelfetchworkshop.NewMemoryStore()})
+	response := signedJSONRequest(t, api, now, "unresolved", http.MethodPost, "/api/tts", map[string]any{"input": "本地测试"})
+	if response.Code != http.StatusServiceUnavailable || defaultCalls.Load() != 0 {
+		t.Fatalf("unresolved model scope should fail before fallback: status %d, calls %d", response.Code, defaultCalls.Load())
 	}
 }

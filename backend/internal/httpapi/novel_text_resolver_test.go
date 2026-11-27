@@ -6,7 +6,6 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"io"
 	"net/http"
-	"qiantie/backend/internal/auth"
 	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/novelfetchworkshop"
 	"qiantie/backend/internal/yzcmusage"
@@ -16,15 +15,7 @@ import (
 
 func TestNovelResolverChecksActiveBindingAndCurrentCatalog(t *testing.T) {
 	ctx := context.Background()
-	accounts := &applicationTestStore{accounts: map[string]auth.Account{"member": {Username: "member", Active: true}, "manager": {Username: "manager", Active: true}, "other": {Username: "other", Active: true}}}
-	profiles := NewMemberProfileStore(t.TempDir())
-	bind := func(manager string) {
-		t.Helper()
-		if err := profiles.writeArray("member-profiles.json", []map[string]any{{"username": "member", "role": "member", "boundTo": manager}}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	bind("manager")
+	center := newModelOwnerTestCenter()
 	catalog := novelfetchworkshop.NewMemoryStore()
 	model := map[string]any{"id": "chosen", "modelId": "actual", "kind": "text", "enabled": true, "credential": "secret", "baseUrl": "https://example.invalid/v1"}
 	save := func() {
@@ -34,7 +25,7 @@ func TestNovelResolverChecksActiveBindingAndCurrentCatalog(t *testing.T) {
 		}
 	}
 	save()
-	resolver := NovelCreationTextResolver(accounts, profiles, func(c context.Context, owner, id string) (batchfactoryv11.DirectorProvider, error) {
+	resolver := NovelCreationTextResolver(center, func(c context.Context, owner, id string) (batchfactoryv11.DirectorProvider, error) {
 		return resolveAgentTextModel(c, catalog, nil, owner, id)
 	})
 	p, err := resolver(ctx, "member", "chosen")
@@ -45,19 +36,19 @@ func TestNovelResolverChecksActiveBindingAndCurrentCatalog(t *testing.T) {
 		t.Fatal("actual catalog owner was not recorded")
 	}
 	// All following checks only resolve providers; no external HTTP can be sent.
-	member := accounts.accounts["member"]
+	member := center.identities["member"]
 	member.Active = false
-	accounts.accounts["member"] = member
+	center.identities["member"] = member
 	if _, err = resolver(ctx, "member", "chosen"); err == nil {
 		t.Fatal("inactive account retained model permission")
 	}
 	member.Active = true
-	accounts.accounts["member"] = member
-	bind("other")
+	center.identities["member"] = member
+	center.manager = "other"
 	if _, err = resolver(ctx, "member", "chosen"); err == nil {
 		t.Fatal("binding change silently reused previous manager model")
 	}
-	bind("manager")
+	center.manager = "manager"
 	model["enabled"] = false
 	save()
 	if _, err = resolver(ctx, "member", "chosen"); err == nil {
@@ -74,11 +65,6 @@ func TestNovelResolverChecksActiveBindingAndCurrentCatalog(t *testing.T) {
 }
 
 func TestNovelResolverBackgroundCallsKeepOriginalMemberBilling(t *testing.T) {
-	accounts := &applicationTestStore{accounts: map[string]auth.Account{"member": {Username: "member", Active: true}, "manager": {Username: "manager", Active: true}}}
-	profiles := NewMemberProfileStore(t.TempDir())
-	if err := profiles.writeArray("member-profiles.json", []map[string]any{{"username": "member", "role": "member", "boundTo": "manager"}}); err != nil {
-		t.Fatal(err)
-	}
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +77,7 @@ func TestNovelResolverBackgroundCallsKeepOriginalMemberBilling(t *testing.T) {
 		attempts++
 		return &http.Response{StatusCode: 200, Header: http.Header{"X-Oneapi-Request-Id": []string{fmt.Sprintf("job-attempt-%d", attempts)}}, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))}, nil
 	}))}
-	resolver := NovelCreationTextResolver(accounts, profiles, func(ctx context.Context, owner, model string) (batchfactoryv11.DirectorProvider, error) {
+	resolver := NovelCreationTextResolver(newModelOwnerTestCenter(), func(ctx context.Context, owner, model string) (batchfactoryv11.DirectorProvider, error) {
 		if owner != "manager" {
 			t.Fatal("wrong credential owner", owner)
 		}

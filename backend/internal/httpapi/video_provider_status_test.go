@@ -44,7 +44,7 @@ func TestV12VideoProviderStatusUsesManagedCatalog(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	api := NewRouter(RouterOptions{BridgeSecret: "secret", Now: func() time.Time { return now }, UserConfigStore: config, NovelFetchStore: catalog})
+	api := NewRouter(RouterOptions{AccountCenterStore: activeModelTestAccounts("alice"), BridgeSecret: "secret", Now: func() time.Time { return now }, UserConfigStore: config, NovelFetchStore: catalog})
 	rec := signedJSONRequest(t, api, now, "alice", http.MethodGet, "/api/batch-factory/v12/video-provider/status?provider=personal_api", nil)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"model":"yd-model"`) || !strings.Contains(rec.Body.String(), `"configured":true`) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())

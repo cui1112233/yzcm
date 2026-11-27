@@ -21,7 +21,7 @@ type screenplayVideoService interface {
 // 它不保存密钥；只读取当前账户在“设置”中保存的视频模型。
 type screenplayVideoRunner struct {
 	service      screenplayVideoService
-	configs      *UserConfigStore
+	configs      runtimeConfigReader
 	poll         time.Duration
 	repo         screenplay.ProductionRepository
 	References   func(context.Context, screenplay.Project, screenplay.StoryboardShot) ([]string, error)

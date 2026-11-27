@@ -16,6 +16,7 @@ import (
 	_ "golang.org/x/image/webp"
 	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/imagecapacity"
+	"qiantie/backend/internal/novelfetchworkshop"
 	"qiantie/backend/internal/yzcmusage"
 )
 
@@ -100,7 +101,10 @@ func resolveImageCapacityRequest(ctx context.Context, options RouterOptions, ide
 	if strings.TrimSpace(modelID) == "" {
 		return imagecapacity.Request{}, fmt.Errorf("请先选择图片模型")
 	}
-	owner := effectiveModelCatalogOwner(identity, options.MemberProfileStore, options.AuthStore)
+	owner, err := ResolveAPIConfigOwner(ctx, options.AccountCenterStore, identity.Username)
+	if err != nil {
+		return imagecapacity.Request{}, err
+	}
 	config, err := loadShuihuoOwnerConfig(ctx, options.Store, owner, options.NovelFetchStore)
 	if err != nil {
 		return imagecapacity.Request{}, err
@@ -110,7 +114,7 @@ func resolveImageCapacityRequest(ctx context.Context, options RouterOptions, ide
 		return imagecapacity.Request{}, err
 	}
 	model := target.CatalogModel
-	endpoint := firstText(model["endpoint"], model["baseUrl"])
+	endpoint := novelfetchworkshop.ModelCredentialDestination(model).Endpoint
 	if endpoint == "" {
 		return imagecapacity.Request{}, fmt.Errorf("此模型由本地执行器管理并发，不使用图片 API 共享池")
 	}

@@ -53,7 +53,15 @@ func modelSecretBinding(owner string, model map[string]any, field string) ([]byt
 	if owner == "" || id == "" || !modelKinds[kind] {
 		return nil, apisecrets.ErrBadCiphertext
 	}
-	return json.Marshal([]string{"qiantie:v88:model:bound-v2", strings.ToLower(owner), kind, id, firstText(model["catalogSource"]), firstText(model["modelId"]), firstText(model["baseUrl"]), field})
+	return json.Marshal([]any{"qiantie:v88:model:bound-v3", strings.ToLower(owner), kind, id, firstText(model["modelId"]), novelfetchworkshop.ModelCredentialSource(model), novelfetchworkshop.ModelCredentialDestination(model), field})
+}
+
+func v2ModelSecretBinding(owner string, model map[string]any, field string) ([]byte, error) {
+	target := novelfetchworkshop.ModelCredentialDestination(model)
+	if target.BaseURL == "" || target.Endpoint != target.BaseURL || target.TasksEndpoint != "" || target.ResultEndpoint != "" || model["kind"] == "video" {
+		return nil, apisecrets.ErrBadCiphertext
+	}
+	return json.Marshal([]string{"qiantie:v88:model:bound-v2", strings.ToLower(owner), firstText(model["kind"]), firstText(model["id"]), firstText(model["catalogSource"]), firstText(model["modelId"]), target.BaseURL, field})
 }
 
 func (p *configSecretProvider) SealModelConfig(owner string, next, previous map[string]any) error {
@@ -63,6 +71,12 @@ func (p *configSecretProvider) SealModelConfig(owner string, next, previous map[
 	}
 	var cipher *apisecrets.Cipher
 	for _, model := range modelCatalog(next) {
+		if _, legacyReference := model["credentialRef"]; legacyReference {
+			delete(model, "credentialRef")
+			if firstText(model["credential"], model["apiKey"]) == "" {
+				model["credentialStatus"] = "needs_reentry"
+			}
+		}
 		for _, field := range []string{"credential", "apiKey"} {
 			value, _ := model[field].(string)
 			if strings.TrimSpace(value) == "" {
@@ -83,15 +97,26 @@ func (p *configSecretProvider) SealModelConfig(owner string, next, previous map[
 				// Only migration can ingest a historical v1 record. An already
 				// bound record must authenticate for this precise model and field.
 				if strings.HasPrefix(value, apisecrets.BoundPrefix) {
-					if _, err := cipher.OpenBound(value, binding); err != nil {
-						return err
+					if _, err := cipher.OpenBound(value, binding); err == nil {
+						continue
 					}
-					continue
+					if previous[novelfetchworkshop.ModelSecretVersionKey] != "bound-v2" {
+						return apisecrets.ErrBadCiphertext
+					}
+					oldModel := oldModels[firstText(model["id"])]
+					oldBinding, bindErr := v2ModelSecretBinding(owner, oldModel, field)
+					if bindErr != nil || novelfetchworkshop.ModelCredentialDestination(model) != novelfetchworkshop.ModelCredentialDestination(oldModel) {
+						delete(model, field)
+						model["credentialStatus"] = "needs_reentry"
+						continue
+					}
+					value, err = cipher.OpenBound(value, oldBinding)
+				} else {
+					if previous[novelfetchworkshop.ModelSecretVersionKey] == novelfetchworkshop.ModelSecretVersion {
+						return apisecrets.ErrBadCiphertext
+					}
+					value, err = cipher.Decrypt(value)
 				}
-				if previous[novelfetchworkshop.ModelSecretVersionKey] == novelfetchworkshop.ModelSecretVersion {
-					return apisecrets.ErrBadCiphertext
-				}
-				value, err = cipher.Decrypt(value)
 				if err != nil {
 					return err
 				}
@@ -106,6 +131,36 @@ func (p *configSecretProvider) SealModelConfig(owner string, next, previous map[
 			if err != nil {
 				return err
 			}
+		}
+		if alias := firstText(model["apiKey"]); alias != "" {
+			aliasBinding, err := modelSecretBinding(owner, model, "apiKey")
+			if err != nil {
+				return err
+			}
+			plain, err := cipher.OpenBound(alias, aliasBinding)
+			if err != nil {
+				return err
+			}
+			binding, err := modelSecretBinding(owner, model, "credential")
+			if err != nil {
+				return err
+			}
+			if stored := firstText(model["credential"]); stored != "" {
+				primary, err := cipher.OpenBound(stored, binding)
+				if err != nil {
+					return err
+				}
+				if primary != plain {
+					delete(model, "credential")
+					model["credentialStatus"] = "needs_reentry"
+				}
+			} else {
+				model["credential"], err = cipher.SealBound(plain, binding)
+				if err != nil {
+					return err
+				}
+			}
+			delete(model, "apiKey")
 		}
 	}
 	return nil

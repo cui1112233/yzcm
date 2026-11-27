@@ -20,6 +20,34 @@ import (
 
 type yzcmCatalogReaderFixture func(context.Context, yzcmmodels.Query) (yzcmmodels.Page, error)
 
+func activeModelTestAccounts(usernames ...string) *impersonationTestStore {
+	accounts := &impersonationTestStore{identities: make(map[string]accountcenter.Identity, len(usernames))}
+	for _, username := range usernames {
+		accounts.identities[username] = accountcenter.Identity{Username: username, Role: accountcenter.RoleFounder, Active: true}
+	}
+	return accounts
+}
+
+type modelOwnerTestCenter struct {
+	*impersonationTestStore
+	manager string
+}
+
+func (s *modelOwnerTestCenter) ListTeams(_ context.Context, filter accountcenter.TeamFilter) ([]accountcenter.TeamSummary, error) {
+	if filter.Username == "member" && s.manager != "" {
+		return []accountcenter.TeamSummary{{Team: accountcenter.Team{ID: "model-team", ManagerUsername: s.manager}}}, nil
+	}
+	return nil, nil
+}
+
+func newModelOwnerTestCenter() *modelOwnerTestCenter {
+	return &modelOwnerTestCenter{manager: "manager", impersonationTestStore: &impersonationTestStore{identities: map[string]accountcenter.Identity{
+		"member":  {Username: "member", Role: accountcenter.RoleMember, Active: true, TeamID: "model-team"},
+		"manager": {Username: "manager", Role: accountcenter.RoleManager, Active: true, TeamID: "model-team"},
+		"other":   {Username: "other", Role: accountcenter.RoleManager, Active: true},
+	}}}
+}
+
 func newFormalModelCatalogTestRouter(options RouterOptions) http.Handler {
 	options.AccountCenterStore = &impersonationTestStore{identities: map[string]accountcenter.Identity{
 		"tester": {Username: "tester", Role: accountcenter.RoleFounder, Active: true},
@@ -249,7 +277,7 @@ func TestMemberModelCatalogUsesBoundManagerWithoutLeakingCredential(t *testing.T
 	profiles := NewMemberProfileStore(t.TempDir())
 	if err := profiles.writeArray("member-profiles.json", []map[string]any{
 		{"username": "manager", "role": "manager"},
-		{"username": "member", "role": "member", "boundTo": "manager"},
+		{"username": "member", "role": "member", "boundTo": "other"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +290,7 @@ func TestMemberModelCatalogUsesBoundManagerWithoutLeakingCredential(t *testing.T
 
 	handler := NewRouter(RouterOptions{
 		BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: catalog,
-		AuthStore: accounts, MemberProfileStore: profiles, UserConfigStore: NewUserConfigStore(t.TempDir()),
+		AuthStore: accounts, AccountCenterStore: newModelOwnerTestCenter(), MemberProfileStore: profiles, UserConfigStore: NewUserConfigStore(t.TempDir()),
 	})
 	req := httptest.NewRequest(http.MethodGet, "/api/models?kind=image", nil)
 	signNovelFetchRequest(req, "member", false, now, secret)
@@ -294,7 +322,7 @@ func TestModelCatalogListsLegacyStringEnabledModel(t *testing.T) {
 	}}}); err != nil {
 		t.Fatal(err)
 	}
-	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
+	handler := newFormalModelCatalogTestRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
 	response := doNovelFetchRequest(t, handler, http.MethodGet, "/api/models?kind=text", nil, now, secret)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -314,7 +342,7 @@ func TestModelCatalogListsBuiltInTTSWhenAudioCatalogIsEmpty(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	secret := "test-secret"
 	store := novelfetchworkshop.NewMemoryStore()
-	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
+	handler := newFormalModelCatalogTestRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
 
 	response := doNovelFetchRequest(t, handler, http.MethodGet, "/api/models?kind=audio", nil, now, secret)
 	if response.Code != http.StatusOK {
@@ -502,7 +530,7 @@ func TestModelCatalogPatchKeepsAdminExtensionFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := newFormalModelCatalogTestRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store})
-	// 个人中心平台预设卡只改 Key：不能丢管理端写入的 name / adapterKind / credentialRef。
+	// 个人中心平台预设卡只改 Key：保留安全的扩展字段并去掉旧密钥引用。
 	response := doFormalModelCatalogRequest(t, handler, http.MethodPatch, "/api/config/models/yd2-mini-video", map[string]any{
 		"credential": "sk-new",
 	}, now, secret)
@@ -514,7 +542,10 @@ func TestModelCatalogPatchKeepsAdminExtensionFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	model := modelCatalog(settings)[0]
-	for key, want := range map[string]any{"name": "YD2 Mini", "adapterKind": "vidu", "credentialRef": "env:YD2", "credential": "sk-new"} {
+	if _, exists := model["credentialRef"]; exists {
+		t.Fatal("historical credential reference remained selectable")
+	}
+	for key, want := range map[string]any{"name": "YD2 Mini", "adapterKind": "vidu", "credential": "sk-new"} {
 		if model[key] != want {
 			t.Fatalf("%s=%#v, want %#v (model=%#v)", key, model[key], want, model)
 		}

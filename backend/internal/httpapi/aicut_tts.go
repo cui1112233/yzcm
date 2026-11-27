@@ -131,7 +131,11 @@ func RegisterAICutTTSRoutes(mux *http.ServeMux, auth BridgeAuth, store aicut.Sto
 
 func requestAICutTTSBytes(ctx context.Context, owner string, input ttsRequest, catalog novelfetchworkshop.Store) ([]byte, string, error) {
 	if catalog != nil {
-		if model, found := configuredTTSModel(ctx, catalog, owner); found {
+		model, found, err := configuredTTSModel(ctx, catalog, owner)
+		if err != nil {
+			return nil, "", err
+		}
+		if found {
 			return requestConfiguredTTSBytes(ctx, input, model)
 		}
 	}

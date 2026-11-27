@@ -159,11 +159,10 @@ func managedTextProviderResolver(resolver func(context.Context, string, string) 
 
 func NewRouter(options RouterOptions) http.Handler {
 	resolveRuntimeModelOwner := func(owner string) string {
-		if options.AccountCenterStore != nil {
-			resolved, _ := ResolveAPIConfigOwner(context.Background(), options.AccountCenterStore, owner)
-			return resolved
-		}
-		return effectiveModelCatalogOwner(BridgeIdentity{Username: owner}, options.MemberProfileStore, options.AuthStore)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		resolved, _ := ResolveAPIConfigOwner(ctx, options.AccountCenterStore, owner)
+		return resolved
 	}
 	runtimeCatalogStore := runtimeModelCatalogStore(options.NovelFetchStore, resolveRuntimeModelOwner)
 	runtimeTextProviderResolver := managedTextProviderResolver(options.TextProviderResolver, resolveRuntimeModelOwner)
@@ -338,7 +337,7 @@ func NewRouter(options RouterOptions) http.Handler {
 			}
 			return provider.Complete(ctx, request)
 		})
-		registerComicPageRoutes(v12, manualProduction, options.Store, options.LocalArtifacts, options.LocalExecutors, runtimeCatalogStore, options.UserConfigStore, options.PresetCatalog, options.AuthStore, options.MemberProfileStore, options.Director, comicGenerationGate, options.ImageGenerationCache)
+		registerComicPageRoutes(v12, manualProduction, options.Store, options.LocalArtifacts, options.LocalExecutors, runtimeCatalogStore, options.UserConfigStore, options.PresetCatalog, options.AuthStore, options.MemberProfileStore, options.Director, comicGenerationGate, options.ImageGenerationCache, resolveRuntimeModelOwner)
 	}
 	registerComicDirectRoutes(v12, options.N8ComicPublisher, options.ComicDirectRecordPath, options.Now)
 	registerN8ComicPublishRoutes(v12, options.N8ComicPublisher)
@@ -656,7 +655,7 @@ func NewRouter(options RouterOptions) http.Handler {
 		if options.AgentAssetObjects != nil {
 			imageReferences, _ = options.AgentAssetObjects.(agentworkspace.ReferenceURLProvider)
 		}
-		imageGenerate := newAgentImageGenerator(options.Store, runtimeCatalogStore, options.UserConfigStore, options.LocalExecutors, options.LocalArtifacts, options.AgentAssets, imageReferences)
+		imageGenerate := newAgentImageGenerator(options.Store, runtimeCatalogStore, options.UserConfigStore, options.LocalExecutors, options.LocalArtifacts, options.AgentAssets, imageReferences, options.AccountCenterStore)
 		textComplete := newAgentTextCompletionExecutor(textModels)
 		imageServices := AgentNodeGenerationServices{Projects: options.AgentWorkspace, Catalog: runtimeCatalogStore, TextModels: textModels, TextComplete: textComplete, Assets: options.AgentAssets, Objects: options.AgentAssetObjects, ImageGenerate: imageGenerate, ImageProcess: NewAgentImageProcessor(), QueueImages: true, Now: options.Now}
 		RegisterAgentNodeGenerationRoutes(root, auth, imageServices)
@@ -1021,7 +1020,7 @@ func NewRouter(options RouterOptions) http.Handler {
 		root.Handle("/api/web-submit/", sessionOnlyNovelAuth.Middleware(http.HandlerFunc(legacyWebSubmitAlias)))
 		RegisterNovelFetchIntegrations(root, sessionOnlyCompatAuth, options.NovelFetchStore, options.NovelFetchQueue)
 		registerCanonicalNovelFetchWebSubmitAliases(root, auth)
-		registerModelCatalogRoutes(root, novelAuth, auth, options.NovelFetchStore, options.UserConfigStore, options.AuthStore, options.MemberProfileStore, options.YZCMModelCatalog)
+		registerModelCatalogRoutes(root, novelAuth, auth, options.NovelFetchStore, options.UserConfigStore, options.YZCMModelCatalog)
 	}
 	root.HandleFunc("GET /health", func(w http.ResponseWriter, req *http.Request) {
 		if options.Health != nil && options.Health(req.Context()) != nil {
@@ -1107,8 +1106,9 @@ func shuihuoImageReadyChecker(store batchfactoryv11.Store, catalogStore novelfet
 		// 与成员实际使用的管理员渠道口径不一致。
 		channelOwner := owner
 		if resolveOwner != nil {
-			if resolved := strings.TrimSpace(resolveOwner(owner)); resolved != "" {
-				channelOwner = resolved
+			channelOwner = strings.TrimSpace(resolveOwner(owner))
+			if channelOwner == "" {
+				return false, "当前团队模型配置无法确认"
 			}
 		}
 		if shuihuoImageChannelReady(ctx, userConfig, channelOwner) {

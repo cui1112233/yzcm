@@ -55,7 +55,7 @@ func TestV12LegacyImageGenerationUsesManagedImageModel(t *testing.T) {
 	}}}); err != nil {
 		t.Fatal(err)
 	}
-	api := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, Slice: 1, Store: store, NovelFetchStore: catalog})
+	api := NewRouter(RouterOptions{AccountCenterStore: activeModelTestAccounts("tester"), BridgeSecret: secret, Now: func() time.Time { return now }, Slice: 1, Store: store, NovelFetchStore: catalog})
 	rec := signedJSONRequest(t, api, now, "tester", http.MethodPost, "/api/batch-factory/v12/image-generation", map[string]any{"imageModelId": "image-demo", "prompt": "一间明亮的客厅"})
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"imageUrl":"https://images.example/generated.png"`) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())

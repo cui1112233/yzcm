@@ -334,7 +334,11 @@ func (s *ScreenplayMediaWorkbench) importMedia(w http.ResponseWriter, r *http.Re
 // providers keep their own voice IDs and are not claimed to support these IDs.
 func (s *ScreenplayMediaWorkbench) voiceDirectory(ctx context.Context, owner string) map[string]any {
 	if s.Catalog != nil {
-		if _, found := configuredTTSModel(ctx, s.Catalog, owner); found {
+		_, found, err := configuredTTSModel(ctx, s.Catalog, owner)
+		if err != nil {
+			return map[string]any{"voices": []any{}, "source": "unavailable", "reason": "音频模型配置暂不可用"}
+		}
+		if found {
 			return map[string]any{"voices": []any{}, "source": "configured", "reason": "当前自定义配音服务没有公开音色目录，请填写该服务支持的音色ID"}
 		}
 	}

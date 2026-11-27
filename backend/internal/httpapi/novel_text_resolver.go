@@ -2,10 +2,8 @@ package httpapi
 
 import (
 	"context"
-	"fmt"
 
 	"qiantie/backend/internal/accountcenter"
-	"qiantie/backend/internal/auth"
 	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/yzcmusage"
 )
@@ -13,27 +11,11 @@ import (
 // NovelCreationTextResolver rechecks active membership and the current manager
 // binding before every actual external call. The supplied resolver honours an
 // explicit model ID and never substitutes a different configured model.
-func NovelCreationTextResolver(accounts auth.Store, profiles *MemberProfileStore, resolve AgentTextModelResolver, centers ...accountcenter.Store) AgentTextModelResolver {
+func NovelCreationTextResolver(center accountcenter.Store, resolve AgentTextModelResolver) AgentTextModelResolver {
 	return func(ctx context.Context, owner, modelID string) (batchfactoryv11.DirectorProvider, error) {
-		if accounts != nil {
-			account, err := accounts.FindAccount(ctx, owner)
-			if err != nil || !account.Active {
-				return nil, fmt.Errorf("所选文本模型当前不可用：账号无权调用")
-			}
-		}
-		effective := effectiveModelCatalogOwner(BridgeIdentity{Username: owner}, profiles, accounts)
-		if len(centers) > 0 && centers[0] != nil {
-			var err error
-			effective, err = ResolveAPIConfigOwner(ctx, centers[0], owner)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if accounts != nil && effective != owner {
-			account, err := accounts.FindAccount(ctx, effective)
-			if err != nil || !account.Active {
-				return nil, fmt.Errorf("所选文本模型当前不可用：管理账号不可用")
-			}
+		effective, err := ResolveAPIConfigOwner(ctx, center, owner)
+		if err != nil {
+			return nil, err
 		}
 		p, err := resolve(ctx, effective, modelID)
 		if err != nil || p == nil {

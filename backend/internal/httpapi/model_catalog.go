@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"qiantie/backend/internal/accountcenter"
-	"qiantie/backend/internal/auth"
 	"qiantie/backend/internal/novelfetchworkshop"
 	"qiantie/backend/internal/safehttp"
 	"qiantie/backend/internal/yzcmmodels"
@@ -111,20 +110,42 @@ func modelIdentityKey(baseURL, modelID string) string {
 	return baseURL + "|" + modelID
 }
 
-func effectiveModelCatalogOwner(identity BridgeIdentity, profiles *MemberProfileStore, accounts auth.Store) string {
-	_, managedBy := configManagementState(identity, profiles, accounts)
-	if owner := strings.TrimSpace(fmt.Sprint(managedBy)); owner != "" && owner != "<nil>" {
-		return owner
-	}
-	return identity.Username
-}
-
 // resolvedOwnerModelCatalogStore keeps every user's own workflow settings but
 // reads the model catalog from the manager that owns the member's configuration.
 // Writes still go to the original owner through the embedded Store.
 type resolvedOwnerModelCatalogStore struct {
 	novelfetchworkshop.Store
 	resolveOwner func(string) string
+}
+
+type runtimeConfigReader interface {
+	GetConfig(context.Context, string) (map[string]any, error)
+}
+
+type runtimeUserConfig struct {
+	accounts accountcenter.Store
+	prefs    *UserConfigStore
+	catalog  novelfetchworkshop.Store
+}
+
+func (s runtimeUserConfig) GetConfig(ctx context.Context, subject string) (map[string]any, error) {
+	owner, err := ResolveAPIConfigOwner(ctx, s.accounts, subject)
+	if err != nil {
+		return nil, err
+	}
+	config, err := s.prefs.GetConfig(ctx, owner)
+	if err != nil {
+		return nil, err
+	}
+	delete(config, "modelCatalog")
+	if s.catalog != nil {
+		models, err := s.catalog.GetConfig(ctx, owner)
+		if err != nil {
+			return nil, err
+		}
+		config["modelCatalog"] = models["modelCatalog"]
+	}
+	return config, nil
 }
 
 func runtimeModelCatalogStore(store novelfetchworkshop.Store, resolveOwner func(string) string) novelfetchworkshop.Store {
@@ -135,23 +156,28 @@ func runtimeModelCatalogStore(store novelfetchworkshop.Store, resolveOwner func(
 }
 
 func (s resolvedOwnerModelCatalogStore) GetConfig(ctx context.Context, owner string) (map[string]any, error) {
-	config, err := s.Store.GetConfig(ctx, owner)
-	if err != nil {
-		return nil, err
-	}
 	resolvedOwner := owner
 	if s.resolveOwner != nil {
 		resolvedOwner = strings.TrimSpace(s.resolveOwner(owner))
 	}
 	if resolvedOwner == "" {
-		delete(config, "modelCatalog")
-		delete(config, "modelCatalogVersion")
-		return config, nil
+		return nil, accountcenter.ErrForbidden
 	}
 	if resolvedOwner == owner {
-		return config, nil
+		return s.Store.GetConfig(ctx, owner)
 	}
 	managed, err := s.Store.GetConfig(ctx, resolvedOwner)
+	if err != nil {
+		return nil, err
+	}
+	var config map[string]any
+	if workflow, ok := s.Store.(interface {
+		GetWorkflowConfig(context.Context, string) (map[string]any, error)
+	}); ok {
+		config, err = workflow.GetWorkflowConfig(ctx, owner)
+	} else {
+		config, err = s.Store.GetConfig(ctx, owner)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +198,7 @@ func (s resolvedOwnerModelCatalogStore) GetConfig(ctx context.Context, owner str
 	return merged, nil
 }
 
-func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridgeAuth, configAuth BridgeAuth, store novelfetchworkshop.Store, userConfig *UserConfigStore, accounts auth.Store, profiles *MemberProfileStore, saved yzcmmodels.Reader) {
+func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridgeAuth, configAuth BridgeAuth, store novelfetchworkshop.Store, userConfig *UserConfigStore, saved yzcmmodels.Reader) {
 	mux := http.NewServeMux()
 	policy := func(req *http.Request) apiConfigAccess {
 		return apiConfigPolicy(req.Context(), configAuth.AccountCenterStore)
@@ -197,14 +223,10 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 	})
 	mux.HandleFunc("GET /api/models", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		modelOwner := effectiveModelCatalogOwner(identity, profiles, accounts)
-		if configAuth.AccountCenterStore != nil {
-			var err error
-			modelOwner, err = ResolveAPIConfigOwner(req.Context(), configAuth.AccountCenterStore, identity.Username)
-			if err != nil {
-				writeJSON(w, http.StatusOK, map[string]any{"models": []any{}})
-				return
-			}
+		modelOwner, err := ResolveAPIConfigOwner(req.Context(), configAuth.AccountCenterStore, identity.Username)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"models": []any{}})
+			return
 		}
 		models, err := readModelCatalog(req, store, userConfig, modelOwner, req.URL.Query().Get("kind"), true)
 		if err != nil {
@@ -215,8 +237,7 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			ctx, _ := configAuth.accountCenterContext(req.Context(), identity.Username)
 			if !apiConfigPolicy(ctx, configAuth.AccountCenterStore).custom {
 				for i, model := range models {
-					models[i] = map[string]any{"id": model["id"], "kind": model["kind"], "modelId": model["modelId"], "displayName": model["displayName"],
-						"available": model["available"], "hasCredential": model["hasCredential"], "enabled": model["enabled"]}
+					models[i] = publicRuntimeModel(model)
 				}
 			}
 		}
@@ -257,6 +278,10 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 		}
 		var model map[string]any
 		var err error
+		if rejectsCredentialReference(input) {
+			writeAccountCenterForbidden(w)
+			return
+		}
 		if !access.custom || allowedInputFields(input, "kind", "modelId", "credential") {
 			model, err = newRestrictedYZCMModel(req.Context(), saved, input)
 		} else {
@@ -322,12 +347,12 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 					if existing["id"] != strings.TrimSpace(existingModelID) {
 						continue
 					}
-					if savedCredential, ok := existing["credential"].(string); ok {
-						credential = strings.TrimSpace(savedCredential)
+					target := novelfetchworkshop.ModelCredentialDestination(existing)
+					if existing["kind"] != "text" || strings.TrimSpace(baseURL) == "" || strings.TrimSpace(baseURL) != target.BaseURL || target.Endpoint != target.BaseURL {
+						writeAccountCenterForbidden(w)
+						return
 					}
-					if baseURL == "" {
-						baseURL = firstText(existing["baseUrl"])
-					}
+					credential = shuihuoModelCredential(existing)
 					if modelID == "" {
 						modelID = firstText(existing["modelId"])
 					}
@@ -396,20 +421,28 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 		}
 		model := map[string]any{
 			"kind":            "audio",
-			"endpoint":        strings.TrimSpace(fmt.Sprint(input["endpoint"])),
-			"requestTemplate": strings.TrimSpace(fmt.Sprint(input["requestTemplate"])),
-			"responseMapping": strings.TrimSpace(fmt.Sprint(input["responseMapping"])),
-			"credential":      strings.TrimSpace(fmt.Sprint(input["credential"])),
+			"endpoint":        firstText(input["endpoint"]),
+			"requestTemplate": firstText(input["requestTemplate"]),
+			"responseMapping": firstText(input["responseMapping"]),
+			"credential":      firstText(input["credential"]),
 		}
-		existingModelID := strings.TrimSpace(fmt.Sprint(input["existingModelId"]))
+		existingModelID := firstText(input["existingModelId"])
 		if existingModelID != "" {
 			if settings, settingsErr := store.GetConfig(req.Context(), identity.Username); settingsErr == nil {
 				for _, existing := range modelCatalog(settings) {
 					if existing["id"] != existingModelID {
 						continue
 					}
-					for _, key := range []string{"endpoint", "requestTemplate", "responseMapping", "credential"} {
-						if strings.TrimSpace(fmt.Sprint(model[key])) == "" {
+					if model["credential"] == "" {
+						target := novelfetchworkshop.ModelCredentialDestination(existing)
+						if existing["kind"] != "audio" || model["endpoint"] == "" || model["endpoint"] != target.Endpoint {
+							writeAccountCenterForbidden(w)
+							return
+						}
+						model["credential"] = shuihuoModelCredential(existing)
+					}
+					for _, key := range []string{"requestTemplate", "responseMapping"} {
+						if model[key] == "" {
 							model[key] = existing[key]
 						}
 					}
@@ -441,7 +474,7 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求内容无效"})
 			return
 		}
-		if !access.custom && !allowedInputFields(patch, "credential", "clearCredential") {
+		if rejectsCredentialReference(patch) || !access.custom && !allowedInputFields(patch, "credential", "clearCredential") {
 			writeAccountCenterForbidden(w)
 			return
 		}
@@ -475,6 +508,7 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 				if clear || credential != "" {
 					current["credential"] = credential
 					delete(current, "apiKey")
+					delete(current, "credentialStatus")
 				}
 				updated, found = current, true
 				break
@@ -483,6 +517,7 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 				writeAccountCenterForbidden(w)
 				return
 			}
+			before := cloneAnyMap(current)
 			for key, value := range patch {
 				if key == "id" || key == "clearCredential" {
 					continue
@@ -518,6 +553,14 @@ func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridge
 			if err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 				return
+			}
+			addressChanged := novelfetchworkshop.ModelCredentialDestination(before) != novelfetchworkshop.ModelCredentialDestination(model)
+			if (addressChanged || modelTargetChanged(before, model) && shuihuoModelCredential(before) != "") && firstText(patch["credential"], patch["apiKey"]) == "" {
+				writeAccountCenterForbidden(w)
+				return
+			}
+			if before["credentialStatus"] == "needs_reentry" && shuihuoModelCredential(model) == "" {
+				model["credentialStatus"] = "needs_reentry"
 			}
 			catalog[index] = model
 			updated = model
@@ -638,14 +681,14 @@ func testConfiguredModel(w http.ResponseWriter, req *http.Request, store novelfe
 			if model["kind"] != kind || !managedModelAvailable(model) {
 				continue
 			}
-			if baseURL == "" {
-				baseURL = firstText(model["baseUrl"])
-			}
 			if modelID == "" {
 				modelID = firstText(model["modelId"])
 			}
 			if credential == "" {
-				credential = firstText(model["credential"])
+				target := novelfetchworkshop.ModelCredentialDestination(model)
+				if baseURL != "" && baseURL == target.Endpoint && target.Endpoint == target.BaseURL {
+					credential = shuihuoModelCredential(model)
+				}
 			}
 			break
 		}
@@ -1035,10 +1078,10 @@ func normalizeManagedModel(input map[string]any) (map[string]any, error) {
 			model[key] = ""
 		}
 	}
-	// 管理端「水货生产模型」写 name / adapterKind / credentialRef / parameterSchema，
+	// 管理端「水货生产模型」写 name / adapterKind / parameterSchema，
 	// 个人中心平台预设卡写 displayName / baseUrl / credential。两处共用这份规范化，
 	// 只改 Key 或启用状态时不能把另一侧写入的扩展字段冲掉。
-	for _, key := range []string{"name", "adapterKind", "credentialRef", "parameterSchema", "tasksEndpoint", "resultEndpoint", "group", "capabilities"} {
+	for _, key := range []string{"name", "adapterKind", "parameterSchema", "tasksEndpoint", "resultEndpoint", "group", "capabilities"} {
 		if value, exists := input[key]; exists && fmt.Sprint(value) != "<nil>" {
 			model[key] = value
 		}
@@ -1058,8 +1101,7 @@ func publicManagedModel(model map[string]any) map[string]any {
 }
 
 func managedModelHasCredential(model map[string]any) bool {
-	credential := strings.TrimSpace(fmt.Sprint(model["credential"]))
-	return credential != "" && credential != "<nil>"
+	return shuihuoModelCredential(model) != ""
 }
 
 // managedModelRetired 识别已下线模型：沿用数据里的 [off] 命名约定。

@@ -125,7 +125,7 @@ VALUES ('legacy-run','member',?,?,'legacy-request','queued','fixture-model','{"c
 		id, _ := r.Context().Value(novelReceiptIDKey{}).(string)
 		return &http.Response{StatusCode: 200, Header: http.Header{"X-Oneapi-Request-Id": []string{id}}, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))}, nil
 	}))}
-	resolve := NovelCreationTextResolver(nil, nil, func(_ context.Context, owner, model string) (batchfactoryv11.DirectorProvider, error) {
+	resolve := NovelCreationTextResolver(accountcenter.NewMySQLStore(workerDB), func(_ context.Context, owner, model string) (batchfactoryv11.DirectorProvider, error) {
 		return &batchfactoryv11.OpenAICompatibleProvider{UsageOwner: owner, Endpoint: "https://newapi.yzcm.site/v1/chat/completions", APIKey: "fixture-key", Model: model, Client: client}, nil
 	})
 	workerStore := novelcreation.NewMySQLStore(workerDB)

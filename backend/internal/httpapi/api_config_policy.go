@@ -2,14 +2,17 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"unicode"
 
 	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/apisecrets"
+	"qiantie/backend/internal/novelfetchworkshop"
 	"qiantie/backend/internal/yzcmmodels"
 	"qiantie/backend/internal/yzcmusage"
 )
@@ -78,8 +81,12 @@ func ResolveAPIConfigOwner(ctx context.Context, store accountcenter.Store, usern
 	if err != nil || !identity.Active || identity.ArchivedAt != nil {
 		return "", accountcenter.ErrForbidden
 	}
-	if identity.Role != accountcenter.RoleMember {
+	switch identity.Role {
+	case accountcenter.RoleFounder, accountcenter.RoleDeveloper, accountcenter.RoleManager:
 		return identity.Username, nil
+	case accountcenter.RoleMember:
+	default:
+		return "", accountcenter.ErrForbidden
 	}
 	if identity.TeamID == "" {
 		return "", accountcenter.ErrForbidden
@@ -106,8 +113,20 @@ func isManagedYZCMModel(model map[string]any) bool {
 }
 
 func publicRestrictedModel(model map[string]any) map[string]any {
-	return map[string]any{"id": model["id"], "modelId": model["modelId"], "displayName": model["displayName"], "kind": model["kind"],
-		"hasCredential": managedModelHasCredential(model), "available": managedModelAvailable(model), "enabled": model["enabled"], "catalogSource": managedYZCMSource}
+	item := publicRuntimeModel(model)
+	item["hasCredential"] = managedModelHasCredential(model) || model["hasCredential"] == true
+	item["catalogSource"] = managedYZCMSource
+	if model["credentialStatus"] == "needs_reentry" {
+		item["credentialStatus"] = "needs_reentry"
+	}
+	return item
+}
+
+func publicRuntimeModel(model map[string]any) map[string]any {
+	enabled, set := model["enabled"]
+	return map[string]any{"id": modelString(model, "id"), "modelId": modelString(model, "modelId"),
+		"displayName": modelString(model, "displayName"), "kind": modelString(model, "kind"),
+		"available": model["available"] == true || managedModelAvailable(model), "enabled": !set || normalizedModelEnabled(enabled)}
 }
 
 func allowedInputFields(input map[string]any, fields ...string) bool {
@@ -130,30 +149,59 @@ func apiConfigField(key string) string {
 
 func apiSecretField(key string) bool {
 	name := apiConfigField(key)
-	return name == "authorization" || name == "headers" || name == "password" || name == "credential" || name == "secret" || name == "token" ||
+	return name == "authorization" || name == "headers" || name == "password" || name == "credential" || name == "credentialref" || name == "secret" || name == "token" ||
 		strings.HasSuffix(name, "apikey") || strings.HasSuffix(name, "secretkey") || strings.HasSuffix(name, "accesstoken") || strings.HasSuffix(name, "admintoken")
 }
 
-func containsAPIConfig(input any) bool {
+func rejectsCredentialReference(input map[string]any) bool {
+	for key := range input {
+		if apiConfigField(key) == "credentialref" {
+			return true
+		}
+	}
+	return false
+}
+
+func modelTargetChanged(before, after map[string]any) bool {
+	return novelfetchworkshop.ModelCredentialDestination(before) != novelfetchworkshop.ModelCredentialDestination(after) ||
+		novelfetchworkshop.ModelCredentialSource(before) != novelfetchworkshop.ModelCredentialSource(after) ||
+		firstText(before["modelId"]) != firstText(after["modelId"]) || firstText(before["kind"]) != firstText(after["kind"])
+}
+
+func containsConfigField(input any, included func(string) bool) bool {
 	switch value := input.(type) {
 	case map[string]any:
 		for key, item := range value {
-			switch apiConfigField(key) {
-			case "modelcatalog", "modelcatalogversion", "modelcatalogsecretversion", "apiintegrations", "baseurl", "endpoint", "apiformat", "provider", "tasksendpoint", "resultendpoint", "requesttemplate", "responsemapping", "voiceclonerequesttemplate", "voicecloneresponsemapping", "adapterkind", "credentialref", "parameterschema", "routing", "customchannels":
-				return true
-			}
-			if apiSecretField(key) || containsAPIConfig(item) {
+			if included(key) || containsConfigField(item, included) {
 				return true
 			}
 		}
 	case []any:
 		for _, item := range value {
-			if containsAPIConfig(item) {
+			if containsConfigField(item, included) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func isManagedModelField(key string) bool {
+	switch apiConfigField(key) {
+	case "modelcatalog", "modelcatalogversion", "modelcatalogsecretversion", "modelcataloglegacyscrubpending", "credentialref":
+		return true
+	}
+	return false
+}
+
+func containsAPIConfig(input any) bool {
+	return containsConfigField(input, func(key string) bool {
+		switch apiConfigField(key) {
+		case "apiintegrations", "baseurl", "endpoint", "apiformat", "provider", "tasksendpoint", "resultendpoint", "requesttemplate", "responsemapping", "voiceclonerequesttemplate", "voicecloneresponsemapping", "adapterkind", "parameterschema", "routing", "customchannels":
+			return true
+		}
+		return isManagedModelField(key) || apiSecretField(key)
+	})
 }
 
 func redactAPIConfig(v any) any {
@@ -163,7 +211,7 @@ func redactAPIConfig(v any) any {
 		for key, item := range value {
 			_, boolValue := item.(bool)
 			configuredFlag := boolValue && strings.Contains(apiConfigField(key), "hasapikey")
-			if (!apiSecretField(key) || configuredFlag) && key != "modelCatalogSecretVersion" {
+			if (!apiSecretField(key) || configuredFlag) && key != "modelCatalogSecretVersion" && key != "modelCatalogLegacyScrubPending" {
 				out[key] = redactAPIConfig(item)
 			}
 		}
@@ -216,36 +264,63 @@ func compatibilityAPIConfigAccess(r *http.Request) (apiConfigAccess, bool) {
 
 func publicCompatibilityConfig(r *http.Request, config map[string]any) map[string]any {
 	access, protected := compatibilityAPIConfigAccess(r)
-	if protected && !access.custom {
-		return redactRestrictedCompatibilityConfig(config).(map[string]any)
+	if !protected {
+		return redactAPIConfig(config).(map[string]any)
 	}
-	return redactAPIConfig(config).(map[string]any)
+	return redactCompatibilityConfig(config, access).(map[string]any)
 }
 
-func redactRestrictedCompatibilityConfig(value any) any {
+func compatibilityModels(value any, access apiConfigAccess) []map[string]any {
+	models := modelCatalog(map[string]any{"modelCatalog": value})
+	result := make([]map[string]any, 0, len(models))
+	for _, model := range models {
+		switch {
+		case access.custom:
+			result = append(result, publicManagedModel(model))
+		case access.allowed && isManagedYZCMModel(model):
+			result = append(result, publicRestrictedModel(model))
+		case access.identity.Subject.Role == accountcenter.RoleMember && (model["available"] == true || managedModelAvailable(model)):
+			result = append(result, publicRuntimeModel(model))
+		}
+	}
+	return result
+}
+
+func redactCompatibilityConfig(value any, access apiConfigAccess) any {
 	switch entry := value.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(entry))
 		for key, child := range entry {
 			switch apiConfigField(key) {
-			case "baseurl", "endpoint", "apiformat", "provider", "tasksendpoint", "resultendpoint", "requesttemplate", "responsemapping", "voiceclonerequesttemplate", "voicecloneresponsemapping", "adapterkind", "credentialref", "parameterschema", "workflowid", "routing", "customchannels", "modelcatalogsecretversion", "apiintegrations":
+			case "modelcatalog":
+				out[key] = compatibilityModels(child, access)
 				continue
+			case "modelcatalogsecretversion", "modelcataloglegacyscrubpending", "importedsensitiverepairbackup", "importedknowledgerepairbackup":
+				continue
+			case "baseurl", "endpoint", "apiformat", "provider", "tasksendpoint", "resultendpoint", "requesttemplate", "responsemapping", "voiceclonerequesttemplate", "voicecloneresponsemapping", "adapterkind", "credentialref", "parameterschema", "workflowid", "routing", "customchannels", "apiintegrations":
+				if !access.custom {
+					continue
+				}
 			}
-			if !apiSecretField(key) {
-				out[key] = redactRestrictedCompatibilityConfig(child)
+			_, flags := child.(bool)
+			if key == "api_key" || key == "password" {
+				out[key+"_configured"] = firstText(child) != ""
+			}
+			if !apiSecretField(key) || flags && strings.Contains(apiConfigField(key), "hasapikey") {
+				out[key] = redactCompatibilityConfig(child, access)
 			}
 		}
 		return out
 	case []any:
 		out := make([]any, 0, len(entry))
 		for _, item := range entry {
-			out = append(out, redactRestrictedCompatibilityConfig(item))
+			out = append(out, redactCompatibilityConfig(item, access))
 		}
 		return out
 	case []map[string]any:
 		out := make([]map[string]any, 0, len(entry))
 		for _, item := range entry {
-			out = append(out, redactRestrictedCompatibilityConfig(item).(map[string]any))
+			out = append(out, redactCompatibilityConfig(item, access).(map[string]any))
 		}
 		return out
 	default:
@@ -255,12 +330,106 @@ func redactRestrictedCompatibilityConfig(value any) any {
 
 type apiConfigCompatKey struct{}
 
-func rejectCompatibilityAPIConfigWrite(w http.ResponseWriter, r *http.Request, data map[string]any) bool {
-	if _, protected := r.Context().Value(apiConfigCompatKey{}).(BridgeAuth); protected && containsAPIConfig(data) {
-		writeAccountCenterForbidden(w)
+func prepareCompatibilitySettingsPatch(r *http.Request, data, current map[string]any) (hasEcho, allowed bool) {
+	access, protected := compatibilityAPIConfigAccess(r)
+	if !protected {
+		return false, !containsAPIConfig(data)
+	}
+	var stripEcho func(map[string]any) bool
+	stripEcho = func(section map[string]any) bool {
+		for key, value := range section {
+			switch key {
+			case "modelCatalog", "modelCatalogVersion":
+				hasEcho = true
+				if current == nil {
+					continue
+				}
+				expected := current[key]
+				if key == "modelCatalog" {
+					expected = compatibilityModels(expected, access)
+				}
+				public, err := json.Marshal(expected)
+				var normalized any
+				if err != nil || json.Unmarshal(public, &normalized) != nil || !reflect.DeepEqual(value, normalized) {
+					return false
+				}
+				delete(section, key)
+			case "settings", "appConfig":
+				if child, ok := value.(map[string]any); ok {
+					if !stripEcho(child) {
+						return false
+					}
+				} else if containsAPIConfig(value) {
+					return false
+				}
+			case "fetch":
+				// The original-book endpoint is a workbench setting and never
+				// receives model credentials.
+				if fetch, ok := value.(map[string]any); ok {
+					copy := cloneAnyMap(fetch)
+					delete(copy, "endpoint")
+					if containsAPIConfig(copy) {
+						return false
+					}
+				} else if containsAPIConfig(value) {
+					return false
+				}
+			case "ai":
+				if ai, ok := value.(map[string]any); ok {
+					for field := range ai {
+						if name := apiConfigField(field); name == "model" || name == "modelid" || name == "extrabodyjson" {
+							return false
+						}
+					}
+				}
+				if containsAPIConfig(value) {
+					return false
+				}
+			default:
+				if containsAPIConfig(map[string]any{key: value}) {
+					return false
+				}
+			}
+		}
 		return true
 	}
-	return false
+	allowed = stripEcho(data)
+	return hasEcho, allowed
+}
+
+func compatibilityConfigForEcho(r *http.Request, store novelfetchworkshop.Store, owner string) (map[string]any, error) {
+	effective, err := compatibilitySettingsOwner(r, owner)
+	if err != nil {
+		return nil, err
+	}
+	if reader, ok := store.(interface {
+		ReadBoundModelConfig(context.Context, string) (map[string]any, error)
+	}); ok {
+		return reader.ReadBoundModelConfig(r.Context(), effective)
+	}
+	return store.GetConfig(r.Context(), effective)
+}
+
+func compatibilitySettingsOwner(r *http.Request, owner string) (string, error) {
+	auth, protected := r.Context().Value(apiConfigCompatKey{}).(BridgeAuth)
+	if !protected || auth.AccountCenterStore == nil {
+		return "", accountcenter.ErrForbidden
+	}
+	return ResolveAPIConfigOwner(r.Context(), auth.AccountCenterStore, owner)
+}
+
+func formalCompatibilityCatalog(r *http.Request, store novelfetchworkshop.Store, owner string, initial map[string]any) any {
+	effective, err := compatibilitySettingsOwner(r, owner)
+	if err != nil {
+		return []any{}
+	}
+	if effective != owner {
+		initial, err = store.GetConfig(r.Context(), effective)
+		if err != nil {
+			return []any{}
+		}
+	}
+	return initial["modelCatalog"]
 }
 
 func modelCredentialPatch(input map[string]any) (string, bool, error) {

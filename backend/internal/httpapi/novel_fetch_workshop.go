@@ -4351,19 +4351,14 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		if nested, ok := settings["settings"].(map[string]any); ok {
 			publicSource = nested
 		}
-		publicSource = novelfetchworkshop.EnsureWorkshopDefaults(publicSource)
-		// 普通成员只读所属管理员的模型目录：成员自己保存的旧副本不再展示，
-		// 避免“页面看到旧 Key、预检按管理员目录判断”的配置漂移。
-		if canManage, _ := configManagementState(identity, profiles, accounts); !canManage {
-			if owner := effectiveModelCatalogOwner(identity, profiles, accounts); owner != "" {
-				if managed, err := store.GetConfig(req.Context(), owner); err == nil {
-					if catalog, ok := managed["modelCatalog"].([]any); ok && len(catalog) > 0 {
-						publicSource["modelCatalog"] = catalog
-					}
-				}
-			}
+		publicSource = novelfetchworkshop.EnsureWorkshopDefaults(cloneAnyMap(publicSource))
+		if _, guarded := req.Context().Value(apiConfigCompatKey{}).(BridgeAuth); guarded {
+			publicSource["modelCatalog"] = formalCompatibilityCatalog(req, store, identity.Username, settings)
 		}
 		appConfig := novelFetchAppConfig(publicSource)
+		if catalog, exists := publicSource["modelCatalog"]; exists {
+			appConfig["modelCatalog"] = catalog
+		}
 		platforms := novelFetchPlatformCatalog(publicSource)
 		publicSource["platforms"] = platforms
 		styles, ok := publicSource["styles"].([]any)
@@ -4378,9 +4373,6 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 				aiConfig = map[string]any{}
 			}
 		}
-		publicAppConfig := publicNovelFetchConfig(appConfig)
-		publicAIConfig := publicNovelFetchConfig(aiConfig)
-		publicSettings := publicCompatibilityConfig(req, publicNovelFetchConfig(publicSource))
 		// The legacy embedded workbench reads the catalog and its counters from
 		// the top-level response.  Keep that view in the same response as the
 		// canonical appConfig so both pages consume one Go-owned configuration
@@ -4392,11 +4384,11 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		knowledge = publicNovelFetchConfig(knowledge)
 		knowledgeSummary := batchKnowledgeSummary(knowledge, false)
 		writeJSON(w, http.StatusOK, publicCompatibilityConfig(req, map[string]any{
-			"appConfig":         publicAppConfig,
+			"appConfig":         appConfig,
 			"platforms":         platforms,
 			"styles":            styles,
-			"aiConfig":          publicAIConfig,
-			"settings":          publicSettings,
+			"aiConfig":          aiConfig,
+			"settings":          publicSource,
 			"knowledge":         knowledge,
 			"knowledge_loaded":  true,
 			"knowledge_summary": knowledgeSummary,
@@ -4404,13 +4396,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 	})
 
 	saveWorkshopConfig := func(w http.ResponseWriter, req *http.Request) {
-		stripCatalog := false
-		if identity, ok := BridgeIdentityFromContext(req.Context()); ok {
-			if canManage, _ := configManagementState(identity, profiles, accounts); !canManage {
-				stripCatalog = true
-			}
-		}
-		saveNovelFetchConfig(w, req, store, stripCatalog, func(merged map[string]any) map[string]any {
+		saveNovelFetchConfig(w, req, store, func(merged map[string]any) map[string]any {
 			return map[string]any{"ok": true, "settings": merged}
 		})
 	}
@@ -4435,7 +4421,7 @@ func novelFetchSubmitChunks(bookIDs []string, batchSize int) [][]string {
 	return chunks
 }
 
-func saveNovelFetchConfig(w http.ResponseWriter, req *http.Request, store novelfetchworkshop.Store, stripModelCatalog bool, response func(map[string]any) map[string]any) {
+func saveNovelFetchConfig(w http.ResponseWriter, req *http.Request, store novelfetchworkshop.Store, response func(map[string]any) map[string]any) {
 	identity, ok := BridgeIdentityFromContext(req.Context())
 	if !ok || identity.Username == "" {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
@@ -4446,7 +4432,20 @@ func saveNovelFetchConfig(w http.ResponseWriter, req *http.Request, store novelf
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求内容无效"})
 		return
 	}
-	if rejectCompatibilityAPIConfigWrite(w, req, patch) {
+	echoed, allowed := prepareCompatibilitySettingsPatch(req, patch, nil)
+	if !allowed {
+		writeAccountCenterForbidden(w)
+		return
+	}
+	if echoed {
+		current, err := compatibilityConfigForEcho(req, store, identity.Username)
+		if _, valid := prepareCompatibilitySettingsPatch(req, patch, current); err != nil || !valid {
+			writeAccountCenterForbidden(w)
+			return
+		}
+	}
+	if patch == nil {
+		writeAuthError(w, http.StatusBadRequest, "设置内容无效")
 		return
 	}
 	settings, _ := patch["settings"].(map[string]any)
@@ -4468,11 +4467,6 @@ func saveNovelFetchConfig(w http.ResponseWriter, req *http.Request, store novelf
 		}
 	}
 	settings["appConfig"] = appPatch
-	// 普通成员不能覆盖模型目录：目录统一由所属管理员维护，成员侧只读。
-	if stripModelCatalog {
-		delete(settings, "modelCatalog")
-		delete(settings, "modelCatalogVersion")
-	}
 	current, err := store.GetConfig(req.Context(), identity.Username)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取设置失败"})
@@ -4510,6 +4504,12 @@ func saveNovelFetchConfig(w http.ResponseWriter, req *http.Request, store novelf
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存设置失败"})
 		return
+	}
+	if _, guarded := req.Context().Value(apiConfigCompatKey{}).(BridgeAuth); guarded {
+		merged["modelCatalog"] = formalCompatibilityCatalog(req, store, identity.Username, merged)
+		if app, ok := merged["appConfig"].(map[string]any); ok {
+			app["modelCatalog"] = merged["modelCatalog"]
+		}
 	}
 	writeJSON(w, http.StatusOK, publicCompatibilityConfig(req, response(merged)))
 }

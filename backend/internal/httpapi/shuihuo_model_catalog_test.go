@@ -153,14 +153,13 @@ func TestShuihuoTextModelConfiguredUsesManagedCatalog(t *testing.T) {
 	}
 }
 
-func TestShuihuoModelKindConfiguredUsesCredentialReferenceAndAudioFields(t *testing.T) {
-	t.Setenv("V88_TEXT_MODEL_KEY", "text-secret")
+func TestShuihuoModelKindConfiguredRequiresIndependentKeyAndAudioFields(t *testing.T) {
 	config := map[string]any{"modelCatalog": []any{
 		map[string]any{"kind": "text", "enabled": true, "modelId": "text-model", "baseUrl": "https://text.example/v1", "credentialRef": "V88_TEXT_MODEL_KEY"},
 		map[string]any{"kind": "audio", "enabled": true, "modelId": "tts-model", "endpoint": "https://audio.example/speech", "credential": "audio-secret", "requestTemplate": `{\"body\":{}}`, "responseMapping": `{\"resultUrl\":\"data.url\"}`},
 	}}
-	if !shuihuoModelKindConfigured(config, "text") {
-		t.Fatal("text model with a credential reference should be ready")
+	if shuihuoModelKindConfigured(config, "text") {
+		t.Fatal("a historical credential reference must not make a model ready")
 	}
 	if !shuihuoModelKindConfigured(config, "audio") {
 		t.Fatal("audio model with endpoint, credential, template and mapping should be ready")
@@ -201,17 +200,16 @@ func TestShuihuoVideoReadyCheckerAcceptsLocalDoubaoExecutor(t *testing.T) {
 	}
 }
 
-func TestShuihuoImageModelReadyUsesBaseURLAndCredentialRef(t *testing.T) {
-	t.Setenv("V88_IMAGE_MODEL_KEY", "image-secret")
+func TestShuihuoImageModelReadyUsesBaseURLAndIndependentKey(t *testing.T) {
 	model := map[string]any{
-		"kind":          "image",
-		"enabled":       true,
-		"modelId":       "image-model",
-		"baseUrl":       "https://images.example/v1",
-		"credentialRef": "V88_IMAGE_MODEL_KEY",
+		"kind":       "image",
+		"enabled":    true,
+		"modelId":    "image-model",
+		"baseUrl":    "https://images.example/v1",
+		"credential": "local-test-key",
 	}
 	if !shuihuoImageModelReady(model) {
-		t.Fatal("image model with a valid base URL and credential reference should be ready")
+		t.Fatal("image model with a valid base URL and its own key should be ready")
 	}
 	model["enabled"] = false
 	if shuihuoImageModelReady(model) {

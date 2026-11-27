@@ -3468,7 +3468,10 @@ func (c *BatchAutomationCoordinator) ensureAudioPlan(ctx context.Context, owner,
 	if len(lines) == 0 {
 		return "", 0, fmt.Errorf("正文没有可测量的生产行")
 	}
-	model, ok := configuredTTSModel(ctx, c.ttsStore, owner)
+	model, ok, err := configuredTTSModel(ctx, c.ttsStore, owner)
+	if err != nil {
+		return "", 0, err
+	}
 	semanticHash := automationTTSSemanticHash(lines, model, ok)
 	if hasReusableAudioPlan(book) {
 		var artifactID string

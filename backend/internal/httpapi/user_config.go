@@ -62,6 +62,8 @@ func NewUserConfigStore(baseDir string) *UserConfigStore {
 	return &UserConfigStore{BaseDir: trimmed, secrets: newConfigSecretProvider(trimmed)}
 }
 
+func (s *UserConfigStore) LegacyModelFileLocker() sync.Locker { return &s.mu }
+
 func cloneConfigMap(source map[string]any) map[string]any {
 	result := make(map[string]any, len(source))
 	for key, value := range source {
@@ -341,7 +343,7 @@ func registerUserConfigRoutes(root *http.ServeMux, middleware BridgeAuth, store 
 				return
 			}
 		}
-		if _, supplied := patch["modelCatalog"]; supplied {
+		if containsConfigField(patch, isManagedModelField) {
 			writeAccountCenterForbidden(w)
 			return
 		}

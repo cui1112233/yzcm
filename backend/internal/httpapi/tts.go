@@ -96,11 +96,19 @@ func registerTTSRoute(root *http.ServeMux, auth BridgeAuth, catalogStore novelfe
 		if input.Style == "" {
 			input.Style = "general"
 		}
-		if identity, ok := BridgeIdentityFromContext(r.Context()); ok && catalogStore != nil {
-			if model, found := configuredTTSModel(r.Context(), catalogStore, identity.Username); found {
-				serveConfiguredTTS(w, r, input, model)
-				return
-			}
+		identity, ok := BridgeIdentityFromContext(r.Context())
+		if !ok || catalogStore == nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "音频模型配置暂不可用")
+			return
+		}
+		model, found, err := configuredTTSModel(r.Context(), catalogStore, identity.Username)
+		if err != nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "音频模型配置暂不可用")
+			return
+		}
+		if found {
+			serveConfiguredTTS(w, r, input, model)
+			return
 		}
 		body, contentType, err := requestDefaultTTSBytes(r.Context(), input)
 		if err != nil {
@@ -155,10 +163,10 @@ func requestDefaultTTSBytes(ctx context.Context, input ttsRequest) ([]byte, stri
 	return body, contentType, nil
 }
 
-func configuredTTSModel(ctx context.Context, store novelfetchworkshop.Store, owner string) (map[string]any, bool) {
+func configuredTTSModel(ctx context.Context, store novelfetchworkshop.Store, owner string) (map[string]any, bool, error) {
 	config, err := store.GetConfig(ctx, owner)
 	if err != nil {
-		return nil, false
+		return nil, false, err
 	}
 	for _, model := range modelCatalog(config) {
 		if !strings.EqualFold(modelString(model, "kind"), "audio") || model["enabled"] != true {
@@ -170,9 +178,9 @@ func configuredTTSModel(ctx context.Context, store novelfetchworkshop.Store, own
 		if shuihuoModelCredential(model) == "" || modelString(model, "requestTemplate") == "" {
 			continue
 		}
-		return model, true
+		return model, true, nil
 	}
-	return nil, false
+	return nil, false, nil
 }
 
 func serveConfiguredTTS(w http.ResponseWriter, r *http.Request, input ttsRequest, model map[string]any) {
@@ -190,10 +198,7 @@ func serveConfiguredTTS(w http.ResponseWriter, r *http.Request, input ttsRequest
 }
 
 func requestConfiguredTTSBytes(ctx context.Context, input ttsRequest, model map[string]any) ([]byte, string, error) {
-	endpoint := modelString(model, "endpoint")
-	if endpoint == "" {
-		endpoint = modelString(model, "baseUrl")
-	}
+	endpoint := novelfetchworkshop.ModelCredentialDestination(model).Endpoint
 	method, headers, body, err := configuredTTSRequest(modelString(model, "requestTemplate"), input, shuihuoModelCredential(model))
 	if err != nil {
 		return nil, "", fmt.Errorf("请求模板无效: %w", err)

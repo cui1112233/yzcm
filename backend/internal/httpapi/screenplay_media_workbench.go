@@ -40,7 +40,7 @@ type ScreenplayMediaWorkbench struct {
 	Executors          *localexecutor.Service
 	Files              *localartifact.Store
 	Video              screenplayVideoService
-	Configs            *UserConfigStore
+	Configs            runtimeConfigReader
 }
 type screenplayMediaAction struct {
 	SourceProjectID   string                        `json:"sourceProjectId"`

@@ -56,8 +56,9 @@ func TestBindingFinalVideoRequests(t *testing.T) {
 	service := &fakeScreenplayVideoService{}
 	r.service = service
 	r.repo = screenplay.NewMemoryProductionRepository()
-	r.configs = NewUserConfigStore(t.TempDir())
-	if e := r.configs.write("alice", map[string]any{"scriptDefaults": map[string]any{"videoModelKey": "fixture"}}); e != nil {
+	configs := NewUserConfigStore(t.TempDir())
+	r.configs = configs
+	if e := configs.write("alice", map[string]any{"scriptDefaults": map[string]any{"videoModelKey": "fixture"}}); e != nil {
 		t.Fatal(e)
 	}
 	sh.Characters = asset.Name

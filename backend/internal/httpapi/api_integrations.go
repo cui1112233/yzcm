@@ -578,7 +578,7 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 		writeJSON(w, http.StatusOK, apiIntegrationsView(next))
 	})))
 
-	root.Handle("POST /api/settings/api-integrations/reveal", middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+	root.Handle("POST /api/settings/api-integrations/reveal", middleware.SessionOnly().AccountCenterMiddleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		access := policy(req)
 		if !access.authorize(w, true, false) {
 			return

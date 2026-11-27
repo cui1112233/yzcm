@@ -8,6 +8,7 @@ import (
 	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/imagecapacity"
 	"strings"
@@ -47,8 +48,11 @@ func TestImageCapacityRoutesAreOwnerScopedAndAdminOnly(t *testing.T) {
 	}, "test-route")
 	mux := http.NewServeMux()
 	now := time.Now()
-	auth := BridgeAuth{Secret: "bridge", Now: func() time.Time { return now }}
-	registerImageCapacityRoutes(mux, auth, RouterOptions{ImageCapacity: controller, UserConfigStore: config, Store: batchfactoryv11.NewMemoryStore()})
+	center := &impersonationTestStore{identities: map[string]accountcenter.Identity{
+		"alice": {Username: "alice", Role: accountcenter.RoleManager, Active: true},
+	}}
+	auth := BridgeAuth{Secret: "bridge", Now: func() time.Time { return now }, AccountCenterStore: center}
+	registerImageCapacityRoutes(mux, auth, RouterOptions{ImageCapacity: controller, UserConfigStore: config, Store: batchfactoryv11.NewMemoryStore(), AccountCenterStore: center})
 	request := func(method, path, body string, owner bool) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, path, strings.NewReader(body))
 		SignBridgeRequest(r, "alice", owner, now, "bridge")

@@ -58,9 +58,7 @@ type comicPageGenerator struct {
 
 func (g comicPageGenerator) modelOwner(owner string) string {
 	if g.resolveModelOwner != nil {
-		if resolved := strings.TrimSpace(g.resolveModelOwner(owner)); resolved != "" {
-			return resolved
-		}
+		return strings.TrimSpace(g.resolveModelOwner(owner))
 	}
 	return owner
 }
@@ -1959,7 +1957,7 @@ func comicPromptTextIsJSON(text string) bool {
 	return trimmed[0] == '{' || trimmed[0] == '['
 }
 
-func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoordinator, store batchfactoryv11.Store, files *localartifact.Store, localExecutors *localexecutor.Service, catalogStore novelfetchworkshop.Store, userConfig *UserConfigStore, presetCatalog *prompt.Catalog, accounts auth.Store, profiles *MemberProfileStore, director *batchfactoryv11.DirectorService, generationGate *comicPageGenerationGate, imageCache imagegenerationcache.Repository) {
+func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoordinator, store batchfactoryv11.Store, files *localartifact.Store, localExecutors *localexecutor.Service, catalogStore novelfetchworkshop.Store, userConfig *UserConfigStore, presetCatalog *prompt.Catalog, accounts auth.Store, profiles *MemberProfileStore, director *batchfactoryv11.DirectorService, generationGate *comicPageGenerationGate, imageCache imagegenerationcache.Repository, resolveModelOwner func(string) string) {
 	registerComicSourceSegmentRoutes(mux, production, store, director)
 	comicStore, ok := store.(batchfactoryv11.ComicPageStore)
 	if mux == nil || !ok {
@@ -1980,9 +1978,7 @@ func registerComicPageRoutes(mux *http.ServeMux, production *BatchAutomationCoor
 	const image = images + "/{imageId}"
 	const collections = "/api/batch-factory/v12/batches/{batchId}/books/{bookId}/comic-collections"
 	const collectionDownload = collections + "/{collectionId}/download"
-	generator := comicPageGenerator{production: production, store: store, files: files, localExecutors: localExecutors, catalogStore: catalogStore, userConfig: userConfig, presetCatalog: presetCatalog, generationGate: generationGate, imageCache: imageCache, resolveModelOwner: func(owner string) string {
-		return effectiveModelCatalogOwner(BridgeIdentity{Username: owner}, profiles, accounts)
-	}}
+	generator := comicPageGenerator{production: production, store: store, files: files, localExecutors: localExecutors, catalogStore: catalogStore, userConfig: userConfig, presetCatalog: presetCatalog, generationGate: generationGate, imageCache: imageCache, resolveModelOwner: resolveModelOwner}
 
 	handleComic("GET "+pages, func(w http.ResponseWriter, r *http.Request) {
 		owner, ok := bridgeOwner(r)

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/localartifact"
 	"qiantie/backend/internal/localexecutor"
@@ -295,12 +296,15 @@ func registerV12AssetGenerationRoute(mux *http.ServeMux, production *BatchAutoma
 		}, 1)
 		modelConfigOwner := owner
 		if resolveModelOwner != nil {
-			if resolved := strings.TrimSpace(resolveModelOwner(owner)); resolved != "" {
-				modelConfigOwner = resolved
+			modelConfigOwner = strings.TrimSpace(resolveModelOwner(owner))
+			if modelConfigOwner == "" {
+				tasks.finish(taskID, nil, accountcenter.ErrForbidden)
+				writeAccountCenterForbidden(w)
+				return
 			}
 		}
 		go func() {
-			generationCtx, cancel := assetImageGenerationContext(context.Background())
+			generationCtx, cancel := assetImageGenerationContext(context.WithoutCancel(r.Context()))
 			defer cancel()
 			generationCtx = withShuihuoAssetThreeView(generationCtx, threeView)
 			images, generationErr := generateShuihuoAssetImagesWithRepair(generationCtx, store, files, owner, selectedBatch, assetIDs, modelID, aspectRatio, provider, localExecutors, presetCatalog, rewrite, userConfig, modelConfigOwner, catalogStore)

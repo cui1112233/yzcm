@@ -107,15 +107,21 @@ func readReferenceAssetImageSettingsForModel(ctx context.Context, store *UserCon
 			result["base_url"], result["model"], result["api_key"] = target.BaseURL, target.ModelID, target.Credential
 			return result
 		}
-	}
-	if selectedModelID == "" && strings.TrimSpace(fmt.Sprint(result["base_url"])) != "" && strings.TrimSpace(fmt.Sprint(result["model"])) != "" && strings.TrimSpace(fmt.Sprint(result["api_key"])) != "" {
+		delete(result, "api_key")
 		return result
+	}
+	if selectedModelID != "" {
+		delete(result, "api_key")
 	}
 	if catalogStore == nil {
 		return result
 	}
 	settings, err := catalogStore.GetConfig(ctx, username)
 	if err != nil {
+		delete(result, "api_key")
+		return result
+	}
+	if selectedModelID == "" && firstText(result["base_url"]) != "" && firstText(result["model"]) != "" && firstText(result["api_key"]) != "" {
 		return result
 	}
 	for _, candidate := range modelCatalog(settings) {
@@ -127,7 +133,7 @@ func readReferenceAssetImageSettingsForModel(ctx context.Context, store *UserCon
 		}
 		baseURL := strings.TrimSpace(fmt.Sprint(candidate["baseUrl"]))
 		modelID := strings.TrimSpace(fmt.Sprint(candidate["modelId"]))
-		credential := strings.TrimSpace(fmt.Sprint(candidate["credential"]))
+		credential := shuihuoModelCredential(candidate)
 		if baseURL == "<nil>" {
 			baseURL = ""
 		}

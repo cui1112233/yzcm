@@ -138,7 +138,7 @@ func TestRouterAutomationVideoRetryVerifiesStoryboardVersion(t *testing.T) {
 			retryStore := &videoRetryStateStore{snapshot: mustJSON(automationStateFile{Version: 1, Jobs: map[string]map[string]any{jobID: job}}), finished: make(chan map[string]any, 1)}
 			reader := NewFileAutomationStatusReader("")
 			now := time.Unix(1700000000, 0)
-			options := RouterOptions{BridgeSecret: "secret", Now: func() time.Time { return now }, Slice: 4, Store: store, Director: director, Production: production, AutomationStatusReader: reader, AutomationStateStore: retryStore, LocalArtifacts: files, NovelFetchStore: catalog}
+			options := RouterOptions{AccountCenterStore: activeModelTestAccounts("alice"), BridgeSecret: "secret", Now: func() time.Time { return now }, Slice: 4, Store: store, Director: director, Production: production, AutomationStatusReader: reader, AutomationStateStore: retryStore, LocalArtifacts: files, NovelFetchStore: catalog}
 			if tc.injected {
 				stages := &batchfactoryv11.BookStageService{Store: store, Director: director, Production: production, VideoReady: shuihuoVideoReadyChecker(store, catalog, production)}
 				options.AutomationCoordinator = NewBatchAutomationCoordinator(store, nil, stages, nil, nil, catalog, nil, reader, options.Now)
