@@ -59,6 +59,11 @@ func (r *MySQLAuthoringRepository) sessionTransaction(ctx context.Context, owner
 	if err = result.Close(); err != nil {
 		return err
 	}
+	for _, item := range scope.rows {
+		item.Active = assistantSessionVisible(scope.rows, item.ID, actor) && sessionActive(scope.rows, item.ID) && !st.Archived
+		item.CanManage = sessionProjectAccess(st, owner, actor, "edit") && (actor == item.Creator || actor == owner && item.Visibility == "project")
+		item.CanStop = item.RequestStatus != "" && (item.requestActor == actor || item.CanManage)
+	}
 	if err = fn(&scope); err != nil {
 		return err
 	}
@@ -86,6 +91,16 @@ func (r *MySQLAuthoringRepository) ListAssistantSessions(ctx context.Context, ow
 	return list, err
 }
 
+func (s *sessionScope) history(id string) (AssistantSessionHistory, error) {
+	var history AssistantSessionHistory
+	var raw []byte
+	if err := s.tx.QueryRowContext(s.ctx, "SELECT body FROM screenplay_assistant_sessions WHERE owner_username=? AND project_id=? AND session_id=?", s.owner, s.project, id).Scan(&raw); err != nil {
+		return history, err
+	}
+	err := json.Unmarshal(raw, &history)
+	return history, err
+}
+
 func (r *MySQLAuthoringRepository) GetAssistantSession(ctx context.Context, owner, project, actor, id string) (*AssistantSession, AssistantSessionHistory, error) {
 	var item *AssistantSession
 	var history AssistantSessionHistory
@@ -94,11 +109,8 @@ func (r *MySQLAuthoringRepository) GetAssistantSession(ctx context.Context, owne
 		if item, err = s.selected(id); err != nil {
 			return err
 		}
-		var raw []byte
-		if err = s.tx.QueryRowContext(ctx, "SELECT body FROM screenplay_assistant_sessions WHERE owner_username=? AND project_id=? AND session_id=?", owner, project, id).Scan(&raw); err != nil {
-			return err
-		}
-		if err = json.Unmarshal(raw, &history); err != nil {
+		history, err = s.history(id)
+		if err != nil {
 			return err
 		}
 		if !sessionActive(s.rows, id) || s.permissions.Archived {
@@ -223,6 +235,10 @@ func (s *sessionScope) clearRequest(id string) error {
 type AssistantSessionRequest struct {
 	Owner, Project, Actor, SessionID, Token string
 	Revision                                int64
+	Mode                                    string
+	History                                 AssistantSessionHistory
+	Chapters                                []Chapter
+	AuthorRevision                          int64
 }
 
 func (r *MySQLAuthoringRepository) BeginAssistantRequest(ctx context.Context, owner, project, actor, id string, expected int64) (AssistantSessionRequest, error) {
@@ -238,6 +254,13 @@ func (r *MySQLAuthoringRepository) BeginAssistantRequest(ctx context.Context, ow
 		if item.Revision != expected || item.RequestStatus != "" {
 			return ErrRevisionConflict
 		}
+		req.History, err = s.history(id)
+		if err != nil {
+			return err
+		}
+		req.Mode = item.Mode
+		req.Chapters = s.permissions.Chapters
+		req.AuthorRevision = s.permissions.Revision
 		_, err = s.tx.ExecContext(ctx, "UPDATE screenplay_assistant_sessions SET request_actor=?,request_token=?,request_status='running',request_deadline=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 30 MINUTE),revision=revision+1 WHERE owner_username=? AND project_id=? AND session_id=?", actor, req.Token, owner, project, id)
 		return err
 	})
@@ -246,6 +269,18 @@ func (r *MySQLAuthoringRepository) BeginAssistantRequest(ctx context.Context, ow
 
 // Unknown outcomes keep the reservation until an explicit stop.
 func (r *MySQLAuthoringRepository) FinishAssistantRequest(ctx context.Context, req AssistantSessionRequest, history *AssistantSessionHistory) error {
+	return r.finishAssistantRequest(ctx, req, history, nil)
+}
+
+// FinishAssistantRequestGuarded validates server-supplied SQL authority after
+// acquiring project/authoring/session locks, in the very same save transaction.
+func (r *MySQLAuthoringRepository) FinishAssistantRequestGuarded(ctx context.Context, req AssistantSessionRequest, history *AssistantSessionHistory, guard func(context.Context, *sql.Tx) error) error {
+	if guard == nil || history == nil {
+		return ErrAccessDenied
+	}
+	return r.finishAssistantRequest(ctx, req, history, guard)
+}
+func (r *MySQLAuthoringRepository) finishAssistantRequest(ctx context.Context, req AssistantSessionRequest, history *AssistantSessionHistory, guard func(context.Context, *sql.Tx) error) error {
 	return r.sessionTransaction(ctx, req.Owner, req.Project, req.Actor, "generate", func(s *sessionScope) error {
 		item, err := s.selected(req.SessionID)
 		if err != nil {
@@ -254,9 +289,24 @@ func (r *MySQLAuthoringRepository) FinishAssistantRequest(ctx context.Context, r
 		if !sessionActive(s.rows, item.ID) || item.Revision != req.Revision || item.RequestStatus != "running" {
 			return ErrRevisionConflict
 		}
+		if guard != nil {
+			if err := guard(ctx, s.tx); err != nil {
+				return err
+			}
+		}
 		query := "UPDATE screenplay_assistant_sessions SET request_status='unknown',revision=revision+1"
 		args := []any{}
 		if history != nil {
+			if len(history.Proposals) > len(req.History.Proposals) {
+				if !sessionProjectAccess(s.permissions, req.Owner, req.Actor, "edit") {
+					return ErrAccessDenied
+				}
+				for _, added := range history.Proposals[len(req.History.Proposals):] {
+					if err := validateSessionProposal(s.permissions, added); err != nil {
+						return err
+					}
+				}
+			}
 			if item.Mode == "readonly" && len(history.Proposals) > 0 {
 				return ErrAccessDenied
 			}
@@ -428,4 +478,61 @@ func staleProjectSessions(ctx context.Context, tx *sql.Tx, owner, project string
 	}
 	_, err = tx.ExecContext(ctx, "UPDATE screenplay_assistant_sessions SET revision=revision+1 WHERE owner_username=? AND project_id=?", owner, project)
 	return err
+}
+
+func (r *MySQLAuthoringRepository) CheckAssistantRequest(ctx context.Context, req AssistantSessionRequest) error {
+	return r.withCurrentAssistantRequest(ctx, req, func(*sessionScope) error { return nil })
+}
+
+func (r *MySQLAuthoringRepository) withCurrentAssistantRequest(ctx context.Context, req AssistantSessionRequest, fn func(*sessionScope) error) error {
+	return r.sessionTransaction(ctx, req.Owner, req.Project, req.Actor, "generate", func(s *sessionScope) error {
+		item, err := s.selected(req.SessionID)
+		if err != nil {
+			return err
+		}
+		if !sessionActive(s.rows, item.ID) || item.Revision != req.Revision || item.RequestStatus != "running" {
+			return ErrRevisionConflict
+		}
+		var valid int
+		err = s.tx.QueryRowContext(ctx, "SELECT 1 FROM screenplay_assistant_sessions WHERE owner_username=? AND project_id=? AND session_id=? AND request_token=? AND request_actor=? AND request_deadline>CURRENT_TIMESTAMP(6)", req.Owner, req.Project, req.SessionID, req.Token, req.Actor).Scan(&valid)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrRevisionConflict
+		}
+		if err != nil {
+			return err
+		}
+		return fn(s)
+	})
+}
+
+func (r *MySQLAuthoringRepository) ReserveSessionAttempt(ctx context.Context, req AssistantSessionRequest, stage, team, actualActor, keyHash string) (string, error) {
+	if req.Actor == "" || actualActor == "" || (stage != "initial" && stage != "read_reply") {
+		return "", ErrInvalidArgument
+	}
+	id := newScreenplayID("attempt")
+	err := r.withCurrentAssistantRequest(ctx, req, func(s *sessionScope) error {
+		_, err := s.tx.ExecContext(ctx, `INSERT INTO screenplay_session_usage_attempts
+ (attempt_id, project_owner,project_id,session_id,request_token,stage,subject,team_id,actor,credential_hash)
+ VALUES(?,?,?,?,?,?,?,?,?,?)`, id, req.Owner, req.Project, req.SessionID, req.Token, stage, req.Actor, team, actualActor, keyHash)
+		return err
+	})
+	return id, err
+}
+func (r *MySQLAuthoringRepository) ClaimSessionAttempt(ctx context.Context, req AssistantSessionRequest, id, team, actualActor, keyHash string) error {
+	return r.withCurrentAssistantRequest(ctx, req, func(s *sessionScope) error {
+		result, err := s.tx.ExecContext(ctx, `UPDATE screenplay_session_usage_attempts SET state='unknown'
+ WHERE attempt_id=? AND project_owner=? AND project_id=? AND session_id=? AND request_token=?
+ AND subject=? AND team_id=? AND actor=? AND credential_hash=? AND state='reserved'`, id, req.Owner, req.Project, req.SessionID, req.Token, req.Actor, team, actualActor, keyHash)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return ErrRevisionConflict
+		}
+		return nil
+	})
 }

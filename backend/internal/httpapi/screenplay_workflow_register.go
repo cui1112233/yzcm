@@ -62,7 +62,7 @@ func registerScreenplayWorkflow(root *http.ServeMux, auth BridgeAuth, options Ro
 		authoring.PlanningProgress = &screenplay.RedisPlanningProgressRepository{Do: redis.Do}
 	}
 	RegisterScreenplayWorkflowRoutes(root, auth, options.Screenplay, resolver, options.Now, options.PresetCatalog, authoring, runner)
-	registerScreenplayAuthoringRoutesWithReceipts(root, auth, options.Screenplay, authoringRepo, resolver, receipts, mediaStore)
+	registerScreenplayAuthoringSessionRoutes(root, auth, options.Screenplay, authoringRepo, resolver, receipts, options.ScreenplaySessionChannel, mediaStore)
 	RegisterScreenplayStoryboardPreferenceRoutes(root, auth, options.Screenplay, authoring)
 	RegisterScreenplayStoryboardPlanRoutes(root, auth, authoring, resolver)
 	RegisterScreenplayStoryboardGenerationRoutes(root, auth, options.Screenplay, authoring)

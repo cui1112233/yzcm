@@ -101,6 +101,10 @@ func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, stor
 }
 
 func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth BridgeAuth, store screenplay.Store, repo screenplay.AuthoringRepository, resolver func(context.Context, string, string) (batchfactoryv11.DirectorProvider, error), receipts screenplay.ScriptBatchReceipts, mediaStore ...screenplay.MediaStore) {
+	registerScreenplayAuthoringSessionRoutes(mux, auth, store, repo, resolver, receipts, nil, mediaStore...)
+}
+
+func registerScreenplayAuthoringSessionRoutes(mux *http.ServeMux, auth BridgeAuth, store screenplay.Store, repo screenplay.AuthoringRepository, resolver func(context.Context, string, string) (batchfactoryv11.DirectorProvider, error), receipts screenplay.ScriptBatchReceipts, channel *ScreenplaySessionChannel, mediaStore ...screenplay.MediaStore) {
 	var media screenplay.MediaStore
 	if len(mediaStore) > 0 {
 		media = mediaStore[0]
@@ -145,7 +149,18 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 		return true
 	}
 	if sessionRepo, ok := repo.(*screenplay.MySQLAuthoringRepository); ok {
-		registerAssistantSessionManagement(sessionRepo, handle, decode)
+		generatorFor := func(r *http.Request, actor string) screenplay.TextGenerator {
+			if channel == nil {
+				return nil
+			}
+			authority := newSessionAuthority(auth, r, actor)
+			return sessionChannelGenerator{channel: channel, repo: sessionRepo, subject: actor, verify: authority.verify, commitGuard: authority.commit}
+		}
+		registerAssistantSessionManagement(sessionRepo, handle, decode, func(r *http.Request, owner, actor string) bool {
+			return sessionChatAvailable(r.Context(), svc, generatorFor(r, actor), owner, r.PathValue("id"), actor)
+		})
+		registerSessionProposals(svc, sessionRepo, handle, decode)
+		handle("POST /api/comic-screenplays/projects/{id}/assistant/sessions/{session}/chat", "generate", sessionChatHandler(sessionRepo, svc, decode, generatorFor))
 	}
 	respond := func(w http.ResponseWriter, st screenplay.AuthoringState, e error, actor string) {
 		if e != nil {

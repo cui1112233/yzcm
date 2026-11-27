@@ -58,6 +58,7 @@ func readRuntimeManifest(path string) runtimeManifest {
 }
 
 type RouterOptions struct {
+	ScreenplaySessionChannel      *ScreenplaySessionChannel
 	AgentVideoWorkerContext       context.Context
 	AgentScriptSplitWorkerContext context.Context
 	AgentImageWorkerContext       context.Context

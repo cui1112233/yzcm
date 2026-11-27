@@ -70,27 +70,7 @@ func (s *MySQLStore) CommitAuthoringAsset(ctx context.Context, repository Author
 		return AuthoringState{}, e
 	}
 	action := proposal.Actions[0]
-	if action.Kind != "asset" {
-		return AuthoringState{}, ErrInvalidArgument
-	}
-	if action.Asset.OwnerUsername != "" && action.Asset.OwnerUsername != owner || action.Asset.ProjectID != "" && action.Asset.ProjectID != project {
-		return AuthoringState{}, ErrInvalidArgument
-	}
-	switch action.AssetOperation {
-	case "add":
-		if action.Asset.ID != action.TargetID || action.ExpectedRevision != 0 {
-			return AuthoringState{}, ErrInvalidArgument
-		}
-		asset := *action.Asset
-		asset.OwnerUsername = owner
-		asset.ProjectID = project
-		_, e = createAssetInTx(ctx, tx, asset)
-	case "delete":
-		e = deleteAssistantAssetInTx(ctx, tx, owner, project, action)
-	default:
-		_, e = updateAssetInTx(ctx, tx, owner, project, action.TargetID, *action.Asset, action.ExpectedRevision)
-	}
-	if e != nil {
+	if e = applyAssistantAssetInTx(ctx, tx, owner, project, action); e != nil {
 		return AuthoringState{}, e
 	}
 	state.Proposals[index].Status = "applied"
@@ -119,4 +99,32 @@ func (s *MySQLStore) CommitAuthoringAsset(ctx context.Context, repository Author
 		return AuthoringState{}, e
 	}
 	return state, nil
+}
+
+func applyAssistantAssetInTx(ctx context.Context, tx *sql.Tx, owner, project string, action AuthoringAction) error {
+	var e error
+	if action.Kind != "asset" {
+		return ErrInvalidArgument
+	}
+	if action.Asset.OwnerUsername != "" && action.Asset.OwnerUsername != owner || action.Asset.ProjectID != "" && action.Asset.ProjectID != project {
+		return ErrInvalidArgument
+	}
+	switch action.AssetOperation {
+	case "add":
+		if action.Asset.ID != action.TargetID || action.ExpectedRevision != 0 {
+			return ErrInvalidArgument
+		}
+		asset := *action.Asset
+		asset.OwnerUsername = owner
+		asset.ProjectID = project
+		_, e = createAssetInTx(ctx, tx, asset)
+	case "delete":
+		e = deleteAssistantAssetInTx(ctx, tx, owner, project, action)
+	default:
+		_, e = updateAssetInTx(ctx, tx, owner, project, action.TargetID, *action.Asset, action.ExpectedRevision)
+	}
+	if e != nil {
+		return e
+	}
+	return nil
 }

@@ -27,6 +27,7 @@ var (
 // A receipt contains only attribution metadata. API keys and response content
 // remain in memory and must never enter this recovery directory.
 type receipt struct {
+	AttemptID      string    `json:"attemptId,omitempty"`
 	Request        Request   `json:"request"`
 	CredentialHash string    `json:"credentialHash"`
 	Status         int       `json:"httpStatus"`
@@ -35,7 +36,7 @@ type receipt struct {
 
 func (r receipt) valid() bool {
 	hash, err := hex.DecodeString(r.CredentialHash)
-	return err == nil && len(hash) == 32 && r.Request.validIdentity() && len(r.Request.Feature) <= 64 && !r.At.IsZero() && r.Status >= 100 && r.Status <= 599
+	return len(r.AttemptID) <= 64 && err == nil && len(hash) == 32 && r.Request.validIdentity() && len(r.Request.Feature) <= 64 && !r.At.IsZero() && r.Status >= 100 && r.Status <= 599
 }
 
 func receiptName(requestID string) string { return "receipt-" + Fingerprint(requestID) + ".json" }
@@ -125,6 +126,16 @@ func (t *Tracker) preflightReceipt(ctx context.Context) (*receiptBinding, error)
 	return &b, nil
 }
 
+func validateClaim(saved, incoming receipt) error {
+	if saved.AttemptID == "" && incoming.AttemptID == "" {
+		return nil
+	}
+	if saved.AttemptID != incoming.AttemptID || saved.Request.ID != incoming.Request.ID || saved.Request.Owner != incoming.Request.Owner || saved.Request.TeamID != incoming.Request.TeamID || saved.Request.ActorUsername != incoming.Request.ActorUsername || saved.CredentialHash != incoming.CredentialHash {
+		return ErrReceiptAttributionConflict
+	}
+	return nil
+}
+
 func saveReceiptAt(dir string, r receipt) error {
 	name := receiptName(r.Request.ID)
 	if receiptInReview(dir, name) {
@@ -132,6 +143,13 @@ func saveReceiptAt(dir string, r receipt) error {
 	}
 	dest := filepath.Join(dir, name)
 	if _, err := os.Lstat(dest); err == nil {
+		saved, err := readReceipt(dest)
+		if err != nil {
+			return err
+		}
+		if err := validateClaim(saved, r); err != nil {
+			return err
+		}
 		return syncReceiptDirectory(dir)
 	} else if !os.IsNotExist(err) {
 		return err
@@ -185,12 +203,22 @@ func (t *Tracker) recordBoundReceipt(ctx context.Context, b *receiptBinding, r r
 	if errors.Is(err, errReceiptDiskUnavailable) {
 		return t.recoverKnownClaim(ctx, *b, r, err)
 	}
+	if r.AttemptID != "" && err != nil && !errors.Is(err, ErrReceiptAttributionConflict) {
+		saved, readErr := readBoundClaim(*b, receiptName(r.Request.ID))
+		if readErr == nil && validateClaim(saved, r) == nil {
+			return errors.Join(ErrSessionReceiptOnDisk, err)
+		}
+	}
+
 	return err
 }
 
 func (t *Tracker) writeReceipt(ctx context.Context, r receipt) error {
 	if t.Store.DB == nil {
 		return errReceiptDatabaseUnavailable
+	}
+	if r.AttemptID != "" {
+		return t.Store.recordSessionReceipt(ctx, r)
 	}
 	return t.Store.recordAt(ctx, r.Request, r.CredentialHash, r.Status, r.At)
 }
@@ -233,7 +261,10 @@ func (t *Tracker) writeAfterClaimFailure(ctx context.Context, b receiptBinding, 
 	saved, err := readBoundClaim(b, receiptName(r.Request.ID))
 	switch {
 	case err == nil:
-		return t.writeKnownReceipt(ctx, saved)
+		if err := validateClaim(saved, r); err != nil {
+			return err
+		}
+		return t.writeKnownSessionOrLegacyReceipt(ctx, b, saved)
 	case errors.Is(err, ErrReceiptAttributionConflict):
 		return err
 	case !os.IsNotExist(err) || errors.Is(err, errReceiptDirectoryChanged):
@@ -258,7 +289,24 @@ func (t *Tracker) recoverKnownClaim(ctx context.Context, b receiptBinding, r rec
 	if err != nil {
 		return unverifiedReceipt(b, r, errors.Join(cause, err))
 	}
-	return t.writeKnownReceipt(ctx, saved)
+	if err := validateClaim(saved, r); err != nil {
+		return err
+	}
+	return t.writeKnownSessionOrLegacyReceipt(ctx, b, saved)
+}
+
+func (t *Tracker) writeKnownSessionOrLegacyReceipt(ctx context.Context, b receiptBinding, r receipt) error {
+	err := t.writeKnownReceipt(ctx, r)
+	if err == nil || r.AttemptID == "" || errors.Is(err, ErrReceiptAttributionConflict) {
+		return err
+	}
+	if b.verifyVisible() == nil && syncReceiptDirectory(b.dir) == nil {
+		saved, readErr := readBoundClaim(b, receiptName(r.Request.ID))
+		if readErr == nil && validateClaim(saved, r) == nil {
+			return errors.Join(ErrSessionReceiptOnDisk, err)
+		}
+	}
+	return err
 }
 
 func (t *Tracker) writeKnownReceipt(ctx context.Context, r receipt) error {

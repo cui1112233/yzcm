@@ -95,30 +95,50 @@ func (s *MySQLStore) CommitAuthoringShotStructure(ctx context.Context, repositor
 	if e != nil {
 		return AuthoringState{}, e
 	}
+	if e = applyAssistantShotStructureInTx(ctx, tx, o, p, a); e != nil {
+		return AuthoringState{}, e
+	}
+	markShotApplied(&st, i, v)
+	body, e = json.Marshal(st)
+	if e != nil {
+		return AuthoringState{}, e
+	}
+	result, e := tx.ExecContext(ctx, `UPDATE screenplay_authoring SET body=?,revision=? WHERE project_id=? AND owner_username=? AND revision=?`, string(body), st.Revision, p, o, v)
+	if e = oneShotRow(result, e); e != nil {
+		return AuthoringState{}, e
+	}
+	if e = tx.Commit(); e != nil {
+		return AuthoringState{}, e
+	}
+	return st, nil
+}
+
+func applyAssistantShotStructureInTx(ctx context.Context, tx *sql.Tx, o, p string, a AuthoringAction) error {
+	var e error
 	d := a.CreativeStructure
 	b := Storyboard{ProjectID: p, OwnerUsername: o, EpisodeNo: d.Episode, Engine: d.Engine, Shots: []StoryboardShot{}}
 	if e = tx.QueryRowContext(ctx, `SELECT id,revision FROM screenplay_storyboards WHERE project_id=? AND owner_username=? AND episode_no=? AND engine=? FOR UPDATE`, p, o, d.Episode, string(d.Engine)).Scan(&b.ID, &b.Revision); e != nil {
-		return AuthoringState{}, e
+		return e
 	}
 	if b.ID != d.BoardID || b.Revision != a.ExpectedRevision {
-		return AuthoringState{}, ErrRevisionConflict
+		return ErrRevisionConflict
 	}
 	rows, e := tx.QueryContext(ctx, `SELECT id,storyboard_id,project_id,owner_username,seq,scene_id,duration_sec,characters_text,scene_name,props_text,video_desc,protocol_json FROM screenplay_storyboard_shots WHERE storyboard_id=? AND project_id=? AND owner_username=? ORDER BY seq FOR UPDATE`, b.ID, p, o)
 	if e != nil {
-		return AuthoringState{}, e
+		return e
 	}
 	for rows.Next() {
 		var sh StoryboardShot
 		var protocol []byte
 		if e = rows.Scan(&sh.ID, &sh.StoryboardID, &sh.ProjectID, &sh.OwnerUsername, &sh.Seq, &sh.SceneID, &sh.Duration, &sh.Characters, &sh.Scene, &sh.Props, &sh.VideoDesc, &protocol); e != nil {
 			rows.Close()
-			return AuthoringState{}, e
+			return e
 		}
 		if len(protocol) > 0 {
 			var f storyboardProtocol
 			if e = json.Unmarshal(protocol, &f); e != nil {
 				rows.Close()
-				return AuthoringState{}, e
+				return e
 			}
 			f.apply(&sh)
 		}
@@ -127,10 +147,10 @@ func (s *MySQLStore) CommitAuthoringShotStructure(ctx context.Context, repositor
 	e = rows.Err()
 	rows.Close()
 	if e != nil {
-		return AuthoringState{}, e
+		return e
 	}
 	if e = applyShotStructure(&b, a); e != nil {
-		return AuthoringState{}, e
+		return e
 	}
 	now := time.Now().UTC()
 	// Move surviving sequence numbers into a disjoint positive range first. This
@@ -144,13 +164,13 @@ func (s *MySQLStore) CommitAuthoringShotStructure(ctx context.Context, repositor
 		}
 	}
 	if maxSeq > 1000000000 {
-		return AuthoringState{}, ErrInvalidState
+		return ErrInvalidState
 	}
 	if d.Operation == "delete" {
 		for _, sh := range d.Targets {
 			result, err := tx.ExecContext(ctx, `DELETE FROM screenplay_storyboard_shots WHERE id=? AND storyboard_id=? AND project_id=? AND owner_username=?`, sh.ID, b.ID, p, o)
 			if e = oneShotRow(result, err); e != nil {
-				return AuthoringState{}, e
+				return e
 			}
 		}
 	}
@@ -158,7 +178,7 @@ func (s *MySQLStore) CommitAuthoringShotStructure(ctx context.Context, repositor
 		if before, ok := old[sh.ID]; ok && before.Seq != sh.Seq {
 			result, err := tx.ExecContext(ctx, `UPDATE screenplay_storyboard_shots SET seq=?,updated_at=? WHERE id=? AND storyboard_id=? AND project_id=? AND owner_username=?`, maxSeq+len(d.After)+index+1, now, sh.ID, b.ID, p, o)
 			if e = oneShotRow(result, err); e != nil {
-				return AuthoringState{}, e
+				return e
 			}
 		}
 	}
@@ -168,38 +188,26 @@ func (s *MySQLStore) CommitAuthoringShotStructure(ctx context.Context, repositor
 			if before.Seq != sh.Seq {
 				result, err := tx.ExecContext(ctx, `UPDATE screenplay_storyboard_shots SET seq=?,updated_at=? WHERE id=? AND storyboard_id=? AND project_id=? AND owner_username=?`, sh.Seq, now, sh.ID, b.ID, p, o)
 				if e = oneShotRow(result, err); e != nil {
-					return AuthoringState{}, e
+					return e
 				}
 			}
 			continue
 		}
 		if sh.ProjectID != p || sh.OwnerUsername != o {
-			return AuthoringState{}, ErrInvalidArgument
+			return ErrInvalidArgument
 		}
 		protocol, err := marshalStoryboardProtocol(sh)
 		if err != nil {
-			return AuthoringState{}, err
+			return err
 		}
 		result, err := tx.ExecContext(ctx, `INSERT INTO screenplay_storyboard_shots (id,storyboard_id,project_id,owner_username,seq,scene_id,duration_sec,characters_text,scene_name,props_text,video_desc,protocol_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, sh.ID, b.ID, p, o, sh.Seq, sh.SceneID, sh.Duration, sh.Characters, sh.Scene, sh.Props, sh.VideoDesc, protocol, now, now)
 		if e = oneShotRow(result, err); e != nil {
-			return AuthoringState{}, e
+			return e
 		}
 	}
 	result, e := tx.ExecContext(ctx, `UPDATE screenplay_storyboards SET shot_count=?,revision=revision+1,updated_at=? WHERE id=? AND project_id=? AND owner_username=? AND revision=?`, len(b.Shots), now, b.ID, p, o, a.ExpectedRevision)
 	if e = oneShotRow(result, e); e != nil {
-		return AuthoringState{}, e
+		return e
 	}
-	markShotApplied(&st, i, v)
-	body, e = json.Marshal(st)
-	if e != nil {
-		return AuthoringState{}, e
-	}
-	result, e = tx.ExecContext(ctx, `UPDATE screenplay_authoring SET body=?,revision=? WHERE project_id=? AND owner_username=? AND revision=?`, string(body), st.Revision, p, o, v)
-	if e = oneShotRow(result, e); e != nil {
-		return AuthoringState{}, e
-	}
-	if e = tx.Commit(); e != nil {
-		return AuthoringState{}, e
-	}
-	return st, nil
+	return nil
 }

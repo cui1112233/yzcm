@@ -179,21 +179,8 @@ func (s *MySQLStore) CommitAuthoringContent(ctx context.Context, repository Auth
 	if err != nil {
 		return AuthoringState{}, err
 	}
-	var active Document
-	if action.ContentEdit.Publish {
-		err = tx.QueryRowContext(ctx, `SELECT id,version,revision,content FROM screenplay_documents WHERE project_id=? AND owner_username=? AND status='active' ORDER BY version DESC LIMIT 1 FOR UPDATE`, project, owner).Scan(&active.ID, &active.Version, &active.Revision, &active.Content)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return AuthoringState{}, err
-		}
-	}
-	prepared, err := prepareAssistantContentCommit(&st, action, source, active)
-	if err != nil {
+	if err = applyAssistantContentInTx(ctx, tx, &st, action, source); err != nil {
 		return AuthoringState{}, err
-	}
-	if prepared.Document.ID != "" {
-		if _, err = saveScreenplayInTx(ctx, tx, prepared.Document, prepared.Shots, prepared.Characters, prepared.Scenes); err != nil {
-			return AuthoringState{}, err
-		}
 	}
 	markShotApplied(&st, index, expected)
 	if err = saveAuthoringStateInTx(ctx, tx, st, expected); err != nil {
@@ -231,4 +218,26 @@ func saveAuthoringStateInTx(ctx context.Context, tx *sql.Tx, st AuthoringState, 
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE screenplay_authoring SET body=?,revision=? WHERE project_id=? AND owner_username=? AND revision=?`, string(body), st.Revision, st.ProjectID, st.Owner, expected)
 	return oneShotRow(result, err)
+}
+
+func applyAssistantContentInTx(ctx context.Context, tx *sql.Tx, st *AuthoringState, action AuthoringAction, source string) error {
+	owner, project := st.Owner, st.ProjectID
+	var err error
+	var active Document
+	if action.ContentEdit.Publish {
+		err = tx.QueryRowContext(ctx, `SELECT id,version,revision,content FROM screenplay_documents WHERE project_id=? AND owner_username=? AND status='active' ORDER BY version DESC LIMIT 1 FOR UPDATE`, project, owner).Scan(&active.ID, &active.Version, &active.Revision, &active.Content)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	prepared, err := prepareAssistantContentCommit(st, action, source, active)
+	if err != nil {
+		return err
+	}
+	if prepared.Document.ID != "" {
+		if _, err = saveScreenplayInTx(ctx, tx, prepared.Document, prepared.Shots, prepared.Characters, prepared.Scenes); err != nil {
+			return err
+		}
+	}
+	return nil
 }

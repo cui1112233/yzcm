@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"log"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"qiantie/backend/internal/safehttp"
 )
 
 type identityKey struct{}
@@ -201,8 +204,9 @@ func (t *Tracker) reconcile(parent context.Context) {
 }
 
 type trackedTransport struct {
-	base http.RoundTripper
-	t    *Tracker
+	session bool
+	base    http.RoundTripper
+	t       *Tracker
 }
 
 func (t *Tracker) Wrap(base http.RoundTripper) http.RoundTripper {
@@ -210,6 +214,12 @@ func (t *Tracker) Wrap(base http.RoundTripper) http.RoundTripper {
 }
 func (t *trackedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	i, _ := r.Context().Value(identityKey{}).(identity)
+	a, bound := r.Context().Value(sessionAttemptKey{}).(sessionAttempt)
+	if t.session || bound {
+		if !t.session || !bound || t.t == nil || !a.matches(r, i) {
+			return nil, errors.Join(ErrSessionNotSent, ErrSessionGuard)
+		}
+	}
 	path := strings.TrimRight(r.URL.Path, "/")
 	paid := r.Method == http.MethodPost && (path == "/v1/chat/completions" || path == "/v1/responses" || path == "/v1/embeddings" || path == "/v1/rerank" || path == "/v1/completions" || path == "/v1/images/generations" || path == "/v1/images/edits" || path == "/v1/audio/speech" || path == "/v1/audio/transcriptions")
 	if r.URL.Hostname() != "newapi.yzcm.site" || !paid || i.Owner == "" {
@@ -217,19 +227,42 @@ func (t *trackedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	key := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 	if key == "" {
+		if t.session {
+			return nil, errors.Join(ErrSessionNotSent, ErrSessionGuard)
+		}
 		return t.base.RoundTrip(r)
+	}
+	if t.session {
+		if err := t.t.CheckSessionStorage(r.Context()); err != nil {
+			return nil, errors.Join(ErrSessionNotSent, err)
+		}
 	}
 	binding, err := t.t.preflightReceipt(r.Context())
 	if err != nil {
-		return nil, err
+		if t.session {
+			return nil, errors.Join(ErrSessionNotSent, err)
+		}
+		return nil, errors.Join(safehttp.ErrRequestNotSent, err)
 	}
 	at := time.Now().UTC()
+	if t.session {
+		if err := a.claim(r.Context()); err != nil {
+			return nil, errors.Join(ErrSessionNotSent, err)
+		}
+	}
 	response, err := t.base.RoundTrip(r)
 	if err != nil {
+		if t.session {
+			return nil, errors.Join(ErrSessionReceiptUnknown, err)
+		}
 		return response, err
 	}
 	id := strings.TrimSpace(response.Header.Get("X-Oneapi-Request-Id"))
-	if id == "" || len(id) > 64 {
+	if id == "" || len(id) > 64 || t.session && !validSessionProviderID(response.Header, id) {
+		if t.session {
+			response.Body.Close()
+			return nil, ErrSessionReceiptUnknown
+		}
 		return response, nil
 	}
 	feature := i.Feature
@@ -244,6 +277,19 @@ func (t *trackedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	t.t.remember(key)
 	captured := receipt{Request: Request{ID: id, Owner: i.Owner, TeamID: i.TeamID, ActorUsername: i.ActorUsername, Feature: feature}, CredentialHash: Fingerprint(key), Status: response.StatusCode, At: at}
+	if t.session {
+		captured.AttemptID = a.id
+		persist, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 6*time.Second)
+		defer cancel()
+		if err := t.t.recordBoundReceipt(persist, binding, captured); err != nil {
+			response.Body.Close()
+			if errors.Is(err, ErrSessionReceiptOnDisk) {
+				return nil, ErrSessionReceiptOnDisk
+			}
+			return nil, errors.Join(ErrSessionReceiptUnknown, err)
+		}
+		return response, nil
+	}
 	if err := t.t.recordBoundReceipt(context.Background(), binding, captured); err != nil {
 		logReceiptError(id, err)
 	}
