@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 
 	"qiantie/backend/internal/novelfetchworkshop"
 )
@@ -18,7 +20,7 @@ type deferredSettingsEnvelope struct {
 	Fingerprint string `json:"fingerprint"`
 }
 
-func (s *UserConfigStore) deferredSettings(owner string) (map[string]any, error) {
+func (s *UserConfigStore) deferredSettings(owner string) (settingsEdits, error) {
 	if s == nil || s.BaseDir == "" {
 		return nil, nil
 	}
@@ -42,38 +44,73 @@ func (s *UserConfigStore) deferredSettings(owner string) (map[string]any, error)
 	if err != nil {
 		return nil, err
 	}
-	var saved map[string]any
-	if err := json.Unmarshal([]byte(plain), &saved); err != nil {
-		return nil, err
+	var edits settingsEdits
+	if err := json.Unmarshal([]byte(plain), &edits); err != nil {
+		// Older encrypted files contained maps. Empty generated sections had
+		// no delete intent. Preserve restored fields which those sections hid.
+		var old map[string]any
+		if err := json.Unmarshal([]byte(plain), &old); err != nil {
+			return nil, err
+		}
+		if section, ok := old[apiIntegrationsSettingKey].(map[string]any); ok {
+			if channels, ok := section["customChannels"].([]any); ok {
+				delete(section, "customChannels")
+				for _, v := range channels {
+					row, _ := v.(map[string]any)
+					if id, _ := row["id"].(string); id != "" {
+						edits = append(edits, fieldEdits([]string{apiIntegrationsSettingKey, "customChannels", id}, row)...)
+					}
+				}
+			}
+			if pins, ok := section["pinned"].([]any); ok && len(pins) == 0 {
+				delete(section, "pinned")
+			}
+		}
+		edits = append(edits, fieldEdits(nil, old)...)
 	}
-	return saved, nil
+	for _, edit := range edits {
+		if len(edit.Path) == 0 {
+			return nil, fmt.Errorf("invalid deferred settings path")
+		}
+	}
+	if edits == nil {
+		edits = settingsEdits{}
+	}
+	return edits, nil
 }
 
-func (s *UserConfigStore) writeSettingsPatch(ctx context.Context, owner string, config, patch map[string]any, catalog novelfetchworkshop.Store) error {
+func (s *UserConfigStore) writeSettingsPatch(ctx context.Context, owner string, config map[string]any, changes settingsEdits, catalog novelfetchworkshop.Store) error {
 	saved, err := s.deferredSettings(owner)
 	if err != nil {
 		return err
 	}
-	if saved == nil {
-		lookup, ok := catalog.(interface {
-			HasPendingLegacyVideos(context.Context, string) (bool, error)
-		})
-		if !ok {
-			return s.writeAuthenticatedConfig(owner, config)
-		}
+	lookup, ok := catalog.(interface {
+		HasPendingLegacyVideos(context.Context, string) (bool, error)
+	})
+	if !ok && saved == nil {
+		return s.writeAuthenticatedConfig(owner, config)
+	}
+	if ok {
 		pending, err := lookup.HasPendingLegacyVideos(ctx, owner)
 		if err != nil {
 			return err
 		}
 		if !pending {
+			if saved != nil {
+				path, err := s.configPath(owner)
+				if err != nil {
+					return err
+				}
+				if err := s.secrets.FinalizeLegacySettings(owner, path); err != nil {
+					return err
+				}
+				config = s.readLegacyConfig(owner)
+				changes.apply(config)
+			}
 			return s.writeAuthenticatedConfig(owner, config)
 		}
 	}
-	next := mergeConfigMap(saved, patch)
-	if _, updated := patch[apiIntegrationsSettingKey]; updated {
-		next[apiIntegrationsSettingKey] = config[apiIntegrationsSettingKey]
-	}
-	raw, err := json.Marshal(next)
+	raw, err := json.Marshal(append(saved, changes...))
 	if err != nil {
 		return err
 	}
@@ -87,4 +124,31 @@ func (s *UserConfigStore) writeSettingsPatch(ctx context.Context, owner string, 
 		return err
 	}
 	return writeUserConfigDocument(path, deferredSettingsEnvelope{ciphertext, fingerprint})
+}
+
+// FinalizeLegacySettings is called with the owner's configuration writer
+// locked. Assignments and tombstones can be replayed if removal is interrupted.
+func (p *configSecretProvider) FinalizeLegacySettings(owner, path string) error {
+	s := &UserConfigStore{BaseDir: filepath.Dir(filepath.Dir(path)), secrets: p}
+	edits, err := s.deferredSettings(owner)
+	if err != nil || edits == nil {
+		return err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var config map[string]any
+	if err := json.Unmarshal(raw, &config); err != nil {
+		return err
+	}
+	if config == nil || config["ciphertext"] != nil && config["fingerprint"] != nil {
+		return fmt.Errorf("standard configuration is unavailable for deferred settings")
+	}
+	edits.apply(config)
+	delete(config, novelfetchworkshop.LegacyModelDefaultsFileKey)
+	if err := s.writeAuthenticatedConfig(owner, config); err != nil {
+		return err
+	}
+	return os.Remove(filepath.Join(filepath.Dir(path), deferredSettingsFile))
 }

@@ -354,8 +354,8 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 		if err != nil {
 			return nil, err
 		}
-		if pending := settings[legacyVideoPendingKey]; pending != nil && legacy != nil {
-			ready, err := s.pendingVideoFileReady(owner, pending, legacy)
+		if legacy != nil {
+			ready, err := s.legacyVideoFileReady(owner, settings, legacy, currentVersion || settings[ModelSecretVersionKey] == "bound-v2")
 			if err != nil {
 				return nil, err
 			}
@@ -394,7 +394,7 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 			if !previouslyBound && len(rows) > 0 {
 				mergeLegacyModelKeys(rows, legacyCatalogRows(legacy))
 			}
-			waiting := !fileChecked && (checkFile || settings[legacyVideoPendingKey] != nil)
+			waiting := !fileChecked && (s.LegacyConfigDir != "" || settings[legacyVideoPendingKey] != nil)
 			rows, err = s.preparePendingVideos(owner, settings, rows, boundRows, migration, waiting)
 			if err != nil {
 				return nil, err
@@ -431,6 +431,18 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 		}
 		delete(settings, modelLegacyScrubPendingKey)
 		delete(settings, legacyModelScrubEntriesKey)
+	} else if settings[legacyModelMigrationVersionKey] == legacyModelMigrationVersion && !checkFile {
+		path, err := s.legacyModelFilePath(owner)
+		if err != nil {
+			return nil, err
+		}
+		if s.LegacyConfigLocker != nil {
+			s.LegacyConfigLocker.Lock()
+			defer s.LegacyConfigLocker.Unlock()
+		}
+		if err := s.finalizeLegacySettings(owner, path); err != nil {
+			return nil, err
+		}
 	}
 	return EnsureWorkshopDefaults(settings), nil
 }

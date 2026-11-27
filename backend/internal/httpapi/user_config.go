@@ -101,11 +101,6 @@ func (s *UserConfigStore) configPath(username string) (string, error) {
 	return UserScopedPath(s.BaseDir, username, "api-config.json")
 }
 
-func (s *UserConfigStore) read(username string) map[string]any {
-	config, _ := s.effectiveConfig(username)
-	return config
-}
-
 func (s *UserConfigStore) readLegacyConfig(username string) map[string]any {
 	config := cloneConfigMap(defaultUserConfig)
 	if s == nil || s.BaseDir == "" {
@@ -124,6 +119,8 @@ func (s *UserConfigStore) readLegacyConfig(username string) map[string]any {
 		return config
 	}
 	merged := mergeConfigMap(config, saved)
+	delete(merged, "ciphertext")
+	delete(merged, "fingerprint")
 	// 兼容读取：历史明文原样可用，密文在这里还原成明文，调用方无需感知。
 	s.secrets.decrypt(merged)
 	return merged
@@ -145,10 +142,7 @@ func (s *UserConfigStore) effectiveConfig(username string) (map[string]any, erro
 	}
 	config := s.readLegacyConfig(username)
 	if changes != nil {
-		config = mergeConfigMap(config, changes)
-		if replacement, ok := changes[apiIntegrationsSettingKey]; ok {
-			config[apiIntegrationsSettingKey] = replacement
-		}
+		changes.apply(config)
 	}
 	return config, nil
 }
@@ -381,7 +375,7 @@ func registerUserConfigRoutes(root *http.ServeMux, middleware BridgeAuth, store 
 		config, err := store.effectiveConfig(identity.Username)
 		if err == nil {
 			config = mergeConfigMap(config, patch)
-			err = store.writeSettingsPatch(req.Context(), identity.Username, config, patch, catalogStore)
+			err = store.writeSettingsPatch(req.Context(), identity.Username, config, fieldEdits(nil, patch), catalogStore)
 		}
 		store.mu.Unlock()
 		if err != nil {

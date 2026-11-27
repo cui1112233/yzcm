@@ -18,13 +18,18 @@ const (
 	storageProjectDir = "制作工程"
 )
 
-func configuredStorageRoot(configs *UserConfigStore, username string) string {
+func configuredStorageRoot(ctx context.Context, configs *UserConfigStore, username string) (string, error) {
 	if configs == nil {
-		return ""
+		return "", nil
 	}
-	config := configs.read(username)
+	configs.mu.Lock()
+	defer configs.mu.Unlock()
+	config, err := configs.GetConfig(ctx, username)
+	if err != nil {
+		return "", err
+	}
 	root, _ := config["storageRoot"].(string)
-	return strings.TrimSpace(root)
+	return strings.TrimSpace(root), nil
 }
 
 func scanStorageFiles(dir string) []map[string]any {
@@ -175,7 +180,11 @@ func RegisterStorageRoutes(root *http.ServeMux, middleware BridgeAuth, configs *
 	}
 	root.Handle("GET /api/storage/list", authHandler(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		storageRoot := configuredStorageRoot(configs, identity.Username)
+		storageRoot, err := configuredStorageRoot(req.Context(), configs, identity.Username)
+		if err != nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "读取存储配置失败")
+			return
+		}
 		if storageRoot == "" {
 			writeJSON(w, http.StatusOK, map[string]any{"scriptResults": []any{}, "novelFetch": []any{}, "novelAdapt": []any{}, "projects": []any{}})
 			return
@@ -184,7 +193,11 @@ func RegisterStorageRoutes(root *http.ServeMux, middleware BridgeAuth, configs *
 	})))
 	root.Handle("POST /api/storage/restore", authHandler(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		storageRoot := configuredStorageRoot(configs, identity.Username)
+		storageRoot, err := configuredStorageRoot(req.Context(), configs, identity.Username)
+		if err != nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "读取存储配置失败")
+			return
+		}
 		result, err := restoreConfiguredStorage(req.Context(), storageRoot, identity.Username, history)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "恢复本地存储失败"})
@@ -204,7 +217,11 @@ func RegisterStorageRoutes(root *http.ServeMux, middleware BridgeAuth, configs *
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求内容无效"})
 			return
 		}
-		rootDir := configuredStorageRoot(configs, identity.Username)
+		rootDir, err := configuredStorageRoot(req.Context(), configs, identity.Username)
+		if err != nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "读取存储配置失败")
+			return
+		}
 		categoryDir := map[string]string{"image": "图片", "video": "视频", "audio": "配音"}[input.Category]
 		if categoryDir == "" || strings.TrimSpace(input.ProjectName) == "" || strings.TrimSpace(input.Filename) == "" || strings.TrimSpace(input.DataURL) == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "projectName/category/filename/dataUrl 均必填"})

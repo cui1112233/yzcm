@@ -34,8 +34,11 @@ func YZCMUsageCredentialResolver(config *UserConfigStore, primary ...func(contex
 			return "", errors.New("usage account unavailable")
 		}
 		config.mu.Lock()
-		settings := config.read(owner)
+		settings, err := config.GetConfig(ctx, owner)
 		config.mu.Unlock()
+		if err != nil {
+			return "", err
+		}
 		delete(settings, "modelCatalog")
 		delete(settings, "settings")
 		var find func(any) string

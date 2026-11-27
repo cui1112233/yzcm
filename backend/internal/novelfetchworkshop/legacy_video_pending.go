@@ -111,20 +111,31 @@ func (s *MySQLStore) preparePendingVideos(owner string, settings map[string]any,
 // A returning file is evidence for a staged database credential only when it
 // contains a credential for that video. The reconcile step then compares both
 // origins. A preferences-only file cannot release any staged row.
-func (s *MySQLStore) pendingVideoFileReady(owner string, stored any, file map[string]any) (bool, error) {
-	pending, err := s.openPendingVideos(owner, stored)
-	if err != nil {
-		return false, err
+func (s *MySQLStore) legacyVideoFileReady(owner string, settings, file map[string]any, bound bool) (bool, error) {
+	var pending pendingLegacyVideos
+	if stored := settings[legacyVideoPendingKey]; stored != nil {
+		var err error
+		pending, err = s.openPendingVideos(owner, stored)
+		if err != nil {
+			return false, err
+		}
+	}
+	for _, source := range collectLegacySources(settings) {
+		if ModelConfigText(source.model, "kind") == "video" && (!bound || source.Video || source.Container != 0) {
+			pending.Sources = append(pending.Sources, pendingVideoSource{source.legacyScrubEntry, source.raw})
+		}
 	}
 	sources := collectLegacySources(file)
+	if len(pending.Rows)+len(pending.Sources) == 0 {
+		return len(sources) > 0 || file[LegacyModelDefaultsFileKey] != true, nil
+	}
 	matches := func(model map[string]any) bool {
 		for _, source := range sources {
 			keys, valid := legacySourceCredentials(source)
-			local := ModelConfigText(model, "provider") == batchfactoryv11.VideoProviderDoubaoLocal &&
-				!hasLegacyCredentialValue(model) && sameLegacyVideoTarget(model, source.model)
-			if valid && (len(keys) > 0 || local) && ModelConfigText(source.model, "kind") == "video" &&
-				(ModelConfigText(model, "id") != "" && ModelConfigText(source.model, "id") == ModelConfigText(model, "id") ||
-					ModelConfigText(source.model, "id") == "" && sameLegacyVideoTarget(model, source.model)) {
+			local := ModelConfigText(model, "provider") == batchfactoryv11.VideoProviderDoubaoLocal && !hasLegacyCredentialValue(model)
+			fileID, databaseID := ModelConfigText(source.model, "id"), ModelConfigText(model, "id")
+			if valid && (len(keys) > 0 || local) && sameLegacyVideoTarget(model, source.model) &&
+				(fileID == "" || databaseID == "" || fileID == databaseID) {
 				return true
 			}
 		}
@@ -141,14 +152,16 @@ func (s *MySQLStore) pendingVideoFileReady(owner string, stored any, file map[st
 			return false, nil
 		}
 	}
-	return len(pending.Sources)+len(pending.Rows) > 0, nil
+	return true, nil
 }
 
 func (s *MySQLStore) HasPendingLegacyVideos(ctx context.Context, owner string) (bool, error) {
 	var pending bool
 	err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM novel_fetch_workshop_configs
-WHERE owner_username=? AND JSON_CONTAINS_PATH(settings_json,'one','$.modelCatalogLegacyVideoPending','$.modelCatalogLegacyScrubPending',
+WHERE owner_username=? AND (
+JSON_CONTAINS_PATH(settings_json,'one','$.modelCatalogLegacyVideoPending','$.modelCatalogLegacyScrubPending')
+OR (? AND JSON_CONTAINS_PATH(settings_json,'one',
 '$.videoProviders','$.settings.videoProviders','$.appConfig.videoProviders','$.settings.appConfig.videoProviders',
-'$.settings.modelCatalog','$.appConfig.modelCatalog','$.settings.appConfig.modelCatalog'))`, owner).Scan(&pending)
+'$.settings.modelCatalog','$.appConfig.modelCatalog','$.settings.appConfig.modelCatalog'))))`, owner, s.LegacyConfigDir != "").Scan(&pending)
 	return pending, err
 }

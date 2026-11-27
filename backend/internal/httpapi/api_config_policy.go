@@ -225,6 +225,9 @@ func redactAPIConfig(v any) any {
 	case map[string]any:
 		out := make(map[string]any, len(value))
 		for key, item := range value {
+			if key == "ciphertext" || key == "fingerprint" {
+				continue
+			}
 			_, boolValue := item.(bool)
 			configuredFlag := boolValue && strings.Contains(apiConfigField(key), "hasapikey")
 			if (!apiSecretField(key) || configuredFlag) && key != "modelCatalogSecretVersion" && !strings.HasPrefix(key, "modelCatalogLegacy") &&

@@ -202,9 +202,6 @@ func readLegacyModelDocument(path string) (map[string]any, error) {
 	if err := json.Unmarshal(data, &document); err != nil {
 		return nil, err
 	}
-	if document[LegacyModelDefaultsFileKey] == true {
-		return nil, nil
-	}
 	for _, container := range legacyCatalogContainers(document) {
 		if raw := container["modelCatalog"]; raw != nil {
 			if _, ok := raw.([]any); !ok {
@@ -546,10 +543,20 @@ func (s *MySQLStore) scrubLegacyModelFile(ctx context.Context, owner string, set
 	if len(entries) == 0 && ModelConfigText(document, modelLegacyScrubDoneKey) != expected {
 		return fmt.Errorf("legacy credential cleanup has no matching completion record")
 	}
+	if err := s.finalizeLegacySettings(owner, path); err != nil {
+		return err
+	}
 	_, err = s.DB.ExecContext(ctx, `UPDATE novel_fetch_workshop_configs
 SET settings_json=JSON_REMOVE(settings_json, '$.modelCatalogLegacyScrubPending', '$.modelCatalogLegacyScrubEntries')
 WHERE owner_username=? AND JSON_UNQUOTE(JSON_EXTRACT(settings_json, '$.modelCatalogLegacyScrubPending'))=?`, owner, expected)
 	return err
+}
+
+func (s *MySQLStore) finalizeLegacySettings(owner, path string) error {
+	if writer, ok := s.ModelSecrets.(interface{ FinalizeLegacySettings(string, string) error }); ok && path != "" {
+		return writer.FinalizeLegacySettings(owner, path)
+	}
+	return nil
 }
 
 func replaceLegacyModelDocument(path string, document map[string]any) error {

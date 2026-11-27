@@ -508,6 +508,7 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 		stored := apiIntegrationStoredMap(config)
 		values := apiIntegrationValues(stored)
 		nextValues := map[string]any{}
+		explicitValues := map[string]any{}
 		for key, value := range values {
 			nextValues[key] = value
 		}
@@ -518,6 +519,7 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 			}
 			if value == nil {
 				delete(nextValues, key)
+				explicitValues[key] = nil
 				continue
 			}
 			coerced, ok := coerceIntegrationValue(key, value)
@@ -528,10 +530,12 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 			if secret {
 				if text, _ := coerced.(string); text == "" {
 					delete(nextValues, key)
+					explicitValues[key] = nil
 					continue
 				}
 			}
 			nextValues[key] = coerced
+			explicitValues[key] = coerced
 		}
 		previousChannels := apiIntegrationChannels(stored)
 		previousByID := map[string]map[string]any{}
@@ -558,11 +562,14 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 			channels = previousChannels
 		}
 		next := map[string]any{"values": nextValues, "pinned": apiIntegrationPinned(stored), "customChannels": channels}
+		explicit := map[string]any{"values": explicitValues}
 		if payload.Pinned != nil {
 			next["pinned"] = apiIntegrationPinned(map[string]any{"pinned": toAnySlice(*payload.Pinned)})
+			explicit["pinned"] = next["pinned"]
 		}
 		// 渠道选择与字段值分开合并：只覆盖本次提交的分组，其余分组保持不变。
 		selection := apiIntegrationChannelSelection(stored)
+		explicitSelection := map[string]any{}
 		for group, value := range payload.ChannelSelection {
 			if !apiIntegrationChannelGroups[group] {
 				continue
@@ -570,16 +577,23 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 			enabled := normalizeChannelSelectionValue(value)
 			if len(enabled) == 0 && !isExplicitChannelSelection(value) {
 				delete(selection, group)
+				explicitSelection[group] = nil
 				continue
 			}
 			if enabled == nil {
 				enabled = []string{}
 			}
 			selection[group] = map[string]any{"enabled": enabled}
+			explicitSelection[group] = selection[group]
 		}
 		next["channelSelection"] = selection
 		config[apiIntegrationsSettingKey] = next
-		if err := store.writeSettingsPatch(req.Context(), identity.Username, config, map[string]any{apiIntegrationsSettingKey: next}, catalog); err != nil {
+		explicit["channelSelection"] = explicitSelection
+		edits := fieldEdits([]string{apiIntegrationsSettingKey}, explicit)
+		if payload.CustomChannels != nil {
+			edits = append(edits, integrationChannelEdits(previousChannels, *payload.CustomChannels, channels)...)
+		}
+		if err := store.writeSettingsPatch(req.Context(), identity.Username, config, edits, catalog); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "配置保存失败"})
 			return
 		}
