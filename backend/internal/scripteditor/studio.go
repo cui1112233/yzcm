@@ -6,6 +6,117 @@ import (
 )
 
 const workCopyLinkType = "work_copy"
+const scriptImportLinkType = "script_import"
+
+type ReplaceScope string
+
+const (
+	ReplaceCurrentVersion ReplaceScope = "current_version"
+	ReplaceEpisode        ReplaceScope = "current_episode"
+	ReplaceAllScripts     ReplaceScope = "all_scripts"
+)
+
+type ReplaceScriptsInput struct {
+	Scope             ReplaceScope     `json:"scope"`
+	ScriptID          string           `json:"scriptId"`
+	Find              string           `json:"find"`
+	Replace           string           `json:"replace"`
+	ExpectedRevisions map[string]int64 `json:"expectedRevisions"`
+}
+
+func (s *Service) ImportScripts(ctx context.Context, owner, workID string, inputs []CreateScriptInput, requestKey string) ([]Script, error) {
+	if len(inputs) == 0 || strings.TrimSpace(requestKey) == "" {
+		return nil, ErrValidation
+	}
+	bindings, ok := s.Store.(BindingStore)
+	if !ok {
+		return nil, ErrValidation
+	}
+	links, err := bindings.ListJobLinks(ctx, owner, workID, scriptImportLinkType)
+	if err != nil {
+		return nil, err
+	}
+	existing := []Script{}
+	for _, link := range links {
+		if link.JobID == requestKey {
+			detail, getErr := s.Store.GetWork(ctx, owner, workID)
+			if getErr != nil {
+				return nil, getErr
+			}
+			for _, row := range detail.Scripts {
+				if row.ID == link.TargetID {
+					existing = append(existing, row)
+				}
+			}
+		}
+	}
+	if len(existing) > 0 {
+		sortScripts(existing)
+		return existing, nil
+	}
+	created := make([]Script, 0, len(inputs))
+	for _, input := range inputs {
+		input.Version = 0
+		input.GenerationSource = SourceImport
+		row, createErr := s.Store.CreateScript(ctx, owner, workID, input)
+		if createErr != nil {
+			return created, createErr
+		}
+		created = append(created, row)
+		if _, createErr = bindings.UpsertJobLink(ctx, JobLink{OwnerUsername: owner, WorkID: workID, JobID: requestKey, TargetType: scriptImportLinkType, TargetID: row.ID, SyncState: SyncSynced, ConflictState: ConflictNone}); createErr != nil {
+			return created, createErr
+		}
+	}
+	return created, nil
+}
+
+func (s *Service) ReplaceScripts(ctx context.Context, owner, workID string, input ReplaceScriptsInput) ([]Script, error) {
+	if strings.TrimSpace(input.Find) == "" {
+		return nil, ErrValidation
+	}
+	detail, err := s.Store.GetWork(ctx, owner, workID)
+	if err != nil {
+		return nil, err
+	}
+	var active *Script
+	for index := range detail.Scripts {
+		if detail.Scripts[index].ID == input.ScriptID {
+			active = &detail.Scripts[index]
+			break
+		}
+	}
+	if active == nil {
+		return nil, ErrNotFound
+	}
+	selected := []Script{}
+	for _, row := range detail.Scripts {
+		include := input.Scope == ReplaceAllScripts || input.Scope == ReplaceEpisode && row.Episode == active.Episode || input.Scope == ReplaceCurrentVersion && row.ID == active.ID
+		if include {
+			expected, ok := input.ExpectedRevisions[row.ID]
+			if !ok || expected != row.Revision {
+				return nil, ErrConflict
+			}
+			selected = append(selected, row)
+		}
+	}
+	if input.Scope != ReplaceAllScripts && input.Scope != ReplaceEpisode && input.Scope != ReplaceCurrentVersion {
+		return nil, ErrValidation
+	}
+	updated := make([]Script, 0, len(selected))
+	for _, row := range selected {
+		next := strings.ReplaceAll(row.Content, input.Find, input.Replace)
+		if next == row.Content {
+			updated = append(updated, row)
+			continue
+		}
+		saved, updateErr := s.Store.UpdateScript(ctx, owner, workID, row.ID, UpdateScriptInput{Content: &next}, row.Revision)
+		if updateErr != nil {
+			return updated, updateErr
+		}
+		updated = append(updated, saved)
+	}
+	return updated, nil
+}
 
 type SearchHit struct {
 	ChapterID string `json:"chapterId"`

@@ -27,6 +27,8 @@ export function updateScriptEditorChapter(workId, chapterId, input) { return api
 export function deleteScriptEditorChapter(workId, chapterId, revision) { return apiRequest(`${root}/works/${id(workId)}/chapters/${id(chapterId)}?expectedRevision=${Number(revision)}`, { method: 'DELETE' }); }
 export function reorderScriptEditorChapters(workId, chapterIds) { return apiRequest(`${root}/works/${id(workId)}/chapters/reorder`, { method: 'POST', body: JSON.stringify({ chapterIds }) }); }
 export function createScriptEditorScript(workId, input) { return apiRequest(`${root}/works/${id(workId)}/scripts`, { method: 'POST', body: JSON.stringify(input) }); }
+export function importScriptEditorScripts(workId, input) { return apiRequest(`${root}/works/${id(workId)}/scripts/import`, { method: 'POST', body: JSON.stringify(input), suppressGlobalError: true }); }
+export function replaceScriptEditorScripts(workId, input) { return apiRequest(`${root}/works/${id(workId)}/scripts/replace`, { method: 'POST', body: JSON.stringify(input), suppressGlobalError: true }); }
 export function updateScriptEditorScript(workId, scriptId, input) { return apiRequest(`${root}/works/${id(workId)}/scripts/${id(scriptId)}`, { method: 'PATCH', body: JSON.stringify(input) }); }
 export function deleteScriptEditorScript(workId, scriptId, revision) { return apiRequest(`${root}/works/${id(workId)}/scripts/${id(scriptId)}?expectedRevision=${Number(revision)}`, { method: 'DELETE' }); }
 export function copyScriptEditorScript(workId, scriptId) { return apiRequest(`${root}/works/${id(workId)}/scripts/${id(scriptId)}/copy`, { method: 'POST' }); }

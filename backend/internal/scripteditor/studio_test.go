@@ -98,3 +98,39 @@ func TestImportIntoWorkAppendsAndReplacesWithRevision(t *testing.T) {
 		t.Fatalf("stale replace error = %v", err)
 	}
 }
+
+func TestImportScriptsNeverOverwritesExistingEpisodeVersion(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	service := NewService(store)
+	work, _ := store.CreateWork(ctx, "alice", CreateWorkInput{Title: "剧本", Type: WorkScript})
+	_, _ = store.CreateScript(ctx, "alice", work.ID, CreateScriptInput{Episode: 1, Version: 1, Title: "第一集", Content: "旧版"})
+	rows, err := service.ImportScripts(ctx, "alice", work.ID, []CreateScriptInput{{Episode: 1, Version: 1, Title: "第一集", Content: "新版"}}, "import-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Version != 2 || rows[0].Content != "新版" {
+		t.Fatalf("rows = %#v", rows)
+	}
+	again, err := service.ImportScripts(ctx, "alice", work.ID, []CreateScriptInput{{Episode: 1, Content: "重复"}}, "import-1")
+	if err != nil || len(again) != 1 || again[0].ID != rows[0].ID {
+		t.Fatalf("idempotent import = %#v, %v", again, err)
+	}
+}
+
+func TestReplaceScriptsValidatesAllRevisionsBeforeWriting(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	service := NewService(store)
+	work, _ := store.CreateWork(ctx, "alice", CreateWorkInput{Title: "剧本", Type: WorkScript})
+	first, _ := store.CreateScript(ctx, "alice", work.ID, CreateScriptInput{Episode: 1, Content: "甲旧"})
+	second, _ := store.CreateScript(ctx, "alice", work.ID, CreateScriptInput{Episode: 1, Content: "乙旧"})
+	_, err := service.ReplaceScripts(ctx, "alice", work.ID, ReplaceScriptsInput{Scope: ReplaceEpisode, ScriptID: first.ID, Find: "旧", Replace: "新", ExpectedRevisions: map[string]int64{first.ID: first.Revision, second.ID: 99}})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("replace error = %v", err)
+	}
+	current, _ := store.GetWork(ctx, "alice", work.ID)
+	if current.Scripts[0].Content != "甲旧" || current.Scripts[1].Content != "乙旧" {
+		t.Fatalf("partial replacement: %#v", current.Scripts)
+	}
+}

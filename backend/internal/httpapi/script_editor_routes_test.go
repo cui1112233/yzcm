@@ -153,6 +153,23 @@ func TestScriptEditorRoutesSearchWorkAndImportIntoWork(t *testing.T) {
 	}
 }
 
+func TestScriptEditorRoutesImportAndReplaceScripts(t *testing.T) {
+	now := time.Unix(1800000000, 0).UTC()
+	api := newScriptEditorTestRouter(now)
+	created := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works", map[string]any{"title": "剧本", "type": "script"})
+	workID := scriptEditorID(t, created, "work")
+	first := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/scripts", map[string]any{"episode": 1, "content": "旧台词"})
+	firstID := scriptEditorID(t, first, "script")
+	imported := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/scripts/import", map[string]any{"requestKey": "import-1", "scripts": []map[string]any{{"episode": 1, "version": 1, "content": "导入版"}}})
+	if imported.Code != http.StatusCreated || !bytes.Contains(imported.Body.Bytes(), []byte(`"version":2`)) {
+		t.Fatalf("import status=%d body=%s", imported.Code, imported.Body.String())
+	}
+	replaced := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works/"+workID+"/scripts/replace", map[string]any{"scope": "current_version", "scriptId": firstID, "find": "旧", "replace": "新", "expectedRevisions": map[string]int64{firstID: 0}})
+	if replaced.Code != http.StatusOK || !bytes.Contains(replaced.Body.Bytes(), []byte("新台词")) {
+		t.Fatalf("replace status=%d body=%s", replaced.Code, replaced.Body.String())
+	}
+}
+
 func TestScriptEditorJobRoutesCreateListCancelAndRetry(t *testing.T) {
 	now := time.Unix(1800000000, 0).UTC()
 	api := newScriptEditorTestRouter(now)

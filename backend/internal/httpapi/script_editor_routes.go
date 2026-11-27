@@ -263,6 +263,33 @@ func RegisterScriptEditorRoutes(mux *http.ServeMux, auth BridgeAuth, service *sc
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"script": script})
 	})
+	handle("POST /api/script-editor/works/{workID}/scripts/import", func(w http.ResponseWriter, req *http.Request, owner string) {
+		var input struct {
+			RequestKey string                           `json:"requestKey"`
+			Scripts    []scripteditor.CreateScriptInput `json:"scripts"`
+		}
+		if !decode(w, req, &input) {
+			return
+		}
+		rows, err := service.ImportScripts(req.Context(), owner, req.PathValue("workID"), input.Scripts, input.RequestKey)
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"scripts": rows})
+	})
+	handle("POST /api/script-editor/works/{workID}/scripts/replace", func(w http.ResponseWriter, req *http.Request, owner string) {
+		var input scripteditor.ReplaceScriptsInput
+		if !decode(w, req, &input) {
+			return
+		}
+		rows, err := service.ReplaceScripts(req.Context(), owner, req.PathValue("workID"), input)
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"scripts": rows})
+	})
 	handle("PATCH /api/script-editor/works/{workID}/scripts/{scriptID}", func(w http.ResponseWriter, req *http.Request, owner string) {
 		var input struct {
 			Title            *string `json:"title"`
