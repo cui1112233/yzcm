@@ -90,3 +90,10 @@
 - 最终4001实际SHA/manifest955e68ed，health200，前端/assets/user-BIPAnHzG.js。启动前只读核对142条迁移记录，没有未知checksum漂移或待执行迁移，沿用框架明确登记的两项LegacyChecksums，未改ledger。
 - 最终真实MySQL/API：创建无媒体临时人物，merge绑定后名称/ID一致；准备不改镜头，确认后生效；仍引用时助手删除400；replace恢复原人物后无残留临时ID，再删除临时人物成功；重复确认409，来源与其他字段保留。样例仍归档。证据assistant-shot-binding-runtime.json、migration-preflight-runtime.json、runtime-switch.json。验收没有模型调用，没有本任务远端推送或公网部署。
 - 此轮未接原件工具名由51减至48，但已接名称仍有未支持分支；D01未整体完成，D02等工作包仍待办。当前状态以remaining-audit最新表为准，前述旧数字保留历史证据。
+
+## 11月27日：审核事实与正文/章节确认
+
+- c33aa9d3独立审查通过，新增五项review_input读取工具；真实4001五接口200、指定镜头范围、非成员403、非法覆盖400、内容及会话不变。没有模型调用或真实平台审核，不把review_status=unverified说成已通过。证据assistant-review-read-runtime.json。
+- 700ef9d1独立规格及质量审查通过；真实正文ID/版本/摘要、章节快照、初始模型上下文证据、原子业务+applied回执、重复确认与历史正文保留已实现。clean-source业务/prompt、定向HTTP、前端与Go embed构建通过。
+- 候选程序qiantie-local-700ef9d1.exe已保留；迁移只读预检142条没有未知漂移，待执行8800412为同主线已提交的script-editor绑定新增表。安全切换发现真实生产批任务running，未结束任务或替换原c33aa9d3程序；此版本真实MySQL/API运行验收仍待执行。
+- 原件工具名统计现为29已接、43未接，含部分分支。D01及D02以后仍未整体完成；本任务没有远端推送或上线。
