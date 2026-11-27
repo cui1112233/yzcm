@@ -328,7 +328,7 @@ func prepareNovelFetchScheduleTasks(ctx context.Context, store novelfetchworksho
 		}
 	}
 	item["updatedAt"] = now.UTC().Format(time.RFC3339Nano)
-	if err := saveNovelFetchScheduleItem(ctx, store, owner, item); err != nil {
+	if err := saveNovelFetchScheduleItem(ctx, store, owner, item, true); err != nil {
 		return fmt.Errorf("保存待执行书籍失败: %w", err)
 	}
 	return nil
