@@ -15,5 +15,7 @@ test('uses one compact brand-derived icon component for all four formal roles', 
   }
   assert.match(source, /role-energy-icon/);
   assert.match(source, /size\s*=\s*26/);
+  assert.match(source, /<img/);
+  assert.doesNotMatch(source, /<svg|linearGradient|clipPath/);
   assert.doesNotMatch(source, /Crown|ShieldCheck|BadgeCheck/);
 });
