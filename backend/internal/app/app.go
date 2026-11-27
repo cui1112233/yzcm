@@ -58,14 +58,23 @@ import (
 var novelFetchClassificationTimeout = 60 * time.Second
 
 type novelFetchRewriteAdapter struct {
-	provider *batchfactoryv11.OpenAICompatibleProvider
+	provider batchfactoryv11.DirectorProvider
 }
 
 func (a novelFetchRewriteAdapter) ModelIdentity() string {
-	if a.provider == nil {
+	if novelFetchTextProviderMissing(a.provider) {
 		return ""
 	}
-	return strings.TrimSpace(a.provider.Model)
+	if configured, ok := a.provider.(*batchfactoryv11.OpenAICompatibleProvider); ok {
+		if model := strings.TrimSpace(configured.TextModelMetadata().ActualModel); model != "" {
+			return model
+		}
+		return strings.TrimSpace(configured.Model)
+	}
+	if configured, ok := a.provider.(batchfactoryv11.TextModelMetadataProvider); ok {
+		return strings.TrimSpace(configured.TextModelMetadata().ActualModel)
+	}
+	return ""
 }
 
 type ownerTextProvider struct {
@@ -205,12 +214,14 @@ func loadSubjectModelConfig(ctx context.Context, accounts accountcenter.Store, c
 	return novelfetchworkshop.ReadRuntimeConfig(ctx, catalog, owner)
 }
 
-func textGenderJudge(provider *batchfactoryv11.OpenAICompatibleProvider) novelfetchworkshop.AIGenderJudge {
-	if provider == nil {
+func textGenderJudge(provider batchfactoryv11.DirectorProvider) novelfetchworkshop.AIGenderJudge {
+	if novelFetchTextProviderMissing(provider) {
 		return nil
 	}
 	return func(ctx context.Context, info novelfetchworkshop.BookInfo) (string, error) {
-		return provider.Complete(batchfactoryv11.WithSingleAttempt(ctx), batchfactoryv11.TextCompletionRequest{
+		callCtx, cancel := context.WithTimeout(batchfactoryv11.WithSingleAttempt(ctx), novelFetchClassificationTimeout)
+		defer cancel()
+		return provider.Complete(callCtx, batchfactoryv11.TextCompletionRequest{
 			SystemPrompt:        "你是小说男女频分类助手。只输出 JSON：{\"gender\":\"男频或女频\"}。必须从「男频」「女频」中选择最接近的一项，不要留空，不要输出 JSON 以外的内容。",
 			UserPrompt:          "请根据以下分类信息和正文片段判断小说男女频：分类=" + info.Category + "；题材=" + info.Genre + "；正文片段=" + genderTextExcerpt(info.Text),
 			Temperature:         0,
@@ -424,7 +435,7 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	novelCreationRunStarter := novelCreationService.Notify
 	novelStartup := &novelCreationStartup{service: novelCreationService}
 	novelFetchRewriteResolver = func(ctx context.Context, owner string) (novelfetchworkshop.RewriteProvider, error) {
-		provider, providerErr := resolveCatalogTextProviderWithSelection(ctx, owner, novelfetchworkshop.ProcessTextModel(ctx))
+		provider, providerErr := resolveNovelFetchProcessTextProvider(ctx, accountCenterStore, owner, novelfetchworkshop.ProcessTextModel(ctx), textProviderForModel, resolveCatalogTextProviderWithSelection)
 		if providerErr != nil {
 			return nil, providerErr
 		}
@@ -434,7 +445,7 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 		return novelFetchRewrite, nil
 	}
 	novelFetchAIGenderJudgeResolver = func(ctx context.Context, owner string) (novelfetchworkshop.AIGenderJudge, error) {
-		provider, providerErr := resolveCatalogTextProviderWithSelection(ctx, owner, novelfetchworkshop.ProcessTextModel(ctx))
+		provider, providerErr := resolveNovelFetchProcessTextProvider(ctx, accountCenterStore, owner, novelfetchworkshop.ProcessTextModel(ctx), textProviderForModel, resolveCatalogTextProviderWithSelection)
 		if providerErr != nil {
 			return nil, providerErr
 		}

@@ -1,6 +1,6 @@
 # 批量测书链路修复 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 修复已确认的敏感回写、分类门禁、AI复用及配置执行缺口，并统一更新本地4001。
 
@@ -22,40 +22,40 @@
 
 Files: novelfetchworkshop/sensitive.go及必要新定位helper；httpapi/novel_fetch_workshop.go敏感处理区、novel_fetch_rules_body_safety.go；相关新回归。
 
-- [ ] 将归档探针改为正确行为断言，实际RED：长行范围外文字保留、同词多次命中应用、重叠/多规则/中文定位、无定位不能假成功。
-- [ ] 实现精确片段定位/写回，维护已存在分组、显式删除、禁用范围语义。
-- [ ] 手动敏感AI修复尊重本次明确请求；模型解析错误和条目失败阻止ready保存，逐版本返回真实失败。
-- [ ] 保留原始正文和旧版本；普通处理若按既有策略本地降级，明确标注降级来源，不伪造AI成功。
-- [ ] GREEN相关规则/敏感/正文持久化测试，root核对差异后整合。
+- [x] 将归档探针改为正确行为断言，实际RED：长行范围外文字保留、同词多次命中应用、重叠/多规则/中文定位、无定位不能假成功。
+- [x] 实现精确片段定位/写回，维护已存在分组、显式删除、禁用范围语义。
+- [x] 手动敏感AI修复尊重本次明确请求；模型解析错误和条目失败阻止ready保存，逐版本返回真实失败。
+- [x] 保留原始正文和旧版本；普通处理若按既有策略本地降级，明确标注降级来源，不伪造AI成功。
+- [x] GREEN相关规则/敏感/正文持久化测试，root核对差异后整合。
 
 ## Task 2: 测书分类与生成共同门禁（F4–F6）
 
 Files: httpapi/novel_fetch_classification_reservation.go、novel_fetch_workshop.go worker段、novel_fetch_execution_admission.go及相关测试；必要小helper。
 
-- [ ] RED：测书失败不补女频/默认风格、敏感关闭仍能判断风格、单步生成分类缺失不产生改文调用、有效标签不重判。
-- [ ] 测书调用ResolveGender/ResolveStyle真实结果，保留工厂ClassifyBook默认策略。
-- [ ] 分类provider独立于敏感开关；单步生成沿用同一分类准备/门禁，并保留不上传语义及有效快照。
-- [ ] 失败原因可见、不会后台无限重判；保持付费调用前预约/不确定结果人工保护。
-- [ ] GREEN分类、执行准入、重试/停止回归。
+- [x] RED：测书失败不补女频/默认风格、敏感关闭仍能判断风格、单步生成分类缺失不产生改文调用、有效标签不重判。
+- [x] 测书调用ResolveGender/ResolveStyle真实结果，保留工厂ClassifyBook默认策略。
+- [x] 分类provider独立于敏感开关；单步生成沿用同一分类准备/门禁，并保留不上传语义及有效快照。
+- [x] 失败原因可见、不会后台无限重判；保持付费调用前预约/不确定结果人工保护。
+- [x] GREEN分类、执行准入、重试/停止回归。
 
 ## Task 3: AI计划与有效成果复用（F7、F10）
 
 Files: novelfetchworkshop/rewrite.go及必要新helpers；httpapi有效AI候选helper、worker复用检查；相关测试。
 
-- [ ] RED：off不注入参考、按风格挑选兼容参考、旧非法正文不再当版本已齐、已确认历史成果不被覆盖。
-- [ ] 尊重opening/high模式及已有策略配置；不改变未修改的用户提示词和账号配置。
-- [ ] 统一未确认AI的有效性判断，生成/恢复与上传口径一致；明确失败版本允许在显式生成/重试时重做。
-- [ ] 不自动重生已确认上传版本，不删除旧成果再试；模型失败保留旧正文。
-- [ ] GREEN改文请求/校验/持久化、有效AI候选及相关上传检查。
+- [x] RED：off不注入参考、按风格挑选兼容参考、旧非法正文不再当版本已齐、已确认历史成果不被覆盖。
+- [x] 尊重opening/high模式及已有策略配置；不改变未修改的用户提示词和账号配置。
+- [x] 统一未确认AI的有效性判断，生成/恢复与上传口径一致；明确失败版本允许在显式生成/重试时重做。
+- [x] 不自动重生已确认上传版本，不删除旧成果再试；模型失败保留旧正文。
+- [x] GREEN改文请求/校验/持久化、有效AI候选及相关上传检查。
 
 ## Task 4: 明确模型、明确版本和数量（F8、F9、F11）
 
 Files: frontend/NovelFetchPage.jsx与小设置helper/test；httpapi/novel_fetch_workshop.go选择归一化、web_submit_service.go/预览版本入口；AI数量相关测试。
 
-- [ ] RED：不可用的既选模型保持原选择并明确提示，不能自动替成第一个再保存。
-- [ ] RED：明确空版本不触发上传；网站API没有传版本时仍可沿用其历史默认行为，不能混淆显式空选择。
-- [ ] 版本候选支持ai1–ai20，别名规范化、上界拒绝与请求20实际20统一；保留现有默认选择，不把原1版本自动扩大为20。
-- [ ] GREEN前端设置和版本选择测试、空选择队列到上传替身、数量及回执去重相关测试。
+- [x] RED：不可用的既选模型保持原选择并明确提示，不能自动替成第一个再保存。
+- [x] RED：明确空版本不触发上传；网站API没有传版本时仍可沿用其历史默认行为，不能混淆显式空选择。
+- [x] 版本候选支持ai1–ai20，别名规范化、上界拒绝与请求20实际20统一；保留现有默认选择，不把原1版本自动扩大为20。
+- [x] GREEN前端设置和版本选择测试、空选择队列到上传替身、数量及回执去重相关测试。
 
 ## Task 5: 整合、复核与统一更新
 
@@ -66,3 +66,19 @@ Files: frontend/NovelFetchPage.jsx与小设置helper/test；httpapi/novel_fetch_
 - [ ] 确认实际4001和空闲队列，记录正文及发布记录指纹、回退程序；本地切换后核对SHA、前端入口、原有数据。
 - [ ] 只在用户归还凭据页面后继续实际单书分类、AI2、指定上传与网站回读；开发验收不冒充真实上传。
 - [ ] 更新验收报告，列明已修复、测试/运行身份及剩余外部条件。
+
+
+## Task 6: 实际单书发现的补充断点（2026-11-28）
+
+- [x] 实库复现：明确重试返回 failed=1、errors=redis nil，队列始终未入队。取消标记 GET 缺键属于正常状态。
+- [x] 用真实 RESP 通信格式 RED→GREEN；只归一化类型化空值，断连和其他错误仍透传。提交 dcc16b05，已本地更新并由页面验证实际入队。
+- [x] 重试提示按结构化结果显示失败原因；数值 queued 只显示已入队，不能宣称完成；相关前端164项通过。
+- [x] 接通现有 custom: 渠道解析：分类与改文共用已有文本模型入口，保留账号归属、明确模型选择、单次调用和默认模型语义；不增加平行解析器。
+- [x] 真实保存格式和假HTTP验证所选模型确实用于分类和改文，缺配置报错且不默默换模型，typed nil不触发空指针。
+- [ ] 本地构建更新后明确重试测试书，保留旧AI1及原文指纹，生成AI2并核验网站回执和回读。
+
+实际登录已通过：之前页面选到了无团队归属的 choushiyiguai1；切回测试书所属 choushiyiguai 后，用用户提供的目标站账号正常登录，目标会话接口为ready。密码不进入源码、文档或Git。
+
+本机其他窗口持续提交并更新4001。每个运行包固定到已测试Git提交，核验实际运行版本是新包祖先后才切换，确保不回退已运行功能；测书相关代码若有更新必须重建。其他窗口尚未验证的新提交继续保留在Git，不混入这一轮实测。
+
+真实模型配置核验：当前“免费测试模型”地址为本机127.0.0.1:18900且无监听，不能作为真实ERNIE调用成功的证据。已告知用户并询问补齐真实模型或暂不调用；不自动换到付费模型，不将本地测试回显上传到真实网站。
