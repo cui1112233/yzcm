@@ -5,10 +5,13 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 type Migration struct {
@@ -99,6 +102,7 @@ func RunMigrations(ctx context.Context, db *sql.DB, migrations []Migration) erro
 	}
 	ordered := append([]Migration(nil), migrations...)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Version < ordered[j].Version })
+migrations:
 	for _, migration := range ordered {
 		expected := checksumFor(migration)
 		var recorded string
@@ -133,7 +137,10 @@ func RunMigrations(ctx context.Context, db *sql.DB, migrations []Migration) erro
 			adopted, adoptErr := migration.Adopt(ctx, tx)
 			if adoptErr != nil {
 				_ = tx.Rollback()
-				return fmt.Errorf("adopt migration %d: %w", migration.Version, adoptErr)
+				if recoveryErr := readoptMigrationAfterDuplicate(ctx, db, migration, expected, adoptErr); recoveryErr != nil {
+					return fmt.Errorf("adopt migration %d: %w", migration.Version, recoveryErr)
+				}
+				continue
 			}
 			if adopted {
 				if _, insertErr := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?, ?, CURRENT_TIMESTAMP(6))`, migration.Version, expected); insertErr != nil {
@@ -156,7 +163,10 @@ func RunMigrations(ctx context.Context, db *sql.DB, migrations []Migration) erro
 		for _, statement := range migration.SQL {
 			if _, err := tx.ExecContext(ctx, statement); err != nil {
 				_ = tx.Rollback()
-				return fmt.Errorf("apply migration %d: %w", migration.Version, err)
+				if recoveryErr := readoptMigrationAfterDuplicate(ctx, db, migration, expected, err); recoveryErr != nil {
+					return fmt.Errorf("apply migration %d: %w", migration.Version, recoveryErr)
+				}
+				continue migrations
 			}
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?, ?, CURRENT_TIMESTAMP(6))`, migration.Version, expected); err != nil {
@@ -166,6 +176,41 @@ func RunMigrations(ctx context.Context, db *sql.DB, migrations []Migration) erro
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// A previous startup's DDL may finish after its caller timed out. Duplicate
+// table/column errors are evidence to recheck the exact schema, never evidence
+// to skip DDL blindly. This helper has no retry loop: one fresh adoption only.
+func readoptMigrationAfterDuplicate(ctx context.Context, db *sql.DB, migration Migration, checksum string, cause error) error {
+	var duplicate *mysql.MySQLError
+	if migration.Adopt == nil || !errors.As(cause, &duplicate) || (duplicate.Number != 1050 && duplicate.Number != 1060) {
+		return cause
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(cause, err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("begin re-adopt migration %d: %w", migration.Version, err))
+	}
+	defer tx.Rollback()
+	adopted, err := migration.Adopt(ctx, tx)
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("re-adopt migration %d: %w", migration.Version, err))
+	}
+	if !adopted {
+		return cause
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(cause, err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?, ?, CURRENT_TIMESTAMP(6))`, migration.Version, checksum); err != nil {
+		return errors.Join(cause, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return errors.Join(cause, fmt.Errorf("commit re-adopt migration %d: %w", migration.Version, err))
 	}
 	return nil
 }
