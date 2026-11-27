@@ -270,9 +270,10 @@ func (s *MySQLStore) GetConfig(ctx context.Context, owner string) (map[string]an
 	var raw []byte
 	var pending bool
 	// Read the catalog and its migration phase from the same database snapshot.
+	// Historical tables may use different collations; bind the same owner in both lookups.
 	err := s.DB.QueryRowContext(ctx, `SELECT c.settings_json,EXISTS(
-SELECT 1 FROM novel_fetch_legacy_config_migrations m WHERE m.owner_username=c.owner_username AND m.phase!='complete')
-FROM novel_fetch_workshop_configs c WHERE c.owner_username=?`, owner).Scan(&raw, &pending)
+SELECT 1 FROM novel_fetch_legacy_config_migrations m WHERE m.owner_username=? AND m.phase!='complete')
+FROM novel_fetch_workshop_configs c WHERE c.owner_username=?`, owner, owner).Scan(&raw, &pending)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
