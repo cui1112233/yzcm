@@ -934,6 +934,13 @@ func startNovelFetchBodyCleanup(ctx context.Context, store *novelfetchworkshop.M
 						break
 					}
 				}
+				if strings.EqualFold(strings.TrimSpace(os.Getenv("NOVEL_FETCH_BODY_REAPER_DISABLED")), "true") == false {
+					if deleted, err := store.ReapRetiredBodyObjects(ctx, time.Now().UTC(), batchLimit); err != nil {
+						log.Printf("novel fetch retired object cleanup failed: %v", err)
+					} else if deleted > 0 {
+						log.Printf("novel fetch retired object cleanup deleted %d objects", deleted)
+					}
+				}
 				timer.Reset(6 * time.Hour)
 			}
 		}

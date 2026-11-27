@@ -36,6 +36,7 @@ import { batchFactoryRawSourceText, batchFactorySourceMetadata, batchFactorySour
 import { normalizeNovelFetchInput, serializeNovelFetchRows, NOVEL_FETCH_INPUT_FORMATS } from './novel-fetch-input-format.js';
 import { parseOpeningDraft } from './novel-fetch-knowledge-edits.js';
 import { buildRuleConfigPatch } from './novel-fetch-rule-config.js';
+import { describeRuleApplyResult } from './novel-fetch-rule-result.js';
 import { dispatchGlobalStatus } from '../../shared/notifications/globalTaskCenter.js';
 import { getMemberCenter, getTeamMembers } from '../../shared/api/member.js';
 import { listGlobalAccounts } from '../../shared/api/accountAdmin.js';
@@ -1726,19 +1727,19 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
   async function applySelectedRules() {
     if (!selectedTaskKeys.length) return message.warning('请先选择任务');
     setTaskActionBusy('rules-selected');
-    try { await applyWorkshopRules(selectedTaskKeys, ruleApplyScope, sensitiveAiProcessEnabled); await loadTasks(); message.success('已完成规则处理'); } catch (error) { message.error(error.message || '规则处理失败'); } finally { setTaskActionBusy(''); }
+    try { const result = await applyWorkshopRules(selectedTaskKeys, ruleApplyScope, sensitiveAiProcessEnabled); const notice = describeRuleApplyResult(result, '已完成规则处理'); message[notice.type](notice.message); await loadTasks(); } catch (error) { message.error(error.message || '规则处理失败'); } finally { setTaskActionBusy(''); }
   }
   async function applyAllRules() {
     const ids = currentBatchIds;
     if (!ids.length) return message.warning('当前没有可处理任务');
     setTaskActionBusy('rules-current-batch');
-    try { await applyWorkshopRules(ids, ruleApplyScope, sensitiveAiProcessEnabled); await loadTasks(); message.success('已完成全部任务规则处理'); } catch (error) { message.error(error.message || '规则处理失败'); } finally { setTaskActionBusy(''); }
+    try { const result = await applyWorkshopRules(ids, ruleApplyScope, sensitiveAiProcessEnabled); const notice = describeRuleApplyResult(result, '已完成全部任务规则处理'); message[notice.type](notice.message); await loadTasks(); } catch (error) { message.error(error.message || '规则处理失败'); } finally { setTaskActionBusy(''); }
   }
   async function applyRulesToAllTasks() {
     const ids = currentBatchIds;
     if (!ids.length) return message.warning('当前批次没有可处理任务');
     setTaskActionBusy('rules-all');
-    try { await applyWorkshopRules(ids, ruleApplyScope, sensitiveAiProcessEnabled); await loadTasks(); message.success(`已处理当前批次 ${ids.length} 个任务`); } catch (error) { message.error(error.message || '规则处理当前批次任务失败'); } finally { setTaskActionBusy(''); }
+    try { const result = await applyWorkshopRules(ids, ruleApplyScope, sensitiveAiProcessEnabled); const notice = describeRuleApplyResult(result, `已处理当前批次 ${ids.length} 个任务`); message[notice.type](notice.message); await loadTasks(); } catch (error) { message.error(error.message || '规则处理当前批次任务失败'); } finally { setTaskActionBusy(''); }
   }
   async function submitVisibleTasks() {
     const ids = currentBatchIds;

@@ -81,5 +81,22 @@ func NovelFetchWorkshopMigrations() []Migration {
 		{Version: 1200002, SQL: NovelFetchWorkshopBodyStatements(), CallbackChecksum: "novel-fetch-workshop-v2-bodies"},
 		{Version: 1200003, SQL: NovelFetchWorkshopCleanupStatements(), CallbackChecksum: "novel-fetch-workshop-v3-body-cleanup"},
 		{Version: 1200004, SQL: NovelFetchWorkshopRunAuditStatements(), CallbackChecksum: "novel-fetch-workshop-v4-run-audit"},
+		{Version: 1200005, SQL: NovelFetchBodyObjectRetirementStatements(), CallbackChecksum: "novel-fetch-workshop-v5-body-object-retirements"},
 	}
+}
+
+func NovelFetchBodyObjectRetirementStatements() []string {
+	return []string{`CREATE TABLE IF NOT EXISTS novel_fetch_body_object_retirements (
+ object_key VARCHAR(512) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+ owner_username VARCHAR(191) NOT NULL,
+ book_id VARCHAR(191) NOT NULL,
+ version_id VARCHAR(64) NOT NULL,
+ registered_at DATETIME(6) NOT NULL,
+ not_before DATETIME(6) NOT NULL,
+ state VARCHAR(16) NOT NULL,
+ attempts INT UNSIGNED NOT NULL DEFAULT 0,
+ last_error TEXT NULL,
+ PRIMARY KEY (object_key),
+ KEY idx_nfw_retirements_due (state, not_before)
+) ENGINE=InnoDB`}
 }

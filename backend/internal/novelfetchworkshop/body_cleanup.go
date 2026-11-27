@@ -32,8 +32,10 @@ type BodyCleanupRecord struct {
 }
 
 type BodyCleanupResult struct {
-	Deleted int                 `json:"deleted"`
-	Results []BodyCleanupRecord `json:"results"`
+	Deleted        int                 `json:"deleted"`
+	ObjectsPending int                 `json:"objectsPending"`
+	ObjectsHeld    int                 `json:"objectsHeld"`
+	Results        []BodyCleanupRecord `json:"results"`
 }
 
 func NormalizeBodyRetentionDays(days int) int {

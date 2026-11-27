@@ -3,7 +3,9 @@ package novelfetchworkshop
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"regexp"
@@ -35,6 +37,28 @@ func BodyObjectKey(owner, bookID, versionID string) string {
 	bookID = strings.Trim(unsafeBodyKeyPart.ReplaceAllString(strings.TrimSpace(bookID), "_"), "._-")
 	versionID = strings.Trim(unsafeBodyKeyPart.ReplaceAllString(strings.TrimSpace(versionID), "_"), "._-")
 	return "novel-fetch/" + ownerHash[:24] + "/" + bookID + "/" + versionID + ".txt"
+}
+
+// New writes never reuse the legacy fixed key. Keep BodyObjectKey for legacy reads.
+func newBodyObjectKey(owner, bookID, versionID string) (string, error) {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(BodyObjectKey(owner, bookID, versionID), ".txt") + "/writes/" + hex.EncodeToString(id[:]) + ".txt", nil
+}
+
+func immutableBodyObjectKey(key, owner, bookID, versionID string) bool {
+	prefix := strings.TrimSuffix(BodyObjectKey(owner, bookID, versionID), ".txt") + "/writes/"
+	if !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, ".txt") {
+		return false
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(key, prefix), ".txt")
+	if len(id) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(id)
+	return err == nil
 }
 
 func NewBodyTOSStore(config BodyTOSConfig) (*BodyObjectStore, error) {

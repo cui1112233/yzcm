@@ -2,10 +2,12 @@ package novelfetchworkshop
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -493,8 +495,7 @@ func nullableRunString(value string) any {
 }
 
 func (s *MySQLStore) PutBody(ctx context.Context, owner string, body BodyRecord) (BodyRef, error) {
-	bookID := strings.TrimSpace(body.BookID)
-	versionID := strings.TrimSpace(body.VersionID)
+	bookID, versionID := strings.TrimSpace(body.BookID), strings.TrimSpace(body.VersionID)
 	if bookID == "" {
 		return BodyRef{}, errors.New("book id is required")
 	}
@@ -509,34 +510,23 @@ func (s *MySQLStore) PutBody(ctx context.Context, owner string, body BodyRecord)
 	if err != nil {
 		return BodyRef{}, err
 	}
-	objectKey := ""
+	encoding := "gzip"
 	if s.ObjectBodies != nil {
-		objectKey = BodyObjectKey(owner, bookID, versionID)
-		if err := s.ObjectBodies.PutContent(ctx, objectKey, body.Content); err != nil {
+		key, err := newBodyObjectKey(owner, bookID, versionID)
+		if err != nil {
+			return BodyRef{}, err
+		}
+		if err := s.ObjectBodies.PutContent(ctx, key, body.Content); err != nil {
 			return BodyRef{}, fmt.Errorf("store novel fetch body in TOS: %w", err)
 		}
-		blob = []byte(objectKey)
+		encoding, blob = "tos", []byte(key)
 	}
-	query := `INSERT INTO novel_fetch_workshop_bodies(owner_username,book_id,version_id,revision,content_encoding,content_blob,content_hash,char_count,state,created_at,updated_at,last_needed_at,releasable_at,expires_at) VALUES(?,?,?,1,'gzip',?,?,?,?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),NULL,NULL) ON DUPLICATE KEY UPDATE revision=revision+1, content_encoding=VALUES(content_encoding), content_blob=VALUES(content_blob), content_hash=VALUES(content_hash), char_count=VALUES(char_count), state=VALUES(state), updated_at=CURRENT_TIMESTAMP(6), last_needed_at=CURRENT_TIMESTAMP(6), releasable_at=NULL, expires_at=NULL`
-	if objectKey != "" {
-		query = strings.Replace(query, "'gzip'", "'tos'", 1)
+	ref, err := s.switchBodyReference(ctx, owner, bookID, versionID, encoding, blob, hash, charCount, state)
+	if err != nil && encoding == "tos" {
+		// An ambiguous commit must never trigger object deletion.
+		log.Printf("novel fetch body reference not confirmed; uploaded object retained id=%x", sha256.Sum256(blob))
 	}
-	_, err = s.DB.ExecContext(ctx, query, owner, bookID, versionID, blob, hash, charCount, state)
-	if err != nil {
-		if objectKey != "" {
-			_ = s.ObjectBodies.DeleteContent(ctx, objectKey)
-		}
-		return BodyRef{}, err
-	}
-
-	ref := BodyRef{VersionID: versionID}
-	var updated time.Time
-	err = s.DB.QueryRowContext(ctx, `SELECT revision, content_hash, char_count, state, updated_at FROM novel_fetch_workshop_bodies WHERE owner_username=? AND book_id=? AND version_id=?`, owner, bookID, versionID).Scan(&ref.Revision, &ref.ContentHash, &ref.CharCount, &ref.State, &updated)
-	if err != nil {
-		return BodyRef{}, err
-	}
-	ref.UpdatedAt = updated.UTC().Format(time.RFC3339Nano)
-	return ref, nil
+	return ref, err
 }
 
 func (s *MySQLStore) GetBody(ctx context.Context, owner, bookID, versionID string) (BodyRecord, error) {
@@ -595,28 +585,23 @@ func (s *MySQLStore) ListBodyRefs(ctx context.Context, owner, bookID string) ([]
 }
 
 func (s *MySQLStore) DeleteBody(ctx context.Context, owner, bookID, versionID string) (bool, error) {
-	bookID = strings.TrimSpace(bookID)
-	versionID = strings.TrimSpace(versionID)
-	if s.ObjectBodies != nil {
-		var encoding string
-		var blob []byte
-		err := s.DB.QueryRowContext(ctx, `SELECT content_encoding, content_blob FROM novel_fetch_workshop_bodies WHERE owner_username=? AND book_id=? AND version_id=?`, owner, bookID, versionID).Scan(&encoding, &blob)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return false, err
-		}
-		if encoding == "tos" {
-			if err := s.ObjectBodies.DeleteContent(ctx, string(blob)); err != nil {
-				return false, err
-			}
-		}
-	}
-	result, err := s.DB.ExecContext(ctx, `DELETE FROM novel_fetch_workshop_bodies WHERE owner_username=? AND book_id=? AND version_id=?`, owner, bookID, versionID)
+	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
-	rows, err := result.RowsAffected()
+	defer tx.Rollback()
+	candidate, err := lockBody(ctx, tx, owner, strings.TrimSpace(bookID), strings.TrimSpace(versionID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
-	return rows > 0, nil
+	if err := removeBody(ctx, tx, candidate, time.Now().UTC()); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
