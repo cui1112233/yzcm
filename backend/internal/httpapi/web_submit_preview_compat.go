@@ -59,7 +59,7 @@ func RegisterWebSubmitPreviewCompat(root *http.ServeMux, middleware BridgeAuth, 
 // requested/planned/deferred/missing 与 plan_complete，调用方可以据此判断
 // 计划是否丢项，而不是只从 groups 是否为空猜测。
 func buildWebSubmitPlanPayload(ctx context.Context, store novelfetchworkshop.Store, owner string, taskIDs, requestedVersions []string, force bool) (map[string]any, int, string) {
-	settings, err := store.GetConfig(ctx, owner)
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
 	if err != nil {
 		return nil, http.StatusInternalServerError, "读取提交配置失败"
 	}
