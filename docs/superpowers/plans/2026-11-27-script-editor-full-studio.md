@@ -139,7 +139,7 @@ git commit -m "feat(script-editor): add full studio workspace shell"
 func TestScriptEditorStudioBindingMigration(t *testing.T) {
     migrations := ScriptEditorMigrations()
     latest := migrations[len(migrations)-1]
-    require.Equal(t, int64(8800411), latest.Version)
+    require.Equal(t, int64(8800412), latest.Version)
     for _, table := range []string{"script_editor_work_bindings", "script_editor_source_links", "script_editor_asset_links", "script_editor_job_links"} {
         require.Contains(t, latest.UpSQL, "CREATE TABLE IF NOT EXISTS "+table)
         require.Contains(t, latest.UpSQL, "owner_username")
@@ -156,7 +156,7 @@ func TestWorkBindingValidateRequiresStableIdentity(t *testing.T) {
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/storage ./internal/scripteditor -run 'Binding|Studio' -count=1`
-Expected: FAIL because migration 8800411 and binding types are absent.
+Expected: FAIL because migration 8800412 and binding types are absent.
 
 - [ ] **Step 3: Add migration and exact domain types**
 
@@ -178,7 +178,7 @@ type WorkBinding struct {
 }
 ```
 
-Migration 8800411 gives every table an owner/work index and a unique stable-source key. Work deletion does not cascade into downstream project tables.
+Migration 8800412 gives every table an owner/work index and a unique stable-source key. Work deletion does not cascade into downstream project tables. Version 8800411 is already occupied by the energy receipt binding upgrade.
 
 - [ ] **Step 4: Run focused tests**
 

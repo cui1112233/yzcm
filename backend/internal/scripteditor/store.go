@@ -85,6 +85,20 @@ type Store interface {
 	CreateReview(context.Context, Review) (Review, error)
 }
 
+// BindingStore keeps stable identities between the script studio and existing
+// production modules. It stays separate from Store until every persistence
+// implementation supports the new migration.
+type BindingStore interface {
+	UpsertWorkBinding(context.Context, WorkBinding) (WorkBinding, error)
+	WorkBinding(context.Context, string, string, BindingTargetType) (WorkBinding, error)
+	UpsertSourceLink(context.Context, SourceLink) (SourceLink, error)
+	ListSourceLinks(context.Context, string, string, string) ([]SourceLink, error)
+	UpsertAssetLink(context.Context, AssetLink) (AssetLink, error)
+	ListAssetLinks(context.Context, string, string, string) ([]AssetLink, error)
+	UpsertJobLink(context.Context, JobLink) (JobLink, error)
+	ListJobLinks(context.Context, string, string, string) ([]JobLink, error)
+}
+
 func randomID(prefix string) string {
 	var raw [12]byte
 	if _, err := rand.Read(raw[:]); err != nil {
