@@ -23,6 +23,7 @@ type MemoryStore struct {
 	assetLinks   map[string]AssetLink
 	jobLinks     map[string]JobLink
 	storyboards  map[string]StoryboardDocument
+	settings     map[string]WorkSettings
 	now          func() time.Time
 	newID        func(string) string
 }
@@ -30,9 +31,42 @@ type MemoryStore struct {
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		works: map[string]Work{}, chapters: map[string]Chapter{}, scripts: map[string]Script{}, handoffs: map[string]Handoff{}, jobs: map[string]Job{}, reviews: map[string]Review{},
-		workBindings: map[string]WorkBinding{}, sourceLinks: map[string]SourceLink{}, assetLinks: map[string]AssetLink{}, jobLinks: map[string]JobLink{}, storyboards: map[string]StoryboardDocument{},
+		workBindings: map[string]WorkBinding{}, sourceLinks: map[string]SourceLink{}, assetLinks: map[string]AssetLink{}, jobLinks: map[string]JobLink{}, storyboards: map[string]StoryboardDocument{}, settings: map[string]WorkSettings{},
 		now: time.Now, newID: randomID,
 	}
+}
+
+func (s *MemoryStore) GetWorkSettings(_ context.Context, owner, workID string) (WorkSettings, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row, ok := s.settings[owner+"\x00"+workID]
+	if !ok {
+		return WorkSettings{}, ErrNotFound
+	}
+	return row, nil
+}
+func (s *MemoryStore) SaveWorkSettings(_ context.Context, owner, workID string, row WorkSettings, expected int64) (WorkSettings, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.activeWork(owner, workID); err != nil {
+		return WorkSettings{}, err
+	}
+	key := owner + "\x00" + workID
+	current, ok := s.settings[key]
+	if ok && current.Revision != expected {
+		return WorkSettings{}, ErrConflict
+	}
+	if !ok && expected != 0 {
+		return WorkSettings{}, ErrConflict
+	}
+	if ok {
+		row.Revision = current.Revision + 1
+	} else {
+		row.Revision = 0
+	}
+	row.UpdatedAt = s.now().UTC()
+	s.settings[key] = row
+	return row, nil
 }
 
 func (s *MemoryStore) GetStoryboard(_ context.Context, owner, workID string, episode int) (StoryboardDocument, error) {

@@ -191,5 +191,16 @@ func ScriptEditorMigrations() []Migration {
   UNIQUE KEY uq_script_editor_storyboard_episode (owner_username, work_id, episode),
   KEY idx_script_editor_storyboard_work (owner_username, work_id, updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`},
+	}, {
+		Version:          8800416,
+		CallbackChecksum: "v88-script-editor-settings-v1",
+		SQL: []string{`CREATE TABLE IF NOT EXISTS script_editor_settings (
+  owner_username VARCHAR(191) NOT NULL,
+  work_id VARCHAR(64) NOT NULL,
+  settings_json JSON NOT NULL,
+  revision BIGINT NOT NULL DEFAULT 0,
+  updated_at DATETIME(6) NOT NULL,
+  PRIMARY KEY (owner_username, work_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`},
 	}}
 }

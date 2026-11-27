@@ -602,6 +602,29 @@ func RegisterScriptEditorRoutes(mux *http.ServeMux, auth BridgeAuth, service *sc
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"production": status})
 	})
+	handle("GET /api/script-editor/works/{workID}/settings", func(w http.ResponseWriter, req *http.Request, owner string) {
+		settings, err := service.Settings(req.Context(), owner, req.PathValue("workID"))
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
+	})
+	handle("PUT /api/script-editor/works/{workID}/settings", func(w http.ResponseWriter, req *http.Request, owner string) {
+		var input struct {
+			Settings         scripteditor.WorkSettings `json:"settings"`
+			ExpectedRevision int64                     `json:"expectedRevision"`
+		}
+		if !decode(w, req, &input) {
+			return
+		}
+		settings, err := service.SaveSettings(req.Context(), owner, req.PathValue("workID"), input.Settings, input.ExpectedRevision)
+		if err != nil {
+			writeScriptEditorError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
+	})
 	handle("GET /api/script-editor/works/{workID}/jobs/{jobID}", func(w http.ResponseWriter, req *http.Request, owner string) {
 		job, err := service.Store.GetJob(req.Context(), owner, req.PathValue("workID"), req.PathValue("jobID"))
 		if err != nil {

@@ -7,8 +7,8 @@ import (
 
 func TestScriptEditorMigrationContainsRequiredTables(t *testing.T) {
 	migrations := ScriptEditorMigrations()
-	if len(migrations) != 3 {
-		t.Fatalf("migration count = %d, want 3", len(migrations))
+	if len(migrations) != 4 {
+		t.Fatalf("migration count = %d, want 4", len(migrations))
 	}
 	if migrations[0].Version != 8800410 {
 		t.Fatalf("version = %d, want 8800410", migrations[0].Version)
@@ -51,6 +51,13 @@ func TestScriptEditorStoryboardMigration(t *testing.T) {
 	latest := ScriptEditorMigrations()[2]
 	if latest.Version != 8800415 || !strings.Contains(strings.Join(latest.SQL, "\n"), "script_editor_storyboards") {
 		t.Fatalf("storyboard migration invalid: %#v", latest)
+	}
+}
+
+func TestScriptEditorSettingsMigration(t *testing.T) {
+	latest := ScriptEditorMigrations()[3]
+	if latest.Version != 8800416 || !strings.Contains(strings.Join(latest.SQL, "\n"), "script_editor_settings") {
+		t.Fatalf("settings migration invalid: %#v", latest)
 	}
 }
 

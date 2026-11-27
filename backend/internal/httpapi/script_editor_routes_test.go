@@ -233,6 +233,25 @@ func TestScriptEditorCanvasSyncRoutesUseRealAgentWorkspace(t *testing.T) {
 	}
 }
 
+func TestScriptEditorSettingsRoutesPersistWithRevision(t *testing.T) {
+	now := time.Unix(1800000000, 0).UTC()
+	api := newScriptEditorTestRouter(now)
+	created := signedJSONRequest(t, api, now, "alice", http.MethodPost, "/api/script-editor/works", map[string]any{"title": "设置作品", "type": "script"})
+	workID := scriptEditorID(t, created, "work")
+	defaults := signedJSONRequest(t, api, now, "alice", http.MethodGet, "/api/script-editor/works/"+workID+"/settings", nil)
+	if defaults.Code != http.StatusOK || !bytes.Contains(defaults.Body.Bytes(), []byte(`"ratio":"9:16"`)) {
+		t.Fatalf("defaults status=%d body=%s", defaults.Code, defaults.Body.String())
+	}
+	saved := signedJSONRequest(t, api, now, "alice", http.MethodPut, "/api/script-editor/works/"+workID+"/settings", map[string]any{"expectedRevision": 0, "settings": map[string]any{"ratio": "16:9", "concurrency": 3, "autosaveSeconds": 5}})
+	if saved.Code != http.StatusOK || !bytes.Contains(saved.Body.Bytes(), []byte(`"ratio":"16:9"`)) {
+		t.Fatalf("save status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	stale := signedJSONRequest(t, api, now, "alice", http.MethodPut, "/api/script-editor/works/"+workID+"/settings", map[string]any{"expectedRevision": 1, "settings": map[string]any{"ratio": "1:1"}})
+	if stale.Code != http.StatusConflict {
+		t.Fatalf("stale status=%d body=%s", stale.Code, stale.Body.String())
+	}
+}
+
 func TestScriptEditorJobRoutesCreateListCancelAndRetry(t *testing.T) {
 	now := time.Unix(1800000000, 0).UTC()
 	api := newScriptEditorTestRouter(now)

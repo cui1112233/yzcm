@@ -894,3 +894,50 @@ func (s *MySQLStore) SaveStoryboard(ctx context.Context, row StoryboardDocument,
 	}
 	return row, nil
 }
+
+func (s *MySQLStore) GetWorkSettings(ctx context.Context, owner, workID string) (WorkSettings, error) {
+	var row WorkSettings
+	var raw []byte
+	err := s.db.QueryRowContext(ctx, `SELECT settings_json,revision,updated_at FROM script_editor_settings WHERE owner_username=? AND work_id=?`, owner, workID).Scan(&raw, &row.Revision, &row.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return WorkSettings{}, ErrNotFound
+	}
+	if err != nil {
+		return WorkSettings{}, err
+	}
+	decoded, err := decodeSettingsJSON(raw)
+	decoded.Revision, decoded.UpdatedAt = row.Revision, row.UpdatedAt
+	return decoded, err
+}
+func (s *MySQLStore) SaveWorkSettings(ctx context.Context, owner, workID string, row WorkSettings, expected int64) (WorkSettings, error) {
+	raw, err := settingsJSON(row)
+	if err != nil {
+		return WorkSettings{}, ErrValidation
+	}
+	now := s.now().UTC()
+	current, getErr := s.GetWorkSettings(ctx, owner, workID)
+	if getErr == ErrNotFound {
+		if expected != 0 {
+			return WorkSettings{}, ErrConflict
+		}
+		row.Revision, row.UpdatedAt = 0, now
+		_, err = s.db.ExecContext(ctx, `INSERT INTO script_editor_settings (owner_username,work_id,settings_json,revision,updated_at) VALUES (?,?,?,?,?)`, owner, workID, raw, 0, now)
+		return row, mapWriteError(err)
+	}
+	if getErr != nil {
+		return WorkSettings{}, getErr
+	}
+	if current.Revision != expected {
+		return WorkSettings{}, ErrConflict
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE script_editor_settings SET settings_json=?,revision=revision+1,updated_at=? WHERE owner_username=? AND work_id=? AND revision=?`, raw, now, owner, workID, expected)
+	if err != nil {
+		return WorkSettings{}, err
+	}
+	count, _ := result.RowsAffected()
+	if count != 1 {
+		return WorkSettings{}, ErrConflict
+	}
+	row.Revision, row.UpdatedAt = expected+1, now
+	return row, nil
+}

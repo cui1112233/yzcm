@@ -12,6 +12,7 @@ import ScriptEditorAssets from './ScriptEditorAssets.jsx';
 import ScriptEditorStoryboard from './ScriptEditorStoryboard.jsx';
 import ScriptEditorCanvas from './ScriptEditorCanvas.jsx';
 import ScriptEditorProduction from './ScriptEditorProduction.jsx';
+import ScriptEditorSettings from './ScriptEditorSettings.jsx';
 import { buildStudioSearch, resolveStudioLocation, SCRIPT_EDITOR_RAIL_ITEMS } from './studioContract.js';
 
 const icons = {
@@ -72,6 +73,7 @@ export default function ScriptEditorWorkspace({ work, onBack, onReload }) {
   if (location.tab === 'storyboard') content = <ScriptEditorStoryboard work={work} />;
   if (location.tab === 'canvas') content = <ScriptEditorCanvas work={work} />;
   if (location.tab === 'production') content = <ScriptEditorProduction work={work} />;
+  if (location.tab === 'settings') content = <ScriptEditorSettings work={work} />;
   if (location.tab === 'delivery') content = <ScriptEditorDelivery work={work} />;
 
   return <main className="script-editor-page is-workspace">
