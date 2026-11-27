@@ -44,3 +44,9 @@ test('all seven approved pages stay inside the common account-center page contra
     assert.match(read(file), /account-center-page|AccountRolePage/, `${file} must use the shared page contract`);
   }
 });
+
+test('team governance uses the approved 团队管理 title consistently', () => {
+  const team = read('user/pages/TeamPage.jsx');
+  assert.match(team, /title="团队管理"/);
+  assert.doesNotMatch(team, /title="组员管理"/);
+});
