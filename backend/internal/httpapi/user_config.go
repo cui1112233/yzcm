@@ -189,6 +189,18 @@ func (s *UserConfigStore) effectiveConfig(ctx context.Context, owner string) (ma
 		}
 		saved = nil
 	}
+	// A default shown by the UI is not a value restored from disk.
+	if saved == nil {
+		saved = map[string]any{}
+	}
+	snapshotEnd := 0
+	for snapshotEnd < len(edits) && edits[snapshotEnd].OnlyIfMissing {
+		snapshotEnd++
+	}
+	if err := edits[:snapshotEnd].apply(saved); err != nil {
+		return nil, err
+	}
+	edits = edits[snapshotEnd:]
 	config := mergeConfigMap(defaultUserConfig, saved)
 	return config, edits.apply(config)
 }
@@ -344,6 +356,12 @@ func mergeManagedModelCatalog(ctx context.Context, config map[string]any, catalo
 		return nil
 	}
 	settings, err := novelfetchworkshop.ReadRuntimeConfig(ctx, catalogStore, username)
+	if errors.Is(err, novelfetchworkshop.ErrCatalogAwaitingMigration) {
+		// Preference saves can finish while the original model file is offline.
+		delete(config, "modelCatalog")
+		delete(config, "modelCatalogVersion")
+		return nil
+	}
 	if err != nil {
 		return err
 	}

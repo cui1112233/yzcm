@@ -163,7 +163,7 @@ func TestLegacySettingPatchReviewImportAfterCompletion(t *testing.T) {
 	for _, tc := range []struct {
 		file deferredSettingsEnvelope
 		want float64
-	}{{first, 42}, {upper, 51}, {fixture("57"), 57}, {first, 51}} {
+	}{{first, 42}, {upper, 51}, {fixture("57"), 51}, {first, 51}} {
 		if err := writeUserConfigDocument(old, tc.file); err != nil {
 			t.Fatal(err)
 		}
@@ -305,7 +305,7 @@ func TestLegacySettingPatchRoundTwoHistoricalChannelEcho(t *testing.T) {
 		t.Fatal(err)
 	}
 	row := apiIntegrationChannels(apiIntegrationStoredMap(saved))[0].(map[string]any)
-	if saved["notifications"].(map[string]any)["soundVolume"] != 42.0 || row["model"] != "keep" || row["apiKey"] != "synthetic-current" || row["concurrency"] != 7.0 || row["name"] != "explicit" || row["enabled"] != nil {
+	if saved["notifications"].(map[string]any)["soundVolume"] != 42.0 || row["model"] != "keep" || row["apiKey"] != "synthetic-current" || row["concurrency"] != 7.0 || row["name"] != "restored" || row["enabled"] != nil {
 		t.Fatal("historical snapshot defaults erased restored settings or explicit edits")
 	}
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
@@ -428,18 +428,29 @@ func TestLegacySettingPatchRoundTwoNormalSaveAndReopenedReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	file, err := importer.readStandardFile(path)
-	if err != nil || file["storageRoot"] != "new-root" || file["notifications"].(map[string]any)["soundVolume"] != 42.0 {
+	if err != nil || file["storageRoot"] != "new-root" || file["notifications"].(map[string]any)["soundVolume"] != 60.0 {
 		t.Fatal("standard settings lost storageRoot or volume", err)
 	}
 }
 
 func TestLegacySettingPatchRoundTwoIdentityEchoAloneIsNoop(t *testing.T) {
-	target := map[string]any{}
 	echo := settingsEdit{Path: []string{apiIntegrationsSettingKey, "customChannels", "v", "id"}, Value: json.RawMessage(`"v"`)}
 	if err := echo.Validate(); err != nil {
 		t.Error(err)
 	}
-	if err := (settingsEdits{echo}).apply(target); err != nil || len(target) != 0 {
+	s := patchTestStore(t)
+	c := NewUserConfigStore(s.LegacyConfigDir)
+	file, _ := c.configPath("a")
+	raw, err := json.Marshal(settingsEdits{echo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSealedSettingFixture(t, c, "a", string(raw))
+	if _, err := c.secrets.ImportDeferredSettings(context.Background(), "a", file, s); err != nil {
+		t.Fatal(err)
+	}
+	edits, _, _, err := s.LoadLegacySettingEdits(context.Background(), "a")
+	if err != nil || len(edits) != 0 {
 		t.Fatalf("historical identity-only row has no assignment: %v", err)
 	}
 }

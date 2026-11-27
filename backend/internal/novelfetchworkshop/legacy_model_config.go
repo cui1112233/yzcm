@@ -625,7 +625,7 @@ func (s *MySQLStore) importAndCompleteLegacySettings(ctx context.Context, owner,
 		if latest.Phase != LegacyFinalizing {
 			return ErrConfigConflict
 		}
-		edits, err := s.openSettingEdits(owner, latest)
+		journal, err := s.openSettingJournal(owner, latest)
 		if err != nil {
 			return err
 		}
@@ -635,11 +635,11 @@ func (s *MySQLStore) importAndCompleteLegacySettings(ctx context.Context, owner,
 		if !ok {
 			return errors.New("no standard settings writer available")
 		}
-		if err := writer.ApplyLegacySettingEdits(owner, path, edits); err != nil {
+		if err := writer.ApplyLegacySettingEdits(owner, path, journal.edits()); err != nil {
 			return err
 		}
 
-		complete, err := completeLegacySettingEdits(ctx, tx, owner, latest.Revision)
+		complete, err := s.completeSettingJournal(ctx, tx, latest, journal)
 		if err != nil {
 			return err
 		}

@@ -1,14 +1,11 @@
 package novelfetchworkshop
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -194,7 +191,7 @@ func (edit LegacySettingEdit) Validate() error {
 	if len(path) == 0 || slices.Contains(path, "") || (edit.Delete && len(edit.Value) != 0) || (!edit.Delete && !json.Valid(edit.Value)) {
 		return errors.New("invalid legacy setting edit")
 	}
-	if edit.OnlyIfMissing && (edit.Delete || path[0] != "apiIntegrations") {
+	if edit.OnlyIfMissing && edit.Delete {
 		return errors.New("invalid snapshot edit")
 	}
 	if path[0] != "apiIntegrations" {
@@ -224,106 +221,6 @@ func channelIdentityEcho(edit LegacySettingEdit) bool {
 	return len(p) == 4 && p[0] == "apiIntegrations" && p[1] == "customChannels" && p[3] == "id"
 }
 
-// The map converter emitted one recursively flattened map per channel, followed
-// by one flattened map for every other setting. Later requests appended edits.
-// A map walk cannot visit a leaf twice or return to a closed subtree.
-func NormalizeHistoricalChannelRows(edits []LegacySettingEdit) ([]LegacySettingEdit, error) {
-	if !slices.ContainsFunc(edits, channelIdentityEcho) {
-		return edits, nil
-	}
-	snapshotChannels := map[string]bool{}
-	for _, edit := range edits {
-		if err := edit.Validate(); err != nil {
-			return nil, err
-		}
-		if channelIdentityEcho(edit) {
-			snapshotChannels[edit.Path[2]] = true
-		}
-	}
-	end := historicalSnapshotEnd(edits, snapshotChannels)
-	out := make([]LegacySettingEdit, 0, len(edits))
-	for _, edit := range edits[:end] {
-		if edit.Path[0] != "apiIntegrations" {
-			out = append(out, edit)
-			continue
-		}
-		if channelIdentityEcho(edit) || edit.Delete {
-			continue
-		}
-		var value any
-		if err := json.Unmarshal(edit.Value, &value); err != nil {
-			return nil, err
-		}
-		var channelField []string
-		if len(edit.Path) >= 4 && edit.Path[1] == "customChannels" {
-			channelField = edit.Path[3:]
-		}
-		if historicalChannelDefault(channelField, value) {
-			continue
-		}
-		edit.OnlyIfMissing = true
-		out = append(out, edit)
-	}
-	return append(out, edits[end:]...), nil
-}
-
-func historicalSnapshotEnd(edits []LegacySettingEdit, snapshotChannels map[string]bool) int {
-	closed := map[string]bool{}
-	var previous []string
-	inChannels := true
-	seenFields := map[string]bool{}
-	for i, edit := range edits {
-		p := edit.Path
-		channel := len(p) >= 3 && p[0] == "apiIntegrations" && p[1] == "customChannels"
-		if channel {
-			if !inChannels || len(p) == 3 || !snapshotChannels[p[2]] {
-				return i
-			}
-			if len(previous) < 3 || !slices.Equal(previous[:3], p[:3]) {
-				clear(seenFields)
-			}
-			// The standard channel constructor emitted these fields together.
-			// A blank key was a string or was absent. Its API key tombstone
-			// followed by a repeated name is a later clear-and-rename request.
-			if edit.Delete && len(p) == 4 && p[3] == "apiKey" && i+1 < len(edits) {
-				next := edits[i+1].Path
-				if len(next) == 4 && slices.Equal(next[:3], p[:3]) && next[3] == "name" &&
-					seenFields["id"] && seenFields["name"] && seenFields["baseUrl"] && seenFields["model"] &&
-					seenFields["group"] && seenFields["enabled"] && seenFields["apiFormat"] && seenFields["concurrency"] {
-					return i
-				}
-			}
-			if len(p) == 4 {
-				seenFields[p[3]] = true
-			}
-		} else if inChannels {
-			// The converter explicitly emitted channels before walking the map.
-			// Starting its second walk may legitimately revisit apiIntegrations.
-			inChannels = false
-			previous = nil
-			clear(closed)
-		}
-		// JSON escaping keeps arbitrary field names distinct.
-		for n := len(previous); n > 0; n-- {
-			if len(p) >= n && slices.Equal(previous[:n], p[:n]) {
-				break
-			}
-			key, _ := json.Marshal(previous[:n])
-			closed[string(key)] = true
-		}
-		for n := 1; n <= len(p); n++ {
-			key, _ := json.Marshal(p[:n])
-			if closed[string(key)] {
-				return i
-			}
-		}
-		key, _ := json.Marshal(p)
-		closed[string(key)] = true
-		previous = p
-	}
-	return len(edits)
-}
-
 func historicalChannelDefault(path []string, value any) bool {
 	switch v := value.(type) {
 	case nil:
@@ -345,187 +242,13 @@ func historicalChannelDefault(path []string, value any) bool {
 	return false
 }
 
-func compactSettingEdits(edits []LegacySettingEdit) ([]LegacySettingEdit, error) {
-	// Keep the order of the last assignments: a channel deletion may be
-	// followed by recreation, or a group deletion by a child assignment.
-	var err error
-	edits, err = NormalizeHistoricalChannelRows(edits)
-	if err != nil {
-		return nil, err
-	}
-	seen := map[string]bool{}
-	result := make([]LegacySettingEdit, 0, len(edits))
-	for i := len(edits) - 1; i >= 0; i-- {
-		edit := edits[i]
-		if err := edit.Validate(); err != nil {
-			return nil, err
-		}
-		key, err := json.Marshal(edit.Path)
-		if err != nil {
-			return nil, err
-		}
-		if !seen[string(key)] {
-			result = append(result, edit)
-			seen[string(key)] = true
-		}
-	}
-	slices.Reverse(result)
-	return result, nil
-}
-
-func (s *MySQLStore) openSettingEdits(owner string, state LegacyConfigMigrationState) ([]LegacySettingEdit, error) {
-	if state.PatchEnvelope == "" && state.PatchFingerprint == "" {
-		return nil, nil
-	}
-	if s.ModelSecrets == nil {
-		return nil, errors.New("legacy setting patch requires encryption")
-	}
-	plain, err := s.ModelSecrets.OpenLegacyConflict(owner, settingPatchBinding(), state.PatchEnvelope, state.PatchFingerprint)
-	if err != nil {
-		return nil, err
-	}
-	var edits []LegacySettingEdit
-	if err := json.Unmarshal([]byte(plain), &edits); err != nil {
-		return nil, err
-	}
-	return compactSettingEdits(edits)
-}
-
 func (s *MySQLStore) LoadLegacySettingEdits(ctx context.Context, owner string) ([]LegacySettingEdit, uint64, bool, error) {
 	state, found, err := s.LegacyConfigMigrationState(ctx, owner)
 	if err != nil || !found || state.Phase == LegacyComplete {
 		return nil, state.Revision, false, err
 	}
-	edits, err := s.openSettingEdits(owner, state)
-	return edits, state.Revision, true, err
-}
-func (s *MySQLStore) AppendLegacySettingEdits(ctx context.Context, owner string, edits []LegacySettingEdit) error {
-	return s.mergeLegacySettingEdits(ctx, owner, edits, "", "")
-}
-
-// Import puts older assignments before existing edits, including when the
-// caller retries after committing the import but before retiring its file.
-func (s *MySQLStore) ImportLegacySettingEdits(ctx context.Context, owner string, edits []LegacySettingEdit, fingerprint, sourceCiphertext string) error {
-	digest, err := hex.DecodeString(fingerprint)
-	if err != nil || len(digest) != 32 {
-		return errors.New("invalid legacy file identity")
-	}
-	if !slices.ContainsFunc(edits, channelIdentityEcho) {
-		sourceCiphertext = ""
-	}
-	return s.mergeLegacySettingEdits(ctx, owner, edits, hex.EncodeToString(digest), sourceCiphertext)
-}
-func (s *MySQLStore) mergeLegacySettingEdits(ctx context.Context, owner string, edits []LegacySettingEdit, fingerprint, sourceCiphertext string) error {
-	importing := fingerprint != ""
-	var err error
-	edits, err = NormalizeHistoricalChannelRows(edits)
-	if err != nil {
-		return err
-	}
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if importing {
-		_, err = tx.ExecContext(ctx, `INSERT INTO novel_fetch_legacy_config_migrations(owner_username,phase) VALUES(?,'finalizing')
-ON DUPLICATE KEY UPDATE revision=revision`, owner)
-		if err != nil {
-			return err
-		}
-	}
-	state, found, err := readMigrationState(tx.QueryRowContext(ctx, migrationStateQuery+" FOR UPDATE", owner))
-	if err != nil {
-		return err
-	}
-	if importing && found {
-		var imported bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM novel_fetch_legacy_setting_files WHERE owner_username=? AND fingerprint=?)`, owner, fingerprint).Scan(&imported); err != nil {
-			return err
-		}
-		if !imported {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO novel_fetch_legacy_setting_files(owner_username,fingerprint) VALUES(?,?)`, owner, fingerprint); err != nil {
-				return err
-			}
-		}
-		// Preserve the authenticated original when an old array has no request
-		// boundaries. The receipt outlives completion and journal compaction.
-		if sourceCiphertext != "" {
-			if _, err := tx.ExecContext(ctx, `UPDATE novel_fetch_legacy_setting_files SET source_ciphertext=COALESCE(source_ciphertext,?) WHERE owner_username=? AND fingerprint=?`, sourceCiphertext, owner, fingerprint); err != nil {
-				return err
-			}
-			var retained string
-			if err := tx.QueryRowContext(ctx, `SELECT source_ciphertext FROM novel_fetch_legacy_setting_files WHERE owner_username=? AND fingerprint=?`, owner, fingerprint).Scan(&retained); err != nil {
-				return err
-			}
-			if s.ModelSecrets == nil {
-				return errors.New("legacy evidence requires encryption")
-			}
-			if _, err := s.ModelSecrets.OpenLegacyConflict(owner, LegacyConflictSource{Document: "deferred-settings.json", Field: "settings"}, retained, fingerprint); err != nil {
-				return err
-			}
-		}
-		if imported {
-			return tx.Commit()
-		}
-		if state.Phase == LegacyComplete {
-			if _, err = tx.ExecContext(ctx, `UPDATE novel_fetch_legacy_config_migrations SET phase='finalizing',revision=revision+1,updated_at=CURRENT_TIMESTAMP(6) WHERE owner_username=?`, owner); err != nil {
-				return err
-			}
-			state.Phase = LegacyFinalizing
-		}
-	}
-	if !found || state.Phase == LegacyComplete {
-		return ErrConfigConflict
-	}
-	previous, err := s.openSettingEdits(owner, state)
-	if err != nil {
-		return err
-	}
-	combined := append(slices.Clone(previous), edits...)
-	if importing {
-		combined = append(slices.Clone(edits), previous...)
-	}
-	combined, err = compactSettingEdits(combined)
-	if err != nil {
-		return err
-	}
-	if len(edits) == 0 || importing && reflect.DeepEqual(combined, previous) {
-		return tx.Commit()
-	}
-	if s.ModelSecrets == nil {
-		return errors.New("legacy setting patch requires encryption")
-	}
-	raw, err := json.Marshal(combined)
-	if err != nil {
-		return err
-	}
-	ciphertext, fingerprint, err := s.ModelSecrets.SealLegacyConflict(owner, settingPatchBinding(), string(raw))
-	if err != nil {
-		return err
-	}
-	_, err = tx.ExecContext(ctx, `UPDATE novel_fetch_legacy_config_migrations SET patch_ciphertext=?,patch_fingerprint=?,revision=revision+1,updated_at=CURRENT_TIMESTAMP(6) WHERE owner_username=?`, ciphertext, fingerprint, owner)
-	if err != nil {
-		return err
-	}
-	if importing {
-		stored, _, err := readMigrationState(tx.QueryRowContext(ctx, migrationStateQuery, owner))
-		if err != nil {
-			return err
-		}
-		verified, err := s.openSettingEdits(owner, stored)
-		if err != nil {
-			return err
-		}
-		verifiedRaw, err := json.Marshal(verified)
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(verifiedRaw, raw) {
-			return errors.New("imported setting patch failed verification")
-		}
-	}
-	return tx.Commit()
+	journal, err := s.openSettingJournal(owner, state)
+	return journal.edits(), state.Revision, true, err
 }
 
 // Lock a row that exists independently of the workshop configuration. Both
@@ -565,20 +288,40 @@ func (s *MySQLStore) WriteStandardSettingsIfReady(ctx context.Context, owner str
 	return true, tx.Commit()
 }
 
-type settingPatchExecutor interface {
-	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}
-
-func completeLegacySettingEdits(ctx context.Context, db settingPatchExecutor, owner string, revision uint64) (bool, error) {
-	result, err := db.ExecContext(ctx, `UPDATE novel_fetch_legacy_config_migrations SET phase='complete',revision=revision+1,
+func (s *MySQLStore) completeSettingJournal(ctx context.Context, tx *sql.Tx, state LegacyConfigMigrationState, journal settingJournal) (bool, error) {
+	result, err := tx.ExecContext(ctx, `UPDATE novel_fetch_legacy_config_migrations SET phase='complete',revision=revision+1,
  candidate_ciphertext=NULL,candidate_fingerprint=NULL,patch_ciphertext=NULL,patch_fingerprint=NULL,updated_at=CURRENT_TIMESTAMP(6)
- WHERE owner_username=? AND phase='finalizing' AND revision=?`, owner, revision)
+ WHERE owner_username=? AND phase='finalizing' AND revision=?`, state.Owner, state.Revision)
 	if err != nil {
 		return false, err
 	}
 	n, err := result.RowsAffected()
-	return n == 1, err
+	if err != nil || n == 0 {
+		return false, err
+	}
+	// The CAS owns the migration row before we archive. An append that won
+	// the race has already retained the old source in its own transaction.
+	return true, s.retainOldDBPatch(ctx, tx, state, journal)
 }
+
 func (s *MySQLStore) CompleteLegacySettingEdits(ctx context.Context, owner string, revision uint64) (bool, error) {
-	return completeLegacySettingEdits(ctx, s.DB, owner, revision)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	state, found, err := readMigrationState(tx.QueryRowContext(ctx, migrationStateQuery+" FOR UPDATE", owner))
+	if err != nil || !found || state.Phase != LegacyFinalizing || state.Revision != revision {
+		return false, err
+	}
+	journal, err := s.openSettingJournal(owner, state)
+	if err != nil {
+		return false, err
+	}
+	ok, err := s.completeSettingJournal(ctx, tx, state, journal)
+	if err != nil || !ok {
+		return false, err
+	}
+	err = tx.Commit()
+	return err == nil, err
 }

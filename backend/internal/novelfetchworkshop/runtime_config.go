@@ -5,8 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 )
+
+// The source has been discovered but has never been published as a bound catalog.
+var ErrCatalogAwaitingMigration = fmt.Errorf("legacy catalog awaits migration: %w", ErrConfigConflict)
 
 // ReadWorkflowConfig reads preferences without importing or cleaning historical
 // model credentials. Store.GetConfig remains the strict migration/admin path.
@@ -51,6 +55,16 @@ FROM novel_fetch_workshop_configs c WHERE c.owner_username=?`, owner, owner).Sca
 	}
 	var catalog any
 	if _, exists := snapshot["modelCatalog"]; exists {
+		if _, versioned := snapshot[ModelSecretVersionKey]; pending && !versioned && s.ModelSecrets != nil {
+			if err := validateLegacyVideoDocument(snapshot); err != nil {
+				return nil, err
+			}
+			for _, row := range runtimeCatalogRows(snapshot["modelCatalog"]) {
+				if ModelConfigText(row, "kind") == "video" {
+					return nil, ErrCatalogAwaitingMigration
+				}
+			}
+		}
 		if s.ModelSecrets == nil || snapshot[ModelSecretVersionKey] != ModelSecretVersion {
 			return nil, ErrConfigConflict
 		}

@@ -62,7 +62,6 @@ func snapshotEdits(old map[string]any) settingsEdits {
 		}
 	}
 	edits := snapshotAssignments(nil, top, defaultUserConfig)
-	explicitCount := len(edits)
 	stored, _ := old[apiIntegrationsSettingKey].(map[string]any)
 	section := maps.Clone(stored)
 	channelDefaults := map[string]any{"enabled": true, "apiFormat": "openai_compatible", "model": defaultUserConfig["model"], "baseUrl": defaultUserConfig["baseUrl"]}
@@ -79,7 +78,7 @@ func snapshotEdits(old map[string]any) settingsEdits {
 	}
 	delete(section, "customChannels")
 	edits = append(edits, snapshotAssignments([]string{apiIntegrationsSettingKey}, section, nil)...)
-	for i := explicitCount; i < len(edits); i++ {
+	for i := range edits {
 		edits[i].OnlyIfMissing = true
 	}
 	return edits
@@ -103,34 +102,11 @@ func (p *configSecretProvider) importDeferredSettings(ctx context.Context, owner
 	if err = json.Unmarshal(raw, &envelope); err != nil {
 		return false, err
 	}
-	plain, err := p.OpenLegacyConflict(owner, novelfetchworkshop.LegacyConflictSource{Document: deferredSettingsFile, Field: "settings"}, envelope.Ciphertext, envelope.Fingerprint)
-	if err != nil {
-		return false, err
-	}
-	var edits settingsEdits
-	switch data := bytes.TrimSpace([]byte(plain)); {
-	case len(data) > 0 && data[0] == '[':
-		if err := json.Unmarshal(data, &edits); err != nil {
-			return false, err
-		}
-	case len(data) > 0 && data[0] == '{':
-		var old map[string]any
-		if err := json.Unmarshal(data, &old); err != nil {
-			return false, err
-		}
-		edits = snapshotEdits(old)
-	default:
-		return false, errors.New("invalid deferred settings document")
-	}
 	if journal == nil {
 		return false, errors.New("legacy settings import requires migration storage")
 	}
-	if discover {
-		if _, _, err := journal.DiscoverLegacyConfigMigration(ctx, owner); err != nil {
-			return false, err
-		}
-	}
-	if err := journal.ImportLegacySettingEdits(ctx, owner, edits, envelope.Fingerprint, envelope.Ciphertext); err != nil {
+	convertMap := func(old map[string]any) []novelfetchworkshop.LegacySettingEdit { return snapshotEdits(old) }
+	if err := journal.ImportLegacySettingFile(ctx, owner, envelope.Ciphertext, envelope.Fingerprint, discover, convertMap); err != nil {
 		return false, err
 	}
 	_, _, active, err := journal.LoadLegacySettingEdits(ctx, owner)

@@ -126,3 +126,33 @@ func TestRuntimeConfigPreservesSnapshotAndBindingFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestRuntimeConfigOnlyDefersUnversionedLegacyVideos(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		raw               string
+		pending, deferred bool
+	}{
+		{"waiting-video", `{"modelCatalog":[{"id":"v","kind":"video"}]}`, true, true},
+		{"ordinary-video", `{"modelCatalog":[{"id":"v","kind":"video"}]}`, false, false},
+		{"settings-only", `{"modelCatalog":[{"id":"t","kind":"text"}]}`, true, false},
+		{"invalid-format", `{"modelCatalog":"broken"}`, true, false},
+		{"marked-catalog", `{"modelCatalogSecretVersion":"bound-v2","modelCatalog":[{"id":"v","kind":"video"}]}`, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			s := NewMySQLStore(db)
+			p := &runtimeSecretProbe{}
+			s.ModelSecrets = p
+			mock.ExpectQuery(runtimeSnapshotQuery).WithArgs("a", "a").WillReturnRows(sqlmock.NewRows([]string{"settings_json", "pending"}).AddRow(tc.raw, tc.pending))
+			config, err := s.ReadRuntimeConfig(context.Background(), "a")
+			if !errors.Is(err, ErrConfigConflict) || errors.Is(err, ErrCatalogAwaitingMigration) != tc.deferred || config != nil || p.calls != 0 {
+				t.Fatalf("unverified catalog was misclassified or opened: %v", err)
+			}
+		})
+	}
+}

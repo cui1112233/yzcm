@@ -61,19 +61,11 @@ func TestLegacySettingPatchArchivedSnapshotOrderAndEvidence(t *testing.T) {
 				t.Fatal(err)
 			}
 			saved := apiIntegrationChannels(apiIntegrationStoredMap(got))[0].(map[string]any)
-			name := "new"
-			if mode == "ambiguous" {
-				name = "fresh"
+			if saved["name"] != "fresh" || saved["concurrency"] != 7.0 || got["notifications"].(map[string]any)["soundVolume"] != 42.0 {
+				t.Error("lost a restored field or a missing assignment")
 			}
-			if saved["name"] != name || saved["concurrency"] != 7.0 || got["notifications"].(map[string]any)["soundVolume"] != 42.0 {
-				t.Error("lost a restored field or explicit edit")
-			}
-			if mode == "generated-empty" || mode == "ambiguous" || mode == "ambiguous-key" {
-				if saved["apiKey"] != "synthetic-restored" {
-					t.Error("generated field erased restored key")
-				}
-			} else if _, ok := saved["apiKey"]; ok {
-				t.Error("discarded explicit key clear")
+			if saved["apiKey"] != "synthetic-restored" {
+				t.Error("unmarked edits erased restored key")
 			}
 			if mode == "ambiguous" || mode == "ambiguous-key" {
 				if !reflect.DeepEqual(saved["params"], map[string]any{"keep": true}) {
@@ -106,12 +98,28 @@ func TestLegacySettingPatchArchivedIntegrationSections(t *testing.T) {
 	snap = append(snap, fieldEdits(nil, old)...)
 	snap = append(snap, fieldEdits([]string{"notifications"}, map[string]any{"soundVolume": 42})...)
 	snap = append(snap, fieldEdits([]string{apiIntegrationsSettingKey, "values"}, map[string]any{"later": "explicit"})...)
-	if err := snap.apply(doc); err != nil {
+	s := patchTestStore(t)
+	c := NewUserConfigStore(s.LegacyConfigDir)
+	c.UseLegacySettingJournal(s)
+	path, _ := c.configPath("a")
+	if err := writeUserConfigDocument(path, doc); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSealedSettingFixture(t, c, "a", string(raw))
+	if _, err := s.GetConfig(context.Background(), "a"); err != nil {
+		t.Fatal(err)
+	}
+	doc, err = c.readStandardFile(path)
+	if err != nil {
 		t.Fatal(err)
 	}
 	section := apiIntegrationStoredMap(doc)
-	if !reflect.DeepEqual(section["pinned"], []any{"shared", "keep", "old"}) || !reflect.DeepEqual(section["values"], map[string]any{"a": "restored", "missing": "carried", "later": "explicit"}) || !reflect.DeepEqual(section["channelSelection"], map[string]any{"text": map[string]any{"enabled": []any{"keep"}}}) || doc["notifications"].(map[string]any)["soundVolume"] != 42.0 {
-		t.Error("snapshot overwrote or discarded restored settings or a confirmed subsequent edit")
+	if !reflect.DeepEqual(section["pinned"], []any{"shared", "keep", "old"}) || !reflect.DeepEqual(section["values"], map[string]any{"a": "restored", "missing": "carried", "later": "restored"}) || !reflect.DeepEqual(section["channelSelection"], map[string]any{"text": map[string]any{"enabled": []any{"keep"}}}) || doc["notifications"].(map[string]any)["soundVolume"] != 42.0 {
+		t.Error("snapshot overwrote or discarded restored settings or a missing assignment")
 	}
 }
 

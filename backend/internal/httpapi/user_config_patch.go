@@ -69,11 +69,7 @@ func applyFieldEdit(object map[string]any, path []string, value any, edit settin
 }
 
 func (edits settingsEdits) apply(config map[string]any) error {
-	normalized, err := novelfetchworkshop.NormalizeHistoricalChannelRows(edits)
-	if err != nil {
-		return err
-	}
-	for _, edit := range normalized {
+	for _, edit := range edits {
 		if err := edit.Validate(); err != nil {
 			return err
 		}

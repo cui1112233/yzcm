@@ -835,7 +835,7 @@ func TestLegacyDeferredSnapshotConversionIsConservative(t *testing.T) {
 	}
 }
 
-func TestLegacySettingPatchImportsExplicitArrayAndRetainsUnverifiedFile(t *testing.T) {
+func TestLegacySettingPatchImportsVersionedEditsAndRetainsUnverifiedFile(t *testing.T) {
 	ctx := context.Background()
 	store := patchTestStore(t)
 	config := NewUserConfigStore(store.LegacyConfigDir)
@@ -844,7 +844,7 @@ func TestLegacySettingPatchImportsExplicitArrayAndRetainsUnverifiedFile(t *testi
 	binding := novelfetchworkshop.LegacyConflictSource{Document: deferredSettingsFile, Field: "settings"}
 	save := func(owner string) {
 		t.Helper()
-		ciphertext, fingerprint, err := config.secrets.SealLegacyConflict(owner, binding, `[{"path":["notifications","soundVolume"],"value":0},{"path":["apiIntegrations","values","kimiOfficialApiKey"],"delete":true}]`)
+		ciphertext, fingerprint, err := config.secrets.SealLegacyConflict(owner, binding, `{"schemaVersion":1,"batches":[{"batchId":"volume-and-key","edits":[{"path":["notifications","soundVolume"],"value":0},{"path":["apiIntegrations","values","kimiOfficialApiKey"],"delete":true}]}]}`)
 		if err != nil {
 			t.Fatal(err)
 		}
