@@ -468,3 +468,132 @@ func TestLegacyConfigMigrationStateOldProviderEnvelopeRoundTrip(t *testing.T) {
 		t.Fatal("upgraded state did not complete", err)
 	}
 }
+
+func TestLegacyConfigMigrationStateEvidenceIsConsumedOnce(t *testing.T) {
+	ctx := context.Background()
+	store := stateTestStore(t)
+	for _, mode := range []string{"provider-only", "two-provider-records", "wrong-independent-row", "provider-plus-catalog", "fresh-provider-only", "fresh-provider-plus-catalog"} {
+		t.Run(mode, func(t *testing.T) {
+			const oldID = "legacy-video:personal_api"
+			scenario := strings.TrimPrefix(mode, "fresh-")
+			provider := map[string]any{"model": "fixture-video", "createUrl": "https://fixture.invalid/create", "tasksUrl": "https://fixture.invalid/tasks", "resultUrl": "https://fixture.invalid/result"}
+			generated := map[string]any{"kind": "video", "id": oldID, "modelId": "fixture-video", "displayName": "fixture-video", "provider": "personal_api", "endpoint": provider["createUrl"], "tasksEndpoint": provider["tasksUrl"], "resultEndpoint": provider["resultUrl"], "workflowId": "", "enabled": true, "credentialStatus": "needs_reentry", "credentialRecoveryReason": "legacy_missing"}
+			independent := map[string]any{"kind": "video", "id": oldID, "modelId": "fixture-video", "displayName": "user-disabled", "provider": "personal_api", "endpoint": provider["createUrl"], "tasksEndpoint": provider["tasksUrl"], "resultEndpoint": provider["resultUrl"], "workflowId": "", "enabled": false}
+			if mode != scenario {
+				initial, err := json.Marshal(map[string]any{"modelCatalog": []any{independent}, "videoProviders": map[string]any{"personal_api": provider}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = store.DB.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_configs(owner_username,settings_json,created_at,updated_at) VALUES(?,?,NOW(6),NOW(6))`, mode, initial); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				seedPendingEnvelope(t, store, mode, map[string]any{"Rows": []any{independent, generated}, "Sources": []any{map[string]any{"video": true, "provider": "personal_api", "container": 0, "Raw": provider}}})
+			}
+			if _, err := store.GetConfig(ctx, mode); err != nil {
+				t.Fatal(err)
+			}
+			provider["apiKey"] = "synthetic-provider"
+			providers := map[string]any{"personal_api": provider}
+			doc := map[string]any{"videoProviders": providers}
+			if mode == "two-provider-records" {
+				doc["settings"] = map[string]any{"videoProviders": providers}
+			}
+			if scenario == "provider-plus-catalog" || mode == "wrong-independent-row" {
+				independent["credential"] = "synthetic-independent"
+				if mode == "wrong-independent-row" {
+					independent["displayName"] = "unrelated-entry"
+					independent["enabled"] = true
+				}
+				doc["modelCatalog"] = []any{independent}
+			}
+			dir := filepath.Join(store.LegacyConfigDir, mode)
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "api-config.json")
+			raw, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(path, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			var savedID string
+			if scenario == "provider-plus-catalog" {
+				stop := errors.New("synthetic file write interruption")
+				store.ReplaceLegacyConfig = func(string, map[string]any) error { return stop }
+				_, err := store.GetConfig(ctx, mode)
+				store.ReplaceLegacyConfig = nil
+				if !errors.Is(err, stop) {
+					t.Fatal("expected retryable failure after model commit", err)
+				}
+				committed, err := store.ReadBoundModelConfig(ctx, mode)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, model := range modelCatalog(committed) {
+					if model["displayName"] == "user-disabled" {
+						savedID = firstText(model["id"])
+					}
+				}
+				if savedID == "" || savedID == oldID {
+					t.Fatal("distinct ID must already exist before file retry")
+				}
+			}
+			cfg, err := store.GetConfig(ctx, mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, found, err := store.LegacyConfigMigrationState(ctx, mode)
+			if err != nil || !found {
+				t.Fatal("missing migration", err)
+			}
+			rows := modelCatalog(cfg)
+			if scenario != "provider-plus-catalog" {
+				retained, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(raw, retained) || len(rows) != 0 || state.Phase != "awaiting_source" || state.CandidateEnvelope == "" {
+					t.Fatal("independent catalog row released without its own file evidence", err)
+				}
+				return
+			}
+			check := func(cfg map[string]any) string {
+				rows := modelCatalog(cfg)
+				if len(rows) != 2 {
+					t.Fatalf("expected separate provider and disabled catalog models, got %d", len(rows))
+				}
+				got := map[string]map[string]any{}
+				for _, row := range rows {
+					got[firstText(row["displayName"])] = row
+				}
+				a, b := got["fixture-video"], got["user-disabled"]
+				id := firstText(b["id"])
+				if a["id"] != oldID || a["enabled"] != true || a["credential"] != "synthetic-provider" || id == "" || id == oldID || strings.Contains(id, "synthetic") || b["enabled"] != false || b["credential"] != "synthetic-independent" {
+					t.Fatal("model identity, enabled state or credentials crossed")
+				}
+				return id
+			}
+			id := check(cfg)
+			if id != savedID {
+				t.Fatal("retry changed independent row ID")
+			}
+			if state.Phase != "complete" {
+				t.Fatal("two proven records did not complete")
+			}
+			scrubbed, err := os.ReadFile(path)
+			if err != nil || bytes.Contains(scrubbed, []byte("synthetic-")) {
+				t.Fatal("file still contains a migrated key")
+			}
+			conflicts, _, err := store.ListLegacyModelConflicts(ctx, mode, "")
+			if err != nil || len(conflicts) != 0 {
+				t.Fatal("independently proven keys were treated as disputed")
+			}
+			cold := novelfetchworkshop.NewMySQLStore(store.DB)
+			cold.LegacyConfigDir, cold.ModelSecrets = store.LegacyConfigDir, store.ModelSecrets
+			again, err := cold.GetConfig(ctx, mode)
+			if err != nil || check(again) != id {
+				t.Fatal("cold read changed the independent model ID", err)
+			}
+		})
+	}
+}

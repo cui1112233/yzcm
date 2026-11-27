@@ -239,6 +239,8 @@ type legacyConfigMigration struct {
 	state                       LegacyConfigMigrationState
 	releaseVideos, hasFileVideo bool
 	file, database              []legacySourceEntry
+	videoMatches                []legacyVideoMatch
+	fileModelIDs                map[legacyVideoPosition]string
 }
 
 func legacyEntryDigest(value any) string {
@@ -374,7 +376,10 @@ func reconcileLegacyVideoCredentials(rows, boundRows []any, sourceGroups ...[]le
 			if ModelConfigText(source.model, "kind") != "video" {
 				continue
 			}
-			id := ModelConfigText(source.model, "id")
+			id := source.TargetID
+			if id == "" {
+				id = ModelConfigText(source.model, "id")
+			}
 			var matches []*videoChoice
 			for _, choice := range choices {
 				if id != "" && id == ModelConfigText(choice.row, "id") || id == "" && sameLegacyVideoTarget(source.model, choice.row) {
@@ -781,6 +786,15 @@ func markLegacyKeyReentry(model map[string]any, reason string) {
 	model["credentialRecoveryReason"] = reason
 }
 
+func legacyModelRowID(model map[string]any) string {
+	if id := ModelConfigText(model, "id"); id != "" {
+		return id
+	}
+	raw, _ := json.Marshal([]any{ModelConfigText(model, "kind"), ModelConfigText(model, "modelId"), ModelCredentialSource(model), ModelCredentialDestination(model)})
+	sum := sha256.Sum256(raw)
+	return "legacy:" + hex.EncodeToString(sum[:16])
+}
+
 func normalizeLegacyModelRows(rows []any) []any {
 	catalog := make([]any, 0, len(rows))
 	byID := make(map[string]map[string]any, len(rows))
@@ -789,11 +803,8 @@ func normalizeLegacyModelRows(rows []any) []any {
 		if !ok {
 			continue
 		}
-		id := ModelConfigText(model, "id")
-		if id == "" {
-			raw, _ := json.Marshal([]any{ModelConfigText(model, "kind"), ModelConfigText(model, "modelId"), ModelCredentialSource(model), ModelCredentialDestination(model)})
-			sum := sha256.Sum256(raw)
-			id = "legacy:" + hex.EncodeToString(sum[:16])
+		id := legacyModelRowID(model)
+		if ModelConfigText(model, "id") == "" {
 			model["id"] = id
 		}
 		if prior := byID[id]; prior != nil {

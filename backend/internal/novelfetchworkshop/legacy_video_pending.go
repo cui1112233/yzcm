@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"slices"
 
 	"qiantie/backend/internal/batchfactoryv11"
 )
@@ -157,7 +156,7 @@ func (source pendingVideoSource) historicalRow() map[string]any {
 	return old
 }
 
-func (p pendingLegacyVideos) orphanRows() []map[string]any {
+func (p pendingLegacyVideos) orphanIndices() []int {
 	if len(p.Rows) == 0 {
 		return nil
 	}
@@ -182,83 +181,11 @@ func (p pendingLegacyVideos) orphanRows() []map[string]any {
 			}
 		}
 	}
-	var orphan []map[string]any
-	for i, item := range p.Rows {
+	var orphan []int
+	for i := range p.Rows {
 		if !claimed[i] {
-			row, _ := item.(map[string]any)
-			orphan = append(orphan, row)
+			orphan = append(orphan, i)
 		}
 	}
 	return orphan
-}
-
-func (p pendingLegacyVideos) fileReady(file map[string]any) bool {
-	if validateLegacyVideoDocument(file) != nil {
-		return false
-	}
-	sources := collectLegacyVideoCandidates(file)
-	matches := func(model map[string]any) bool {
-		for _, source := range sources {
-			keys, valid := legacySourceCredentials(source)
-			local := ModelConfigText(model, "provider") == batchfactoryv11.VideoProviderDoubaoLocal && !hasLegacyCredentialValue(model)
-			fileID, databaseID := ModelConfigText(source.model, "id"), ModelConfigText(model, "id")
-			if valid && (len(keys) > 0 || local) && sameLegacyVideoTarget(model, source.model) && (fileID == "" || databaseID == "" || fileID == databaseID) {
-				return true
-			}
-		}
-		return false
-	}
-	for _, row := range p.orphanRows() {
-		if !validLegacyVideoFields(row) || !matches(row) {
-			return false
-		}
-	}
-	for _, saved := range p.Sources {
-		if !validLegacyVideoFields(saved.Raw) || (saved.Video && !validLegacyProviderIdentity(saved.Provider, saved.Raw)) || !matches(saved.model()) {
-			return false
-		}
-	}
-	return p.any()
-}
-
-// Keep formal rows and non-video rows in place. Restore the original database
-// videos only after the returning source passes the same identity checks.
-func (p pendingLegacyVideos) prepareRows(rows, boundRows []any, migration *legacyConfigMigration) []any {
-	formal := map[string]bool{}
-	for _, item := range boundRows {
-		row, _ := item.(map[string]any)
-		formal[ModelConfigText(row, "id")] = true
-	}
-	var active []any
-	for _, item := range rows {
-		row, _ := item.(map[string]any)
-		if ModelConfigText(row, "kind") != "video" || formal[ModelConfigText(row, "id")] {
-			active = append(active, item)
-		}
-	}
-	if !migration.releaseVideos {
-		return active
-	}
-	// Older pending envelopes also stored a derived Rows list. The source
-	// entries retain the original fields; use a derived row only when the
-	// previous writer omitted its source (for example a keyless catalog row).
-	var restored []any
-	for _, saved := range p.Sources {
-		source := legacySourceEntry{legacyScrubEntry: saved.legacyScrubEntry, raw: saved.Raw, model: saved.model()}
-		migration.database = append(migration.database, source)
-		if !slices.ContainsFunc(restored, func(prior any) bool { return reflect.DeepEqual(prior, source.model) }) {
-			restored = append(restored, source.model)
-		}
-	}
-	for _, row := range p.orphanRows() {
-		restored = append(restored, row)
-	}
-	existing := active
-	for _, item := range restored {
-		row, _ := item.(map[string]any)
-		if _, found := findLegacyTarget(row, existing); !found {
-			active = append(active, cloneMap(row))
-		}
-	}
-	return active
 }

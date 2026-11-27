@@ -376,13 +376,15 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 		if err := validateLegacyVideoDocument(legacy); err != nil {
 			return nil, err
 		}
-		var candidates pendingLegacyVideos
+		var videoMatches []legacyVideoMatch
 		if waiting {
-			candidates, err = s.migrationCandidates(state)
+			candidates, err := s.migrationCandidates(state)
 			if err != nil {
 				return nil, err
 			}
-			if !candidates.fileReady(legacy) {
+			var ready bool
+			videoMatches, ready = candidates.matchFile(legacy)
+			if !ready {
 				legacy = nil
 			}
 		} else if !found && len(legacyCatalogRows(legacy)) == 0 && ModelConfigText(settings, modelLegacyScrubPendingKey) == "" {
@@ -410,7 +412,7 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 					return nil, err
 				}
 			}
-			migration := &legacyConfigMigration{path: path, state: state, releaseVideos: fileChecked, hasFileVideo: len(collectLegacyVideoCandidates(legacy)) > 0}
+			migration := &legacyConfigMigration{path: path, state: state, releaseVideos: fileChecked, videoMatches: videoMatches, hasFileVideo: len(collectLegacyVideoCandidates(legacy)) > 0}
 			for _, source := range collectLegacySources(settings) {
 				if (!waiting || ModelConfigText(source.model, "kind") != "video") && (!previouslyBound || source.Video || source.Container != 0) {
 					migration.database = append(migration.database, source)
@@ -420,10 +422,15 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 				mergeLegacyModelKeys(rows, legacyCatalogRows(legacy))
 			}
 			if waiting {
-				rows = candidates.prepareRows(rows, boundRows, migration)
+				rows = migration.prepareVideoRows(rows, boundRows, legacy)
 			}
 			delete(settings, legacyVideoPendingKey)
 			rows, migration.file = prepareLegacyModelEntries(rows, legacy, collectLegacySources(legacy), previouslyBound)
+			for i := range migration.file {
+				if id := migration.fileModelIDs[videoPosition(migration.file[i])]; id != "" {
+					migration.file[i].TargetID = id
+				}
+			}
 			reconcileLegacyVideoCredentials(rows, boundRows, migration.database, migration.file)
 			digest := legacyCatalogSecretDigest(legacy)
 			settings["modelCatalog"] = rows

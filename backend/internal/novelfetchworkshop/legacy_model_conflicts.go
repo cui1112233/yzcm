@@ -321,7 +321,10 @@ func (s *MySQLStore) stageLegacyRecovery(ctx context.Context, tx *sql.Tx, owner 
 		return ids, nil
 	}
 	for _, source := range migration.database {
-		target, _ := findLegacyTarget(source.model, rows)
+		target := targets[source.TargetID]
+		if target == nil {
+			target, _ = findLegacyTarget(source.model, rows)
+		}
 		if _, err := archive("db:novel_fetch_workshop_configs", source, target, true); err != nil {
 			return err
 		}

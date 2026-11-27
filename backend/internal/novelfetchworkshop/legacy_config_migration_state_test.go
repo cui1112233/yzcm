@@ -224,7 +224,9 @@ func TestLegacyConfigMigrationStateHistoricalProviderProjection(t *testing.T) {
 		if len(p.orphanRows()) != 0 || !p.fileReady(exactFile) {
 			t.Error("genuine keyed historical row remained pending after original returned")
 		}
-		active := p.prepareRows(nil, nil, &legacyConfigMigration{releaseVideos: true})
+		matches, _ := p.matchFile(exactFile)
+		migration := legacyConfigMigration{releaseVideos: true, videoMatches: matches}
+		active := migration.prepareVideoRows(nil, nil, exactFile)
 		if len(active) != 1 {
 			t.Fatal("a verified provider must restore exactly one row")
 		}
@@ -240,4 +242,38 @@ func TestLegacyConfigMigrationStateHistoricalProviderProjection(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestLegacyConfigMigrationStateIndependentIDUsesIdentityAndLocation(t *testing.T) {
+	row := map[string]any{"kind": "video", "id": "same-id", "modelId": "fixture", "provider": "personal_api", "endpoint": "https://fixture.invalid", "workflowId": "fixture-flow", "displayName": "independent", "enabled": false}
+	source := legacySourceEntry{legacyScrubEntry: legacyScrubEntry{Container: -1, Index: 7}, model: row}
+	id := separateLegacyVideoID(source, nil)
+	row["credential"], row["apiKey"], row["credentialRef"] = "synthetic-one", "synthetic-two", "synthetic-ref"
+	if separateLegacyVideoID(source, nil) != id {
+		t.Fatal("secret fields changed public model ID")
+	}
+	source.Index++
+	if separateLegacyVideoID(source, nil) == id {
+		t.Fatal("original sealed position omitted from new ID")
+	}
+	source.Index--
+	occupied := map[string]bool{id: true}
+	replacement := separateLegacyVideoID(source, occupied)
+	if replacement == id || separateLegacyVideoID(source, occupied) != replacement {
+		t.Fatal("existing ID collision was not handled deterministically")
+	}
+}
+
+func (p pendingLegacyVideos) orphanRows() []map[string]any {
+	var rows []map[string]any
+	for _, i := range p.orphanIndices() {
+		row, _ := p.Rows[i].(map[string]any)
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+func (p pendingLegacyVideos) fileReady(file map[string]any) bool {
+	_, ok := p.matchFile(file)
+	return ok
 }
