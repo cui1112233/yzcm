@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 type bindingAsset struct {
@@ -60,7 +61,11 @@ func bindingInput(f map[string]json.RawMessage, key string, scene bool) ([]strin
 		return nil, bindingFail("资产参数必须为完整名称或实际字符串编号，单类最多200项")
 	}
 	for _, v := range vals {
-		if len(v) > 512 {
+		if key == "scene_name" || strings.HasSuffix(key, "_names") {
+			if utf8.RuneCountInString(v) > 191 {
+				return nil, bindingFail("单个资产名称最多191个字符")
+			}
+		} else if len(v) > 512 {
 			return nil, bindingFail("资产参数过长")
 		}
 	}
@@ -270,6 +275,17 @@ func buildBindingShot(before StoryboardShot, bind *AssistantShotBinding) (Storyb
 		dst := bindingShotField(&after, kind)
 		old := *dst
 		*dst = strings.Join(names, "、")
+		// These are the lengths of the actual MySQL VARCHAR columns. Count the
+		// separators as well, and validate only the types included in this edit.
+		label, limit := "人物", 512
+		if kind == AssetProp {
+			label = "道具"
+		} else if kind == AssetScene {
+			label, limit = "场景", 191
+		}
+		if utf8.RuneCountInString(*dst) > limit {
+			return after, nil, bindingFail(fmt.Sprintf("镜头%s名称合计超过%d个字符，请减少本次绑定", label, limit))
+		}
 		if kind == AssetScene {
 			val := ""
 			if len(ids) > 0 {
@@ -319,7 +335,10 @@ func validateBindingEdit(d *AssistantCreativeShotEdit) error {
 		seen[a.ID] = true
 	}
 	after, changes, e := buildBindingShot(d.Before, bind)
-	if e != nil || !reflect.DeepEqual(changes, d.Changes) || !bindingShotEqual(after, d.After) {
+	if e != nil {
+		return e
+	}
+	if !reflect.DeepEqual(changes, d.Changes) || !bindingShotEqual(after, d.After) {
 		return ErrInvalidArgument
 	}
 	return validateStoryboardShotInput(after)

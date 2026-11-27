@@ -3,7 +3,10 @@ package screenplay
 import (
 	"context"
 	"encoding/json"
+	"strconv"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"qiantie/backend/internal/prompt"
 )
@@ -212,5 +215,93 @@ func TestBindingNineGridSourceIsNotALegacyAssetReference(t *testing.T) {
 	raw, _ = json.Marshal(fields)
 	if !assistantAssetReference(old, "", "街道", "", raw) {
 		t.Fatal("unverified source marker suppressed a legacy asset ID")
+	}
+}
+
+func TestBindingSQLNameColumnLimits(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		kind   AssetType
+		total  int
+		byName bool
+		ok     bool
+	}{
+		{AssetCharacter, 512, true, true}, {AssetCharacter, 513, false, false}, {AssetProp, 512, false, true}, {AssetProp, 513, true, false}, {AssetScene, 191, true, true}, {AssetScene, 192, false, false},
+	} {
+		t.Run(string(tc.kind)+strconv.Itoa(tc.total), func(t *testing.T) {
+			s := NewMemoryStore()
+			s.CreateProject(ctx, Project{ID: "p", OwnerUsername: "alice"})
+			names := []string{strings.Repeat("楼", tc.total)}
+			if tc.kind != AssetScene {
+				names = []string{strings.Repeat("人", 191), strings.Repeat("🌂", 191), strings.Repeat("伞", tc.total-384)}
+			}
+			ids := make([]string, len(names))
+			snapshots := make([]bindingAsset, len(names))
+			for i, name := range names {
+				id := "a" + strconv.Itoa(i)
+				ids[i] = id
+				asset, e := s.CreateAsset(ctx, Asset{ID: id, ProjectID: "p", OwnerUsername: "alice", Type: tc.kind, Name: name})
+				if e != nil {
+					t.Fatal(e)
+				}
+				snapshots[i] = bindingAsset{id, tc.kind, name, asset.Revision}
+			}
+			sh := StoryboardShot{ID: "s", Seq: 1, Duration: 4, Line: "保留"}
+			board, e := s.SaveStoryboard(ctx, Storyboard{ID: "board", ProjectID: "p", OwnerUsername: "alice", EpisodeNo: 1, Engine: EngineXiaoluoV7, Shots: []StoryboardShot{sh}})
+			if e != nil {
+				t.Fatal(e)
+			}
+			key := bindingIDKey(tc.kind)
+			values := ids
+			if tc.byName {
+				values = names
+				key = map[AssetType]string{AssetScene: "scene_name", AssetProp: "prop_names", AssetCharacter: "character_names"}[tc.kind]
+			}
+			args := map[string]any{"shot_id": "s", "mode": "merge", key: values}
+			if tc.kind == AssetScene {
+				args[key] = values[0]
+			}
+			raw, _ := json.Marshal(args)
+			a, _, e := PrepareAssistantShotEdit(ctx, s, "alice", "p", "bind_shot_assets", raw)
+			want := strings.Join(names, "、")
+			if utf8.RuneCountInString(want) != tc.total {
+				t.Fatal("invalid fixture")
+			}
+			if tc.ok {
+				if e != nil {
+					t.Fatal(e)
+				}
+				if got := *bindingShotField(&a.CreativeShot.After, tc.kind); got != want {
+					t.Fatal("name truncated")
+				}
+				if e := validateCreativeShotAction(a); e != nil {
+					t.Fatal(e)
+				}
+			} else {
+				limit := "512"
+				if tc.kind == AssetScene {
+					limit = "191"
+				}
+				if e == nil || !strings.Contains(e.Error(), limit) {
+					t.Errorf("prepare accepted oversized %s or missed limit %s: %v", tc.kind, limit, e)
+				}
+				// Rebuild the previously admissible persisted action without asking the
+				// new preparation function, and exercise the actual confirmation validator.
+				before := board.Shots[0]
+				after := before
+				*bindingShotField(&after, tc.kind) = want
+				var storedIDs any = ids
+				if tc.kind == AssetScene {
+					storedIDs = ids[0]
+				}
+				after.ProtocolFields, _ = json.Marshal(map[string]any{"asset_bindings": map[string]any{bindingIDKey(tc.kind): storedIDs}})
+				edit := AssistantCreativeShotEdit{Before: before, After: after, BoardID: board.ID, Engine: board.Engine, Episode: 1, Binding: &AssistantShotBinding{Selected: map[AssetType][]string{tc.kind: ids}, Assets: snapshots}, Changes: []AssistantShotChange{{bindingIDKey(tc.kind), "", bindingDisplay(want, ids)}}}
+				stored := AuthoringAction{TargetID: "s", Kind: "creative_shot", ExpectedRevision: board.Revision, CreativeShot: &edit}
+				st := AuthoringState{Revision: 2, Proposals: []AssistantProposal{{ID: "pending", Revision: 2, Status: "pending", Actions: []AuthoringAction{stored}}}}
+				if _, _, e := pendingShotAction(st, "pending", 2); e == nil {
+					t.Error("old oversized proposal passed confirmation")
+				}
+			}
+		})
 	}
 }
