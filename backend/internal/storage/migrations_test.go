@@ -83,6 +83,7 @@ func TestAppMigrationsIncludesV11AndV12Migrations(t *testing.T) {
 	want = append(want, AccountCenterMigrations()...)
 	want = append(want, AccountCenterEnergyMigrations()...)
 	want = append(want, ScriptEditorMigrations()...)
+	want = append(want, YZCMModelCatalogMigrations()...)
 	want = append(want, ComicStyleOutputMigrations()...)
 	want = append(want, BatchMultiModeMigrations()...)
 	if len(migrations) != len(want) {

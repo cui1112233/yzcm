@@ -133,6 +133,7 @@ func AppMigrations() []Migration {
 	out = append(out, AccountCenterMigrations()...)
 	out = append(out, AccountCenterEnergyMigrations()...)
 	out = append(out, ScriptEditorMigrations()...)
+	out = append(out, YZCMModelCatalogMigrations()...)
 	out = append(out, ComicStyleOutputMigrations()...)
 	out = append(out, BatchMultiModeMigrations()...)
 	return out

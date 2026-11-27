@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,126 @@ import (
 
 	"qiantie/backend/internal/auth"
 	"qiantie/backend/internal/novelfetchworkshop"
+	"qiantie/backend/internal/storage"
+	"qiantie/backend/internal/yzcmmodels"
 )
+
+type yzcmCatalogReaderFixture func(context.Context, yzcmmodels.Query) (yzcmmodels.Page, error)
+
+func (f yzcmCatalogReaderFixture) Search(ctx context.Context, query yzcmmodels.Query) (yzcmmodels.Page, error) {
+	return f(ctx, query)
+}
+
+type yzcmCatalogSourceFixture func(context.Context) (yzcmmodels.Snapshot, error)
+
+func (f yzcmCatalogSourceFixture) Fetch(ctx context.Context) (yzcmmodels.Snapshot, error) {
+	return f(ctx)
+}
+
+func TestYZCMModelCatalogRouteAuthAndValidation(t *testing.T) {
+	calls := 0
+	const secret = "fixture-admin-credential"
+	api, _, _ := newImpersonationTestRouter(t, func(options *RouterOptions) {
+		options.NovelFetchStore = nil
+		options.YZCMModelCatalog = yzcmCatalogReaderFixture(func(_ context.Context, q yzcmmodels.Query) (yzcmmodels.Page, error) {
+			calls++
+			if q.Kind != "image" || q.Q != "画面" || q.Limit != 2 || q.Offset != 0 {
+				t.Errorf("invalid query handed to search: %+v", q)
+			}
+			return yzcmmodels.Page{}, errors.New(secret)
+		})
+	})
+	path := "/api/config/models/yzcm?kind=image&q=%E7%94%BB%E9%9D%A2&limit=2"
+	for _, scenario := range []struct {
+		token, path string
+		status      int
+	}{
+		{"", path, http.StatusUnauthorized}, {"member", path, http.StatusForbidden},
+		{"disabled", path, http.StatusUnauthorized}, {"archived", path, http.StatusForbidden},
+		{"manager", path + "&kind=video", http.StatusBadRequest}, {"manager", path + "&format=debug", http.StatusBadRequest},
+		{"manager", "/api/config/models/yzcm?kind=unknown", http.StatusBadRequest}, {"manager", "/api/config/models/yzcm?limit=101", http.StatusBadRequest},
+		{"manager", path, http.StatusServiceUnavailable},
+	} {
+		response := impersonationRequest(api, http.MethodGet, scenario.path, scenario.token, "", nil)
+		if response.Code != scenario.status || strings.Contains(response.Body.String(), secret) {
+			t.Fatalf("%q %s: got %d %s; want %d", scenario.token, scenario.path, response.Code, response.Body, scenario.status)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("unexpected read count: %d", calls)
+	}
+	if response := impersonationRequest(api, http.MethodPost, "/api/config/models/yzcm", "founder", "{}", nil); response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("catalog must have no write route: %d %s", response.Code, response.Body)
+	}
+}
+
+func TestYZCMModelCatalogHTTPMySQLReadsOnlySavedRows(t *testing.T) {
+	ctx := context.Background()
+	db, _ := novelAttributionDatabase(t)
+	if err := storage.RunMigrations(ctx, db, storage.YZCMModelCatalogMigrations()); err != nil {
+		t.Fatal(err)
+	}
+	store := &yzcmmodels.Store{DB: db}
+	api, _, _ := newImpersonationTestRouter(t, func(options *RouterOptions) { options.YZCMModelCatalog = store })
+	const path = "/api/config/models/yzcm?kind=text&q=relay"
+	read := func(token, path string, expected int) yzcmmodels.Page {
+		t.Helper()
+		response := impersonationRequest(api, http.MethodGet, path, token, "", nil)
+		if response.Code != expected || response.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("%q: wrong status or caching policy: %d %v %s", token, response.Code, response.Header(), response.Body)
+		}
+		body := response.Body.String()
+		for _, forbidden := range []string{"admin-credential", "credential", "baseUrl", "apiKey", "requestTemplate"} {
+			if strings.Contains(body, forbidden) {
+				t.Fatalf("%s leaked in catalog: %s", forbidden, body)
+			}
+		}
+		var result struct {
+			yzcmmodels.Page
+			SyncSource string `json:"syncSource"`
+		}
+		if err := json.Unmarshal([]byte(body), &result); err != nil || result.SyncSource != "not_configured" {
+			t.Fatalf("bad catalog response: %+v %v", result, err)
+		}
+		return result.Page
+	}
+	if empty := read("manager", path, http.StatusOK); empty.Status != "unavailable" || empty.Reason != "no_saved_snapshot" || empty.Models == nil {
+		t.Fatalf("expected unavailable before first sync, got %+v", empty)
+	}
+	fetches := 0
+	_, err := store.Sync(ctx, yzcmCatalogSourceFixture(func(context.Context) (yzcmmodels.Snapshot, error) {
+		fetches++
+		return yzcmmodels.Snapshot{Complete: true, SourceUpdatedAt: time.Now(), Models: []yzcmmodels.Model{
+			{ModelID: "fixture-relay-text", DisplayName: "测试文案", Kind: "text", Adapted: true, Allowed: true},
+			{ModelID: "fixture-relay-unadapted", DisplayName: "未适配", Kind: "text", Adapted: false, Allowed: true},
+			{ModelID: "fixture-relay-image", DisplayName: "测试图片", Kind: "image", Adapted: true, Allowed: true},
+		}}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{"founder", "dev", "manager", "manager"} {
+		page := read(token, path, http.StatusOK)
+		if page.Status != "available" || len(page.Models) != 1 || page.Models[0].ModelID != "fixture-relay-text" {
+			t.Fatalf("wrong local results: %+v", page)
+		}
+	}
+	if _, err := store.Sync(ctx, yzcmCatalogSourceFixture(func(context.Context) (yzcmmodels.Snapshot, error) {
+		fetches++
+		return yzcmmodels.Snapshot{}, errors.New("fixture leaked upstream admin-credential")
+	})); err == nil {
+		t.Fatal("expected fixture sync failure")
+	}
+	if page := read("manager", path, http.StatusOK); !page.Stale || page.LastSync == nil || page.LastSync.FailureCode != "source_error" || len(page.Models) != 1 {
+		t.Fatalf("failure lost snapshot or diagnostic: %+v", page)
+	}
+	if empty := read("manager", "/api/config/models/yzcm?kind=video&q=relay", http.StatusOK); empty.Status != "empty" || empty.Reason != "no_matches" || len(empty.Models) != 0 {
+		t.Fatalf("expected no exact matches from saved catalog: %+v", empty)
+	}
+	if fetches != 2 {
+		t.Fatalf("catalog reads unexpectedly fetched upstream: %d", fetches)
+	}
+}
 
 func TestIntegrationChannelModelsKeepsTieredChannels(t *testing.T) {
 	userConfig := newIntegrationTestUserConfig(t, map[string]any{

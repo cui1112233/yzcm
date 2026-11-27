@@ -37,6 +37,7 @@ import (
 	"qiantie/backend/internal/scripteditor"
 	"qiantie/backend/internal/upscale"
 	"qiantie/backend/internal/videomanagementconnector"
+	"qiantie/backend/internal/yzcmmodels"
 )
 
 type runtimeManifest struct {
@@ -73,6 +74,7 @@ type RouterOptions struct {
 	Users                           BridgeUserResolver
 	AuthStore                       auth.Store
 	AccountCenterStore              accountcenter.Store
+	YZCMModelCatalog                yzcmmodels.Reader
 	SessionResolver                 func(context.Context, string) (BridgeIdentity, error)
 	Slice                           int
 	RegisterV11                     func(*http.ServeMux)
@@ -562,6 +564,7 @@ func NewRouter(options RouterOptions) http.Handler {
 	RegisterMFARoutes(root, auth, options.MemberProfileStore, options.AuthStore)
 	registerAccountCenterAdmin(root, auth)
 	registerAccountCenterEnergy(root, auth, options.Now)
+	registerYZCMModelCatalog(root, auth, options.YZCMModelCatalog)
 	RegisterAccountAdminReadCompat(root, auth)
 	RegisterAccountTransferCompat(root, auth)
 	RegisterMemberTeamReadCompat(root, auth, options.AuthStore, options.MemberProfileStore)

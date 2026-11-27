@@ -18,12 +18,86 @@ import (
 	"sync"
 	"time"
 
+	"qiantie/backend/internal/accountcenter"
 	"qiantie/backend/internal/auth"
 	"qiantie/backend/internal/novelfetchworkshop"
 	"qiantie/backend/internal/safehttp"
+	"qiantie/backend/internal/yzcmmodels"
 )
 
 var modelKinds = map[string]bool{"text": true, "video": true, "image": true, "audio": true, "asr": true}
+
+func registerYZCMModelCatalog(root *http.ServeMux, auth BridgeAuth, reader yzcmmodels.Reader) {
+	root.Handle("GET /api/config/models/yzcm", auth.AccountCenterMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		identity, ok := AccountCenterIdentityFromContext(r.Context())
+		if !ok || (identity.Subject.Role != accountcenter.RoleFounder && identity.Subject.Role != accountcenter.RoleDeveloper && identity.Subject.Role != accountcenter.RoleManager) {
+			writeAccountCenterForbidden(w)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		query, err := yzcmCatalogQuery(r.URL.RawQuery)
+		if err != nil {
+			writeAuthError(w, http.StatusBadRequest, "模型目录筛选条件无效")
+			return
+		}
+		page := yzcmmodels.Page{Status: "unavailable", Reason: "catalog_store_unavailable", Models: []yzcmmodels.CatalogRow{}, Limit: query.Limit, Offset: query.Offset}
+		status := http.StatusOK
+		if reader != nil {
+			saved, err := reader.Search(r.Context(), query)
+			switch {
+			case errors.Is(err, yzcmmodels.ErrCatalogChanged):
+				writeAuthError(w, http.StatusConflict, "模型目录已更新，请从第一页重新查询")
+				return
+			case err != nil:
+				status = http.StatusServiceUnavailable
+			default:
+				page = saved
+			}
+		}
+		writeJSON(w, status, struct {
+			yzcmmodels.Page
+			SyncSource string `json:"syncSource"`
+		}{Page: page, SyncSource: "not_configured"})
+	})))
+}
+
+func yzcmCatalogQuery(raw string) (yzcmmodels.Query, error) {
+	values, err := url.ParseQuery(raw)
+	if err != nil {
+		return yzcmmodels.Query{}, yzcmmodels.ErrInvalidQuery
+	}
+	var query yzcmmodels.Query
+	for key, list := range values {
+		if len(list) != 1 {
+			return yzcmmodels.Query{}, yzcmmodels.ErrInvalidQuery
+		}
+		value := list[0]
+		switch key {
+		case "kind":
+			query.Kind = value
+		case "q":
+			query.Q = value
+		case "limit":
+			query.Limit, err = strconv.Atoi(value)
+			if query.Limit < 1 {
+				err = yzcmmodels.ErrInvalidQuery
+			}
+		case "offset":
+			query.Offset, err = strconv.Atoi(value)
+		case "snapshotId":
+			query.SnapshotID, err = strconv.ParseUint(value, 10, 64)
+			if query.SnapshotID == 0 {
+				err = yzcmmodels.ErrInvalidQuery
+			}
+		default:
+			err = yzcmmodels.ErrInvalidQuery
+		}
+		if err != nil {
+			return yzcmmodels.Query{}, yzcmmodels.ErrInvalidQuery
+		}
+	}
+	return query.Normalize()
+}
 
 // modelIdentityKey 是「同一个真实模型」的去重键：地址忽略大小写与末尾斜杠，
 // 模型名忽略大小写。任一为空时返回空串，表示无法判定为同一模型，宁可不合并。
