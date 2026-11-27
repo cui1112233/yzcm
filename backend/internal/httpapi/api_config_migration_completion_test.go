@@ -597,3 +597,109 @@ func TestLegacyConfigMigrationStateEvidenceIsConsumedOnce(t *testing.T) {
 		})
 	}
 }
+
+func TestLegacyConfigMigrationStateVerifiedPositionsKeepSeparateCredentials(t *testing.T) {
+	useTempConfigSecretKey(t)
+	ctx := context.Background()
+	store := stateTestStore(t)
+	const providerID = "legacy-video:personal_api"
+	const providerKey = "synthetic-provider"
+	var catalogID string
+	for _, tc := range []struct {
+		owner, originalKey, returnedKey string
+	}{
+		{"only-catalog-key-changed", providerKey, "synthetic-changed"},
+		{"all-keys-equal", providerKey, providerKey},
+		{"distinct-original-catalog-key", "synthetic-independent", "synthetic-independent"},
+	} {
+		t.Run(tc.owner, func(t *testing.T) {
+			// Both positions describe the same enabled model, down to its original ID and display name.
+			provider := map[string]any{"model": "fixture-video", "createUrl": "https://fixture.invalid/create", "tasksUrl": "https://fixture.invalid/tasks", "resultUrl": "https://fixture.invalid/result", "apiKey": providerKey}
+			catalog := map[string]any{"kind": "video", "id": providerID, "modelId": "fixture-video", "displayName": "fixture-video", "enabled": true, "provider": "personal_api", "endpoint": provider["createUrl"], "tasksEndpoint": provider["tasksUrl"], "resultEndpoint": provider["resultUrl"], "workflowId": "", "credential": tc.originalKey}
+			doc := map[string]any{"modelCatalog": []any{catalog}, "videoProviders": map[string]any{"personal_api": provider}}
+			raw, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.DB.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_configs(owner_username,settings_json,created_at,updated_at) VALUES(?,?,NOW(6),NOW(6))`, tc.owner, raw); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := store.GetConfig(ctx, tc.owner)
+			if err != nil || len(modelCatalog(cfg)) != 0 {
+				t.Fatal("videos released before their file returned", err)
+			}
+			catalog["credential"] = tc.returnedKey
+			raw, err = json.Marshal(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeRawConfigFile(t, store.LegacyConfigDir, tc.owner, string(raw))
+			stop := errors.New("synthetic file write interruption")
+			store.ReplaceLegacyConfig = func(string, map[string]any) error { return stop }
+			_, err = store.GetConfig(ctx, tc.owner)
+			store.ReplaceLegacyConfig = nil
+			if !errors.Is(err, stop) {
+				t.Fatal("expected file write failure after committing the catalog", err)
+			}
+
+			conflict := tc.originalKey != tc.returnedKey
+			check := func(settings map[string]any) {
+				t.Helper()
+				rows := modelCatalog(settings)
+				if len(rows) != 2 {
+					t.Fatalf("two independently verified source positions produced %d models", len(rows))
+				}
+				var providerRow, catalogRow map[string]any
+				for _, row := range rows {
+					if row["id"] == providerID {
+						providerRow = row
+					} else {
+						catalogRow = row
+					}
+				}
+				if providerRow["credential"] != providerKey || providerRow["credentialStatus"] == "needs_reentry" {
+					t.Fatal("provider lost its verified credential")
+				}
+				id := firstText(catalogRow["id"])
+				if id == "" || catalogID != "" && catalogID != id {
+					t.Fatal("catalog ID missing or changed across credentials or retries")
+				}
+				catalogID = id
+				if conflict {
+					if catalogRow["credentialStatus"] != "needs_reentry" || catalogRow["credentialRecoveryReason"] != "legacy_video_source_conflict" || firstText(catalogRow["credential"], catalogRow["apiKey"], catalogRow["credentialRef"]) != "" {
+						t.Fatal("independent row did not retain its own credential conflict")
+					}
+				} else if catalogRow["credential"] != tc.originalKey || catalogRow["credentialStatus"] == "needs_reentry" {
+					t.Fatal("independent row lost its verified credential")
+				}
+			}
+			committed, err := store.ReadBoundModelConfig(ctx, tc.owner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check(committed)
+			cold := novelfetchworkshop.NewMySQLStore(store.DB)
+			cold.LegacyConfigDir, cold.ModelSecrets = store.LegacyConfigDir, store.ModelSecrets
+			for range 2 {
+				cfg, err := cold.GetConfig(ctx, tc.owner)
+				if err != nil {
+					t.Fatal(err)
+				}
+				check(cfg)
+			}
+			state, found, err := cold.LegacyConfigMigrationState(ctx, tc.owner)
+			if err != nil || !found || state.Phase != "complete" {
+				t.Fatal("file retry did not complete migration", err)
+			}
+			records, _, err := cold.ListLegacyModelConflicts(ctx, tc.owner, "")
+			if err != nil || conflict && len(records) != 2 || !conflict && len(records) != 0 {
+				t.Fatalf("unexpected credential archive size %d: %v", len(records), err)
+			}
+			for _, record := range records {
+				if record.Source.Video || record.Source.Field != "credential" {
+					t.Fatal("provider credential included in catalog conflict archive")
+				}
+			}
+		})
+	}
+}

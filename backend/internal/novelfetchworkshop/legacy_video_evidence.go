@@ -148,9 +148,8 @@ func sameVideoRecord(database, file legacySourceEntry) bool {
 		reflect.DeepEqual(database.model["enabled"], file.model["enabled"])
 }
 
-// A catalog ID must remain unique. When a separately proven catalog record
-// collides with another pending record, keep the provider's original ID.
-// Only original identity/position fields participate in the new ID.
+// separateLegacyVideoID derives a catalog ID from the protected database
+// position and public model identity.
 func separateLegacyVideoID(source legacySourceEntry, occupied map[string]bool) string {
 	row := source.model
 	for attempt := 0; ; attempt++ {
@@ -198,20 +197,20 @@ func (migration *legacyConfigMigration) prepareVideoRows(rows, boundRows []any, 
 			primary[id] = i
 		}
 	}
-	existing := active
 	var restored []any
 	migration.fileModelIDs = map[legacyVideoPosition]string{}
 	for i, match := range migration.videoMatches {
 		source := match.database
 		row := cloneMap(source.model)
 		id := legacyModelRowID(row)
-		first := primary[id]
-		if first != i && !source.Video && (match.orphan || !reflect.DeepEqual(row, migration.videoMatches[first].database.model)) {
+		// Each match already proved a separate source position. The provider
+		// keeps its ID when a catalog entry shares it.
+		if primary[id] != i {
 			id = separateLegacyVideoID(source, occupied)
 			occupied[id] = true
 			row["id"] = id
 		}
-		formal, collides := findLegacyTarget(row, existing)
+		formal, collides := findLegacyTarget(row, active)
 		if formal != nil {
 			id = ModelConfigText(formal, "id")
 		}
@@ -222,10 +221,7 @@ func (migration *legacyConfigMigration) prepareVideoRows(rows, boundRows []any, 
 		if !match.orphan {
 			migration.database = append(migration.database, source)
 		}
-		if collides {
-			continue
-		}
-		if !slices.ContainsFunc(restored, func(prior any) bool { return reflect.DeepEqual(prior, row) }) {
+		if !collides {
 			restored = append(restored, row)
 		}
 	}
