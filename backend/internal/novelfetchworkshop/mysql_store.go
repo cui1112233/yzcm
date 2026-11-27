@@ -396,7 +396,7 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 		fileChecked := legacy != nil
 		rows := legacyCatalogRows(settings)
 		hasCatalog := hasLegacyVideoProviders(settings)
-		for _, container := range legacyCatalogContainers(settings) {
+		for _, container := range LegacyCatalogContainers(settings) {
 			if _, exists := container["modelCatalog"]; exists {
 				hasCatalog = true
 				break
@@ -531,11 +531,11 @@ func (s *MySQLStore) putConfig(ctx context.Context, owner string, settings map[s
 		if previous[legacyModelMigrationVersionKey] == legacyModelMigrationVersion {
 			updated[legacyModelMigrationVersionKey] = legacyModelMigrationVersion
 		}
-		for _, nested := range legacyCatalogContainers(updated)[1:] {
+		for _, nested := range LegacyCatalogContainers(updated)[1:] {
 			delete(nested, "modelCatalog")
 			delete(nested, "modelCatalogVersion")
 		}
-		for _, container := range legacyCatalogContainers(updated) {
+		for _, container := range LegacyCatalogContainers(updated) {
 			delete(container, "videoProviders")
 		}
 		updated[legacyVideoMigratedKey] = true

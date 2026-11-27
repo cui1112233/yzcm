@@ -358,8 +358,6 @@ func mergeManagedModelCatalog(ctx context.Context, config map[string]any, catalo
 	settings, err := novelfetchworkshop.ReadRuntimeConfig(ctx, catalogStore, username)
 	if errors.Is(err, novelfetchworkshop.ErrCatalogAwaitingMigration) {
 		// Preference saves can finish while the original model file is offline.
-		delete(config, "modelCatalog")
-		delete(config, "modelCatalogVersion")
 		return nil
 	}
 	if err != nil {
@@ -408,6 +406,15 @@ func registerUserConfigRoutes(root *http.ServeMux, middleware BridgeAuth, store 
 		store.UseLegacySettingJournal(journal)
 	}
 	view := func(w http.ResponseWriter, req *http.Request, identity BridgeIdentity, config map[string]any) {
+		// Only a catalog returned by its verified reader belongs in the response.
+		// Old standard files can carry it in several nested containers.
+		for _, container := range novelfetchworkshop.LegacyCatalogContainers(config) {
+			for key := range container {
+				if isManagedModelField(key) {
+					delete(container, key)
+				}
+			}
+		}
 		access := apiConfigPolicy(req.Context(), middleware.AccountCenterStore)
 		if !access.custom {
 			result := preferenceOnlyPatch(config)
@@ -420,7 +427,6 @@ func registerUserConfigRoutes(root *http.ServeMux, middleware BridgeAuth, store 
 			writeJSON(w, http.StatusOK, access.response(redactAPIConfig(result).(map[string]any)))
 			return
 		}
-		delete(config, "modelCatalog")
 		if err := mergeManagedModelCatalog(req.Context(), config, catalogStore, identity.Username); err != nil {
 			writeAuthError(w, http.StatusServiceUnavailable, "读取模型配置失败")
 			return

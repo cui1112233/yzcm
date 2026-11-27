@@ -62,7 +62,9 @@ func historicalSettingEdits(input []LegacySettingEdit) ([]LegacySettingEdit, err
 	return snapshot, nil
 }
 
-// A partially marked or unknown envelope must never fall back to the map importer.
+// Historical files authenticate ordinary preference objects, including fields
+// named schemaVersion, snapshots and batches. This parser grants no request
+// semantics. It also accepts arrays written by the previous database writer.
 func parseSettingJournal(raw []byte, convertMap func(map[string]any) []LegacySettingEdit) (settingJournal, error) {
 	j := emptySettingJournal()
 	raw = bytes.TrimSpace(raw)
@@ -80,19 +82,6 @@ func parseSettingJournal(raw []byte, convertMap func(map[string]any) []LegacySet
 		j.Snapshots, err = historicalSettingEdits(input)
 		return j, err
 	case '{':
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &fields); err != nil {
-			return j, err
-		}
-		if fields["schemaVersion"] != nil || fields["batches"] != nil || fields["snapshots"] != nil {
-			var marked settingJournal
-			decoder := json.NewDecoder(bytes.NewReader(raw))
-			decoder.DisallowUnknownFields()
-			if err := decoder.Decode(&marked); err != nil {
-				return j, err
-			}
-			return marked, marked.validate()
-		}
 		if convertMap != nil {
 			var old map[string]any
 			if err := json.Unmarshal(raw, &old); err != nil {
@@ -147,7 +136,24 @@ func (s *MySQLStore) openSettingJournal(owner string, state LegacyConfigMigratio
 	if err != nil {
 		return settingJournal{}, err
 	}
-	return parseSettingJournal([]byte(raw), nil)
+	data := bytes.TrimSpace([]byte(raw))
+	// Only the authenticated database purpose may carry current request batches.
+	if len(data) > 0 && data[0] == '[' {
+		return parseSettingJournal(data, nil)
+	}
+	if !json.Valid(data) {
+		return settingJournal{}, errors.New("invalid database setting journal")
+	}
+	var marked settingJournal
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&marked); err != nil {
+		return settingJournal{}, err
+	}
+	if err := marked.validate(); err != nil {
+		return settingJournal{}, err
+	}
+	return marked, nil
 }
 
 // Preserve conditional snapshot fields separately. Across explicit batches

@@ -28,7 +28,7 @@ const legacyModelScrubEntryDoneKey = "modelCatalogLegacyScrubEntryDone"
 const legacyModelMigrationVersion = "entry-v2"
 
 func hasLegacyVideoProviders(document map[string]any) bool {
-	for _, container := range legacyCatalogContainers(document) {
+	for _, container := range LegacyCatalogContainers(document) {
 		if _, exists := container["videoProviders"]; exists {
 			return true
 		}
@@ -37,7 +37,7 @@ func hasLegacyVideoProviders(document map[string]any) bool {
 }
 
 func hasNestedLegacyModels(document map[string]any) bool {
-	for _, container := range legacyCatalogContainers(document)[1:] {
+	for _, container := range LegacyCatalogContainers(document)[1:] {
 		if _, exists := container["modelCatalog"]; exists {
 			return true
 		}
@@ -76,7 +76,8 @@ func legacyVideoProviderRows(container map[string]any) []any {
 	return rows
 }
 
-func legacyCatalogContainers(document map[string]any) []map[string]any {
+// LegacyCatalogContainers returns the four configuration containers used by historical model sources.
+func LegacyCatalogContainers(document map[string]any) []map[string]any {
 	nested, _ := document["settings"].(map[string]any)
 	app, _ := document["appConfig"].(map[string]any)
 	nestedApp, _ := nested["appConfig"].(map[string]any)
@@ -85,7 +86,7 @@ func legacyCatalogContainers(document map[string]any) []map[string]any {
 
 func legacyCatalogRows(document map[string]any) []any {
 	var rows []any
-	for _, container := range legacyCatalogContainers(document) {
+	for _, container := range LegacyCatalogContainers(document) {
 		catalog, _ := container["modelCatalog"].([]any)
 		catalog = append(append([]any(nil), catalog...), legacyVideoProviderRows(container)...)
 		for _, item := range catalog {
@@ -142,7 +143,7 @@ func preserveBoundLegacyRows(settings map[string]any) ([]any, error) {
 
 func legacyCatalogSecretDigest(document map[string]any) string {
 	hasVideoData := false
-	for _, container := range legacyCatalogContainers(document) {
+	for _, container := range LegacyCatalogContainers(document) {
 		if raw := container["videoProviders"]; raw != nil {
 			rows, ok := raw.(map[string]any)
 			hasVideoData = hasVideoData || !ok || len(rows) != 0
@@ -166,7 +167,7 @@ func legacyCatalogSecretDigest(document map[string]any) string {
 		return hex.EncodeToString(sum[:])
 	}
 	parts := []any{legacyCatalogRows(document)}
-	for _, container := range legacyCatalogContainers(document) {
+	for _, container := range LegacyCatalogContainers(document) {
 		parts = append(parts, container["videoProviders"])
 	}
 	rows, _ := json.Marshal(parts)
@@ -176,7 +177,7 @@ func legacyCatalogSecretDigest(document map[string]any) string {
 
 func priorLegacyModelDigest(document map[string]any) string {
 	copy := cloneMap(document)
-	for _, container := range legacyCatalogContainers(copy) {
+	for _, container := range LegacyCatalogContainers(copy) {
 		delete(container, "videoProviders")
 	}
 	return legacyCatalogSecretDigest(copy)
@@ -204,7 +205,7 @@ func readLegacyModelDocument(path string) (map[string]any, error) {
 	if err := json.Unmarshal(data, &document); err != nil {
 		return nil, err
 	}
-	for _, container := range legacyCatalogContainers(document) {
+	for _, container := range LegacyCatalogContainers(document) {
 		if raw := container["modelCatalog"]; raw != nil {
 			if _, ok := raw.([]any); !ok {
 				return nil, fmt.Errorf("legacy model catalog is not a list")
@@ -321,7 +322,7 @@ func collectLegacySources(document map[string]any) []legacySourceEntry {
 
 func collectLegacyEntries(document map[string]any, videosOnly bool) []legacySourceEntry {
 	var entries []legacySourceEntry
-	for i, container := range legacyCatalogContainers(document) {
+	for i, container := range LegacyCatalogContainers(document) {
 		catalog, _ := container["modelCatalog"].([]any)
 		for index, item := range catalog {
 			if row, ok := item.(map[string]any); ok && ((videosOnly && ModelConfigText(row, "kind") == "video") || (!videosOnly && hasLegacyKey(row))) {
@@ -674,7 +675,7 @@ func (s *MySQLStore) scrubLegacyModelFile(ctx context.Context, tx *sql.Tx, owner
 		completed = map[string]any{}
 	}
 	changed, unresolved := false, false
-	containers := legacyCatalogContainers(document)
+	containers := LegacyCatalogContainers(document)
 	for _, entry := range entries {
 		receipt := legacyEntryDigest(entry)
 		if completed[receipt] == expected {

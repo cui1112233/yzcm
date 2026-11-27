@@ -108,7 +108,7 @@ func validLegacyProviderIdentity(name string, raw map[string]any) bool {
 }
 
 func validateLegacyVideoDocument(doc map[string]any) error {
-	for _, container := range legacyCatalogContainers(doc) {
+	for _, container := range LegacyCatalogContainers(doc) {
 		if value, exists := container["videoProviders"]; exists {
 			providers, ok := value.(map[string]any)
 			if !ok {

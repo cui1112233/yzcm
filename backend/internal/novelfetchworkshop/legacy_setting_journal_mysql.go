@@ -94,15 +94,10 @@ ON DUPLICATE KEY UPDATE revision=revision`, owner)
 		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM novel_fetch_legacy_setting_files WHERE owner_username=? AND fingerprint=?)`, owner, source.fingerprint).Scan(&imported); err != nil {
 			return err
 		}
-		if incoming.historical {
-			// Backfill missing evidence even for receipts from previous releases.
-			if err = s.retainSettingSource(ctx, tx, owner, *source); err != nil {
-				return err
-			}
-		} else if !imported {
-			if _, err = tx.ExecContext(ctx, `INSERT INTO novel_fetch_legacy_setting_files(owner_username,fingerprint) VALUES(?,?)`, owner, source.fingerprint); err != nil {
-				return err
-			}
+		// Every file using the old purpose is recoverable evidence, including
+		// files whose receipts were first issued with only a fingerprint.
+		if err = s.retainSettingSource(ctx, tx, owner, *source); err != nil {
+			return err
 		}
 		if imported {
 			return tx.Commit()

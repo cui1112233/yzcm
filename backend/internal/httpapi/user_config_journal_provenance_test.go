@@ -1,19 +1,155 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
+	"qiantie/backend/internal/auth"
 	"qiantie/backend/internal/novelfetchworkshop"
 )
 
 var deferredFilePurpose = novelfetchworkshop.LegacyConflictSource{Document: deferredSettingsFile, Field: "settings"}
 var dbPatchPurpose = novelfetchworkshop.LegacyConflictSource{Document: "db:legacy_config_migrations", Field: "setting_patch"}
+
+func TestLegacySettingPatchFilePurposeAlwaysMeansSnapshot(t *testing.T) {
+	for _, tc := range []struct{ name, raw string }{
+		{"ordinary-fields", `{"schemaVersion":3,"batches":["first"],"snapshots":{"folder":"archive"},"notifications":{"soundVolume":42}}`},
+		{"same-shape", `{"schemaVersion":1,"batches":[{"batchId":"old-data","edits":[{"path":["keep"],"delete":true},{"path":["count"],"value":9}]}]}`},
+		{"malformed-version", `{"schemaVersion":"release label","batches":{"color":"blue"},"snapshots":"photo roll"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := patchTestStore(t)
+			c := NewUserConfigStore(s.LegacyConfigDir)
+			c.UseLegacySettingJournal(s)
+			path, _ := c.configPath("a")
+			if err := writeUserConfigDocument(path, map[string]any{"keep": "original", "count": 7, "notifications": map[string]any{"soundVolume": 61}}); err != nil {
+				t.Fatal(err)
+			}
+			source := writeSealedSettingFixture(t, c, "a", tc.raw)
+			if _, err := s.GetConfig(ctx, "a"); err != nil {
+				t.Fatal("old preference names blocked import", err)
+			}
+			got, err := c.readStandardFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got["keep"] != "original" || got["count"] != 7.0 || got["notifications"].(map[string]any)["soundVolume"] != 61.0 {
+				t.Error("old file received permission to delete or overwrite restored fields")
+			}
+			var old map[string]any
+			if err := json.Unmarshal([]byte(tc.raw), &old); err != nil {
+				t.Fatal(err)
+			}
+			for _, k := range []string{"schemaVersion", "batches", "snapshots"} {
+				if !reflect.DeepEqual(got[k], old[k]) {
+					t.Errorf("lost ordinary old preference %s", k)
+				}
+			}
+			assertSettingSource(t, s, source, deferredFilePurpose, tc.raw)
+		})
+	}
+}
+
+func TestUserConfigPendingGETFiltersEveryLegacyContainer(t *testing.T) {
+	s := stateTestStore(t)
+	ctx := context.Background()
+	c := NewUserConfigStore(s.LegacyConfigDir)
+	c.UseLegacySettingJournal(s)
+	const owner = "founder"
+	dbSource := `{"modelCatalog":[{"kind":"video","id":"old","modelId":"legacy","credential":"synthetic","endpoint":"https://example.invalid"}]}`
+	if _, err := s.DB.Exec("INSERT INTO novel_fetch_workshop_configs(owner_username,settings_json,created_at,updated_at) VALUES(?,?,NOW(6),NOW(6))", owner, dbSource); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := s.DiscoverLegacyConfigMigration(ctx, owner); err != nil || !found {
+		t.Fatal("pending state", err)
+	}
+	fixture := func(name string) map[string]any {
+		return map[string]any{
+			"modelCatalog":        []any{map[string]any{"id": "private-" + name, "kind": "video"}},
+			"modelCatalogVersion": 17, "modelCatalogSecretVersion": "old-mark", "modelCatalogLegacyVideoPending": "old-pending",
+			"videoProviders": map[string]any{"p": "private-provider-" + name}, "videoProviderLegacyMigrated": true,
+			"migrationPhase": "old-phase", "configRevision": "private-revision", "localPreference": "keep-" + name,
+		}
+	}
+	disk := fixture("root")
+	settings := fixture("settings")
+	settings["appConfig"] = fixture("settings.appConfig")
+	disk["settings"] = settings
+	disk["appConfig"] = fixture("appConfig")
+	disk["apiIntegrations"] = map[string]any{"customChannels": []any{
+		map[string]any{"id": "test", "name": "test", "params": map[string]any{"modelCatalog": "provider-option"}},
+	}}
+	path, _ := c.configPath(owner)
+	if err := writeUserConfigDocument(path, disk); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _, _ := newImpersonationTestRouter(t, func(o *RouterOptions) {
+		o.AuthStore = &authTestStore{account: auth.Account{Username: owner, Active: true, IsOwner: true}}
+		o.NovelFetchStore = s
+		o.UserConfigStore = c
+	})
+	r := impersonationRequest(h, "GET", "/api/config", owner, "", nil)
+	if r.Code != 200 {
+		t.Fatalf("pending preference GET: %d", r.Code)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(r.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	channels := apiIntegrationChannels(apiIntegrationStoredMap(got))
+	if len(channels) != 1 || mapOrEmpty(channels[0].(map[string]any)["params"])["modelCatalog"] != "provider-option" {
+		t.Error("pending GET removed an ordinary custom provider parameter outside the model containers")
+	}
+	for _, name := range []string{"root", "settings", "appConfig", "settings.appConfig"} {
+		container := got
+		if name != "root" {
+			for _, k := range strings.Split(name, ".") {
+				container, _ = container[k].(map[string]any)
+			}
+		}
+		if container["localPreference"] != "keep-"+name {
+			t.Errorf("lost adjacent preference in %s", name)
+		}
+		for k := range fixture(name) {
+			if _, ok := container[k]; ok && k != "localPreference" {
+				t.Errorf("pending GET exposed %s in %s", k, name)
+			}
+		}
+	}
+	formal := map[string]any{novelfetchworkshop.ModelSecretVersionKey: novelfetchworkshop.ModelSecretVersion, "modelCatalog": []any{
+		map[string]any{"kind": "video", "id": "formal", "modelId": "formal-video", "credential": "synthetic-bound-key"},
+	}}
+	if err := c.secrets.SealModelConfig("another-owner", formal, nil); err != nil {
+		t.Fatal(err)
+	}
+	badCatalog, err := json.Marshal(formal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec("UPDATE novel_fetch_workshop_configs SET settings_json=? WHERE owner_username=?", badCatalog, owner); err != nil {
+		t.Fatal(err)
+	}
+	r = impersonationRequest(h, "GET", "/api/config", owner, "", nil)
+	if r.Code != 503 {
+		t.Errorf("formal catalog binding failure returned %d", r.Code)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("preference GET modified the source file", err)
+	}
+}
 
 func writeSealedSettingFixture(t *testing.T, c *UserConfigStore, owner, plain string) deferredSettingsEnvelope {
 	t.Helper()
@@ -232,38 +368,41 @@ func TestLegacySettingPatchProvenanceProtectedBatches(t *testing.T) {
 	}
 	c := NewUserConfigStore(s.LegacyConfigDir)
 	c.UseLegacySettingJournal(s)
-	path, _ := c.configPath("b")
+	path, _ := c.configPath("a")
 	if err := writeUserConfigDocument(path, map[string]any{"x": "restore", "count": 99}); err != nil {
 		t.Fatal(err)
 	}
-	writeSealedSettingFixture(t, c, "b", plain)
-	if _, err := s.GetConfig(ctx, "b"); err != nil {
+	if err := s.ImportLegacySettingFile(ctx, "a", state.PatchEnvelope, state.PatchFingerprint, false,
+		func(old map[string]any) []novelfetchworkshop.LegacySettingEdit { return snapshotEdits(old) }); err == nil {
+		t.Fatal("a database batch was accepted with the old file purpose")
+	}
+	if _, err := s.GetConfig(ctx, "a"); err != nil {
 		t.Fatal(err)
 	}
 	doc, err := c.readStandardFile(path)
 	if err != nil || doc["x"] != nil || doc["count"] != 2.0 || doc["preserve"] != true {
-		t.Fatal("versioned file lost its request semantics", err)
+		t.Fatal("MySQL journal lost its request semantics", err)
 	}
 
 	journal.Batches[1].ID = first.ID
 	invalid, _ := json.Marshal(journal)
-	changed, fp, err := s.ModelSecrets.SealLegacyConflict("a", dbPatchPurpose, string(invalid))
+	changed, _, err := s.ModelSecrets.SealLegacyConflict("a", dbPatchPurpose, string(invalid))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err = s.ModelSecrets.OpenLegacyConflict("a", dbPatchPurpose, changed, state.PatchFingerprint); err == nil {
 		t.Error("modified batch authenticated with original fingerprint")
 	}
-	if _, err = s.DB.Exec("UPDATE novel_fetch_legacy_config_migrations SET patch_ciphertext=?,patch_fingerprint=? WHERE owner_username='a'", changed, fp); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, _, err = s.LoadLegacySettingEdits(ctx, "a"); err == nil {
-		t.Error("accepted duplicate request boundaries")
-	}
-	for _, raw := range []string{`{"schemaVersion":1}`, `{"schemaVersion":2,"batches":[]}`, string(invalid)} {
-		writeSealedSettingFixture(t, c, "b", raw)
-		if _, err := c.secrets.ImportDeferredSettings(ctx, "b", path, s); err == nil {
-			t.Errorf("import accepted invalid version or boundaries")
+	for _, raw := range []string{`{"schemaVersion":1}`, `{"schemaVersion":2,"batches":[]}`, string(invalid), plain + "{}"} {
+		changed, fp, err := s.ModelSecrets.SealLegacyConflict("b", dbPatchPurpose, raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = s.DB.Exec("UPDATE novel_fetch_legacy_config_migrations SET patch_ciphertext=?,patch_fingerprint=? WHERE owner_username='b'", changed, fp); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err = s.LoadLegacySettingEdits(ctx, "b"); err == nil {
+			t.Error("accepted malformed authenticated MySQL journal")
 		}
 	}
 }

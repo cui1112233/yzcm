@@ -835,7 +835,7 @@ func TestLegacyDeferredSnapshotConversionIsConservative(t *testing.T) {
 	}
 }
 
-func TestLegacySettingPatchImportsVersionedEditsAndRetainsUnverifiedFile(t *testing.T) {
+func TestLegacySettingPatchImportsOnlyMissingFieldsAndRetainsUnverifiedFile(t *testing.T) {
 	ctx := context.Background()
 	store := patchTestStore(t)
 	config := NewUserConfigStore(store.LegacyConfigDir)
@@ -844,7 +844,7 @@ func TestLegacySettingPatchImportsVersionedEditsAndRetainsUnverifiedFile(t *test
 	binding := novelfetchworkshop.LegacyConflictSource{Document: deferredSettingsFile, Field: "settings"}
 	save := func(owner string) {
 		t.Helper()
-		ciphertext, fingerprint, err := config.secrets.SealLegacyConflict(owner, binding, `{"schemaVersion":1,"batches":[{"batchId":"volume-and-key","edits":[{"path":["notifications","soundVolume"],"value":0},{"path":["apiIntegrations","values","kimiOfficialApiKey"],"delete":true}]}]}`)
+		ciphertext, fingerprint, err := config.secrets.SealLegacyConflict(owner, binding, `[{"path":["notifications","soundVolume"],"value":42},{"path":["apiIntegrations","values","kimiOfficialApiKey"],"delete":true}]`)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -864,8 +864,8 @@ func TestLegacySettingPatchImportsVersionedEditsAndRetainsUnverifiedFile(t *test
 		t.Fatal(err)
 	}
 	edits, _, active, err := store.LoadLegacySettingEdits(ctx, "a")
-	if err != nil || !active || len(edits) != 2 || string(edits[0].Value) != "0" || !edits[1].Delete {
-		t.Fatal("explicit array did not preserve zero and explicit deletion", err)
+	if err != nil || !active || len(edits) != 1 || !edits[0].OnlyIfMissing || string(edits[0].Value) != "42" {
+		t.Fatal("legacy file did not preserve its conditional assignment", err)
 	}
 	if _, err := os.Stat(file); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("verified old file still present")
