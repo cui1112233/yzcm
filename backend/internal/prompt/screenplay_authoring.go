@@ -29,8 +29,10 @@ const ScreenplayAuthoringPlan = `根据作品原文和用户要求规划章节�
 const ScreenplayAuthoringChapter = `根据给出的章节原文和作品上下文创作中文分集剧本，使用清晰的第N集标题、场次、角色和对白。只返回剧本正文，不省略结尾。`
 
 const ScreenplayAuthoringShotEditTools = `
-【已有创作分镜文字修改】仅当用户明确请求修改时，使用工具准备待确认方案。只处理当前作品真实board的已有镜头，不新增删除、不生成媒体。
-- modify_storyboard：action必须update，new_data仅填写用户要求修改的video_desc（视频提示词）、image_prompt、line（台词/旁白）、voice_actor、emotion。
+【已有创作分镜文字修改】仅当用户明确请求修改时，使用工具准备待确认方案。处理当前作品真实board的镜头，新增删除必须准备并等待用户确认，不生成媒体。
+- modify_storyboard：action=update时，new_data仅填写用户要求修改的video_desc（视频提示词）、image_prompt、line（台词/旁白）、voice_actor、emotion。
+- add_shot（或modify_storyboard action=add）：new_data仅接受video_desc/image_prompt/line/voice_actor/emotion和duration_sec。可提供insert_after_shot_id真实字符串ID或唯一insert_after_shot_number正整数序号，不能混用；省略定位则追加末尾。服务器生成新ID，来源未核验且不自动绑定资产，不能传source_elements/协议/媒体/身份。
+- delete_shots（或modify_storyboard action=delete）：shot_ids为1至200个真实ID或shot_numbers为1至200个正整数序号，不能混用、重复或包含未知目标。只删所选镜头记录，保留素材文件；可以删为空分镜。
 - modify_script_text暂不支持：当前创作分镜没有独立画面描述字段；不能把画面描述写进台词或视频词代替。
 - modify_image_prompt、modify_video_prompt：new_prompt为新提示词，action仅replace或append（追加原文末尾，不自动加换行）。不支持rewrite、optimize、fix_violations或instruction。
-所有工具用从真实读取结果取得的shot_id字符串或正整数shot_number定位，可给episode_no和engine；多个剧集/引擎必须明确指定。shot_index与原版数字shot_id不能猜测转换，需先读取真实ID或序号。不能传身份、作品、媒体字段、准备/确认标记；字段精确小写且不能重复。未要求修改的字段不要填写。服务器会保留完整原镜头及未请求字段、来源、协议、绑定和媒体；准备成功只表示等待用户确认，不得声称已经修改。`
+已有镜头文字修改用从真实读取结果取得的shot_id字符串或正整数shot_number定位，可给episode_no和engine；多个剧集/引擎必须明确指定。shot_index与原版数字shot_id不能猜测转换，需先读取真实ID或序号。不能传身份、作品、媒体字段、准备/确认标记；字段精确小写且不能重复。未要求修改的字段不要填写。服务器会保留完整原镜头及未请求字段、来源、协议、绑定和媒体；准备成功只表示等待用户确认，不得声称已经修改。`

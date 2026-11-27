@@ -26,7 +26,7 @@ type AssistantCreativeShotEdit struct {
 
 func IsAssistantShotEditTool(name string) bool {
 	switch name {
-	case "modify_storyboard", "modify_script_text", "modify_image_prompt", "modify_video_prompt":
+	case "add_shot", "delete_shots", "modify_storyboard", "modify_script_text", "modify_image_prompt", "modify_video_prompt":
 		return true
 	}
 	return false
@@ -96,6 +96,9 @@ func shotText(s *StoryboardShot, field string) *string {
 	return nil
 }
 func PrepareAssistantShotEdit(ctx context.Context, store Store, owner, project, name string, raw json.RawMessage) (AuthoringAction, string, error) {
+	if isShotStructure(name, raw) {
+		return PrepareAssistantShotStructure(ctx, store, owner, project, name, raw)
+	}
 	fail := func(reason string) (AuthoringAction, string, error) {
 		return AuthoringAction{}, "", fmt.Errorf("%w: %s", ErrInvalidArgument, reason)
 	}

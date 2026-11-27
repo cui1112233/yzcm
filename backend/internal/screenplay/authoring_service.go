@@ -65,16 +65,17 @@ type AssistantNavigate struct {
 	Reason string `json:"reason,omitempty"`
 }
 type AuthoringAction struct {
-	CreativeShot     *AssistantCreativeShotEdit `json:"creative_shot,omitempty"`
-	Kind             string                     `json:"kind"`
-	TargetID         string                     `json:"target_id,omitempty"`
-	Content          string                     `json:"content,omitempty"`
-	Chapter          *Chapter                   `json:"chapter,omitempty"`
-	Asset            *Asset                     `json:"asset,omitempty"`
-	AssetOperation   string                     `json:"asset_operation,omitempty"`
-	AssetPrepared    bool                       `json:"asset_prepared,omitempty"`
-	Shot             *Shot                      `json:"shot,omitempty"`
-	ExpectedRevision int64                      `json:"expected_revision"`
+	CreativeStructure *AssistantShotStructure    `json:"creative_structure,omitempty"`
+	CreativeShot      *AssistantCreativeShotEdit `json:"creative_shot,omitempty"`
+	Kind              string                     `json:"kind"`
+	TargetID          string                     `json:"target_id,omitempty"`
+	Content           string                     `json:"content,omitempty"`
+	Chapter           *Chapter                   `json:"chapter,omitempty"`
+	Asset             *Asset                     `json:"asset,omitempty"`
+	AssetOperation    string                     `json:"asset_operation,omitempty"`
+	AssetPrepared     bool                       `json:"asset_prepared,omitempty"`
+	Shot              *Shot                      `json:"shot,omitempty"`
+	ExpectedRevision  int64                      `json:"expected_revision"`
 }
 type AssistantProposal struct {
 	ID       string            `json:"id"`
@@ -262,6 +263,10 @@ func ValidateAuthoringActions(actions []AuthoringAction) error {
 			if a.Shot == nil || a.TargetID == "" {
 				return ErrInvalidArgument
 			}
+		case "creative_shot_structure":
+			if e := validateShotStructure(a); e != nil {
+				return e
+			}
 		case "creative_shot":
 			if e := validateCreativeShotAction(a); e != nil {
 				return e
@@ -315,6 +320,16 @@ func (s AuthoringService) Apply(ctx context.Context, o, p, id string, v int64, c
 		}
 		a := proposal.Actions[0]
 		switch a.Kind {
+		case "creative_shot_structure":
+			committer, ok := s.Store.(AuthoringShotStructureCommitter)
+			if !ok {
+				return ErrInvalidState
+			}
+			out, e = committer.CommitAuthoringShotStructure(ctx, s.Repository, o, p, id, v)
+			if e == nil {
+				e = InvalidateAuthoringContent(ctx, s.Store, o, p, "storyboard")
+			}
+			return e
 		case "creative_shot":
 			committer, ok := s.Store.(AuthoringShotCommitter)
 			if !ok {

@@ -93,3 +93,28 @@ MySQL通过同一数据库、同一Serializable事务锁定作品、待确认状
 - MySQL通过sqlmock验证同一个事务中目标镜头UPDATE、board版本UPDATE、作者回执UPDATE的任一步失败均Rollback；提交结果不确定返回失败、不声称成功；跨数据库仓库拒绝且不降级分开写；完整未知protocol_json根字段也保留。未运行真实数据库故障注入。内存Store也在两个仓库锁内一次提交，不走先写镜头再Save作者状态。
 - 真实Chrome加载实际React+Antd组件：镜头前后对照与单次确认、原资产新增删除、九项读取中文名、智能展示回归合计8/8通过，无跳过。前端无系统提示词，后端prompt明确支持与不支持范围。
 - 未调用付费模型、未推送、未部署、未重启4001；实际4001保存回读及独立审查交主负责人接续。仅此层源码合同完成，不能标记D01整体完成。
+
+## 2026-11-27 D01创作镜头新增/删除层
+
+依据原件 `luoshui-dev-audit-20261126/20-backend.md` §6.2 的 modify_storyboard update/add/delete，及 §7.2 的 add_shot、delete_shots。本层先完整落新增和删除；bind_shot_assets仍待下一层。原版数值ID不猜测转换，本系统使用真实字符串shot ID。新增暂只写已有真实消费字段，不虚设独立script_text字段，不伪造source_elements来源，不顺带绑定资产。
+
+继续使用 POST `assistant/prepare-shot-edit`，外层 `{expected_revision,tool,tool_args}`，只保存pending方案；确认仍用 `assistant/apply`。
+
+- add_shot：tool_args可给episode_no/engine；insert_after_shot_id和insert_after_shot_number二选一，均不传则追加末尾。new_data可给video_desc、image_prompt、line、voice_actor、emotion、duration_sec，默认时长4秒，复用已有镜头内容校验。定位必须在唯一真实board内，重复序号或多board歧义立即拒绝。服务器准备时生成ID，来源明确未核验，资产绑定为空；不能传ID、source_elements、protocol_fields、媒体或身份。
+- delete_shots：shot_ids或shot_numbers二选一，1至200项，每项必须真实存在于所选board；未知、重复、跨集/引擎/作品、混用、空集合或无目标均整次拒绝。允许删除最后一条/全部镜头，保留空board，之后可以再次新增。
+- modify_storyboard action=add/delete使用上述同一参数和准备实现；update仍沿用原文字修改。上述新增合同采用本系统new_data字段，不将原件root script_text/video_prompt/voice_text/asset参数静默猜成其他字段。字段名精确小写、不允许重复键、未知字段、null或超32768字节参数。
+
+服务器动作creative_shot_structure保存原board ID/版本、集/引擎、操作、完整有序before/after镜头快照和明确targets。准备不写分镜；前端展示新增/删除、真实集/引擎/目标ID和序号、文字、前后数量和保存后顺序，新增显示来源未核验，删除明确保留原素材文件。模型直接返回完整合法creative_shot_structure，或伪造shot_prepared，都不能绕过工具准备。
+
+确认重新锁定作品、authoring状态、board和全量镜头范围，核验作者版本/pending/board版本及所有镜头完整结构化快照，包括未选镜头的同版内容变动。MySQL必须同库同一Serializable事务提交：新增仅INSERT新镜头，删除仅按真实ID/board/作品/owner精确DELETE所选记录；幸存镜头仅在序号变化时UPDATE seq和更新时间，绝不DELETE整板重插、绝不重写幸存镜头protocol_json。重排先移到大于原最大序号的独立正整数区间，再写最终连续序号，规避现有唯一索引中间冲突；完成后shot_count、board revision和applied回执同时提交。任一步失败全部回退，跨仓库不降级分开保存。内存路径同时持有两个仓库锁，一次完成状态和镜头更新。
+
+不物理删除素材文件，也不删除媒体工作台状态。现有schema未发现指向screenplay_storyboard_shots的外键级联；本层不加迁移。确认递增board版本保护已有SaveStoryboardRevision的旧版本回包；另复用InvalidateAuthoringContent("storyboard")暂停生产并把下游标过期。该标记在结构/applied事务后执行，失败不能回滚已经提交的结构；不扩大声称全部历史生产入口都有CAS保护。
+
+### 本层验证与交接
+
+- 业务先红：新增RoundTrip调用add_shot得到“不支持的镜头修改工具”；实现后转绿。真实Chrome先红缺“第2集”，加入真实组件预览后转绿。
+- 干净基线为独立runtime-source（本层开始HEAD 4a276374），只用 `review-overlay/assistant-shot-structure.json` 覆盖本层精确源文件；未改变其HEAD、未复制源码进该目录、未重启4001。
+- screenplay全包通过；screenplay/httpapi定向 `Test(Assistant|AuthoringAssistant|MySQL.*(Shot|Asset))` 通过。新增测试覆盖新增插中间、删除重排、全部删除和空board再新增、modify_storyboard别名、真实ID/序号歧义、跨用户/作品/引擎/集、未知/重复/大小写/null/伪造字段、确认前零写、只读成员拒绝、作者旧版本、board旧版本、未选镜头同版变更、确认失败内存不写、重复确认和迟到SaveStoryboardRevision拒绝。
+- sqlmock覆盖新增/删除同事务的镜头修改、board计数/版本、authoring回执任一失败Rollback及commit结果不确定；同版镜头内容变化不写、不同数据库仓库拒绝。这里只证明SQL合同，真实MySQL唯一序号约束和保存回读由主负责人独立验收。
+- Chrome运行实际React+Antd组件，核验新增/删除目标与前后数量/文字、来源未核验/保留文件说明、弹确认前零写、单次确认载荷和applied禁用；并回归原文字/资产/读取标签/智能展示组件；合计9/9通过，无跳过。
+- 未调用付费模型、未远端推送、未部署、未重启4001。bind_shot_assets、独立画面描述、媒体生成仍未接入，不能将本层当作D01整体完成。

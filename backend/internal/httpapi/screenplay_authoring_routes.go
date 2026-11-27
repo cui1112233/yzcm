@@ -616,7 +616,7 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 					}
 					if len(parsed.Actions) > 0 {
 						for _, action := range parsed.Actions {
-							if action.Kind == "shot" || action.Kind == "creative_shot" && !shotPrepared {
+							if action.Kind == "shot" || (action.Kind == "creative_shot" || action.Kind == "creative_shot_structure") && !shotPrepared {
 								return fmt.Errorf("%w: 创作分镜修改必须通过服务器工具准备完整方案", screenplay.ErrInvalidArgument)
 							}
 							if action.Kind == "asset" && !assetPrepared {
