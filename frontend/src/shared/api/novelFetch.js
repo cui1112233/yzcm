@@ -37,7 +37,8 @@ export function uploadLogin({ username, password }) {
 }
 
 export function getUploadSession() {
-  return apiRequest('/api/novel-fetch-workshop/upload/session');
+  // The workbench renders its own offline/login indicator for this probe.
+  return apiRequest('/api/novel-fetch-workshop/upload/session', { suppressGlobalError: true });
 }
 
 export function uploadBatch(payload) {

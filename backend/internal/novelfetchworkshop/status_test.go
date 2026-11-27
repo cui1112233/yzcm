@@ -2,6 +2,44 @@ package novelfetchworkshop
 
 import "testing"
 
+func TestDeriveTaskStatusDoesNotTreatVersionMetadataAsAIText(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value any
+	}{
+		{"failed metadata", map[string]any{"state": "failed", "error": "provider rejected"}},
+		{"ready metadata", map[string]any{"state": "ready", "revision": 2}},
+		{"boolean", true},
+		{"number", 12},
+		{"text boolean", map[string]any{"text": true}},
+		{"text object", map[string]any{"text": map[string]any{"state": "ready"}}},
+		{"whitespace", map[string]any{"text": " \n\t "}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := Document{Meta: map[string]any{"originalStatus": "done"}, Versions: map[string]any{"ai1": tc.value}}
+			if got := DeriveTaskStatus(doc); got != TaskStatusInputReady {
+				t.Fatalf("metadata became AI body: status=%q value=%#v", got, tc.value)
+			}
+		})
+	}
+}
+
+func TestDeriveTaskStatusAcceptsExplicitLegacyAIText(t *testing.T) {
+	for _, value := range []any{"真正的AI正文", map[string]any{"text": "真正的AI正文", "state": "ready"}} {
+		doc := Document{Meta: map[string]any{"originalStatus": "done"}, Versions: map[string]any{"ai1": value}}
+		if got := DeriveTaskStatus(doc); got != TaskStatusPendingSubmit {
+			t.Fatalf("real AI body lost: status=%q value=%#v", got, value)
+		}
+	}
+}
+
+func TestDeriveTaskStatusKeepsLegacyDoneMarkerWithoutInlineAIText(t *testing.T) {
+	doc := Document{Meta: map[string]any{"originalStatus": "done", "aiStatus": "ai_done"}, Versions: map[string]any{"ai1": map[string]any{"state": "ready"}}}
+	if got := DeriveTaskStatus(doc); got != TaskStatusPendingSubmit {
+		t.Fatalf("legacy ai_done marker changed: %q", got)
+	}
+}
+
 func TestDeriveTaskStatusTreatsSubmittedAIResultAsCompleted(t *testing.T) {
 	document := Document{
 		BookID: "12345678901",

@@ -54,6 +54,10 @@ func TestExpiredUploadAccountPausesWithoutUnknownReceiptAndResumesAfterLogin(t *
 		_ = store.PutDocument(ctx, "tester", doc)
 		_, _ = store.PutBody(ctx, "tester", novelfetchworkshop.BodyRecord{BookID: id, BodyRef: novelfetchworkshop.BodyRef{VersionID: "ai1", State: "ready"}, Content: doc.Versions["ai1"].(string)})
 	}
+	beforeBody, bodyErr := store.GetBody(ctx, "tester", "12345678", "ai1")
+	if bodyErr != nil {
+		t.Fatal(bodyErr)
+	}
 	if err := os.MkdirAll(filepath.Join(usersDir, "tester"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +99,8 @@ func TestExpiredUploadAccountPausesWithoutUnknownReceiptAndResumesAfterLogin(t *
 		t.Fatalf("resume failed: %v %#v", err, result)
 	}
 	doc, _ = store.GetDocument(ctx, "tester", "12345678")
-	if doc.Versions["ai1"] != "她走进书店，与多年未见的朋友重逢。" {
+	afterBody, bodyErr := store.GetBody(ctx, "tester", "12345678", "ai1")
+	if bodyErr != nil || afterBody.Content != "她走进书店，与多年未见的朋友重逢。" || afterBody.Revision != beforeBody.Revision || afterBody.ContentHash != beforeBody.ContentHash || doc.BodyRefs["ai1"].Revision != afterBody.Revision {
 		t.Fatal("login recovery changed completed prose")
 	}
 }

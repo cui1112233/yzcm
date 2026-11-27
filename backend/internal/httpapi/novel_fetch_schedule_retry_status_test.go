@@ -625,6 +625,7 @@ func TestGenerateOnlyScheduleKeepsShortAndCancelledBooksAtFirstDispatchAndRetry(
 }
 
 type manualImportTestQueue interface {
+	novelfetchworkshop.ProcessBookAdmissionQueue
 	novelfetchworkshop.ProcessQueue
 	novelfetchworkshop.ProcessCancellationQueue
 	novelfetchworkshop.ProcessBookDedupQueue
@@ -1376,5 +1377,73 @@ func TestManualProcessStartKeepsSurvivorOfLateCancellation(t *testing.T) {
 				t.Errorf("extra admission: %v", err)
 			}
 		})
+	}
+}
+
+// A stalled start enqueue must not monopolize the admission used by stop.
+// Exercise separate HTTP callers rather than reentrant mock callbacks.
+func TestManualProcessStopDoesNotWaitForStalledStartEnqueue(t *testing.T) {
+	ctx := context.Background()
+	store := cancelRaceStore{novelfetchworkshop.NewMemoryStore()}
+	queue := &manualImportStopQueue{manualImportTestQueue: novelfetchworkshop.NewMemoryQueue()}
+	now := time.Now()
+	const secret = "stalled-start-stop"
+	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store, NovelFetchQueue: queue})
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	queue.beforeEnqueue = func() { entered <- struct{}{}; <-release }
+	started := make(chan int, 1)
+	go func() {
+		resp := doNovelFetchRequest(t, handler, http.MethodPost, "/api/novel-fetch-workshop/process/start", map[string]any{"input_text": cancelRaceA, "selected_versions": []string{"ai1"}}, now, secret)
+		started <- resp.Code
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("start never reached enqueue")
+	}
+	stopped := make(chan int, 1)
+	go func() {
+		resp := doNovelFetchRequest(t, handler, http.MethodPost, "/api/novel-fetch-workshop/process/stop", map[string]any{"ids": []string{cancelRaceA}}, now, secret)
+		stopped <- resp.Code
+	}()
+	blocked := false
+	stopCode := 0
+	select {
+	case stopCode = <-stopped:
+	case <-time.After(time.Second):
+		blocked = true
+	}
+	close(release)
+	if blocked {
+		select {
+		case stopCode = <-stopped:
+		case <-time.After(2 * time.Second):
+			t.Fatal("stop did not finish after enqueue released")
+		}
+	}
+	var startCode int
+	select {
+	case startCode = <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("start did not return")
+	}
+	if blocked {
+		t.Fatalf("stop waited for stalled start enqueue (stop=%d start=%d)", stopCode, startCode)
+	}
+	doc, err := store.GetDocument(ctx, "tester", cancelRaceA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := queue.IsBookCancelled(ctx, "tester", cancelRaceA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopCode != http.StatusOK || startCode != http.StatusConflict || !cancelled || !novelFetchDocumentStopped(doc) {
+		t.Fatalf("stop fence lost: stop=%d start=%d cancelled=%v doc=%v", stopCode, startCode, cancelled, doc.Meta)
+	}
+	if _, err := queue.manualImportTestQueue.Claim(ctx, 5*time.Millisecond); !errors.Is(err, novelfetchworkshop.ErrQueueEmpty) {
+		t.Fatalf("cancelled start was admitted: %v", err)
 	}
 }

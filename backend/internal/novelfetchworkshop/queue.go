@@ -242,27 +242,36 @@ func (q *MemoryQueue) Enqueue(ctx context.Context, job ProcessJob) error {
 }
 
 func (q *MemoryQueue) Claim(ctx context.Context, wait time.Duration) (ProcessJob, error) {
-	if wait <= 0 {
-		wait = time.Second
+	if err := ctx.Err(); err != nil {
+		return ProcessJob{}, err
 	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
+	// Existing work must win over an elapsed wait timer after scheduler delay.
+	// Only an empty queue needs the blocking timeout path.
+	var job ProcessJob
 	select {
-	case job := <-q.pending:
-		job = processJobWithDedupeScope(job)
-		q.mu.Lock()
-		q.inflight[job.ID] = job
-		close(q.changed)
-		q.changed = make(chan struct{})
-		q.mu.Unlock()
-		return job, nil
-	case <-timer.C:
-		return ProcessJob{}, ErrQueueEmpty
-	case <-ctx.Done():
-		return ProcessJob{}, ctx.Err()
+	case job = <-q.pending:
+	default:
+		if wait <= 0 {
+			wait = time.Second
+		}
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case job = <-q.pending:
+		case <-timer.C:
+			return ProcessJob{}, ErrQueueEmpty
+		case <-ctx.Done():
+			return ProcessJob{}, ctx.Err()
+		}
 	}
+	job = processJobWithDedupeScope(job)
+	q.mu.Lock()
+	q.inflight[job.ID] = job
+	close(q.changed)
+	q.changed = make(chan struct{})
+	q.mu.Unlock()
+	return job, nil
 }
-
 func (q *MemoryQueue) Ack(_ context.Context, job ProcessJob) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()

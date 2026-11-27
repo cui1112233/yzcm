@@ -183,8 +183,10 @@ func TestScheduledBookFullChainAndReadbackRecovery(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if doc.OriginalRaw != original || strings.TrimSpace(doc.ProcessedText) == "" {
-				t.Fatal("raw or processed prose not persisted")
+			raw, rawErr := novelfetchworkshop.ReadBodyText(ctx, store, owner, doc, "original_raw")
+			processed, processedErr := novelfetchworkshop.ReadBodyText(ctx, store, owner, doc, "original")
+			if rawErr != nil || processedErr != nil || raw != original || strings.TrimSpace(processed) == "" {
+				t.Fatalf("raw or processed prose not persisted: rawErr=%v processedErr=%v rawChars=%d processedChars=%d", rawErr, processedErr, len([]rune(raw)), len([]rune(processed)))
 			}
 			if doc.Meta["siteSubmitStatus"] != "submitted" {
 				t.Fatalf("upload not confirmed: %v", doc.Meta["siteSubmitStatus"])

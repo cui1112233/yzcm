@@ -1285,21 +1285,11 @@ type novelFetchBookAdmission struct {
 	cancelled []string
 }
 
+// Start/schedule never clear cancellation markers, so the queue atomic fence
+// and document CAS suffice. Do not hold retry/stop admission across enqueue.
 // A rejected atomic enqueue writes nothing. Identify the stopped books, then let
 // the caller retry the survivors through the same atomic queue operation.
 func tryNovelFetchBookAdmission(ctx context.Context, store novelfetchworkshop.Store, queue novelfetchworkshop.ProcessQueue, unique novelfetchworkshop.ProcessBookDedupQueue, job novelfetchworkshop.ProcessJob, ttl time.Duration) (novelFetchBookAdmission, error) {
-	if _, ok := queue.(novelfetchworkshop.ProcessBookAdmissionQueue); ok && len(job.BookIDs) == 1 {
-		var result novelFetchBookAdmission
-		err := withWorkshopBookAdmission(ctx, queue, job.Owner, job.BookIDs[0], func(locked context.Context) error {
-			var err error
-			result, err = tryNovelFetchBookAdmissionLocked(locked, store, queue, unique, job, ttl)
-			return err
-		})
-		return result, err
-	}
-	return tryNovelFetchBookAdmissionLocked(ctx, store, queue, unique, job, ttl)
-}
-func tryNovelFetchBookAdmissionLocked(ctx context.Context, store novelfetchworkshop.Store, queue novelfetchworkshop.ProcessQueue, unique novelfetchworkshop.ProcessBookDedupQueue, job novelfetchworkshop.ProcessJob, ttl time.Duration) (novelFetchBookAdmission, error) {
 	queued, existing, err := unique.EnqueueUniqueBooks(ctx, job, ttl)
 	admission := novelFetchBookAdmission{queued: queued, existing: existing, remaining: job.BookIDs}
 	var rejected *novelfetchworkshop.CancelledBooksError

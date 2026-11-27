@@ -40,8 +40,16 @@ func registerNovelFetchLegacyWorkflowRoutes(mux *http.ServeMux, store novelfetch
 
 	mux.HandleFunc("GET /api/novel-fetch-workshop/batches/current", func(w http.ResponseWriter, req *http.Request) {
 		identity, _ := BridgeIdentityFromContext(req.Context())
-		settings, _ := store.GetConfig(req.Context(), identity.Username)
-		currentBatchID := strings.TrimSpace(fmt.Sprint(settings["novel_fetch_current_batch_id"]))
+		settings, err := store.GetConfig(req.Context(), identity.Username)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取当前批次配置失败"})
+			return
+		}
+		currentBatchID := novelFetchBatchIdentity(settings["novel_fetch_current_batch_id"], settings["novelFetchCurrentBatchId"])
+		if currentBatchID == "" {
+			writeJSON(w, http.StatusOK, map[string]any{"batch": nil})
+			return
+		}
 		docs, err := store.ListDocuments(req.Context(), identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取批次失败"})
@@ -52,7 +60,7 @@ func registerNovelFetchLegacyWorkflowRoutes(mux *http.ServeMux, store novelfetch
 		targets := []string{}
 		seenTargets := map[string]bool{}
 		for _, doc := range docs {
-			if currentBatchID == "" || strings.TrimSpace(fmt.Sprint(doc.Meta["currentBatchId"])) != currentBatchID {
+			if novelFetchBatchIdentity(doc.Meta["currentBatchId"], doc.Meta["current_batch_id"]) != currentBatchID {
 				continue
 			}
 			ids = append(ids, doc.BookID)
@@ -72,6 +80,10 @@ func registerNovelFetchLegacyWorkflowRoutes(mux *http.ServeMux, store novelfetch
 				}
 			}
 		}
+		if len(ids) == 0 {
+			writeJSON(w, http.StatusOK, map[string]any{"batch": nil})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"batch": map[string]any{"id": currentBatchID, "status": deriveNovelFetchBatchStatus(filterNovelFetchBatchDocuments(docs, currentBatchID)), "taskIds": ids, "bookIds": ids, "taskStates": states, "settingsSnapshot": map[string]any{"target_versions": targets}, "updatedAt": time.Now().UTC().Format(time.RFC3339Nano)}})
 	})
 
@@ -86,7 +98,7 @@ func registerNovelFetchLegacyWorkflowRoutes(mux *http.ServeMux, store novelfetch
 		}
 		groups := map[string][]novelfetchworkshop.Document{}
 		for _, doc := range docs {
-			batchID := strings.TrimSpace(fmt.Sprint(doc.Meta["currentBatchId"]))
+			batchID := novelFetchBatchIdentity(doc.Meta["currentBatchId"], doc.Meta["current_batch_id"])
 			if batchID == "" {
 				continue
 			}
@@ -126,7 +138,7 @@ func registerNovelFetchLegacyWorkflowRoutes(mux *http.ServeMux, store novelfetch
 		ids := make([]string, 0)
 		lines := make([]string, 0)
 		for _, row := range rows {
-			if strings.TrimSpace(fmt.Sprint(row.Meta["currentBatchId"])) != batchID {
+			if novelFetchBatchIdentity(row.Meta["currentBatchId"], row.Meta["current_batch_id"]) != batchID {
 				continue
 			}
 			failed := strings.Contains(strings.ToLower(fmt.Sprint(row.Meta["status"])), "fail") || strings.Contains(strings.ToLower(fmt.Sprint(row.Meta["aiStatus"])), "fail")
@@ -365,11 +377,29 @@ func registerNovelFetchLegacyWorkflowRoutes(mux *http.ServeMux, store novelfetch
 func filterNovelFetchBatchDocuments(documents []novelfetchworkshop.Document, batchID string) []novelfetchworkshop.Document {
 	result := make([]novelfetchworkshop.Document, 0, len(documents))
 	for _, document := range documents {
-		if strings.TrimSpace(fmt.Sprint(document.Meta["currentBatchId"])) == batchID {
+		if batchID != "" && novelFetchBatchIdentity(document.Meta["currentBatchId"], document.Meta["current_batch_id"]) == batchID {
 			result = append(result, document)
 		}
 	}
 	return result
+}
+
+// Batch identifiers are opaque strings. Missing or malformed metadata must not
+// become a real batch named "<nil>", "false", or a printed map.
+func novelFetchBatchIdentity(values ...any) string {
+	for _, value := range values {
+		id, ok := value.(string)
+		if !ok {
+			continue
+		}
+		id = strings.TrimSpace(id)
+		switch strings.ToLower(id) {
+		case "", "<nil>", "null", "undefined":
+			continue
+		}
+		return id
+	}
+	return ""
 }
 
 func deriveNovelFetchBatchStatus(documents []novelfetchworkshop.Document) string {
@@ -388,6 +418,20 @@ func deriveNovelFetchBatchStatus(documents []novelfetchworkshop.Document) string
 	}
 	if counts[novelfetchworkshop.TaskStatusQueued] > 0 {
 		return "queued"
+	}
+	for _, status := range []string{
+		novelfetchworkshop.TaskStatusWaitingRetry, novelfetchworkshop.TaskStatusWaitingLogin,
+		novelfetchworkshop.TaskStatusWaitingConfig, novelfetchworkshop.TaskStatusWaitingClassification,
+		novelfetchworkshop.TaskStatusWaitingSensitiveAI, novelfetchworkshop.TaskStatusUploadPending,
+		novelfetchworkshop.TaskStatusScheduledWaiting, novelfetchworkshop.TaskStatusStopped,
+	} {
+		if counts[status] > 0 {
+			return status
+		}
+	}
+	if counts[novelfetchworkshop.TaskStatusPendingSubmit] > 0 &&
+		counts[novelfetchworkshop.TaskStatusCompleted]+counts[novelfetchworkshop.TaskStatusPendingSubmit] == len(documents) {
+		return novelfetchworkshop.TaskStatusPendingSubmit
 	}
 	if counts[novelfetchworkshop.TaskStatusCompleted] == len(documents) {
 		return "done"

@@ -286,3 +286,59 @@ func (f *fakeRedisQueueDo) hasCommand(name string) bool {
 	}
 	return false
 }
+
+// Gate select argument evaluation to model scheduler/context contention after
+// the real timer is created. No queue behavior or timer is mocked.
+type readyClaimGateContext struct {
+	context.Context
+	entered, release chan struct{}
+}
+
+func (c readyClaimGateContext) Done() <-chan struct{} { close(c.entered); <-c.release; return nil }
+func TestMemoryClaimPrioritizesAlreadyQueuedWork(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		q := NewMemoryQueue()
+		job := ProcessJob{ID: "ready", Owner: "owner", BatchID: "batch", BookIDs: []string{"book"}}
+		if err := q.Enqueue(context.Background(), job); err != nil {
+			t.Fatal(err)
+		}
+		before := len(q.pending)
+		if before != 1 {
+			t.Fatal("fixture did not queue actual work")
+		}
+		ctx := readyClaimGateContext{Context: context.Background(), entered: make(chan struct{}), release: make(chan struct{})}
+		type result struct {
+			job ProcessJob
+			err error
+		}
+		done := make(chan result, 1)
+		go func() { j, e := q.Claim(ctx, time.Nanosecond); done <- result{j, e} }()
+		var got result
+		select {
+		case <-ctx.entered:
+			expired := time.NewTimer(time.Millisecond)
+			<-expired.C
+			close(ctx.release)
+			got = <-done
+		case got = <-done:
+		}
+		if got.err != nil || got.job.ID != job.ID {
+			t.Fatalf("queued work reported empty: before=%d after=%d id=%q err=%v", before, len(q.pending), got.job.ID, got.err)
+		}
+	}
+}
+func TestMemoryCancelledClaimPreservesQueuedWork(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		q := NewMemoryQueue()
+		job := ProcessJob{ID: "ready", Owner: "owner", BatchID: "batch", BookIDs: []string{"book"}}
+		if err := q.Enqueue(context.Background(), job); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := q.Claim(ctx, time.Nanosecond)
+		if !errors.Is(err, context.Canceled) || len(q.pending) != 1 {
+			t.Fatalf("cancelled claim consumed pending work: pending=%d err=%v", len(q.pending), err)
+		}
+	}
+}

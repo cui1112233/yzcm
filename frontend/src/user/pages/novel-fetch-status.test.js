@@ -229,6 +229,9 @@ test('task stage values are presented as Chinese workflow labels', () => {
   assert.equal(novelFetchStageLabel('done'), '已完成');
   assert.equal(novelFetchStageLabel('ai_done'), '已生成');
   assert.equal(novelFetchStageLabel('pending_upload'), '待提交');
+  assert.equal(novelFetchStageLabel('pending'), '待处理');
+  assert.equal(novelFetchStageLabel('scheduled_waiting'), '等待定时执行');
+  assert.equal(novelFetchStageLabel('upload_pending'), '正文已完成，待重试上传');
 });
 
 test('Beijing date does not fall back to the previous UTC day', () => {

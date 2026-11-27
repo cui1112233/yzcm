@@ -38,6 +38,7 @@ const done = value => /^(done|success|succeeded|completed|complete|ready|ai_done
 export function novelFetchStageLabel(value) {
   const normalized = text(value);
   return {
+    pending: '待处理', scheduled_waiting: '等待定时执行', upload_pending: '正文已完成，待重试上传',
     done: '已完成', success: '已完成', succeeded: '已完成', completed: '已完成', complete: '已完成',
     ready: '已就绪', ai_done: '已生成', generating: '生成中…', ai_processing: '生成中…',
     queued: '排队中', processing: '正在执行中…', running: '正在执行中…', waiting_retry: '等待重试',

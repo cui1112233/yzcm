@@ -18,10 +18,18 @@ func (q *orphanCheckQueue) ProcessJobExists(context.Context, string) (bool, erro
 func TestQueuedRecoveryRequiresMissingRedisJob(t *testing.T) {
 	for _, exists := range []bool{true, false} {
 		s := novelfetchworkshop.NewMemoryStore()
-		now := time.Now().UTC()
 		doc := novelfetchworkshop.Document{BookID: "orphan", Meta: map[string]any{"status": "queued", "currentProcessJobId": "old"}}
 		_ = s.PutDocument(context.Background(), "owner", doc)
-		doc.UpdatedAt = now.Add(-time.Hour).Format(time.RFC3339Nano)
+		persisted, err := s.GetDocument(context.Background(), "owner", doc.BookID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc = persisted
+		savedAt, err := time.Parse(time.RFC3339Nano, doc.UpdatedAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := savedAt.Add(time.Hour)
 		q := &orphanCheckQueue{MemoryQueue: novelfetchworkshop.NewMemoryQueue(), exists: exists}
 		recoverStaleNovelFetchTasks(context.Background(), s, "owner", map[string]any{}, []novelfetchworkshop.Document{doc}, now, q)
 		got, _ := s.GetDocument(context.Background(), "owner", doc.BookID)
@@ -39,10 +47,18 @@ func TestQueuedRecoveryRequiresMissingRedisJob(t *testing.T) {
 // 必须恢复成 waiting_retry，否则会永远停留在“排队中”。
 func TestQueuedRecoveryWithoutJobIDIsTreatedAsOrphan(t *testing.T) {
 	s := novelfetchworkshop.NewMemoryStore()
-	now := time.Now().UTC()
 	doc := novelfetchworkshop.Document{BookID: "orphan-no-job", Meta: map[string]any{"status": "queued"}}
 	_ = s.PutDocument(context.Background(), "owner", doc)
-	doc.UpdatedAt = now.Add(-time.Hour).Format(time.RFC3339Nano)
+	persisted, err := s.GetDocument(context.Background(), "owner", doc.BookID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc = persisted
+	savedAt, err := time.Parse(time.RFC3339Nano, doc.UpdatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := savedAt.Add(time.Hour)
 	q := &orphanCheckQueue{MemoryQueue: novelfetchworkshop.NewMemoryQueue(), exists: true}
 	recoverStaleNovelFetchTasks(context.Background(), s, "owner", map[string]any{}, []novelfetchworkshop.Document{doc}, now, q)
 	got, _ := s.GetDocument(context.Background(), "owner", doc.BookID)
