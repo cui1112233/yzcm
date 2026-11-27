@@ -75,7 +75,7 @@ func TestAppMigrationsIncludesV11AndV12Migrations(t *testing.T) {
 	want = append(want, ScreenplayProductionMigrations()...)
 	want = append(want, ScreenplayMediaMigrations()...)
 	want = append(want, ScreenplayAuthoringMigrations()...)
-	want = append(want, screenplayAssistantSessionMigration())
+	want = append(want, screenplayAssistantSessionMigration(), screenplayAssistantSessionUpgrade())
 	want = append(want, NovelCreationMigrations()...)
 	want = append(want, ProjectRetentionMigrations()...)
 	want = append(want, ImageCapacityMigrations()...)

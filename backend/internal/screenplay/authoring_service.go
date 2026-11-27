@@ -219,9 +219,9 @@ func (s AuthoringService) Save(ctx context.Context, o, p string, st AuthoringSta
 	st.Owner = o
 	if repo, ok := s.Repository.(*MySQLAuthoringRepository); ok {
 		actors := revokedSessionActors(old, st)
-		archive := !old.Archived && st.Archived
-		if archive || len(actors) > 0 {
-			return repo.saveAndStopRequests(ctx, st, v, actors, archive)
+		archiveChanged := old.Archived != st.Archived
+		if archiveChanged || len(actors) > 0 {
+			return repo.saveAndStopRequests(ctx, st, v, actors, archiveChanged)
 		}
 	}
 	return s.Repository.Save(ctx, st, v)

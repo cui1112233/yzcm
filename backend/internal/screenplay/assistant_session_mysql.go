@@ -98,7 +98,17 @@ func (r *MySQLAuthoringRepository) GetAssistantSession(ctx context.Context, owne
 		if err = s.tx.QueryRowContext(ctx, "SELECT body FROM screenplay_assistant_sessions WHERE owner_username=? AND project_id=? AND session_id=?", owner, project, id).Scan(&raw); err != nil {
 			return err
 		}
-		return json.Unmarshal(raw, &history)
+		if err = json.Unmarshal(raw, &history); err != nil {
+			return err
+		}
+		if !sessionActive(s.rows, id) || s.permissions.Archived {
+			for i := range history.Proposals {
+				if history.Proposals[i].Status == "pending" {
+					history.Proposals[i].Status = "stale"
+				}
+			}
+		}
+		return nil
 	})
 	return item, history, err
 }
@@ -165,12 +175,27 @@ func (r *MySQLAuthoringRepository) ChangeAssistantSession(ctx context.Context, o
 			if item.Archived == (action == "archive") {
 				return ErrInvalidState
 			}
-			if action == "archive" {
-				for child, v := range s.rows {
-					if child != id && v.RequestStatus != "" && sessionDescendant(s.rows, child, id) {
-						if err = s.clearRequest(child); err != nil {
-							return err
-						}
+			// Repeat on restore to retire proposals left pending by earlier versions.
+			children := make([]string, 0)
+			for child := range s.rows {
+				if sessionDescendant(s.rows, child, id) {
+					children = append(children, child)
+				}
+			}
+			sort.Strings(children)
+			for _, child := range children {
+				v := s.rows[child]
+				if err = s.stalePending(child); err != nil {
+					return err
+				}
+				if v.RequestStatus != "" {
+					if err = recordSessionRequests(ctx, s.tx, "unknown", "archived", sessionHistoryFilter, owner, project, child); err != nil {
+						return err
+					}
+				}
+				if child != id {
+					if err = s.clearRequest(child); err != nil {
+						return err
 					}
 				}
 			}
@@ -178,6 +203,9 @@ func (r *MySQLAuthoringRepository) ChangeAssistantSession(ctx context.Context, o
 		case "stop":
 			if item.RequestStatus == "" {
 				return ErrInvalidState
+			}
+			if err = recordSessionRequests(ctx, s.tx, "unknown", "stopped", sessionHistoryFilter, owner, project, id); err != nil {
+				return err
 			}
 			err = s.clearRequest(id)
 		default:
@@ -232,6 +260,9 @@ func (r *MySQLAuthoringRepository) FinishAssistantRequest(ctx context.Context, r
 			if item.Mode == "readonly" && len(history.Proposals) > 0 {
 				return ErrAccessDenied
 			}
+			if err = recordSessionRequests(ctx, s.tx, "completed", "completed", sessionHistoryFilter, req.Owner, req.Project, item.ID); err != nil {
+				return err
+			}
 			body, err := json.Marshal(history)
 			if err != nil {
 				return err
@@ -285,9 +316,18 @@ func (r *MySQLAuthoringRepository) saveAndStopRequests(ctx context.Context, st A
 	}
 	query := "UPDATE screenplay_assistant_sessions SET request_actor=NULL,request_status=NULL,request_token=NULL,request_deadline=NULL,revision=revision+1 WHERE owner_username=? AND project_id=? AND request_status IS NOT NULL"
 	if all {
+		if err = staleProjectSessions(ctx, tx, st.Owner, st.ProjectID); err != nil {
+			return AuthoringState{}, err
+		}
+		if err = recordSessionRequests(ctx, tx, "unknown", "project_archived", "", st.Owner, st.ProjectID); err != nil {
+			return AuthoringState{}, err
+		}
 		_, err = tx.ExecContext(ctx, query, st.Owner, st.ProjectID)
 	} else {
 		for _, actor := range actors {
+			if err = recordSessionRequests(ctx, tx, "unknown", "revoked", " AND request_actor=?", st.Owner, st.ProjectID, actor); err != nil {
+				return AuthoringState{}, err
+			}
 			if _, err = tx.ExecContext(ctx, query+" AND request_actor=?", st.Owner, st.ProjectID, actor); err != nil {
 				break
 			}
@@ -297,4 +337,95 @@ func (r *MySQLAuthoringRepository) saveAndStopRequests(ctx context.Context, st A
 		return AuthoringState{}, err
 	}
 	return st, tx.Commit()
+}
+
+const sessionHistoryFilter = " AND session_id=?"
+
+// Copy the exact stored token before releasing the reservation. Failure rolls
+// back both the history insert and the attempt to clear the active row.
+func recordSessionRequests(ctx context.Context, tx *sql.Tx, outcome, reason, filter string, scope ...any) error {
+	args := append([]any{outcome, reason}, scope...)
+	_, err := tx.ExecContext(ctx, `INSERT INTO screenplay_assistant_request_history(owner_username,project_id,session_id,request_token,actor,outcome,release_reason)
+        SELECT owner_username,project_id,session_id,request_token,request_actor,?,? FROM screenplay_assistant_sessions
+        WHERE owner_username=? AND project_id=? AND request_token IS NOT NULL`+filter, args...)
+	return err
+}
+
+// Change only proposal status; preserve unknown fields in saved history.
+func (s *sessionScope) stalePending(id string) error {
+	var raw []byte
+	if err := s.tx.QueryRowContext(s.ctx, "SELECT body FROM screenplay_assistant_sessions WHERE owner_username=? AND project_id=? AND session_id=?", s.owner, s.project, id).Scan(&raw); err != nil {
+		return err
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return err
+	}
+	if len(body["proposals"]) == 0 {
+		return nil
+	}
+	var proposals []map[string]json.RawMessage
+	if err := json.Unmarshal(body["proposals"], &proposals); err != nil {
+		return err
+	}
+	changed := false
+	for _, proposal := range proposals {
+		var status string
+		if len(proposal["status"]) == 0 {
+			continue
+		}
+		if err := json.Unmarshal(proposal["status"], &status); err != nil {
+			return err
+		}
+		if status == "pending" {
+			proposal["status"] = json.RawMessage(`"stale"`)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	updated, err := json.Marshal(proposals)
+	if err != nil {
+		return err
+	}
+	body["proposals"] = updated
+	raw, err = json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	result, err := s.tx.ExecContext(s.ctx, "UPDATE screenplay_assistant_sessions SET body=? WHERE owner_username=? AND project_id=? AND session_id=?", string(raw), s.owner, s.project, id)
+	return oneShotRow(result, err)
+}
+
+// The project row is already locked. Retire every session revision, including
+// idle children, before an archived project can later be restored.
+func staleProjectSessions(ctx context.Context, tx *sql.Tx, owner, project string) error {
+	rows, err := tx.QueryContext(ctx, "SELECT session_id FROM screenplay_assistant_sessions WHERE owner_username=? AND project_id=? ORDER BY session_id FOR UPDATE", owner, project)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	scope := sessionScope{tx: tx, ctx: ctx, owner: owner, project: project}
+	for _, id := range ids {
+		if err = scope.stalePending(id); err != nil {
+			return err
+		}
+	}
+	_, err = tx.ExecContext(ctx, "UPDATE screenplay_assistant_sessions SET revision=revision+1 WHERE owner_username=? AND project_id=?", owner, project)
+	return err
 }
