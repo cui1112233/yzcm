@@ -180,70 +180,33 @@ export default function SecurityPage() {
 
   if (loading) return <div className="account-center-page"><Skeleton active paragraph={{ rows: 9 }} /></div>;
 
-  return <div className="account-center-page security-page">
-    <PageHeader title="账号安全" subtitle="密码、MFA、Passkey 与登录设备安全" />
+  return <div className="account-center-page security-page pc-security">
+    <PageHeader title="账号安全" subtitle="管理登录方式、账号找回与已登录设备" />
 
-    <div className="ac-security-grid">
-      <Panel title="安全总览" className="ac-security-overview">
-        <div className="ac-security-status">
-          <span className="ac-security-status-icon"><ShieldCheck size={34} /></span>
-          <div><Tag color={mfaEnabled || hasPasskey ? 'green' : 'gold'}>{mfaEnabled || hasPasskey ? '强认证已配置' : '建议开启强认证'}</Tag><h3>{mfaEnabled || hasPasskey ? '账号已启用强登录保护' : '完成一项强认证即可提升保护'}</h3><p>Passkey 使用设备安全密钥验签；MFA 恢复码每个只能使用一次。</p></div>
-        </div>
-        <div className="ac-check-list security-checks">
-          <div><ShieldCheck size={16} className="done" /><span>账号状态</span><b>正常</b></div>
-          <div><KeyRound size={16} className="done" /><span>登录密码</span><b>已设置</b></div>
-          <div><Fingerprint size={16} className={hasPasskey ? 'done' : ''} /><span>Passkey</span><b>{hasPasskey ? `${passkeys.length} 个` : '未绑定'}</b></div>
-          <div><LockKeyhole size={16} className={mfaEnabled ? 'done' : ''} /><span>二步验证 / MFA</span><b>{mfaEnabled ? '已启用' : '未启用'}</b></div>
-        </div>
+    <div className="pc-security-grid">
+      <Panel title="身份验证" className="pc-security-auth">
+        <div className="pc-security-row"><span><KeyRound size={20} /></span><div><strong>登录密码</strong><small>修改后将退出同账号的其他会话</small></div><Tag color="green">已设置</Tag><Button onClick={() => setPasswordOpen(true)}>修改密码</Button></div>
+        <div className="pc-security-row"><span><LockKeyhole size={20} /></span><div><strong>二步验证 / MFA</strong><small>动态验证码与一次性恢复码</small></div><Tag color={mfaEnabled ? 'green' : 'gold'}>{mfaEnabled ? '已启用' : '未启用'}</Tag><Button type={mfaEnabled ? 'default' : 'primary'} onClick={() => { setMfaSetup(null); mfaForm.resetFields(); setMfaOpen(true); }}>{mfaEnabled ? '管理 MFA' : '开启 MFA'}</Button></div>
+        <div className="pc-security-row pc-security-passkey"><span><Fingerprint size={20} /></span><div><strong>Passkey / 安全密钥</strong><small>使用 Windows Hello、Touch ID、Face ID 或硬件密钥</small></div><Tag color={hasPasskey ? 'green' : 'default'}>{hasPasskey ? `${passkeys.length} 个` : '未绑定'}</Tag><Button disabled={!passkeySupported()} loading={saving} onClick={addPasskey}>添加设备</Button></div>
+        {passkeys.length ? <div className="ac-session-list ac-passkey-list">{passkeys.map(item => <div key={item.id}><span className="ac-session-icon"><Fingerprint size={17} /></span><div><strong>{item.name}</strong><small>创建于 {formatDate(item.createdAt)}{item.lastUsedAt ? ` · 最近使用 ${formatDate(item.lastUsedAt)}` : ''}</small></div><Button type="text" danger icon={<Trash2 size={15} />} disabled={saving} onClick={() => deletePasskey(item.id)} /></div>)}</div> : null}
       </Panel>
 
-      <Panel title="登录密码">
-        <div className="ac-security-card-icon"><KeyRound size={22} /></div><h3>定期更新登录密码</h3>
-        <p className="ac-muted-copy">修改后保留当前会话，并退出同账号的其他会话。</p>
-        <Button block onClick={() => setPasswordOpen(true)}>修改密码</Button>
+      <Panel title="账号找回" className="pc-security-recovery">
+        <div className="pc-security-recovery-email"><span><Mail size={22} /></span><div><strong>{emailStatus?.email || '尚未设置恢复邮箱'}</strong><small>{emailStatus?.verified ? '邮箱已验证，可用于账号找回' : '验证邮箱后可安全找回账号'}</small></div>{emailStatus?.verified ? <Tag color="green">已验证</Tag> : <Button loading={mailing} disabled={!emailStatus?.email || !emailStatus?.deliveryConfigured} onClick={sendRecoveryVerification}>发送验证</Button>}</div>
+        <div className="pc-security-recovery-actions"><a href="/recover?mode=account">忘记账号</a><a href="/recover?mode=password">忘记密码</a></div>
+        <p>如果无法使用邮箱，管理员也可以在确认身份后为成员重置密码。</p>
       </Panel>
 
-      <Panel title="二步验证 / MFA">
-        <div className="ac-security-card-icon violet"><LockKeyhole size={22} /></div>
-        <h3>{mfaEnabled ? '动态验证码已启用' : '增加第二层登录保护'}</h3>
-        <p className="ac-muted-copy">兼容常见 TOTP 验证器。当前剩余 {security?.mfa?.recoveryCodesRemaining || 0} 个恢复码。</p>
-        <Button block type={mfaEnabled ? 'default' : 'primary'} onClick={() => { setMfaSetup(null); mfaForm.resetFields(); setMfaOpen(true); }}>{mfaEnabled ? '管理 MFA' : '开启 MFA'}</Button>
-      </Panel>
-    </div>
-
-    <div className="ac-two-column security-session-grid">
-      <Panel title="Passkey / 安全密钥" eyebrow="PASSWORDLESS">
-        <div className="ac-session-control"><span><Fingerprint size={22} /></span><div><h3>使用设备解锁登录</h3><p>Passkey 可使用 Windows Hello、Touch ID、Face ID 或硬件安全密钥，不需要把私钥发送给服务器。</p></div></div>
-        <Button type="primary" icon={<Fingerprint size={16} />} disabled={!passkeySupported()} loading={saving} onClick={addPasskey}>添加当前设备 Passkey</Button>
-        {!passkeySupported() ? <p className="ac-security-note">Passkey 需要 HTTPS 或本机安全环境，以及支持 WebAuthn 的现代浏览器。</p> : null}
-        <div className="ac-session-list ac-passkey-list">
-          {passkeys.map(item => <div key={item.id}>
-            <span className="ac-session-icon"><Fingerprint size={17} /></span>
-            <div><strong>{item.name}</strong><small>创建于 {formatDate(item.createdAt)}{item.lastUsedAt ? ` · 最近使用 ${formatDate(item.lastUsedAt)}` : ''}</small></div>
-            <Button type="text" danger icon={<Trash2 size={15} />} disabled={saving} onClick={() => deletePasskey(item.id)} />
-          </div>)}
-          {!passkeys.length ? <div className="ac-empty">尚未绑定 Passkey</div> : null}
-        </div>
-      </Panel>
-
-      <Panel title="当前与活动设备" eyebrow="ACTIVE DEVICES">
+      <Panel title="当前设备和其他登录设备" className="pc-security-devices" action={<Button danger icon={<LogOut size={15} />} loading={saving} disabled={!security?.otherSessionCount} onClick={revokeOthers}>退出其他设备</Button>}>
         <div className="ac-session-list">
           {(security?.sessions || []).map(session => <div key={`runtime-${session.id}`}><span className="ac-session-icon"><Laptop size={17} /></span><div><strong>{session.current ? `当前设备 · ${deviceLabel(session)}` : deviceLabel(session)}</strong><small>{session.issuedAt ? `登录于 ${formatDate(session.issuedAt)}` : '活动登录会话'}{session.ipHint ? ` · ${session.ipHint}` : ''}</small></div><Tag color={session.current ? 'green' : 'blue'}>{session.current ? '当前设备' : '活动'}</Tag></div>)}
           {(security?.persistentSessions || []).map(session => <div key={`persist-${session.id}`}><span className="ac-session-icon"><TimerReset size={17} /></span><div><strong>{deviceLabel(session)}</strong><small>{session.issuedAt ? `登录于 ${formatDate(session.issuedAt)} · ` : ''}有效期至 {formatDate(session.expiresAt)}{session.ipHint ? ` · ${session.ipHint}` : ''}</small></div><Tag>{session.current ? '当前' : '已记住'}</Tag></div>)}
           {!sessionCount ? <div className="ac-empty">当前仅有本次登录会话</div> : null}
         </div>
       </Panel>
-    </div>
 
-    <div className="security-recovery-grid">
-      <Panel title="会话管理" eyebrow="SESSION CONTROL">
-        <div className="ac-session-control"><span><LogOut size={22} /></span><div><h3>退出其他设备</h3><p>撤销其他运行时 Token 与持久化登录凭据，不影响当前页面。</p></div></div>
-        <Button danger loading={saving} disabled={!security?.otherSessionCount} onClick={revokeOthers}>退出其他设备</Button>
-        <p className="ac-security-note">网络信息只保留类似 192.168.*.* 的模糊提示，不做精确位置跟踪。</p>
-      </Panel>
-      <Panel title="邮箱恢复" eyebrow="ACCOUNT RECOVERY">
-        <div className="ac-session-control"><span><Mail size={22} /></span><div><h3>{emailStatus?.email || '尚未设置恢复邮箱'}</h3><p>{emailStatus?.verified ? '已验证邮箱可用于找回密码。' : '请完成邮箱验证，以便在忘记密码时安全找回账号。'}</p></div></div>
-        {emailStatus?.verified ? <Tag color="green">已验证</Tag> : <Button type="primary" loading={mailing} disabled={!emailStatus?.email || !emailStatus?.deliveryConfigured} onClick={sendRecoveryVerification}>{emailStatus?.email ? '发送验证邮件' : '请先在个人资料填写邮箱'}</Button>}
+      <Panel title="安全活动" className="pc-security-activity">
+        <div className="pc-security-activity-empty"><ShieldCheck size={28} /><strong>未发现异常活动</strong><p>这里仅展示系统能够确认的登录会话；详细安全活动记录暂未提供。</p></div>
       </Panel>
     </div>
 

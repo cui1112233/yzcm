@@ -120,6 +120,64 @@
 .pc-empty strong { color: var(--pc-text); font-size: 16px; }
 .pc-empty p { max-width: 38ch; margin: 0; line-height: 1.65; }
 
+/* Compact profile card: the role emblem sits beside the name and never owns a full panel. */
+.pc-profile-identity { position: relative; display: grid; grid-template-columns: auto minmax(220px, 1fr) auto; grid-template-areas: "avatar name role" "avatar action role"; align-items: center; gap: 4px 22px; min-height: 154px; margin-bottom: 18px; padding: 22px 28px; overflow: hidden; border: 1px solid var(--pc-line); border-radius: 22px; background: linear-gradient(125deg, rgba(38, 70, 137, .72), rgba(13, 30, 72, .65)); box-shadow: inset 0 1px rgba(255,255,255,.2), 0 18px 42px rgba(0,4,24,.25); backdrop-filter: blur(24px) saturate(1.2); }
+.pc-profile-identity::after { content: ''; position: absolute; width: 360px; height: 78px; right: -52px; bottom: -28px; border: 12px solid rgba(106, 223, 255, .16); border-radius: 50%; transform: rotate(-13deg); box-shadow: 0 0 30px rgba(133, 91, 255, .22); pointer-events: none; }
+.pc-profile-avatar { position: relative; z-index: 1; grid-area: avatar; padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
+.pc-profile-avatar .ant-avatar { box-shadow: 0 0 0 2px rgba(221, 241, 255, .78), 0 0 26px rgba(77, 220, 255, .24); }
+.pc-profile-avatar i { position: absolute; right: -2px; bottom: 2px; display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid rgba(147, 224, 255, .64); border-radius: 50%; color: #fff; background: #213b82; }
+.pc-profile-name { grid-area: name; min-width: 0; }
+.pc-profile-name > div { display: flex; align-items: center; gap: 10px; }
+.pc-profile-name strong { overflow: hidden; color: #fff; font-size: 27px; letter-spacing: .02em; text-overflow: ellipsis; white-space: nowrap; }
+.pc-profile-name small { display: block; margin: 2px 0 8px; color: var(--pc-muted); font-size: 14px; }
+.pc-profile-name > span { display: inline-flex; align-items: center; gap: 7px; color: var(--pc-success); font-size: 13px; }
+.pc-profile-role { position: relative; z-index: 1; grid-area: role; display: grid; justify-items: end; gap: 10px; min-width: 230px; }
+.pc-profile-role .member-role-badge { font-size: 16px; }
+.pc-profile-role small { color: var(--pc-muted); }
+.pc-profile-avatar-action { grid-area: action; width: max-content; }
+.member-role-badge { display: inline-flex; align-items: center; gap: 7px; color: var(--pc-gold); }
+.pc-profile-grid { display: grid; grid-template-columns: minmax(0, 1.14fr) minmax(360px, .86fr); gap: 18px; align-items: start; }
+.pc-profile-side { display: grid; gap: 18px; }
+.pc-profile .ac-panel { padding: 0; }
+.pc-profile .ac-panel-header { display: flex; align-items: center; justify-content: space-between; min-height: 58px; padding: 0 22px; border-bottom: 1px solid rgba(132, 202, 255, .2); }
+.pc-profile .ac-panel-header h2 { margin: 0; font-size: 19px; }
+.pc-profile-basic > :not(header), .pc-profile-ownership > :not(header), .pc-profile-visibility > :not(header) { margin-inline: 22px; }
+.pc-profile-fields, .pc-profile-list { display: grid; padding: 8px 0 18px; }
+.pc-profile-fields > div, .pc-profile-list > div { display: grid; grid-template-columns: 118px minmax(0, 1fr) auto; align-items: center; min-height: 52px; gap: 10px; border-bottom: 1px solid rgba(132, 202, 255, .14); }
+.pc-profile-fields span, .pc-profile-list span { color: var(--pc-muted); }
+.pc-profile-fields strong, .pc-profile-list strong { color: var(--pc-text); font-weight: 560; }
+.pc-profile-fields .pc-profile-bio { display: block; min-height: 112px; padding-top: 15px; }
+.pc-profile-bio p { min-height: 62px; margin: 10px 0 0; padding: 13px 15px; border: 1px solid rgba(132, 202, 255, .22); border-radius: 12px; color: #d9e5f8; background: rgba(7, 21, 53, .34); line-height: 1.7; }
+.pc-profile-basic > .ant-btn-primary { margin: 0 22px 22px; }
+.pc-profile-notice { display: flex; gap: 10px; margin-top: 16px !important; padding: 12px 14px; border: 1px solid rgba(119, 194, 255, .28); border-radius: 12px; color: #cfe0fa; background: rgba(61, 105, 184, .22); }
+.pc-profile-notice svg { flex: 0 0 auto; margin-top: 2px; color: var(--pc-cyan); }
+.pc-profile-notice p { margin: 0; line-height: 1.65; }
+.pc-profile-security-link { display: inline-flex; align-items: center; gap: 7px; margin-bottom: 18px !important; color: #91eaff; text-decoration: none; }
+
+.pc-security-grid { display: grid; grid-template-columns: minmax(0, 1.18fr) minmax(340px, .82fr); gap: 18px; align-items: start; }
+.pc-security .ac-panel { padding: 0; }
+.pc-security .ac-panel-header { display: flex; align-items: center; justify-content: space-between; min-height: 58px; padding: 0 22px; border-bottom: 1px solid rgba(132, 202, 255, .2); }
+.pc-security .ac-panel-header h2 { margin: 0; font-size: 19px; }
+.pc-security-auth, .pc-security-devices { grid-column: 1; }
+.pc-security-recovery, .pc-security-activity { grid-column: 2; }
+.pc-security-recovery { grid-row: 1; }
+.pc-security-devices { grid-row: 2; }
+.pc-security-activity { grid-row: 2; }
+.pc-security-row { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto auto; align-items: center; gap: 14px; min-height: 82px; margin: 0 22px; border-bottom: 1px solid rgba(132, 202, 255, .16); }
+.pc-security-row > span, .pc-security-recovery-email > span { display: grid; width: 40px; height: 40px; place-items: center; border: 1px solid rgba(102, 221, 255, .42); border-radius: 13px; color: var(--pc-cyan); background: rgba(77, 220, 255, .08); }
+.pc-security-row > div, .pc-security-recovery-email > div { display: grid; gap: 4px; }
+.pc-security-row small, .pc-security-recovery-email small { color: var(--pc-muted); }
+.pc-security-auth > .ac-session-list { margin: 0 22px 18px; padding-top: 10px; }
+.pc-security-recovery-email { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 13px; margin: 20px 22px 14px; }
+.pc-security-recovery-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 0 22px 14px; }
+.pc-security-recovery-actions a { padding: 11px 14px; border: 1px solid rgba(132, 202, 255, .3); border-radius: 11px; color: #b9edff; background: rgba(35, 75, 143, .3); text-align: center; text-decoration: none; }
+.pc-security-recovery > p { margin: 0 22px 20px; color: var(--pc-muted); line-height: 1.6; }
+.pc-security-devices > .ac-session-list { margin: 14px 22px 20px; }
+.pc-security-activity-empty { display: grid; min-height: 170px; place-items: center; align-content: center; gap: 8px; padding: 24px; color: var(--pc-muted); text-align: center; }
+.pc-security-activity-empty svg { color: var(--pc-success); filter: drop-shadow(0 0 12px rgba(88, 230, 169, .3)); }
+.pc-security-activity-empty strong { color: var(--pc-text); }
+.pc-security-activity-empty p { max-width: 34ch; margin: 0; line-height: 1.65; }
+
 .pc-overview,
 .pc-profile,
 .pc-security,
@@ -141,6 +199,8 @@
   .pc-top-account > em { display: none; }
   .pc-main > .account-center-page,
   .pc-main > .api-config-page { padding-inline: 20px; }
+  .pc-profile-grid, .pc-security-grid { grid-template-columns: 1fr; }
+  .pc-security-auth, .pc-security-recovery, .pc-security-devices, .pc-security-activity { grid-column: 1; grid-row: auto; }
 }
 
 @media (max-width: 760px) {
@@ -159,6 +219,10 @@
   .pc-sidebar-actions button { justify-content: center; padding-inline: 0; }
   .pc-main > .account-center-page,
   .pc-main > .api-config-page { padding: 18px 12px 38px; }
+  .pc-profile-identity { grid-template-columns: auto 1fr; grid-template-areas: "avatar name" "action role"; padding: 18px; }
+  .pc-profile-role { min-width: 0; justify-items: start; }
+  .pc-security-row { grid-template-columns: 38px minmax(0, 1fr) auto; }
+  .pc-security-row > .ant-btn { grid-column: 2 / -1; justify-self: start; }
 }
 
 @media (prefers-reduced-motion: reduce) {

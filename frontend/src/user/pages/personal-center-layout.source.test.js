@@ -24,6 +24,25 @@ test('profile and security pages do not show a fabricated security score', () =>
   assert.doesNotMatch(security, /安全评分|percent=\{score\}/);
 });
 
+test('profile matches the approved identity, basic information, ownership and visibility structure', () => {
+  const profile = read('user/pages/ProfilePage.jsx');
+  for (const region of ['pc-profile-identity', 'pc-profile-basic', 'pc-profile-ownership', 'pc-profile-visibility']) {
+    assert.match(profile, new RegExp(region));
+  }
+  assert.match(profile, /RoleEnergyIcon/);
+  assert.doesNotMatch(profile, /资料完整度|联合治理权限|ac-profile-cards-grid/);
+});
+
+test('security matches authentication, recovery, devices and activity without fake controls', () => {
+  const security = read('user/pages/SecurityPage.jsx');
+  for (const region of ['pc-security-auth', 'pc-security-recovery', 'pc-security-devices', 'pc-security-activity']) {
+    assert.match(security, new RegExp(region));
+  }
+  assert.match(security, /修改密码/);
+  assert.match(security, /忘记账号|忘记密码/);
+  assert.doesNotMatch(security, /安全评分/);
+});
+
 test('the visual system provides glass energy motion and reduced-motion fallback', () => {
   const css = read('shared/styles/account-center-pixel-parity.css');
   assert.match(css, /\.pc-energy-scene/);

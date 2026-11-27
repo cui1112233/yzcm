@@ -1,12 +1,12 @@
 import { Avatar, Progress } from 'antd';
-import { Crown, ShieldCheck, BadgeCheck } from 'lucide-react';
 import { canonicalRoleLabel } from './accountCenterMemberState.js';
+import RoleEnergyIcon from '../components/RoleEnergyIcon.jsx';
 
 const ROLE_META = {
-  开发创始: { icon: Crown, style: 'dev' },
-  开发者: { icon: Crown, style: 'dev' },
-  管理者: { icon: ShieldCheck, style: 'manager' },
-  组员: { icon: BadgeCheck, style: 'member' }
+  开发创始: { style: 'dev' },
+  开发者: { style: 'dev' },
+  管理者: { style: 'manager' },
+  组员: { style: 'member' }
 };
 
 export const FEATURE_LABELS = {
@@ -48,9 +48,8 @@ export function avatarFallback(member) {
 export function RoleBadge({ canonicalRole, compact = false }) {
   const label = canonicalRoleLabel(canonicalRole);
   const meta = ROLE_META[label];
-  const Icon = meta?.icon;
   return <span className={`member-role-badge${meta ? ` role-${meta.style}` : ''}${compact ? ' compact' : ''}`}>
-    {Icon && <Icon size={compact ? 11 : 14} strokeWidth={2.1} aria-hidden="true" />}
+    <RoleEnergyIcon role={label} size={compact ? 18 : 22} decorative />
     {label}
   </span>;
 }
