@@ -102,6 +102,11 @@ func (s *UserConfigStore) configPath(username string) (string, error) {
 }
 
 func (s *UserConfigStore) read(username string) map[string]any {
+	config, _ := s.effectiveConfig(username)
+	return config
+}
+
+func (s *UserConfigStore) readLegacyConfig(username string) map[string]any {
 	config := cloneConfigMap(defaultUserConfig)
 	if s == nil || s.BaseDir == "" {
 		return config
@@ -128,8 +133,23 @@ func (s *UserConfigStore) read(username string) map[string]any {
 // Go settings routes. Callers must still redact secrets before returning data
 // to a browser.
 func (s *UserConfigStore) GetConfig(_ context.Context, username string) (map[string]any, error) {
-	config := s.read(username)
+	config, err := s.effectiveConfig(username)
 	delete(config, novelfetchworkshop.LegacyModelDefaultsFileKey)
+	return config, err
+}
+
+func (s *UserConfigStore) effectiveConfig(username string) (map[string]any, error) {
+	changes, err := s.deferredSettings(username)
+	if err != nil {
+		return nil, err
+	}
+	config := s.readLegacyConfig(username)
+	if changes != nil {
+		config = mergeConfigMap(config, changes)
+		if replacement, ok := changes[apiIntegrationsSettingKey]; ok {
+			config[apiIntegrationsSettingKey] = replacement
+		}
+	}
 	return config, nil
 }
 
@@ -149,10 +169,6 @@ func (s *UserConfigStore) writeConfig(username string, config map[string]any, st
 	if err != nil {
 		return fmt.Errorf("用户名不合法")
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
 	// 落盘加密：在深拷贝上转换，避免把调用方内存里的明文替换成密文。
 	persisted := config
 	if cloned, ok := deepCloneConfigValue(config).(map[string]any); ok {
@@ -164,6 +180,13 @@ func (s *UserConfigStore) writeConfig(username string, config map[string]any, st
 			s.secrets.encrypt(cloned)
 		}
 		persisted = cloned
+	}
+	return writeUserConfigDocument(path, persisted)
+}
+
+func writeUserConfigDocument(path string, persisted any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
 	}
 	raw, err := json.MarshalIndent(persisted, "", "  ")
 	if err != nil {
@@ -323,8 +346,12 @@ func registerUserConfigRoutes(root *http.ServeMux, middleware BridgeAuth, store 
 			return
 		}
 		store.mu.Lock()
-		config := store.read(identity.Username)
+		config, err := store.effectiveConfig(identity.Username)
 		store.mu.Unlock()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "配置读取失败"})
+			return
+		}
 		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusOK, view(req, identity, config))
 	})))
@@ -351,8 +378,11 @@ func registerUserConfigRoutes(root *http.ServeMux, middleware BridgeAuth, store 
 			return
 		}
 		store.mu.Lock()
-		config := mergeConfigMap(store.read(identity.Username), patch)
-		err := store.writeAuthenticatedConfig(identity.Username, config)
+		config, err := store.effectiveConfig(identity.Username)
+		if err == nil {
+			config = mergeConfigMap(config, patch)
+			err = store.writeSettingsPatch(req.Context(), identity.Username, config, patch, catalogStore)
+		}
 		store.mu.Unlock()
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "配置保存失败"})

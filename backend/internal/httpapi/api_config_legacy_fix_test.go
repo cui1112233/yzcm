@@ -720,11 +720,15 @@ JSON_OBJECT('personal_api',JSON_OBJECT('apiKey',?,'model','fixture-video'))) WHE
 		faults                  bool
 		delayed                 bool
 		savePreference          bool
+		rewritePreferenceFile   bool
+		preferenceFirst         bool
 	}{
 		{owner: "mixed-conflict", fileKey: second, faults: true},
 		{owner: "delayed-conflict", fileKey: second, delayed: true},
 		{owner: "delayed-write-failure", fileKey: second, delayed: true, faults: true},
 		{owner: "delayed-preference-save", fileKey: second, delayed: true, savePreference: true},
+		{owner: "delayed-preference-copy", fileKey: second, delayed: true, savePreference: true, rewritePreferenceFile: true},
+		{owner: "delayed-preference-first", fileKey: second, delayed: true, savePreference: true, preferenceFirst: true},
 		{owner: "delayed-identical", fileKey: first, runtime: first, delayed: true},
 		{owner: "mixed-identical", fileKey: first, runtime: first},
 		{owner: "mixed-established", fileKey: second, runtime: established, existing: official(map[string]any{"credential": established})},
@@ -754,15 +758,19 @@ JSON_OBJECT('personal_api',JSON_OBJECT('apiKey',?,'model','fixture-video'))) WHE
 				if err := os.Rename(path, path+".offline"); err != nil {
 					t.Fatal(err)
 				}
-				public, err := store.GetConfig(ctx, tc.owner)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if raw := rawConfig(t, tc.owner); strings.Contains(raw, first) || strings.Contains(raw, "entry-v2") {
-					t.Error("unchecked database source was stored in plaintext or marked complete")
-				}
-				if _, exposed := public["modelCatalogLegacyVideoPending"]; exposed {
-					t.Error("internal video provenance reached the returned configuration")
+				var public map[string]any
+				if !tc.preferenceFirst {
+					var err error
+					public, err = store.GetConfig(ctx, tc.owner)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if raw := rawConfig(t, tc.owner); strings.Contains(raw, first) || strings.Contains(raw, "entry-v2") {
+						t.Error("unchecked database source was stored in plaintext or marked complete")
+					}
+					if _, exposed := public["modelCatalogLegacyVideoPending"]; exposed {
+						t.Error("internal video provenance reached the returned configuration")
+					}
 				}
 				if tc.savePreference {
 					var schema string
@@ -773,14 +781,36 @@ JSON_OBJECT('personal_api',JSON_OBJECT('apiKey',?,'model','fixture-video'))) WHE
 					router := NewRouter(RouterOptions{AuthStore: login, AccountCenterStore: center, NovelFetchStore: store, UserConfigStore: config, Now: func() time.Time { return now }})
 					for _, volume := range []int{37, 42} {
 						body := fmt.Sprintf(`{"notifications":{"soundVolume":%d}}`, volume)
+						if volume == 37 {
+							body = `{"notifications":{"soundVolume":37,"soundEnabled":false}}`
+						}
 						response := impersonationRequest(router, "POST", "/api/config", tc.owner, body, nil)
 						if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "modelCatalogLegacy") {
 							t.Fatal("ordinary preference save failed or returned internal migration metadata")
 						}
-						file, err := os.ReadFile(path)
+						fresh := NewRouter(RouterOptions{AuthStore: login, AccountCenterStore: center, NovelFetchStore: coldStore(), UserConfigStore: NewUserConfigStore(dir), Now: func() time.Time { return now }})
+						got := impersonationRequest(fresh, "GET", "/api/config", tc.owner, "", nil)
 						var saved struct{ Notifications struct{ SoundVolume int } }
-						if err != nil || json.Unmarshal(file, &saved) != nil || saved.Notifications.SoundVolume != volume {
-							t.Fatal("ordinary save did not persist notifications at the missing file path")
+						if got.Code != http.StatusOK || json.Unmarshal(got.Body.Bytes(), &saved) != nil || saved.Notifications.SoundVolume != volume {
+							t.Fatal("ordinary preference save did not survive a fresh store")
+						}
+					}
+					if tc.rewritePreferenceFile {
+						replacements := []string{`{"notifications":{"soundVolume":42}}`, `{"modelCatalog":[],"modelCatalogLegacyDefaultsFile":false}`, `{"settings":{"videoProviders":{"personal_api":{"model":"fixture-video","apiKey":""}}}}`}
+						changes, err := os.ReadFile(filepath.Join(filepath.Dir(path), "deferred-settings.json"))
+						if err != nil || !bytes.Contains(changes, []byte("enc:v2:")) || bytes.Contains(changes, []byte("soundVolume")) {
+							t.Error("deferred preference changes are not independently encrypted")
+						} else {
+							replacements = append(replacements, string(changes))
+						}
+						for _, doc := range replacements {
+							if err := os.WriteFile(path, []byte(doc), 0600); err != nil {
+								t.Fatal(err)
+							}
+							resolved, err := NewCatalogVideoProviderRegistry(center, coldStore()).ResolveExactVideoModel(ctx, tc.owner, model)
+							if err == nil || resolved.APIKey != "" || !strings.Contains(rawConfig(t, tc.owner), "modelCatalogLegacyVideoPending") {
+								t.Error("a replacement without matching video credential evidence completed the migration")
+							}
 						}
 					}
 				} else {
@@ -871,6 +901,22 @@ JSON_OBJECT('personal_api',JSON_OBJECT('apiKey',?,'model','fixture-video'))) WHE
 					t.Fatal("another restart changed the reconciled video")
 				}
 				wantState(t)
+				if tc.savePreference {
+					router := NewRouter(RouterOptions{AuthStore: login, AccountCenterStore: center, NovelFetchStore: store, UserConfigStore: NewUserConfigStore(dir), Now: func() time.Time { return now }})
+					reply := impersonationRequest(router, "GET", "/api/config", tc.owner, "", nil)
+					var prefs struct {
+						Notifications struct {
+							SoundVolume  int
+							SoundEnabled *bool
+						}
+					}
+					if reply.Code != http.StatusOK || json.Unmarshal(reply.Body.Bytes(), &prefs) != nil || prefs.Notifications.SoundVolume != 42 {
+						t.Errorf("restoring legacy credentials lost the saved sound volume: got %d, want 42", prefs.Notifications.SoundVolume)
+					}
+					if prefs.Notifications.SoundEnabled == nil || *prefs.Notifications.SoundEnabled {
+						t.Error("restoring the file lost the earlier mute preference")
+					}
+				}
 			}
 			file, err := os.ReadFile(path)
 			raw := rawConfig(t, tc.owner)

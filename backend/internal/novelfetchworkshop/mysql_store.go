@@ -354,6 +354,15 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 		if err != nil {
 			return nil, err
 		}
+		if pending := settings[legacyVideoPendingKey]; pending != nil && legacy != nil {
+			ready, err := s.pendingVideoFileReady(owner, pending, legacy)
+			if err != nil {
+				return nil, err
+			}
+			if !ready {
+				legacy = nil
+			}
+		}
 		if legacy == nil && ModelConfigText(settings, modelLegacyScrubPendingKey) != "" {
 			return nil, fmt.Errorf("legacy model file is unavailable during credential cleanup")
 		}

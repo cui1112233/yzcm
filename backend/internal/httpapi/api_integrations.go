@@ -470,8 +470,12 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 			return
 		}
 		store.mu.Lock()
-		config := store.read(access.identity.Subject.Username)
+		config, err := store.effectiveConfig(access.identity.Subject.Username)
 		store.mu.Unlock()
+		if err != nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "读取接口配置失败")
+			return
+		}
 		writeJSON(w, http.StatusOK, access.response(apiIntegrationsView(apiIntegrationStoredMap(config))))
 	})))
 
@@ -496,7 +500,11 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 		}
 		store.mu.Lock()
 		defer store.mu.Unlock()
-		config := store.read(identity.Username)
+		config, err := store.effectiveConfig(identity.Username)
+		if err != nil {
+			writeAuthError(w, http.StatusServiceUnavailable, "读取接口配置失败")
+			return
+		}
 		stored := apiIntegrationStoredMap(config)
 		values := apiIntegrationValues(stored)
 		nextValues := map[string]any{}
@@ -571,7 +579,7 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 		}
 		next["channelSelection"] = selection
 		config[apiIntegrationsSettingKey] = next
-		if err := store.writeAuthenticatedConfig(identity.Username, config); err != nil {
+		if err := store.writeSettingsPatch(req.Context(), identity.Username, config, map[string]any{apiIntegrationsSettingKey: next}, catalog); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "配置保存失败"})
 			return
 		}
@@ -635,12 +643,17 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 			return
 		}
 		store.mu.Lock()
-		config := store.read(identity.Username)
+		config, err := store.effectiveConfig(identity.Username)
+		if err != nil {
+			store.mu.Unlock()
+			writeAuthError(w, http.StatusServiceUnavailable, "读取接口配置失败")
+			return
+		}
 		path, pathErr := store.configPath(identity.Username)
 		raw, rawErr := os.ReadFile(path)
 		var persisted map[string]any
 		if pathErr == nil && rawErr == nil && json.Unmarshal(raw, &persisted) == nil && CountPlaintextConfigSecrets(persisted) > 0 {
-			if err := store.writeAuthenticatedConfig(identity.Username, config); err != nil {
+			if err := store.writeAuthenticatedConfig(identity.Username, store.readLegacyConfig(identity.Username)); err != nil {
 				store.mu.Unlock()
 				writeAuthError(w, http.StatusServiceUnavailable, "加密旧配置失败")
 				return
