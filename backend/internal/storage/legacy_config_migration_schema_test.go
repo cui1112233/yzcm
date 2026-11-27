@@ -37,3 +37,37 @@ func TestLegacyConfigMigrationStateSchema(t *testing.T) {
 	}
 	t.Logf("MySQL %s migration 1200007 registered once with checksum %s", version, checksum)
 }
+
+func TestLegacySettingFileReceiptsUpgrade(t *testing.T) {
+	ctx := context.Background()
+	db := energyMigrationTestDatabase(t)
+	old := legacyConfigMigrationStateSchema()
+	if err := RunMigrations(ctx, db, []Migration{old}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO novel_fetch_legacy_config_migrations(owner_username,phase,revision,candidate_ciphertext) VALUES('kept','finalizing',9,'synthetic')"); err != nil {
+		t.Fatal(err)
+	}
+	var registration []Migration
+	for _, m := range NovelFetchWorkshopMigrations() {
+		if m.Version == 1200008 {
+			registration = append(registration, m)
+		}
+	}
+	if len(registration) != 1 {
+		t.Fatalf("file receipt migration registrations=%d", len(registration))
+	}
+	for range 2 {
+		if err := RunMigrations(ctx, db, registration); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM novel_fetch_legacy_config_migrations WHERE owner_username='kept' AND phase='finalizing' AND revision=9 AND candidate_ciphertext='synthetic'").Scan(&n); err != nil || n != 1 {
+		t.Fatal("existing state changed during additive migration", err)
+	}
+	var checksum string
+	if err := db.QueryRow("SELECT checksum FROM schema_migrations WHERE version=1200007").Scan(&checksum); err != nil || checksum != ChecksumFor(old) {
+		t.Fatal("historical migration checksum changed", err)
+	}
+}

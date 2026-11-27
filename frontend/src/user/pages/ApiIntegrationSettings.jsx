@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import ApiCustomModelModal from './ApiCustomModelModal';
 import ApiPresetSelectionModal from './ApiPresetSelectionModal';
 import { API_CHANNEL_PRESETS, API_INTEGRATION_GROUPS } from './apiIntegrationSchema';
+import { channelEdits, mergeChannelEdit } from './apiIntegrationChannelEdits';
 import { buildPresetSelectionPayload, filterPresetsBySelection, selectedPresetIds } from './apiPresetSelection';
 import { createRevisionTracker, sameText } from './hydrationGuard';
 import { isCatalogModelAvailable, isPlatformManagedModel, isUserManagedCatalogModel, mergeGroupEntries, modelIdentity } from './apiConfigCatalogMerge';
@@ -16,21 +17,7 @@ const AUTOSAVE_DELAY = 800;
 
 const SAVE_STATUS_TEXT = { idle: '修改后自动保存', saving: '保存中…', saved: '已保存', error: '保存失败' };
 
-function channelPayload(list) {
-  return list.map(channel => ({
-    ...(channel.id ? { id: channel.id } : {}),
-    name: channel.name,
-    group: channel.group || '',
-    baseUrl: channel.baseUrl,
-    model: channel.model,
-    concurrency: channel.concurrency ?? null,
-    apiFormat: channel.apiFormat || 'openai_compatible',
-    fullUrl: channel.fullUrl === true,
-    ...(channel.apiKey ? { apiKey: channel.apiKey } : {}),
-    // 显式清空 Key 才发这个标记，避免部分保存（例如只改名字）误删已存 Key。
-    ...(channel.clearApiKey ? { clearApiKey: true } : {})
-  }));
-}
+
 
 function isSecret(field) {
   return field.control === 'password';
@@ -207,9 +194,11 @@ export default function ApiIntegrationSettings({
   const queueRef = useRef(Promise.resolve());
   const timersRef = useRef({});
   const editsRef = useRef({});
+  const pendingChannelEdits = useRef(new Map());
+  const deletedChannelIdsRef = useRef(new Set());
   const channelsRef = useRef([]);
   const channelTimerRef = useRef(null);
-  // 渠道整表保存的版本号：请求飞行期间用户又改过渠道，旧回包直接丢弃，避免把刚删的渠道复活。
+  // 渠道保存的版本号：请求飞行期间用户又改过渠道，旧回包直接丢弃，避免把刚删的渠道复活。
   const channelsTrackerRef = useRef(null);
   if (!channelsTrackerRef.current) channelsTrackerRef.current = createRevisionTracker();
   const channelsTracker = channelsTrackerRef.current;
@@ -223,6 +212,9 @@ export default function ApiIntegrationSettings({
   // 所有本地渠道变更都走这里：递增版本号，异步回包才知道自己是否过期。
   function applyLocalChannels(next) {
     channelsTracker.bump();
+    for (const edit of channelEdits(channelsRef.current, next)) {
+      pendingChannelEdits.current.set(edit.id, mergeChannelEdit(pendingChannelEdits.current.get(edit.id), edit));
+    }
     channelsRef.current = next;
     setChannels(next);
   }
@@ -269,7 +261,8 @@ export default function ApiIntegrationSettings({
         });
         setChannels(repaired);
         if (repaired.some((channel, index) => channel.group !== (next?.customChannels || [])[index]?.group)) {
-          channelsRef.current = repaired;
+          channelsRef.current = next.customChannels;
+          applyLocalChannels(repaired);
           channelTimerRef.current = setTimeout(() => {
             channelTimerRef.current = null;
             saveChannels();
@@ -394,11 +387,17 @@ export default function ApiIntegrationSettings({
       channelTimerRef.current = null;
     }
     const list = channelsRef.current;
+    const deletedChannelIds = [...deletedChannelIdsRef.current];
+    const submitted = [...pendingChannelEdits.current.values()];
+    if (!submitted.length && !deletedChannelIds.length) return;
     const revision = channelsTracker.current();
     enqueue(async () => {
       setSaveStatus('saving');
-      // customChannels 是整表提交；服务端只在显式传该键时才替换，不影响 values。
-      const next = await saveApiIntegrations({ customChannels: channelPayload(list) });
+      const next = await saveApiIntegrations({ customChannels: submitted, deletedChannelIds });
+      for (const edit of submitted) {
+        if (pendingChannelEdits.current.get(edit.id) === edit) pendingChannelEdits.current.delete(edit.id);
+      }
+      deletedChannelIds.forEach(id => deletedChannelIdsRef.current.delete(id));
       // 请求飞行期间用户又改过渠道：这份回包已经过期，不能拿它覆盖本地新状态。
       if (channelsTracker.isCurrent(revision)) {
         const nextChannels = Array.isArray(next?.customChannels) ? next.customChannels : list;
@@ -540,6 +539,8 @@ export default function ApiIntegrationSettings({
   }
 
   function deleteCustomChannel(channel) {
+    pendingChannelEdits.current.delete(channel.id);
+    deletedChannelIdsRef.current.add(channel.id);
     applyLocalChannels(channelsRef.current.filter(item => item.id !== channel.id));
     scheduleChannelSave();
     message.success(`已删除渠道「${channel.name}」`);

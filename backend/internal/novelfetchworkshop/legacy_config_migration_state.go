@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -177,13 +178,41 @@ func (s *MySQLStore) discoverLegacyConfigMigration(ctx context.Context, owner st
 }
 
 type LegacySettingEdit struct {
-	Path   []string        `json:"path"`
-	Value  json.RawMessage `json:"value,omitempty"`
-	Delete bool            `json:"delete,omitempty"`
+	Path          []string        `json:"path"`
+	Value         json.RawMessage `json:"value,omitempty"`
+	Delete        bool            `json:"delete,omitempty"`
+	OnlyIfMissing bool            `json:"onlyIfMissing,omitempty"`
 }
 
 func settingPatchBinding() LegacyConflictSource {
 	return LegacyConflictSource{Document: "db:legacy_config_migrations", Field: "setting_patch"}
+}
+
+func (edit LegacySettingEdit) Validate() error {
+	path := edit.Path
+	if len(path) == 0 || slices.Contains(path, "") || (edit.Delete && len(edit.Value) != 0) || (!edit.Delete && !json.Valid(edit.Value)) {
+		return errors.New("invalid legacy setting edit")
+	}
+	if edit.OnlyIfMissing && (edit.Delete || path[0] != "apiIntegrations") {
+		return errors.New("invalid snapshot edit")
+	}
+	if path[0] != "apiIntegrations" {
+		return nil
+	}
+	if len(path) == 1 {
+		return errors.New("whole integration section edit is unsafe")
+	}
+	if path[1] == "customChannels" {
+		switch {
+		case len(path) == 2:
+			return errors.New("whole channel list edit is unsafe")
+		case len(path) == 3 && !edit.Delete:
+			return errors.New("whole channel replacement is unsafe")
+		case len(path) > 3 && path[3] == "id":
+			return errors.New("channel identity cannot be reassigned")
+		}
+	}
+	return nil
 }
 
 func compactSettingEdits(edits []LegacySettingEdit) ([]LegacySettingEdit, error) {
@@ -193,8 +222,8 @@ func compactSettingEdits(edits []LegacySettingEdit) ([]LegacySettingEdit, error)
 	result := make([]LegacySettingEdit, 0, len(edits))
 	for i := len(edits) - 1; i >= 0; i-- {
 		edit := edits[i]
-		if len(edit.Path) == 0 || slices.Contains(edit.Path, "") || (edit.Delete && len(edit.Value) != 0) || (!edit.Delete && !json.Valid(edit.Value)) {
-			return nil, errors.New("invalid legacy setting edit")
+		if err := edit.Validate(); err != nil {
+			return nil, err
 		}
 		key, err := json.Marshal(edit.Path)
 		if err != nil {
@@ -236,15 +265,20 @@ func (s *MySQLStore) LoadLegacySettingEdits(ctx context.Context, owner string) (
 	return edits, state.Revision, true, err
 }
 func (s *MySQLStore) AppendLegacySettingEdits(ctx context.Context, owner string, edits []LegacySettingEdit) error {
-	return s.mergeLegacySettingEdits(ctx, owner, edits, false)
+	return s.mergeLegacySettingEdits(ctx, owner, edits, "")
 }
 
 // Import puts older assignments before existing edits, including when the
 // caller retries after committing the import but before retiring its file.
-func (s *MySQLStore) ImportLegacySettingEdits(ctx context.Context, owner string, edits []LegacySettingEdit) error {
-	return s.mergeLegacySettingEdits(ctx, owner, edits, true)
+func (s *MySQLStore) ImportLegacySettingEdits(ctx context.Context, owner string, edits []LegacySettingEdit, fingerprint string) error {
+	digest, err := hex.DecodeString(fingerprint)
+	if err != nil || len(digest) != 32 {
+		return errors.New("invalid legacy file identity")
+	}
+	return s.mergeLegacySettingEdits(ctx, owner, edits, hex.EncodeToString(digest))
 }
-func (s *MySQLStore) mergeLegacySettingEdits(ctx context.Context, owner string, edits []LegacySettingEdit, importing bool) error {
+func (s *MySQLStore) mergeLegacySettingEdits(ctx context.Context, owner string, edits []LegacySettingEdit, fingerprint string) error {
+	importing := fingerprint != ""
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -252,7 +286,7 @@ func (s *MySQLStore) mergeLegacySettingEdits(ctx context.Context, owner string, 
 	defer tx.Rollback()
 	if importing {
 		_, err = tx.ExecContext(ctx, `INSERT INTO novel_fetch_legacy_config_migrations(owner_username,phase) VALUES(?,'finalizing')
-ON DUPLICATE KEY UPDATE revision=revision+IF(phase='complete',1,0),phase=IF(phase='complete','finalizing',phase)`, owner)
+ON DUPLICATE KEY UPDATE revision=revision`, owner)
 		if err != nil {
 			return err
 		}
@@ -260,6 +294,24 @@ ON DUPLICATE KEY UPDATE revision=revision+IF(phase='complete',1,0),phase=IF(phas
 	state, found, err := readMigrationState(tx.QueryRowContext(ctx, migrationStateQuery+" FOR UPDATE", owner))
 	if err != nil {
 		return err
+	}
+	if importing && found {
+		var imported bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM novel_fetch_legacy_setting_files WHERE owner_username=? AND fingerprint=?)`, owner, fingerprint).Scan(&imported); err != nil {
+			return err
+		}
+		if imported {
+			return tx.Commit()
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO novel_fetch_legacy_setting_files(owner_username,fingerprint) VALUES(?,?)`, owner, fingerprint); err != nil {
+			return err
+		}
+		if state.Phase == LegacyComplete {
+			if _, err = tx.ExecContext(ctx, `UPDATE novel_fetch_legacy_config_migrations SET phase='finalizing',revision=revision+1,updated_at=CURRENT_TIMESTAMP(6) WHERE owner_username=?`, owner); err != nil {
+				return err
+			}
+			state.Phase = LegacyFinalizing
+		}
 	}
 	if !found || state.Phase == LegacyComplete {
 		return ErrConfigConflict

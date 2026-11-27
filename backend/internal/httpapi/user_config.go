@@ -252,6 +252,10 @@ func stripInternalPreferenceFields(value any) {
 				stripInternalPreferenceFields(item)
 			}
 		}
+	case []map[string]any:
+		for _, item := range v {
+			stripInternalPreferenceFields(item)
+		}
 	case []any:
 		for _, item := range v {
 			stripInternalPreferenceFields(item)
@@ -450,8 +454,23 @@ func registerUserConfigRoutes(root *http.ServeMux, middleware BridgeAuth, store 
 		store.mu.Lock()
 		config, err := store.effectiveConfig(req.Context(), identity.Username)
 		if err == nil {
-			config = mergeConfigMap(config, patch)
-			err = store.writeSettingsPatch(req.Context(), identity.Username, config, fieldEdits(nil, patch))
+			var changes settingsEdits
+			if section, ok := patch[apiIntegrationsSettingKey]; ok {
+				obj, ok := section.(map[string]any)
+				if ok {
+					changes, err = integrationRequestEdits(config, obj)
+				}
+				if !ok || err != nil {
+					store.mu.Unlock()
+					writeAuthError(w, http.StatusBadRequest, "接口设置无效")
+					return
+				}
+				delete(patch, apiIntegrationsSettingKey)
+			}
+			changes = append(changes, fieldEdits(nil, patch)...)
+			if err = changes.apply(config); err == nil {
+				err = store.writeSettingsPatch(req.Context(), identity.Username, config, changes)
+			}
 		}
 		store.mu.Unlock()
 		if err != nil {

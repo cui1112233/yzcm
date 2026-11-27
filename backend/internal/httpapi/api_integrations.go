@@ -225,7 +225,7 @@ func apiIntegrationsView(stored map[string]any) map[string]any {
 		}
 		configured[key] = true
 		if !secret {
-			publicValues[key] = value
+			publicValues[key] = deepCloneConfigValue(value)
 		}
 	}
 	channels := apiIntegrationChannels(stored)
@@ -235,14 +235,14 @@ func apiIntegrationsView(stored map[string]any) map[string]any {
 		public := map[string]any{}
 		for _, field := range []string{"id", "name", "baseUrl", "model", "concurrency", "apiFormat", "fullUrl", "enabled", "group", "params"} {
 			if value, ok := channel[field]; ok {
-				public[field] = value
+				public[field] = deepCloneConfigValue(value)
 			}
 		}
 		key, _ := channel["apiKey"].(string)
 		public["hasApiKey"] = strings.TrimSpace(key) != ""
 		publicChannels = append(publicChannels, public)
 	}
-	return map[string]any{
+	result := map[string]any{
 		"values":           publicValues,
 		"configured":       configured,
 		"pinned":           apiIntegrationPinned(stored),
@@ -250,6 +250,8 @@ func apiIntegrationsView(stored map[string]any) map[string]any {
 		"customChannels":   publicChannels,
 		"channelSelection": apiIntegrationChannelSelection(stored),
 	}
+	stripInternalPreferenceFields(result)
+	return result
 }
 
 func isEmptyIntegrationValue(value any) bool {
@@ -534,12 +536,7 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 		// 用指针区分「没提交这个键」和「提交了空值」：输入类字段自动保存时
 		// 只带 values 一个键，未提交的 pinned / customChannels 必须保持原值，
 		// 不能被当成整组覆盖。
-		var payload struct {
-			Values           map[string]any    `json:"values"`
-			Pinned           *[]string         `json:"pinned"`
-			CustomChannels   *[]map[string]any `json:"customChannels"`
-			ChannelSelection map[string]any    `json:"channelSelection"`
-		}
+		var payload map[string]any
 		if json.NewDecoder(http.MaxBytesReader(w, req.Body, 512<<10)).Decode(&payload) != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求内容无效"})
 			return
@@ -551,99 +548,20 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 			writeAuthError(w, http.StatusServiceUnavailable, "读取接口配置失败")
 			return
 		}
-		stored := apiIntegrationStoredMap(config)
-		values := apiIntegrationValues(stored)
-		nextValues := map[string]any{}
-		explicitValues := map[string]any{}
-		for key, value := range values {
-			nextValues[key] = value
+		edits, err := integrationRequestEdits(config, payload)
+		if err != nil {
+			writeAuthError(w, http.StatusBadRequest, err.Error())
+			return
 		}
-		for key, value := range payload.Values {
-			secret, allowedKey := apiIntegrationFields[key]
-			if !allowedKey {
-				continue
-			}
-			if value == nil {
-				delete(nextValues, key)
-				explicitValues[key] = nil
-				continue
-			}
-			coerced, ok := coerceIntegrationValue(key, value)
-			if !ok {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "字段内容无效：" + key})
-				return
-			}
-			if secret {
-				if text, _ := coerced.(string); text == "" {
-					delete(nextValues, key)
-					explicitValues[key] = nil
-					continue
-				}
-			}
-			nextValues[key] = coerced
-			explicitValues[key] = coerced
-		}
-		previousChannels := apiIntegrationChannels(stored)
-		previousByID := map[string]map[string]any{}
-		for _, item := range previousChannels {
-			if channel, ok := item.(map[string]any); ok {
-				if id, _ := channel["id"].(string); id != "" {
-					previousByID[id] = channel
-				}
-			}
-		}
-		channels := make([]any, 0, len(previousChannels))
-		if payload.CustomChannels != nil {
-			channels = make([]any, 0, len(*payload.CustomChannels))
-			for _, input := range *payload.CustomChannels {
-				id, _ := input["id"].(string)
-				channel, ok := sanitizeIntegrationChannel(input, previousByID[id])
-				if !ok {
-					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "自定义渠道内容无效"})
-					return
-				}
-				channels = append(channels, channel)
-			}
-		} else {
-			channels = previousChannels
-		}
-		next := map[string]any{"values": nextValues, "pinned": apiIntegrationPinned(stored), "customChannels": channels}
-		explicit := map[string]any{"values": explicitValues}
-		if payload.Pinned != nil {
-			next["pinned"] = apiIntegrationPinned(map[string]any{"pinned": toAnySlice(*payload.Pinned)})
-			explicit["pinned"] = next["pinned"]
-		}
-		// 渠道选择与字段值分开合并：只覆盖本次提交的分组，其余分组保持不变。
-		selection := apiIntegrationChannelSelection(stored)
-		explicitSelection := map[string]any{}
-		for group, value := range payload.ChannelSelection {
-			if !apiIntegrationChannelGroups[group] {
-				continue
-			}
-			enabled := normalizeChannelSelectionValue(value)
-			if len(enabled) == 0 && !isExplicitChannelSelection(value) {
-				delete(selection, group)
-				explicitSelection[group] = nil
-				continue
-			}
-			if enabled == nil {
-				enabled = []string{}
-			}
-			selection[group] = map[string]any{"enabled": enabled}
-			explicitSelection[group] = selection[group]
-		}
-		next["channelSelection"] = selection
-		config[apiIntegrationsSettingKey] = next
-		explicit["channelSelection"] = explicitSelection
-		edits := fieldEdits([]string{apiIntegrationsSettingKey}, explicit)
-		if payload.CustomChannels != nil {
-			edits = append(edits, integrationChannelEdits(previousChannels, *payload.CustomChannels, channels)...)
+		if err := edits.apply(config); err != nil {
+			writeAuthError(w, http.StatusBadRequest, "接口设置无效")
+			return
 		}
 		if err := store.writeSettingsPatch(req.Context(), identity.Username, config, edits); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "配置保存失败"})
 			return
 		}
-		writeJSON(w, http.StatusOK, apiIntegrationsView(next))
+		writeJSON(w, http.StatusOK, apiIntegrationsView(apiIntegrationStoredMap(config)))
 	})))
 
 	root.Handle("POST /api/settings/api-integrations/reveal", middleware.SessionOnly().AccountCenterMiddleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -750,12 +668,4 @@ func registerAPIIntegrationRoutes(root *http.ServeMux, middleware BridgeAuth, st
 		}
 		reveal(value)
 	})))
-}
-
-func toAnySlice(list []string) []any {
-	result := make([]any, 0, len(list))
-	for _, item := range list {
-		result = append(result, item)
-	}
-	return result
 }

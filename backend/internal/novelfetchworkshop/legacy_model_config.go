@@ -594,6 +594,13 @@ func (s *MySQLStore) importAndCompleteLegacySettings(ctx context.Context, owner,
 		return err
 	}
 	defer tx.Rollback()
+	// The per-account writer row exists even for an imported settings file
+	// whose owner has never opened the novel workshop. An append only locks the
+	// separate migration row, allowing its revision to change while we write.
+	if _, err := tx.ExecContext(ctx, `INSERT INTO novel_fetch_legacy_setting_files(owner_username,fingerprint) VALUES(?,'')
+ ON DUPLICATE KEY UPDATE fingerprint=fingerprint`, owner); err != nil {
+		return err
+	}
 	var raw []byte
 	err = tx.QueryRowContext(ctx, `SELECT settings_json FROM novel_fetch_workshop_configs WHERE owner_username=? FOR UPDATE`, owner).Scan(&raw)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -623,17 +630,16 @@ func (s *MySQLStore) importAndCompleteLegacySettings(ctx context.Context, owner,
 		if err != nil {
 			return err
 		}
-		if len(edits) > 0 {
-			writer, ok := s.ModelSecrets.(interface {
-				ApplyLegacySettingEdits(string, string, []LegacySettingEdit) error
-			})
-			if !ok {
-				return errors.New("no standard settings writer available")
-			}
-			if err := writer.ApplyLegacySettingEdits(owner, path, edits); err != nil {
-				return err
-			}
+		writer, ok := s.ModelSecrets.(interface {
+			ApplyLegacySettingEdits(string, string, []LegacySettingEdit) error
+		})
+		if !ok {
+			return errors.New("no standard settings writer available")
 		}
+		if err := writer.ApplyLegacySettingEdits(owner, path, edits); err != nil {
+			return err
+		}
+
 		complete, err := completeLegacySettingEdits(ctx, tx, owner, latest.Revision)
 		if err != nil {
 			return err

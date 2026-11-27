@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,8 +55,16 @@ func snapshotAssignments(path []string, values, defaults map[string]any) setting
 	return edits
 }
 func snapshotEdits(old map[string]any) settingsEdits {
-	edits := snapshotAssignments(nil, preferenceOnlyPatch(old), defaultUserConfig)
-	section, _ := old[apiIntegrationsSettingKey].(map[string]any)
+	top := map[string]any{}
+	for key, value := range old {
+		if key != apiIntegrationsSettingKey && !isManagedModelField(key) && !internalPreferenceField(key) {
+			top[key] = value
+		}
+	}
+	edits := snapshotAssignments(nil, top, defaultUserConfig)
+	explicitCount := len(edits)
+	stored, _ := old[apiIntegrationsSettingKey].(map[string]any)
+	section := maps.Clone(stored)
 	channelDefaults := map[string]any{"enabled": true, "apiFormat": "openai_compatible", "model": defaultUserConfig["model"], "baseUrl": defaultUserConfig["baseUrl"]}
 	channels, _ := section["customChannels"].([]any)
 	for _, v := range channels {
@@ -64,11 +73,16 @@ func snapshotEdits(old map[string]any) settingsEdits {
 		if id == "" {
 			continue
 		}
+		row = maps.Clone(row)
 		delete(row, "id")
 		edits = append(edits, snapshotAssignments([]string{apiIntegrationsSettingKey, "customChannels", id}, row, channelDefaults)...)
 	}
 	delete(section, "customChannels")
-	return append(edits, snapshotAssignments([]string{apiIntegrationsSettingKey}, section, nil)...)
+	edits = append(edits, snapshotAssignments([]string{apiIntegrationsSettingKey}, section, nil)...)
+	for i := explicitCount; i < len(edits); i++ {
+		edits[i].OnlyIfMissing = true
+	}
+	return edits
 }
 
 // Called with the configuration file lock held. The file remains in place
@@ -116,15 +130,27 @@ func (p *configSecretProvider) importDeferredSettings(ctx context.Context, owner
 			return false, err
 		}
 	}
-	if err := journal.ImportLegacySettingEdits(ctx, owner, edits); err != nil {
+	if err := journal.ImportLegacySettingEdits(ctx, owner, edits, envelope.Fingerprint); err != nil {
 		return false, err
 	}
-	if _, _, active, err := journal.LoadLegacySettingEdits(ctx, owner); err != nil {
+	_, _, active, err := journal.LoadLegacySettingEdits(ctx, owner)
+	if err != nil {
 		return false, err
-	} else if !active {
+	}
+	current, err := os.ReadFile(legacyPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return active, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !bytes.Equal(raw, current) {
 		return false, novelfetchworkshop.ErrConfigConflict
 	}
-	return true, os.Remove(legacyPath)
+	if err := os.Remove(legacyPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	return active, nil
 }
 
 func (s *UserConfigStore) writeSettingsPatch(ctx context.Context, owner string, config map[string]any, changes settingsEdits) error {
@@ -170,6 +196,9 @@ func (p *configSecretProvider) ApplyLegacySettingEdits(owner, path string, edits
 	}
 	if config == nil || config["ciphertext"] != nil || config["fingerprint"] != nil {
 		return errors.New("standard configuration unavailable during replay")
+	}
+	if len(edits) == 0 {
+		return nil
 	}
 	if err := settingsEdits(edits).apply(config); err != nil {
 		return err

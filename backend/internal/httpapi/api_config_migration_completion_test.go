@@ -34,7 +34,7 @@ func TestAPIIntegrationDeferredChannelEdits(t *testing.T) {
 	if !ok {
 		t.Fatal("valid patch rejected")
 	}
-	edits := integrationChannelEdits(previous, []map[string]any{input}, []any{channel})
+	edits := integrationChannelEdits([]map[string]any{input}, []any{channel}, []string{"remove"})
 	config := map[string]any{apiIntegrationsSettingKey: map[string]any{"customChannels": []any{
 		map[string]any{"id": "keep", "apiKey": "original-fixture", "baseUrl": "preserved", "params": map[string]any{"quality": "hd"}},
 		map[string]any{"id": "remove"},
