@@ -218,9 +218,25 @@
 .pc-api-manager-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .pc-api-manager-cards .api-channel-card { min-height: 146px; border-color: rgba(132, 202, 255, .27); border-radius: 14px; background: linear-gradient(145deg, rgba(40, 68, 127, .54), rgba(11, 27, 64, .54)); }
 .pc-api-manager-cards .api-catalog-credential { margin-top: auto; }
-.pc-api-founder-panel .ac-panel-header { display: flex; align-items: center; justify-content: space-between; padding-bottom: 14px; border-bottom: 1px solid rgba(132, 202, 255, .18); }
+.pc-api-founder-panel { overflow: hidden; padding: 0; }
+.pc-api-founder-panel .ac-panel-header { display: flex; align-items: center; justify-content: space-between; min-height: 66px; padding: 14px 22px; border-bottom: 1px solid rgba(132, 202, 255, .18); }
 .pc-api-founder-panel .ac-panel-header h2 { margin: 0; }
-.pc-api-founder-panel .ac-platform-preset-grid { border-color: rgba(132, 202, 255, .24); border-radius: 14px; background: rgba(11, 29, 69, .42); }
+.pc-api-founder-panel > .ac-muted-copy { display: block; margin: 16px 22px; line-height: 1.65; }
+.pc-api-founder-panel > .ant-alert { margin-inline: 22px !important; }
+.pc-api-founder-panel .ac-platform-preset-grid { display: grid; grid-template-columns: minmax(250px, .85fr) minmax(420px, 1.6fr) minmax(120px, .42fr); align-items: center; gap: 18px; margin: 0 22px 12px; padding: 15px 17px; border: 1px solid rgba(132, 202, 255, .24); border-radius: 14px; background: rgba(11, 29, 69, .42); }
+.pc-api-founder-panel .ac-platform-preset-info { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.pc-api-founder-panel .ac-platform-preset-info > span { display: grid; width: 40px; height: 40px; flex: 0 0 40px; place-items: center; border: 1px solid rgba(103, 225, 255, .34); border-radius: 13px; color: var(--pc-cyan); background: rgba(77, 220, 255, .07); }
+.pc-api-founder-panel .ac-platform-preset-info > div { display: grid; min-width: 0; gap: 4px; }
+.pc-api-founder-panel .ac-platform-preset-info strong { overflow: hidden; color: var(--pc-text); font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
+.pc-api-founder-panel .ac-platform-preset-info small { color: var(--pc-muted); line-height: 1.45; }
+.pc-api-founder-panel .ac-platform-preset-credential { display: grid; min-width: 0; gap: 8px; }
+.pc-api-founder-panel .ac-platform-preset-credential .ant-space-item { width: 100%; }
+.pc-api-founder-panel .ac-model-quota { display: grid; gap: 6px; padding: 8px 10px; border: 1px solid rgba(132, 202, 255, .17); border-radius: 10px; color: var(--pc-muted); background: rgba(6, 20, 52, .32); }
+.pc-api-founder-panel .ac-model-quota-head { display: flex; justify-content: space-between; gap: 10px; }
+.pc-api-founder-panel .ac-model-quota-head b { color: var(--pc-text); font-weight: 540; }
+.pc-api-founder-panel .ac-model-quota-track { height: 5px; overflow: hidden; border-radius: 999px; background: rgba(132, 202, 255, .14); }
+.pc-api-founder-panel .ac-model-quota-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #55dbff, #8079ff); }
+.pc-api-founder-panel .ac-platform-preset-state { color: var(--pc-muted); text-align: right; }
 .pc-api-founder-groups { gap: 13px; }
 .pc-api-founder .api-enabled-bar { padding: 8px 0; }
 .pc-api-founder .api-custom-open { color: #07172e; border-color: #83e9ff; background: linear-gradient(135deg, #76e6ff, #88a3ff); }
@@ -258,6 +274,8 @@
   .pc-main > .api-config-page { padding-inline: 20px; }
   .pc-profile-grid, .pc-security-grid { grid-template-columns: 1fr; }
   .pc-api-manager-cards { grid-template-columns: 1fr; }
+  .pc-api-founder-panel .ac-platform-preset-grid { grid-template-columns: 1fr; }
+  .pc-api-founder-panel .ac-platform-preset-state { text-align: left; }
   .pc-governance-summary { grid-template-columns: 1fr 1fr; }
   .pc-security-auth, .pc-security-recovery, .pc-security-devices, .pc-security-activity { grid-column: 1; grid-row: auto; }
 }

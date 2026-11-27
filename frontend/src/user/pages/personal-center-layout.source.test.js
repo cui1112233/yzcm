@@ -94,4 +94,6 @@ test('API configuration has distinct manager and founder visual contracts', () =
   assert.match(settings, /添加自定义模型/);
   assert.match(presetModal, /className="pc-api-modal"/);
   assert.match(customModal, /className="pc-api-modal"/);
+  const css = read('shared/styles/account-center-pixel-parity.css');
+  assert.match(css, /\.pc-api-founder-panel \.ac-platform-preset-grid\s*\{[^}]*display:\s*grid/s);
 });
