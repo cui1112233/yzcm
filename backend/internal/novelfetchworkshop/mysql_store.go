@@ -69,24 +69,12 @@ func (s *MySQLStore) PutDocument(ctx context.Context, owner string, document Doc
 	if document.BookID == "" {
 		return errors.New("book id is required")
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	document, err = prepareDocumentWrite(ctx, tx, owner, document)
-	if err != nil {
-		return err
-	}
 	raw, err := json.Marshal(document)
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_documents(owner_username,book_id,document_json,created_at,updated_at) VALUES(?,?,CAST(? AS CHAR CHARACTER SET utf8mb4),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE document_json=VALUES(document_json), updated_at=GREATEST(CURRENT_TIMESTAMP(6), TIMESTAMPADD(MICROSECOND,1,updated_at))`, owner, document.BookID, string(raw))
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
+	_, err = s.DB.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_documents(owner_username,book_id,document_json,created_at,updated_at) VALUES(?,?,CAST(? AS CHAR CHARACTER SET utf8mb4),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE document_json=VALUES(document_json), updated_at=GREATEST(CURRENT_TIMESTAMP(6), TIMESTAMPADD(MICROSECOND,1,updated_at))`, owner, document.BookID, string(raw))
+	return err
 }
 
 func (s *MySQLStore) CompareAndSwapDocument(ctx context.Context, owner string, document Document) (string, error) {
@@ -102,15 +90,6 @@ func (s *MySQLStore) CompareAndSwapDocument(ctx context.Context, owner string, d
 			return "", err
 		}
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return "", err
-	}
-	defer tx.Rollback()
-	document, err = prepareDocumentWrite(ctx, tx, owner, document)
-	if err != nil {
-		return "", err
-	}
 	next := nextDocumentWriteTime(previous)
 	document.UpdatedAt = next.Format(time.RFC3339Nano)
 	raw, err := json.Marshal(document)
@@ -118,14 +97,14 @@ func (s *MySQLStore) CompareAndSwapDocument(ctx context.Context, owner string, d
 		return "", err
 	}
 	if previous.IsZero() {
-		_, err = tx.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_documents(owner_username,book_id,document_json,created_at,updated_at) VALUES(?,?,CAST(? AS CHAR CHARACTER SET utf8mb4),?,?)`, owner, document.BookID, string(raw), next, next)
+		_, err = s.DB.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_documents(owner_username,book_id,document_json,created_at,updated_at) VALUES(?,?,CAST(? AS CHAR CHARACTER SET utf8mb4),?,?)`, owner, document.BookID, string(raw), next, next)
 		var duplicate *mysql.MySQLError
 		if errors.As(err, &duplicate) && duplicate.Number == 1062 {
 			return "", ErrDocumentChanged
 		}
 	} else {
 		var result sql.Result
-		result, err = tx.ExecContext(ctx, `UPDATE novel_fetch_workshop_documents SET document_json=CAST(? AS CHAR CHARACTER SET utf8mb4), updated_at=? WHERE owner_username=? AND book_id=? AND updated_at=?`, string(raw), next, owner, document.BookID, previous.UTC())
+		result, err = s.DB.ExecContext(ctx, `UPDATE novel_fetch_workshop_documents SET document_json=CAST(? AS CHAR CHARACTER SET utf8mb4), updated_at=? WHERE owner_username=? AND book_id=? AND updated_at=?`, string(raw), next, owner, document.BookID, previous.UTC())
 		if err == nil {
 			var n int64
 			n, err = result.RowsAffected()
@@ -135,9 +114,6 @@ func (s *MySQLStore) CompareAndSwapDocument(ctx context.Context, owner string, d
 		}
 	}
 	if err != nil {
-		return "", err
-	}
-	if err := tx.Commit(); err != nil {
 		return "", err
 	}
 	return document.UpdatedAt, nil
@@ -367,7 +343,9 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 		}
 		if (needsDBMigration || fileChecked) && (currentVersion || hasCatalog || len(rows) > 0 || len(legacy) > 0 || settings[legacyVideoMigratedKey] == true) {
 			previouslyBound := currentVersion || settings[ModelSecretVersionKey] == "bound-v2"
+			var boundRows []any
 			if previouslyBound {
+				boundRows, _ = settings["modelCatalog"].([]any)
 				rows, err = preserveBoundLegacyRows(settings)
 				if err != nil {
 					return nil, err
@@ -383,6 +361,7 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 				mergeLegacyModelKeys(rows, legacyCatalogRows(legacy))
 			}
 			rows, migration.file = prepareLegacyModelEntries(rows, legacy, collectLegacySources(legacy), previouslyBound)
+			reconcileLegacyVideoCredentials(rows, boundRows, migration.database, migration.file)
 			digest := legacyCatalogSecretDigest(legacy)
 			settings["modelCatalog"] = rows
 			if digest != "" {

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	"qiantie/backend/internal/apisecrets"
 	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/safepath"
 )
@@ -109,6 +110,14 @@ func preserveBoundLegacyRows(settings map[string]any) ([]any, error) {
 		id := ModelConfigText(row, "id")
 		if id == "" || used[id] {
 			return nil, fmt.Errorf("bound model row identity could not be verified")
+		}
+		if ModelConfigText(row, "kind") == "video" {
+			for _, field := range []string{"credential", "apiKey"} {
+				value, ok := row[field].(string)
+				if row[field] != nil && (!ok || value != "" && !strings.HasPrefix(value, apisecrets.BoundPrefix)) {
+					return nil, fmt.Errorf("bound video credential could not be verified")
+				}
+			}
 		}
 		used[id] = true
 	}
@@ -316,6 +325,82 @@ func collectLegacySources(document map[string]any) []legacySourceEntry {
 		}
 	}
 	return entries
+}
+
+// Reconcile all legacy origins before a staged video row can become an
+// executable model. The migration still retains each original source for the
+// independent encrypted archive and cleanup checks.
+func reconcileLegacyVideoCredentials(rows, boundRows []any, sourceGroups ...[]legacySourceEntry) {
+	type videoChoice struct {
+		row         map[string]any
+		key         string
+		fingerprint [32]byte
+		blocked     bool
+	}
+	bound := make(map[string]bool, len(boundRows))
+	for _, item := range boundRows {
+		row, _ := item.(map[string]any)
+		bound[ModelConfigText(row, "id")] = true
+	}
+	var choices []*videoChoice
+	for _, item := range rows {
+		row, _ := item.(map[string]any)
+		if ModelConfigText(row, "kind") == "video" {
+			choices = append(choices, &videoChoice{row: row})
+		}
+	}
+	for _, sources := range sourceGroups {
+		for _, source := range sources {
+			if ModelConfigText(source.model, "kind") != "video" {
+				continue
+			}
+			id := ModelConfigText(source.model, "id")
+			var matches []*videoChoice
+			for _, choice := range choices {
+				if id != "" && id == ModelConfigText(choice.row, "id") || id == "" && sameLegacyVideoTarget(source.model, choice.row) {
+					matches = append(matches, choice)
+				}
+			}
+			keys, valid := legacySourceCredentials(source)
+			for _, choice := range matches {
+				if len(matches) != 1 || !valid || !sameLegacyVideoTarget(source.model, choice.row) ||
+					len(keys) != 0 && source.model["credentialStatus"] == "needs_reentry" {
+					choice.blocked = true
+					continue
+				}
+				for _, key := range keys {
+					fingerprint := sha256.Sum256([]byte(key))
+					if choice.key == "" {
+						choice.key, choice.fingerprint = key, fingerprint
+					} else if choice.fingerprint != fingerprint || choice.key != key {
+						choice.blocked = true
+					}
+				}
+			}
+		}
+	}
+	for _, choice := range choices {
+		row := choice.row
+		// Existing bound rows keep both their ciphertext and deliberate clears.
+		if bound[ModelConfigText(row, "id")] {
+			continue
+		}
+		if choice.blocked {
+			markLegacyKeyReentry(row, "legacy_video_source_conflict")
+		} else if choice.key != "" && ModelConfigText(row, "provider") != batchfactoryv11.VideoProviderDoubaoLocal {
+			row["credential"] = choice.key
+			delete(row, "apiKey")
+			delete(row, "credentialRef")
+			delete(row, "credentialStatus")
+			delete(row, "credentialRecoveryReason")
+		}
+	}
+}
+
+func sameLegacyVideoTarget(source, target map[string]any) bool {
+	modelID := ModelConfigText(source, "modelId")
+	return modelID != "" && modelID == ModelConfigText(target, "modelId") &&
+		sameLegacyModelScope(source, target) && ModelConfigText(source, "workflowId") == ModelConfigText(target, "workflowId")
 }
 
 func verifyLegacyScrubTarget(source, target map[string]any, recoveryReason string) bool {

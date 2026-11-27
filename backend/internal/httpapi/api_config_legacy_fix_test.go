@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -642,5 +643,190 @@ VALUES ('fixture',?,NOW(6),NOW(6))`, string(old)); err != nil {
 	if migrated[novelfetchworkshop.ModelSecretVersionKey] != "bound-v3" || len(result) != 2 || result[0]["credential"] != "fixture-previous-key" ||
 		firstText(result[1]["credential"]) != "" || result[1]["credentialStatus"] != "needs_reentry" {
 		t.Fatal("v2 migration must preserve only the known effective destination")
+	}
+}
+
+func TestAPIConfigPolicyMySQLArbitratesMixedLegacyVideoSources(t *testing.T) {
+	ctx := context.Background()
+	db, _ := novelAttributionDatabase(t)
+	migrations := append(storage.AuthMigrations(), storage.AccountCenterMigrations()...)
+	migrations = append(migrations, storage.NovelFetchWorkshopMigrations()...)
+	if err := storage.RunMigrations(ctx, db, migrations); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		model       = "legacy-video:personal_api"
+		first       = "fixture-database-key"
+		second      = "fixture-file-key"
+		established = "fixture-established-key"
+	)
+	dir := t.TempDir()
+	config := NewUserConfigStore(dir)
+	store := novelfetchworkshop.NewMySQLStore(db)
+	store.ModelSecrets = config.ModelConfigSecrets()
+	center, login := accountcenter.NewMySQLStore(db), auth.NewMySQLStore(db)
+	now := time.Now().UTC()
+	writeSources := func(t *testing.T, owner, fileKey string, existing map[string]any) string {
+		t.Helper()
+		rows := []any{map[string]any{"id": "unrelated-text", "kind": "text", "modelId": "text", "baseUrl": "https://text.example.test/v1", "credential": "fixture-text"}}
+		if existing != nil {
+			rows = append(rows, existing)
+		}
+		if err := store.PutConfig(ctx, owner, map[string]any{"modelCatalog": rows}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `UPDATE novel_fetch_workshop_configs SET settings_json=JSON_SET(settings_json,'$.videoProviders',
+JSON_OBJECT('personal_api',JSON_OBJECT('apiKey',?,'model','fixture-video'))) WHERE owner_username=?`, first, owner); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, owner, "api-config.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(map[string]any{"settings": map[string]any{"videoProviders": map[string]any{
+			"personal_api": map[string]any{"apiKey": fileKey, "model": "fixture-video"},
+		}}, "layout": map[string]any{"compact": true}})
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	official := func(fields map[string]any) map[string]any {
+		fields["id"], fields["kind"], fields["modelId"], fields["provider"] = model, "video", "fixture-video", "personal_api"
+		fields["endpoint"], fields["tasksEndpoint"] = batchfactoryv11.DefaultPersonalVideoCreateURL, batchfactoryv11.DefaultPersonalVideoTasksURL
+		fields["resultEndpoint"] = batchfactoryv11.DefaultPersonalVideoTasksURL + "/{id}/result"
+		return fields
+	}
+	rawConfig := func(t *testing.T, owner string) string {
+		t.Helper()
+		var raw string
+		if err := db.QueryRowContext(ctx, "SELECT settings_json FROM novel_fetch_workshop_configs WHERE owner_username=?", owner).Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	cipherAt := func(t *testing.T, owner string, index int) string {
+		t.Helper()
+		locator := fmt.Sprintf("$.modelCatalog[%d].credential", index)
+		var value string
+		if err := db.QueryRowContext(ctx, `SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(settings_json,?)),'') FROM novel_fetch_workshop_configs WHERE owner_username=?`, locator, owner).Scan(&value); err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	for _, tc := range []struct {
+		owner, fileKey, runtime string
+		existing                map[string]any
+		faults                  bool
+	}{
+		{owner: "mixed-conflict", fileKey: second, faults: true},
+		{owner: "mixed-identical", fileKey: first, runtime: first},
+		{owner: "mixed-established", fileKey: second, runtime: established, existing: official(map[string]any{"credential": established})},
+		{owner: "mixed-blank", fileKey: second, existing: official(map[string]any{"credentialStatus": "needs_reentry"})},
+	} {
+		t.Run(tc.owner, func(t *testing.T) {
+			if err := login.CreateAccount(ctx, auth.Account{Username: tc.owner, PasswordHash: "fixture", PasswordAlgorithm: "fixture",
+				Active: true, CreatedAt: now, UpdatedAt: now}); err != nil {
+				t.Fatal(err)
+			}
+			if err := center.CreateIdentity(ctx, accountcenter.Identity{Username: tc.owner, Role: accountcenter.RoleManager}); err != nil {
+				t.Fatal(err)
+			}
+			if err := login.CreateSession(ctx, auth.Session{Username: tc.owner, Token: tc.owner, IssuedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+				t.Fatal(err)
+			}
+			path := writeSources(t, tc.owner, tc.fileKey, tc.existing)
+			store.LegacyConfigDir = dir
+			textCipher, videoCipher := cipherAt(t, tc.owner, 0), cipherAt(t, tc.owner, 1)
+			wantConflicts := 2
+			if tc.fileKey == first {
+				wantConflicts = 0
+			}
+			wantState := func(t *testing.T) {
+				t.Helper()
+				records, _, err := store.ListLegacyModelConflicts(ctx, tc.owner, "")
+				if err != nil || len(records) != wantConflicts {
+					t.Fatalf("conflict rows=%d want=%d err=%v", len(records), wantConflicts, err)
+				}
+			}
+			if tc.faults {
+				before := rawConfig(t, tc.owner)
+				file, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.ExecContext(ctx, `CREATE TRIGGER stop_mixed_plan BEFORE UPDATE ON novel_fetch_workshop_configs FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture update failure'`); err != nil {
+					t.Fatal(err)
+				}
+				_, migrateErr := store.GetConfig(ctx, tc.owner)
+				if _, err := db.ExecContext(ctx, "DROP TRIGGER stop_mixed_plan"); err != nil {
+					t.Fatal(err)
+				}
+				after, err := os.ReadFile(path)
+				if err != nil || migrateErr == nil || rawConfig(t, tc.owner) != before || !bytes.Equal(file, after) {
+					t.Fatal("DB failure did not retain both original sources")
+				}
+				store.ReplaceLegacyConfig = func(string, map[string]any) error { return errors.New("fixture write failure") }
+				if _, err := store.GetConfig(ctx, tc.owner); err == nil {
+					t.Fatal("expected file failure")
+				}
+				store.ReplaceLegacyConfig = nil
+				wantState(t)
+				if raw := rawConfig(t, tc.owner); !strings.Contains(raw, "modelCatalogLegacyScrubPending") || strings.Contains(raw, first) {
+					t.Fatal("file failure should leave a pending plan and a committed database-source archive")
+				}
+				after, err = os.ReadFile(path)
+				if err != nil || !bytes.Equal(file, after) {
+					t.Fatal("failed file write damaged original evidence")
+				}
+			}
+			result, err := store.GetConfig(ctx, tc.owner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cipherAt(t, tc.owner, 0) != textCipher || tc.runtime == established && cipherAt(t, tc.owner, 1) != videoCipher {
+				t.Fatal("migration changed a previously bound ciphertext")
+			}
+			video := NewCatalogVideoProviderRegistry(center, store)
+			chosen, err := video.ResolveExactVideoModel(ctx, tc.owner, model)
+			if tc.runtime == "" {
+				rows := modelCatalog(result)
+				if err == nil || len(rows) != 2 || rows[1]["credentialStatus"] != "needs_reentry" || firstText(rows[1]["credential"]) != "" {
+					t.Fatal("runtime returned a legacy key from a disputed group")
+				}
+			} else if err != nil || chosen.APIKey != tc.runtime {
+				t.Fatalf("runtime failed to preserve the one proven key: %v", err)
+			}
+			wantState(t)
+			file, err := os.ReadFile(path)
+			raw := rawConfig(t, tc.owner)
+			if err != nil || bytes.Contains(file, []byte(tc.fileKey)) || !bytes.Contains(file, []byte("compact")) ||
+				strings.Contains(raw, first) || strings.Contains(raw, "modelCatalogLegacyScrubPending") || strings.Contains(raw, "videoProviders") {
+				t.Fatal("successful migration did not scrub and acknowledge both sources")
+			}
+			if wantConflicts == 0 {
+				return
+			}
+			records, _, err := store.ListLegacyModelConflicts(ctx, tc.owner, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := NewRouter(RouterOptions{AuthStore: login, AccountCenterStore: center, NovelFetchStore: store, UserConfigStore: config, Now: func() time.Time { return now }})
+			origins := map[string]string{}
+			for _, item := range records {
+				got := impersonationRequest(h, "POST", "/api/config/model-conflicts/"+item.ID+"/reveal", tc.owner, "", nil)
+				var found struct{ Value string }
+				if got.Code != http.StatusOK || json.Unmarshal(got.Body.Bytes(), &found) != nil {
+					t.Fatalf("audited reveal failed: %d", got.Code)
+				}
+				origin, _, _ := strings.Cut(item.Source.Document, ":")
+				origins[origin] = found.Value
+			}
+			var reveals int
+			if origins["db"] != first || origins["file"] != second ||
+				db.QueryRowContext(ctx, `SELECT COUNT(*) FROM account_center_audit_events WHERE subject_username=? AND action LIKE 'legacy_key_reveal:%'`, tc.owner).Scan(&reveals) != nil || reveals != 2 {
+				t.Fatal("the two source keys are not independently recoverable and audited")
+			}
+		})
 	}
 }
