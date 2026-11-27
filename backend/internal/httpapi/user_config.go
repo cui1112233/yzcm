@@ -343,7 +343,7 @@ func mergeManagedModelCatalog(ctx context.Context, config map[string]any, catalo
 	if catalogStore == nil || strings.TrimSpace(username) == "" {
 		return nil
 	}
-	settings, err := catalogStore.GetConfig(ctx, username)
+	settings, err := novelfetchworkshop.ReadRuntimeConfig(ctx, catalogStore, username)
 	if err != nil {
 		return err
 	}
