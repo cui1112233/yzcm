@@ -111,11 +111,11 @@ func (s *UserConfigStore) read(username string) map[string]any {
 		return config
 	}
 	raw, err := os.ReadFile(path)
-	if err != nil {
-		return config
-	}
 	var saved map[string]any
-	if json.Unmarshal(raw, &saved) != nil {
+	if err != nil || json.Unmarshal(raw, &saved) != nil || saved == nil {
+		// A later preference save may create a file at the legacy path. Carry
+		// its origin through subsequent saves until the original is restored.
+		config[novelfetchworkshop.LegacyModelDefaultsFileKey] = true
 		return config
 	}
 	merged := mergeConfigMap(config, saved)
@@ -128,7 +128,9 @@ func (s *UserConfigStore) read(username string) map[string]any {
 // Go settings routes. Callers must still redact secrets before returning data
 // to a browser.
 func (s *UserConfigStore) GetConfig(_ context.Context, username string) (map[string]any, error) {
-	return s.read(username), nil
+	config := s.read(username)
+	delete(config, novelfetchworkshop.LegacyModelDefaultsFileKey)
+	return config, nil
 }
 
 func (s *UserConfigStore) write(username string, config map[string]any) error {
@@ -176,6 +178,7 @@ func (s *UserConfigStore) writeConfig(username string, config map[string]any, st
 
 func publicUserConfig(config map[string]any) map[string]any {
 	result := cloneConfigMap(config)
+	delete(result, novelfetchworkshop.LegacyModelDefaultsFileKey)
 	// 接口配置只暴露「已配置/未配置」，密钥（含自定义渠道 apiKey）永不下发。
 	if stored, ok := result[apiIntegrationsSettingKey].(map[string]any); ok {
 		result[apiIntegrationsSettingKey] = apiIntegrationsView(stored)

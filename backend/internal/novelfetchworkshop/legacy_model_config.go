@@ -26,6 +26,10 @@ const legacyModelScrubEntriesKey = "modelCatalogLegacyScrubEntries"
 const legacyModelScrubEntryDoneKey = "modelCatalogLegacyScrubEntryDone"
 const legacyModelMigrationVersion = "entry-v2"
 
+// LegacyModelDefaultsFileKey marks a preferences file created from defaults
+// when the original could not be read. It cannot attest to a legacy source.
+const LegacyModelDefaultsFileKey = "modelCatalogLegacyDefaultsFile"
+
 func hasLegacyVideoProviders(document map[string]any) bool {
 	for _, container := range legacyCatalogContainers(document) {
 		if _, exists := container["videoProviders"]; exists {
@@ -197,6 +201,9 @@ func readLegacyModelDocument(path string) (map[string]any, error) {
 	var document map[string]any
 	if err := json.Unmarshal(data, &document); err != nil {
 		return nil, err
+	}
+	if document[LegacyModelDefaultsFileKey] == true {
+		return nil, nil
 	}
 	for _, container := range legacyCatalogContainers(document) {
 		if raw := container["modelCatalog"]; raw != nil {

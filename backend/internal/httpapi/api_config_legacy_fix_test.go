@@ -719,10 +719,12 @@ JSON_OBJECT('personal_api',JSON_OBJECT('apiKey',?,'model','fixture-video'))) WHE
 		existing                map[string]any
 		faults                  bool
 		delayed                 bool
+		savePreference          bool
 	}{
 		{owner: "mixed-conflict", fileKey: second, faults: true},
 		{owner: "delayed-conflict", fileKey: second, delayed: true},
 		{owner: "delayed-write-failure", fileKey: second, delayed: true, faults: true},
+		{owner: "delayed-preference-save", fileKey: second, delayed: true, savePreference: true},
 		{owner: "delayed-identical", fileKey: first, runtime: first, delayed: true},
 		{owner: "mixed-identical", fileKey: first, runtime: first},
 		{owner: "mixed-established", fileKey: second, runtime: established, existing: official(map[string]any{"credential": established})},
@@ -762,13 +764,37 @@ JSON_OBJECT('personal_api',JSON_OBJECT('apiKey',?,'model','fixture-video'))) WHE
 				if _, exposed := public["modelCatalogLegacyVideoPending"]; exposed {
 					t.Error("internal video provenance reached the returned configuration")
 				}
-				public["layoutDensity"] = "compact"
-				if err := store.PutConfig(ctx, tc.owner, public); err != nil {
-					t.Fatal(err)
+				if tc.savePreference {
+					var schema string
+					if err := db.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&schema); err != nil {
+						t.Fatal(err)
+					}
+					t.Logf("disposable MySQL schema=%s", schema)
+					router := NewRouter(RouterOptions{AuthStore: login, AccountCenterStore: center, NovelFetchStore: store, UserConfigStore: config, Now: func() time.Time { return now }})
+					for _, volume := range []int{37, 42} {
+						body := fmt.Sprintf(`{"notifications":{"soundVolume":%d}}`, volume)
+						response := impersonationRequest(router, "POST", "/api/config", tc.owner, body, nil)
+						if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "modelCatalogLegacy") {
+							t.Fatal("ordinary preference save failed or returned internal migration metadata")
+						}
+						file, err := os.ReadFile(path)
+						var saved struct{ Notifications struct{ SoundVolume int } }
+						if err != nil || json.Unmarshal(file, &saved) != nil || saved.Notifications.SoundVolume != volume {
+							t.Fatal("ordinary save did not persist notifications at the missing file path")
+						}
+					}
+				} else {
+					public["layoutDensity"] = "compact"
+					if err := store.PutConfig(ctx, tc.owner, public); err != nil {
+						t.Fatal(err)
+					}
 				}
 				pending, err := NewCatalogVideoProviderRegistry(center, coldStore()).ResolveExactVideoModel(ctx, tc.owner, model)
 				if err == nil || pending.APIKey != "" {
 					t.Errorf("unchecked video resolved before file returned (database fixture selected=%t)", pending.APIKey == first)
+				}
+				if raw := rawConfig(t, tc.owner); !strings.Contains(raw, "modelCatalogLegacyVideoPending") || strings.Contains(raw, "entry-v2") {
+					t.Error("source verification ended while original file was offline")
 				}
 				if err := os.Rename(path+".offline", path); err != nil {
 					t.Fatal(err)

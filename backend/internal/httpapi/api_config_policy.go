@@ -200,9 +200,11 @@ func containsConfigField(input any, included func(string) bool) bool {
 }
 
 func isManagedModelField(key string) bool {
+	if strings.HasPrefix(apiConfigField(key), "modelcataloglegacy") {
+		return true
+	}
 	switch apiConfigField(key) {
-	case "modelcatalog", "modelcatalogversion", "modelcatalogsecretversion", "modelcataloglegacyscrubpending", "modelcataloglegacyscrubdone",
-		"modelcataloglegacymigrationversion", "modelcataloglegacyscrubentries", "modelcataloglegacyscrubentrydone", "videoproviders", "videoproviderlegacymigrated", "credentialref":
+	case "modelcatalog", "modelcatalogversion", "modelcatalogsecretversion", "videoproviders", "videoproviderlegacymigrated", "credentialref":
 		return true
 	}
 	return false
