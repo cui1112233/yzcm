@@ -1,8 +1,12 @@
+//go:build linux || windows
+
 package yzcmusage
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,130 +15,133 @@ import (
 	"time"
 )
 
-func TestReceiptBindingMySQLConcurrentLegacyPromotion(t *testing.T) {
-	db, _ := receiptRecoveryMySQL(t)
-	store := Store{DB: db}
-	ctx := context.Background()
+func TestReceiptBindingMySQLLegacyAlwaysRequiresAuditedRecovery(t *testing.T) {
+	for _, scenario := range []struct {
+		name, writerZone string
+	}{
+		{"same-timezone", "+00:00"},
+		{"different-timezones", "+00:01"},
+		{"coarse-activation-clock", "+00:00"},
+		{"missing-identity", "+00:00"},
+		{"missing-activation", "+00:00"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			first, dsn := startReceiptLegacyFixture(t, scenario.writerZone)
+			ctx := context.Background()
+			legacy := replaceReceiptFingerprintWithLegacy(t, first)
+			switch scenario.name {
+			case "coarse-activation-clock":
+				if _, err := first.Store.DB.ExecContext(ctx, `UPDATE yzcm_usage_receipt_bindings SET activated_at=CAST(activated_at AS DATETIME(0)) WHERE binding_slot=?`, receiptBindingSlot); err != nil {
+					t.Fatal(err)
+				}
+			case "missing-identity":
+				if _, err := first.Store.DB.ExecContext(ctx, `UPDATE yzcm_usage_receipt_bindings SET filesystem_identity=NULL WHERE binding_slot=?`, receiptBindingSlot); err != nil {
+					t.Fatal(err)
+				}
+				legacy = ""
+			case "missing-activation":
+				if _, err := first.Store.DB.ExecContext(ctx, `UPDATE yzcm_usage_receipt_bindings SET activated_at=NULL WHERE binding_slot=?`, receiptBindingSlot); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reader, err := sql.Open("mysql", dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = reader.Close() })
+			setReceiptFixtureZone(t, reader, "+00:00")
+			if scenario.writerZone != "+00:00" {
+				// Show that the actual two sessions give different meanings to the
+				// same historical DATETIME. Production never interprets this value.
+				const epoch = `SELECT CAST(UNIX_TIMESTAMP(activated_at)*1000000 AS SIGNED) FROM yzcm_usage_receipt_bindings WHERE binding_slot=?`
+				var written, read int64
+				if err := first.Store.DB.QueryRowContext(ctx, epoch, receiptBindingSlot).Scan(&written); err != nil {
+					t.Fatal(err)
+				}
+				if err := reader.QueryRowContext(ctx, epoch, receiptBindingSlot).Scan(&read); err != nil || read-written != 60_000_000 {
+					t.Fatalf("fixture must reinterpret legacy activation by sixty seconds: %d -> %d, %v", written, read, err)
+				}
+			}
+			assertLegacyReceiptBlocked(t, Store{DB: reader}, first.ReceiptDir, legacy)
+		})
+	}
+}
+
+func TestReceiptBindingMySQLConcurrentLegacyReadersPreserveAuthority(t *testing.T) {
+	first, _ := startReceiptLegacyFixture(t, "+00:00")
+	legacy := replaceReceiptFingerprintWithLegacy(t, first)
+	first.Store.DB.SetMaxOpenConns(0)
+	for _, instance := range []string{"first", "second"} {
+		t.Run(instance, func(t *testing.T) {
+			t.Parallel()
+			assertLegacyReceiptBlocked(t, first.Store, first.ReceiptDir, legacy)
+		})
+	}
+}
+
+func startReceiptLegacyFixture(t *testing.T, zone string) (*Tracker, string) {
+	t.Helper()
+	db, dsn := receiptRecoveryMySQL(t)
+	setReceiptFixtureZone(t, db, zone)
 	dir := filepath.Join(t.TempDir(), "usage-receipts")
-	first := &Tracker{Store: store, ReceiptDir: dir, receiptBindingSync: func(f *os.File) error {
+	first := &Tracker{Store: Store{DB: db}, ReceiptDir: dir, receiptBindingSync: func(f *os.File) error {
 		if f.Name() == filepath.Dir(dir) {
-			// Ensure the true marker creation and activation are in distinct
-			// filesystem clock ticks for this verifiable legacy fixture.
-			time.Sleep(50 * time.Millisecond)
+			// This valid historical fixture predates its database activation,
+			// even at coarse file creation clock precision.
+			time.Sleep(100 * time.Millisecond)
 		}
 		return f.Sync()
 	}}
-	if err := first.InitializeReceiptStorage(ctx); err != nil {
+	if err := first.InitializeReceiptStorage(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	initial, found, err := store.loadReceiptBinding(ctx)
-	if err != nil || !found || !strings.HasPrefix(initial.FilesystemIdentity, receiptIdentityV2Prefix) || len(initial.FilesystemIdentity) != 68 {
-		t.Fatalf("invalid current fingerprint: row=%+v found=%t error=%v", initial, found, err)
-	}
-	legacy := replaceReceiptFingerprintWithLegacy(t, first)
-	stale := initial
-	stale.FilesystemIdentity = legacy
-	var activated string
-	if err := db.QueryRowContext(ctx, `SELECT CAST(activated_at AS CHAR) FROM yzcm_usage_receipt_bindings WHERE binding_slot=?`, receiptBindingSlot).Scan(&activated); err != nil {
-		t.Fatal(err)
-	}
-	start := make(chan struct{})
-	outcomes := make(chan error, 2)
-	for range 2 {
-		go func() {
-			<-start
-			cold := &Tracker{Store: store, ReceiptDir: dir}
-			outcomes <- cold.InitializeReceiptStorage(ctx)
-		}()
-	}
-	close(start)
-	for range 2 {
-		if err := <-outcomes; err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := store.upgradeReceiptBinding(ctx, stale, legacy, initial.FilesystemIdentity, first.receiptBound.objects); err != nil {
-		t.Fatalf("stale reader must recognize the exact committed promotion: %v", err)
-	}
-	updated, found, err := store.loadReceiptBinding(ctx)
-	if err != nil || !found || updated != initial {
-		t.Fatalf("promotion changed the slot authority: row=%+v want=%+v found=%t error=%v", updated, initial, found, err)
-	}
-	var finalActivated string
-	if err := db.QueryRowContext(ctx, `SELECT CAST(activated_at AS CHAR) FROM yzcm_usage_receipt_bindings WHERE binding_slot=?`, receiptBindingSlot).Scan(&finalActivated); err != nil || finalActivated != activated {
-		t.Fatalf("promotion changed activation time: before=%q after=%q error=%v", activated, finalActivated, err)
-	}
-	latest := &Tracker{Store: store, ReceiptDir: dir}
-	if err := latest.InitializeReceiptStorage(ctx); err != nil {
+	return first, dsn
+}
+
+func setReceiptFixtureZone(t *testing.T, db *sql.DB, zone string) {
+	t.Helper()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`SET SESSION time_zone = ?`, zone); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestReceiptBindingMySQLLegacyPromotionRequiresStrictTimeEvidence(t *testing.T) {
-	for _, missing := range []string{"identity", "activation", "ordering", "timestamp-resolution", "clock"} {
-		t.Run(missing, func(t *testing.T) {
-			db, _ := receiptRecoveryMySQL(t)
-			store := Store{DB: db}
-			ctx := context.Background()
-			dir := filepath.Join(t.TempDir(), "usage-receipts")
-			first := &Tracker{Store: store, ReceiptDir: dir}
-			if err := first.InitializeReceiptStorage(ctx); err != nil {
-				t.Fatal(err)
-			}
-			legacy := replaceReceiptFingerprintWithLegacy(t, first)
-			switch missing {
-			case "identity":
-				if _, err := db.ExecContext(ctx, `UPDATE yzcm_usage_receipt_bindings SET filesystem_identity=NULL WHERE binding_slot=?`, receiptBindingSlot); err != nil {
-					t.Fatal(err)
-				}
-				legacy = ""
-			case "activation":
-				if _, err := db.ExecContext(ctx, `UPDATE yzcm_usage_receipt_bindings SET activated_at=NULL WHERE binding_slot=?`, receiptBindingSlot); err != nil {
-					t.Fatal(err)
-				}
-			case "ordering", "timestamp-resolution":
-				marker := first.receiptBound.objects.marker
-				if marker.birth.IsZero() || marker.birthUncertainty <= 0 {
-					t.Fatal("test marker does not expose a creation timestamp")
-				}
-				birth := marker.birth
-				if missing == "timestamp-resolution" {
-					birth = birth.Add(marker.birthUncertainty / 2)
-				}
-				if _, err := db.ExecContext(ctx, `UPDATE yzcm_usage_receipt_bindings SET activated_at=TIMESTAMPADD(MICROSECOND, ?, '1970-01-01 00:00:00') WHERE binding_slot=?`, birth.UnixMicro(), receiptBindingSlot); err != nil {
-					t.Fatal(err)
-				}
-			case "clock":
-				db.SetMaxOpenConns(1)
-				if _, err := db.ExecContext(ctx, `SET timestamp = 1680000000`); err != nil {
-					t.Fatal(err)
-				}
-			}
-			calls := 0
-			cold := &Tracker{Store: store, ReceiptDir: dir}
-			response, err := cold.Wrap(transportFunc(func(*http.Request) (*http.Response, error) {
-				calls++
-				return fakeBilledResponse("unexpected-legacy-promotion"), nil
-			})).RoundTrip(billingTestRequest(t, Request{Owner: "member"}))
-			if response != nil || !errors.Is(err, errReceiptLegacyBindingUnverified) || calls != 0 {
-				t.Fatalf("inconclusive evidence permitted a provider call: response=%v error=%v calls=%d", response, err, calls)
-			}
-			row, found, err := store.loadReceiptBinding(ctx)
-			if err != nil || !found || row.FilesystemIdentity != legacy {
-				t.Fatalf("unverified legacy binding changed: row=%+v found=%t error=%v", row, found, err)
-			}
-		})
+func assertLegacyReceiptBlocked(t *testing.T, store Store, dir, legacy string) {
+	t.Helper()
+	ctx := context.Background()
+	const activatedSQL = `SELECT CAST(activated_at AS CHAR) FROM yzcm_usage_receipt_bindings WHERE binding_slot=?`
+	var initialActivation sql.NullString
+	if err := store.DB.QueryRowContext(ctx, activatedSQL, receiptBindingSlot).Scan(&initialActivation); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	cold := &Tracker{Store: store, ReceiptDir: dir}
+	response, err := cold.Wrap(transportFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return fakeBilledResponse("legacy-needs-recovery"), nil
+	})).RoundTrip(billingTestRequest(t, Request{Owner: "member"}))
+	if response != nil {
+		response.Body.Close()
+	}
+	row, found, readErr := store.loadReceiptBinding(ctx)
+	var rows int
+	if countErr := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM yzcm_usage_requests`).Scan(&rows); countErr != nil {
+		t.Fatal(countErr)
+	}
+	if response != nil || !errors.Is(err, errReceiptLegacyBindingUnverified) || calls != 0 || rows != 0 || readErr != nil || !found || row.FilesystemIdentity != legacy || row.State != receiptBindingActive {
+		t.Fatalf("legacy binding must remain unchanged and require recovery: response=%v error=%v provider=%d ledger=%d found=%t row=%+v readErr=%v", response, err, calls, rows, found, row, readErr)
+	}
+	var activation sql.NullString
+	if err := store.DB.QueryRowContext(ctx, activatedSQL, receiptBindingSlot).Scan(&activation); err != nil || activation != initialActivation {
+		t.Fatalf("activation changed: %+v -> %+v, %v", initialActivation, activation, err)
 	}
 }
 
 func replaceReceiptFingerprintWithLegacy(t *testing.T, tracker *Tracker) string {
 	t.Helper()
-	objects := tracker.receiptBound.objects
-	legacy := objects.legacyEncoding()
-	if legacy == "" {
-		t.Fatal("fixture cannot represent a legacy identity")
-	}
-	result, err := tracker.Store.DB.Exec(`UPDATE yzcm_usage_receipt_bindings SET filesystem_identity=? WHERE binding_slot=? AND filesystem_identity=?`, legacy, receiptBindingSlot, objects.encode())
+	current := tracker.receiptBound.objects.encode()
+	legacy := legacyReceiptFixtureIdentity(t, tracker.receiptBound)
+	result, err := tracker.Store.DB.Exec(`UPDATE yzcm_usage_receipt_bindings SET filesystem_identity=? WHERE binding_slot=? AND filesystem_identity=?`, legacy, receiptBindingSlot, current)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,4 +149,15 @@ func replaceReceiptFingerprintWithLegacy(t *testing.T, tracker *Tracker) string 
 		t.Fatalf("legacy fixture setup changed %d rows: %v", rows, err)
 	}
 	return legacy
+}
+
+func legacyReceiptFixtureIdentity(t *testing.T, b *receiptBinding) string {
+	t.Helper()
+	var legacy strings.Builder
+	legacy.WriteString(receiptLegacyFixturePlatform)
+	for _, path := range []string{filepath.Dir(b.dir), b.dir, filepath.Join(b.dir, receiptDirectoryIDFile), b.anchor} {
+		volume, file := legacyReceiptFixtureFileID(t, path)
+		fmt.Fprintf(&legacy, ":%016x%x", volume, file)
+	}
+	return legacy.String()
 }

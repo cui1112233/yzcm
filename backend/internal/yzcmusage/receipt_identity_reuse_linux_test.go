@@ -2,13 +2,31 @@ package yzcmusage
 
 import (
 	"context"
+	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
+
+const receiptLegacyFixturePlatform = "unix1"
+
+func legacyReceiptFixtureFileID(t *testing.T, path string) (uint64, [16]byte) {
+	t.Helper()
+	var stat unix.Stat_t
+	if err := unix.Stat(path, &stat); err != nil {
+		t.Fatal(err)
+	}
+	var file [16]byte
+	binary.BigEndian.PutUint64(file[8:], uint64(stat.Ino))
+	return uint64(stat.Dev), file
+}
 
 func TestReceiptIdentityRejectsRecreatedMarkerWithReusedInode(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "usage-receipts")
@@ -36,16 +54,16 @@ func TestReceiptBindingMySQLReusedInodeStopsBeforeProvider(t *testing.T) {
 				t.Fatal(err)
 			}
 			before := first.receiptBound.objects
+			legacyBefore := legacyReceiptFixtureIdentity(t, first.receiptBound)
 			identity := before.encode()
 			if version == "legacy" {
 				identity = replaceReceiptFingerprintWithLegacy(t, first)
 			}
 			recreateReceiptMarkerOnReusedInode(t, filepath.Join(dir, receiptDirectoryIDFile))
 			after, err := first.receiptBound.filesystemObjects()
-			if err != nil || before.legacyEncoding() != after.legacyEncoding() || before.same(after) {
+			if err != nil || legacyBefore != legacyReceiptFixtureIdentity(t, first.receiptBound) || before.same(after) {
 				t.Fatalf("fixture did not preserve the weak identity while changing the strong identity: %v", err)
 			}
-			t.Logf("marker birth %s -> %s, filesystem clock tick %s", before.marker.birth, after.marker.birth, after.marker.birthUncertainty)
 			calls := 0
 			cold := &Tracker{Store: store, ReceiptDir: dir}
 			response, err := cold.Wrap(transportFunc(func(*http.Request) (*http.Response, error) {
@@ -68,6 +86,32 @@ func TestReceiptBindingMySQLReusedInodeStopsBeforeProvider(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReceiptBindingMySQLLegacyReusedInodeAcrossTimezones(t *testing.T) {
+	first, dsn := startReceiptLegacyFixture(t, "+00:01")
+	legacy := replaceReceiptFingerprintWithLegacy(t, first)
+	recreateReceiptMarkerOnReusedInode(t, filepath.Join(first.ReceiptDir, receiptDirectoryIDFile))
+	objects, err := first.receiptBound.filesystemObjects()
+	if err != nil || legacyReceiptFixtureIdentity(t, first.receiptBound) != legacy || first.receiptBound.objects.same(objects) {
+		t.Fatalf("fixture must preserve the weak identity while changing the strong identity: %v", err)
+	}
+	reader, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	setReceiptFixtureZone(t, reader, "+00:00")
+	// Wait past even the incorrectly reinterpreted activation, so a future-date
+	// guard alone cannot satisfy this test. Both clocks run normally.
+	var remainingMicros int64
+	if err := reader.QueryRow(`SELECT TIMESTAMPDIFF(MICROSECOND, CURRENT_TIMESTAMP(6), activated_at) FROM yzcm_usage_receipt_bindings WHERE binding_slot=?`, receiptBindingSlot).Scan(&remainingMicros); err != nil {
+		t.Fatal(err)
+	}
+	if remainingMicros > 0 {
+		time.Sleep(time.Duration(remainingMicros)*time.Microsecond + 20*time.Millisecond)
+	}
+	assertLegacyReceiptBlocked(t, Store{DB: reader}, first.ReceiptDir, legacy)
 }
 
 func TestReceiptIdentityRejectsUnsupportedFilesystem(t *testing.T) {

@@ -335,8 +335,9 @@ func (t *Tracker) bindReceiptDirectory(parent context.Context) (receiptBinding, 
 	default:
 		return b, errReceiptDirectoryChanged
 	}
-	if filesystemIdentity == "" {
-		// Bindings from before 8800411 have no saved object identity to verify.
+	if !strings.HasPrefix(filesystemIdentity, receiptIdentityV2Prefix) {
+		// Legacy bindings do not establish object lifetime. Their historical
+		// activation time has no time zone and cannot prove when a file existed.
 		return b, errReceiptLegacyBindingUnverified
 	}
 	b.info, err = visibleReceiptDirectory(dir)
@@ -347,21 +348,8 @@ func (t *Tracker) bindReceiptDirectory(parent context.Context) (receiptBinding, 
 	if err != nil {
 		return b, errors.Join(errReceiptDirectoryChanged, err)
 	}
-	fingerprint := b.objects.encode()
-	if filesystemIdentity != fingerprint {
-		legacy := b.objects.legacyEncoding()
-		if legacy == "" || filesystemIdentity != legacy {
-			if strings.HasPrefix(filesystemIdentity, receiptLegacyIdentityPlatform+":") {
-				return b, errors.Join(errReceiptDirectoryChanged, errReceiptLegacyBindingUnverified)
-			}
-			return b, errReceiptDirectoryChanged
-		}
-		if err := b.verifyVisible(); err != nil {
-			return b, err
-		}
-		if err := t.Store.upgradeReceiptBinding(ctx, row, legacy, fingerprint, b.objects); err != nil {
-			return b, err
-		}
+	if filesystemIdentity != b.objects.encode() {
+		return b, errReceiptDirectoryChanged
 	}
 	if err := b.verifyVisible(); err != nil {
 		return b, err

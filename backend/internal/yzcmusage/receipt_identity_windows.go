@@ -5,27 +5,16 @@ import (
 	"encoding/binary"
 	"errors"
 	"os"
-	"sync"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-const receiptLegacyIdentityPlatform = "win1"
-
-var receiptWindowsBirthUncertainty = sync.OnceValue(func() time.Duration {
-	query := windows.NewLazySystemDLL("kernel32.dll").NewProc("GetSystemTimeAdjustment")
-	if err := query.Find(); err != nil {
-		return 0
-	}
-	var adjustment, increment, disabled uint32
-	result, _, _ := query.Call(uintptr(unsafe.Pointer(&adjustment)), uintptr(unsafe.Pointer(&increment)), uintptr(unsafe.Pointer(&disabled)))
-	if result == 0 {
-		return 0
-	}
-	return time.Duration(increment) * (100 * time.Nanosecond)
-})
+// Layout of the platform's FILE_ID_INFO.
+type windowsReceiptFileID struct {
+	volume uint64
+	file   [16]byte
+}
 
 func receiptObjectIdentity(f *os.File) (receiptObjectID, error) {
 	handle := windows.Handle(f.Fd())
@@ -36,7 +25,7 @@ func receiptObjectIdentity(f *os.File) (receiptObjectID, error) {
 	if flags&windows.FILE_SUPPORTS_OPEN_BY_FILE_ID == 0 {
 		return receiptObjectID{}, errReceiptStableIdentityUnavailable
 	}
-	var native receiptLegacyObjectID
+	var native windowsReceiptFileID
 	if err := windows.GetFileInformationByHandleEx(handle, windows.FileIdInfo, (*byte)(unsafe.Pointer(&native)), uint32(unsafe.Sizeof(native))); err != nil {
 		return receiptObjectID{}, errors.Join(errReceiptStableIdentityUnavailable, err)
 	}
@@ -53,10 +42,5 @@ func receiptObjectIdentity(f *os.File) (receiptObjectID, error) {
 	binary.BigEndian.PutUint64(raw[4:12], native.volume)
 	copy(raw[12:28], native.file[:])
 	binary.BigEndian.PutUint64(raw[28:36], created)
-	return receiptObjectID{
-		receiptLegacyObjectID: native,
-		proof:                 sha256.Sum256(raw[:]),
-		birth:                 time.Unix(0, info.CreationTime.Nanoseconds()).UTC(),
-		birthUncertainty:      receiptWindowsBirthUncertainty(),
-	}, nil
+	return receiptObjectID{volume: native.volume, proof: sha256.Sum256(raw[:])}, nil
 }

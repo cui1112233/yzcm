@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"time"
+	"strings"
 )
 
 const receiptBindingSlot = "member-system"
@@ -97,7 +97,7 @@ func (s Store) finishReceiptBinding(ctx context.Context, row receiptBindingRow, 
 		if err != nil {
 			return "", err
 		}
-		if current.FilesystemIdentity == "" {
+		if !strings.HasPrefix(current.FilesystemIdentity, receiptIdentityV2Prefix) {
 			return "", errReceiptStableIdentityUnavailable
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE yzcm_usage_receipt_bindings SET filesystem_identity=?,state='active',activated_at=CURRENT_TIMESTAMP(6)
@@ -112,57 +112,4 @@ WHERE binding_slot=? AND state='pending'`, current.FilesystemIdentity, receiptBi
 		return "", err
 	}
 	return current.FilesystemIdentity, nil
-}
-
-func (s Store) upgradeReceiptBinding(ctx context.Context, row receiptBindingRow, legacy, fingerprint string, objects receiptFilesystemObjects) error {
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var current receiptBindingRow
-	var activated, databaseNow sql.NullInt64
-	localBefore := time.Now()
-	err = tx.QueryRowContext(ctx, `SELECT `+receiptBindingColumns+`,
-CAST(UNIX_TIMESTAMP(activated_at)*1000000 AS SIGNED), CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(6))*1000000 AS SIGNED)
-FROM yzcm_usage_receipt_bindings WHERE binding_slot=? FOR UPDATE`, receiptBindingSlot).
-		Scan(&current.PathDigest, &current.StoreID, &current.State, &current.Origin, &current.FilesystemIdentity, &current.SyncParentLevels, &activated, &databaseNow)
-	localAfter := time.Now()
-	if err != nil {
-		return err
-	}
-	if current.State != receiptBindingActive || current.PathDigest != row.PathDigest || current.StoreID != row.StoreID ||
-		current.Origin != row.Origin || current.SyncParentLevels != row.SyncParentLevels {
-		return errReceiptDirectoryChanged
-	}
-	if current.FilesystemIdentity == fingerprint {
-		// Another process already upgraded this exact set of objects.
-		return tx.Commit()
-	}
-	if legacy == "" || current.FilesystemIdentity != legacy {
-		return errReceiptDirectoryChanged
-	}
-	// The database clock sample must be inside the local round trip. Even then,
-	// a positive database clock offset up to the observed bound is possible.
-	if !activated.Valid || !databaseNow.Valid || activated.Int64 <= 0 || databaseNow.Int64 < activated.Int64 ||
-		databaseNow.Int64 < localBefore.UnixMicro() || databaseNow.Int64 > localAfter.UnixMicro() {
-		return errReceiptLegacyBindingUnverified
-	}
-	localActivationLowerBound := activated.Int64 - (databaseNow.Int64 - localBefore.UnixMicro())
-	for _, id := range []receiptObjectID{objects.parent, objects.directory, objects.marker, objects.anchor} {
-		// Creation can occur anywhere in the reported filesystem clock tick.
-		// Compare its latest plausible time at the precision of DATETIME(6).
-		if id.birth.IsZero() || id.birthUncertainty <= 0 || id.birth.Add(id.birthUncertainty).UnixMicro() >= localActivationLowerBound {
-			return errReceiptLegacyBindingUnverified
-		}
-	}
-	result, err := tx.ExecContext(ctx, `UPDATE yzcm_usage_receipt_bindings SET filesystem_identity=?
-WHERE binding_slot=? AND state='active' AND filesystem_identity=?`, fingerprint, receiptBindingSlot, legacy)
-	if err != nil {
-		return err
-	}
-	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
-		return errors.Join(errReceiptDirectoryChanged, err)
-	}
-	return tx.Commit()
 }

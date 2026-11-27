@@ -5,29 +5,17 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
-	"time"
 )
 
 var errReceiptStableIdentityUnavailable = errors.New("usage receipt filesystem does not provide a stable object identity")
 
 const receiptIdentityV2Prefix = "fs2:"
 
-// The previous format is used only to verify an existing v1 MySQL binding.
-// Its layout matches Windows FILE_ID_INFO; Linux stored its inode in file[8:].
-type receiptLegacyObjectID struct {
-	volume uint64
-	file   [16]byte
-}
-
 type receiptObjectID struct {
-	receiptLegacyObjectID
-	proof            [sha256.Size]byte
-	birth            time.Time
-	birthUncertainty time.Duration
+	volume uint64
+	proof  [sha256.Size]byte
 }
 
 func (id receiptObjectID) same(other receiptObjectID) bool {
@@ -51,18 +39,6 @@ func (objects receiptFilesystemObjects) encode() string {
 func (objects receiptFilesystemObjects) same(other receiptFilesystemObjects) bool {
 	return objects.parent.same(other.parent) && objects.directory.same(other.directory) &&
 		objects.marker.same(other.marker) && objects.anchor.same(other.anchor)
-}
-
-func (objects receiptFilesystemObjects) legacyEncoding() string {
-	var encoded strings.Builder
-	encoded.WriteString(receiptLegacyIdentityPlatform)
-	for _, id := range []receiptObjectID{objects.parent, objects.directory, objects.marker, objects.anchor} {
-		if id.volume == 0 || id.file == ([16]byte{}) {
-			return ""
-		}
-		fmt.Fprintf(&encoded, ":%016x%s", id.volume, hex.EncodeToString(id.file[:]))
-	}
-	return encoded.String()
 }
 
 func openReceiptObject(path string, directory, writable bool) (*os.File, error) {

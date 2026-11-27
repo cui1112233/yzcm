@@ -85,7 +85,7 @@ func TestBuildMySQLInitializesReceiptStorageBeforeFirstPaidRequest(t *testing.T)
 		t.Fatal(err)
 	}
 	var state, filesystemIdentity string
-	if err := db.QueryRowContext(ctx, `SELECT state, filesystem_identity FROM yzcm_usage_receipt_bindings`).Scan(&state, &filesystemIdentity); err != nil || state != "active" || filesystemIdentity == "" {
+	if err := db.QueryRowContext(ctx, `SELECT state, filesystem_identity FROM yzcm_usage_receipt_bindings`).Scan(&state, &filesystemIdentity); err != nil || state != "active" || !strings.HasPrefix(filesystemIdentity, "fs2:") || len(filesystemIdentity) != 68 {
 		t.Fatalf("startup binding state=%q filesystemIdentity=%q error=%v", state, filesystemIdentity, err)
 	}
 
