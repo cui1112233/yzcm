@@ -257,11 +257,11 @@ func TestScriptBatchAssistantProposalCannotForgeStatus(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	applied, e := svc.Apply(ctx, "a", "p", "proposal", out.Revision, true)
-	if e != nil {
-		t.Fatal(e)
+	if _, e = svc.Apply(ctx, "a", "p", "proposal", out.Revision, true); !errors.Is(e, ErrRevisionConflict) {
+		t.Fatal("proposal without server evidence was not rejected", e)
 	}
-	if applied.Chapters[0].ScriptGeneration.Status != "awaiting_continue" || len(applied.Chapters[0].ScriptGeneration.Batches) != 1 {
+	current, e := svc.Load(ctx, "a", "p")
+	if e != nil || current.Proposals[0].Status != "stale" || current.Chapters[0].ScriptGeneration.Status != "awaiting_continue" || len(current.Chapters[0].ScriptGeneration.Batches) != 1 {
 		t.Fatal("proposal forged server generation state")
 	}
 	if _, e = svc.Store.ActiveDocument(ctx, "a", "p"); !errors.Is(e, ErrNoActiveScript) {

@@ -36,10 +36,14 @@ func IsAssistantShotEditTool(name string) bool {
 // Strict object decoding prevents aliases, duplicate keys and null values from
 // silently changing the selected target or the requested operation.
 func assistantShotObject(raw json.RawMessage, allowed ...string) (map[string]json.RawMessage, error) {
+	return assistantStrictEditObject(raw, 32768, "镜头", allowed...)
+}
+
+func assistantStrictEditObject(raw json.RawMessage, limit int, label string, allowed ...string) (map[string]json.RawMessage, error) {
 	fail := func() (map[string]json.RawMessage, error) {
-		return nil, fmt.Errorf("%w: 镜头参数字段无效、重复或为空", ErrInvalidArgument)
+		return nil, fmt.Errorf("%w: %s参数字段无效、重复或为空", ErrInvalidArgument, label)
 	}
-	if len(raw) == 0 || len(raw) > 32768 {
+	if len(raw) == 0 || len(raw) > limit {
 		return fail()
 	}
 	d := json.NewDecoder(bytes.NewReader(raw))

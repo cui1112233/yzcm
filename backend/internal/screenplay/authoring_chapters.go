@@ -32,19 +32,22 @@ func ValidateChapterCollection(chapters []Chapter) error {
 	if err != nil {
 		return err
 	}
-	parsed := ParseScreenplayMarkdown(content)
-	if len(parsed.Shots) == 0 || len(parsed.Episodes) == 0 {
+	if _, err = parsePublishableScreenplay(content); err != nil {
 		return fmt.Errorf("%w: 剧本缺少可识别的集/场标题，请检查“# 第1集”和“## 1-1：日 内 场景”的格式后重试", ErrArtifactInvalid)
 	}
 	return nil
 }
 func PublishChapterCollection(ctx context.Context, s Store, o, p string, chapters []Chapter) (Document, error) {
-	if !ScriptCollectionReady(chapters) {
-		return Document{}, fmt.Errorf("%w: 分批章节尚未全部完成", ErrInvalidState)
-	}
-	content, err := chapterCollectionText(chapters)
+	content, err := publishableChapterCollectionText(chapters)
 	if err != nil {
 		return Document{}, err
 	}
 	return PublishChapterScripts(ctx, s, o, p, content)
+}
+
+func publishableChapterCollectionText(chapters []Chapter) (string, error) {
+	if !ScriptCollectionReady(chapters) {
+		return "", fmt.Errorf("%w: 分批章节尚未全部完成", ErrInvalidState)
+	}
+	return chapterCollectionText(chapters)
 }

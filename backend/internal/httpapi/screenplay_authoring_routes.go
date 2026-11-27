@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/prompt"
@@ -17,7 +18,8 @@ import (
 type assistantWire struct {
 	Reply       string                       `json:"reply"`
 	Summary     string                       `json:"summary"`
-	Actions     []screenplay.AuthoringAction `json:"actions"`
+	ActionInput []json.RawMessage            `json:"actions"`
+	Actions     []screenplay.AuthoringAction `json:"-"`
 	Question    string                       `json:"question"`
 	Suggestions []assistantSuggestion        `json:"suggestions"`
 	Tool        string                       `json:"tool"`
@@ -165,8 +167,12 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 	}
 	base := "/api/comic-screenplays/projects/{id}"
 	for _, path := range []string{"chapters", "display", "assistant/chat", "team"} {
+		path := path
 		handle("GET "+base+"/"+path, "read", func(w http.ResponseWriter, r *http.Request, o, a string) {
 			st, e := svc.Load(r.Context(), o, r.PathValue("id"))
+			if e == nil && path == "assistant/chat" {
+				e = svc.RefreshAssistantContentProposals(r.Context(), &st)
+			}
 			respond(w, st, e, a)
 		})
 	}
@@ -376,6 +382,47 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 		st, e = svc.Save(r.Context(), o, st.ProjectID, st, in.Expected)
 		respond(w, st, e, a)
 	})
+	handle("POST "+base+"/assistant/prepare-content-edit", "edit", func(w http.ResponseWriter, r *http.Request, o, actor string) {
+		ctx := r.Context()
+		p := r.PathValue("id")
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, screenplayJSONLimit))
+		if err != nil {
+			authoringError(w, screenplay.ErrInvalidArgument)
+			return
+		}
+		owner, err := svc.Resolve(ctx, actor, p, "edit")
+		if err != nil {
+			authoringError(w, err)
+			return
+		}
+		if owner != o {
+			authoringError(w, screenplay.ErrAccessDenied)
+			return
+		}
+		st, err := svc.Load(ctx, o, p)
+		if err != nil {
+			authoringError(w, err)
+			return
+		}
+		project, err := store.GetProject(ctx, o, p)
+		if err != nil {
+			authoringError(w, err)
+			return
+		}
+		active, err := screenplay.ReadAssistantActiveDocument(ctx, store, o, p)
+		if err != nil {
+			authoringError(w, err)
+			return
+		}
+		action, summary, err := screenplay.PrepareAssistantContentEdit(project, st, active, body, false)
+		if err != nil {
+			authoringError(w, err)
+			return
+		}
+		st.Proposals = append(st.Proposals, screenplay.AssistantProposal{ID: newAgentID("proposal"), Summary: summary, Actions: []screenplay.AuthoringAction{action}, Status: "pending", Revision: st.Revision + 1})
+		st, err = svc.Save(ctx, o, p, st, st.Revision)
+		respond(w, st, err, actor)
+	})
 	handle("POST "+base+"/assistant/apply", "edit", func(w http.ResponseWriter, r *http.Request, o, a string) {
 		var in struct {
 			Expected   int64  `json:"expected_revision"`
@@ -385,7 +432,7 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 		if !decode(w, r, &in) {
 			return
 		}
-		st, e := svc.Apply(r.Context(), o, r.PathValue("id"), in.ProposalID, in.Expected, in.Confirmed)
+		st, e := svc.ApplyAs(r.Context(), a, o, r.PathValue("id"), in.ProposalID, in.Expected, in.Confirmed)
 		respond(w, st, e, a)
 	})
 	for _, path := range []string{"chapters/plan", "chapters/{chapter}/script", "assistant/chat"} {
@@ -474,13 +521,16 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 				}
 				contextData := map[string]any{"project": project, "chapters": st.Chapters, "conversation": conversation}
 				var shots []screenplay.Shot
-				var hasDoc bool
-				if active, er := store.ActiveDocument(r.Context(), o, st.ProjectID); er == nil {
-					hasDoc = true
+				active, activeErr := screenplay.ReadAssistantActiveDocument(r.Context(), store, o, st.ProjectID)
+				if activeErr != nil && path == "assistant/chat" {
+					return activeErr
+				}
+				hasDoc := active.ID != ""
+				if hasDoc && activeErr == nil {
 					contextData["document"] = active
-					shots, er = store.ListShots(r.Context(), o, st.ProjectID, active.ID)
-					if er != nil {
-						return er
+					shots, e = store.ListShots(r.Context(), o, st.ProjectID, active.ID)
+					if e != nil {
+						return e
 					}
 					contextData["shots"] = shots
 				}
@@ -563,10 +613,8 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 						return screenplay.ErrAIInvalidJSON
 					}
 					toolRuns := []screenplay.AssistantToolRun{}
-					assetPrepared := false
-					shotPrepared := false
 					if strings.TrimSpace(parsed.Tool) != "" && !screenplay.IsAssistantAssetEditTool(parsed.Tool) && !screenplay.IsAssistantShotEditTool(parsed.Tool) {
-						if len(parsed.Actions) > 0 {
+						if len(parsed.ActionInput) > 0 {
 							return screenplay.ErrInvalidArgument
 						}
 						run, detail, toolErr := assistantReadScopedTool(r.Context(), svc, o, st.ProjectID, parsed.Tool, parsed.ToolArgs)
@@ -597,7 +645,7 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 						if json.Unmarshal([]byte(raw), &parsed) != nil || strings.TrimSpace(parsed.Reply) == "" {
 							return screenplay.ErrAIInvalidJSON
 						}
-						if review && (parsed.Tool != "" || len(parsed.Actions) > 0) {
+						if review && (parsed.Tool != "" || len(parsed.ActionInput) > 0) {
 							return fmt.Errorf("%w: 审核数据只供回答，本轮不能继续调用工具或准备修改", screenplay.ErrInvalidArgument)
 						}
 						if strings.TrimSpace(parsed.Tool) != "" && !screenplay.IsAssistantAssetEditTool(parsed.Tool) && !screenplay.IsAssistantShotEditTool(parsed.Tool) {
@@ -605,7 +653,7 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 						}
 					}
 					if screenplay.IsAssistantAssetEditTool(parsed.Tool) {
-						if len(parsed.Actions) > 0 {
+						if len(parsed.ActionInput) > 0 {
 							return screenplay.ErrInvalidArgument
 						}
 						action, summary, editErr := screenplay.PrepareAssistantAssetEdit(r.Context(), store, o, st.ProjectID, parsed.Tool, parsed.ToolArgs)
@@ -613,11 +661,10 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 							return editErr
 						}
 						parsed = assistantWire{Reply: "已准备" + summary + "的方案，请核对后确认应用；当前资产尚未修改。", Summary: summary, Actions: []screenplay.AuthoringAction{action}}
-						assetPrepared = true
 					}
 
 					if screenplay.IsAssistantShotEditTool(parsed.Tool) {
-						if len(parsed.Actions) > 0 {
+						if len(parsed.ActionInput) > 0 {
 							return screenplay.ErrInvalidArgument
 						}
 						action, summary, editErr := screenplay.PrepareAssistantShotEdit(r.Context(), store, o, st.ProjectID, parsed.Tool, parsed.ToolArgs)
@@ -625,20 +672,28 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 							return editErr
 						}
 						parsed = assistantWire{Reply: "已准备" + summary + "的方案，请核对后确认应用；当前分镜尚未修改。", Summary: summary, Actions: []screenplay.AuthoringAction{action}}
-						shotPrepared = true
 					}
-					if len(parsed.Actions) > 0 {
-						for _, action := range parsed.Actions {
-							if action.Kind == "shot" || (action.Kind == "creative_shot" || action.Kind == "creative_shot_structure") && !shotPrepared {
-								return fmt.Errorf("%w: 创作分镜修改必须通过服务器工具准备完整方案", screenplay.ErrInvalidArgument)
-							}
-							if action.Kind == "asset" && !assetPrepared {
-								return fmt.Errorf("%w: 资产修改必须通过服务器工具准备", screenplay.ErrInvalidArgument)
-							}
-						}
-						if len(parsed.Actions) > 1 {
+					if len(parsed.ActionInput) > 0 {
+						if len(parsed.ActionInput) != 1 {
 							return screenplay.ErrInvalidArgument
 						}
+						owner, err := svc.Resolve(r.Context(), a, st.ProjectID, "edit")
+						if err != nil {
+							return err
+						}
+						if owner != o {
+							return screenplay.ErrAccessDenied
+						}
+						action, summary, err := screenplay.PrepareAssistantContentEdit(project, st, active, parsed.ActionInput[0], true)
+						if err != nil {
+							return err
+						}
+						if err = screenplay.CheckAssistantContentContext(r.Context(), store, project, active); err != nil {
+							return err
+						}
+						parsed = assistantWire{Reply: "修改方案已准备，请核对后确认应用。", Summary: summary, Actions: []screenplay.AuthoringAction{action}}
+					}
+					if len(parsed.Actions) > 0 {
 						if e = screenplay.ValidateAuthoringActions(parsed.Actions); e != nil {
 							return e
 						}
@@ -703,11 +758,11 @@ func authoringError(w http.ResponseWriter, e error) {
 	switch {
 	case errors.Is(e, screenplay.ErrAccessDenied):
 		status = 403
-	case errors.Is(e, screenplay.ErrNotFound):
+	case errors.Is(e, screenplay.ErrNotFound), errors.Is(e, screenplay.ErrNoActiveScript):
 		status = 404
 	case errors.Is(e, screenplay.ErrRevisionConflict), errors.Is(e, screenplay.ErrLockBusy):
 		status = 409
-	case errors.Is(e, screenplay.ErrInvalidArgument), errors.Is(e, screenplay.ErrEmptyContent), errors.Is(e, screenplay.ErrArtifactInvalid):
+	case errors.Is(e, screenplay.ErrInvalidArgument), errors.Is(e, screenplay.ErrEmptyContent), errors.Is(e, screenplay.ErrArtifactInvalid), errors.Is(e, screenplay.ErrAIInvalidJSON):
 		status = 400
 	case errors.Is(e, screenplay.ErrAPIKeyMissing), errors.Is(e, screenplay.ErrInvalidState):
 		status = 422

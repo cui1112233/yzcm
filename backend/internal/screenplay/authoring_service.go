@@ -65,6 +65,7 @@ type AssistantNavigate struct {
 	Reason string `json:"reason,omitempty"`
 }
 type AuthoringAction struct {
+	ContentEdit       *AssistantContentEdit      `json:"content_edit,omitempty"`
 	CreativeStructure *AssistantShotStructure    `json:"creative_structure,omitempty"`
 	CreativeShot      *AssistantCreativeShotEdit `json:"creative_shot,omitempty"`
 	Kind              string                     `json:"kind"`
@@ -161,15 +162,32 @@ func (s AuthoringService) Load(ctx context.Context, o, p string) (AuthoringState
 		return AuthoringState{ProjectID: p, Owner: o, Chapters: []Chapter{}, Messages: []AssistantMessage{}, Proposals: []AssistantProposal{}, Members: []MemberGrant{}, Display: map[string]any{"editor_version": "studio", "active_tab": "source", "font_size": 14}}, nil
 	}
 	if e == nil {
-		for i := range st.Chapters {
-			g := st.Chapters[i].ScriptGeneration
-			if g != nil && g.Status == "running" && !time.Now().Before(g.Deadline) {
-				g.Status = "unknown"
-				g.Error = "请求已超过等待时间，结果不确定，不会自动重发"
+		normalizeAuthoringChapters(st.Chapters)
+		for i := range st.Proposals {
+			proposal := &st.Proposals[i]
+			if proposal.Status != "pending" {
+				continue
+			}
+			for _, action := range proposal.Actions {
+				if isAssistantContentAction(action.Kind) && validateAssistantContentAction(action) != nil {
+					proposal.Status = "stale"
+					break
+				}
 			}
 		}
 	}
 	return st, e
+}
+
+func normalizeAuthoringChapters(chapters []Chapter) {
+	now := time.Now()
+	for i := range chapters {
+		g := chapters[i].ScriptGeneration
+		if g != nil && g.Status == "running" && !now.Before(g.Deadline) {
+			g.Status = "unknown"
+			g.Error = "请求已超过等待时间，结果不确定，不会自动重发"
+		}
+	}
 }
 func (s AuthoringService) Save(ctx context.Context, o, p string, st AuthoringState, v int64) (AuthoringState, error) {
 	if _, e := s.Store.GetProject(ctx, o, p); e != nil {
@@ -241,13 +259,9 @@ func ValidateAuthoringActions(actions []AuthoringAction) error {
 	}
 	for _, a := range actions {
 		switch a.Kind {
-		case "document":
-			if strings.TrimSpace(a.Content) == "" {
-				return ErrEmptyContent
-			}
-		case "chapter":
-			if a.Chapter == nil || a.Chapter.ID == "" || a.Chapter.Title == "" {
-				return ErrInvalidArgument
+		case "document", "chapter":
+			if err := validateAssistantContentAction(a); err != nil {
+				return err
 			}
 		case "asset":
 			if !a.AssetPrepared {
@@ -287,6 +301,10 @@ func (s AuthoringService) WithLock(ctx context.Context, o, p string, fn func() e
 	return fn()
 }
 func (s AuthoringService) Apply(ctx context.Context, o, p, id string, v int64, confirmed bool) (AuthoringState, error) {
+	return s.ApplyAs(ctx, o, o, p, id, v, confirmed)
+}
+
+func (s AuthoringService) ApplyAs(ctx context.Context, actor, o, p, id string, v int64, confirmed bool) (AuthoringState, error) {
 	var out AuthoringState
 	if !confirmed {
 		return out, fmt.Errorf("%w: 请确认编辑内容", ErrInvalidArgument)
@@ -337,33 +355,16 @@ func (s AuthoringService) Apply(ctx context.Context, o, p, id string, v int64, c
 			}
 			out, e = committer.CommitAuthoringShot(ctx, s.Repository, o, p, id, v)
 			return e
-		case "chapter":
-			found := false
-			for i, c := range st.Chapters {
-				if c.ID == a.Chapter.ID {
-					next := *a.Chapter
-					nextRows := []Chapter{next}
-					if e = PreserveScriptGeneration(nextRows, []Chapter{c}); e != nil {
-						return e
-					}
-					st.Chapters[i] = nextRows[0]
-					found = true
-				}
+		case "chapter", "document":
+			committer, ok := s.Store.(AuthoringContentCommitter)
+			if !ok {
+				return ErrInvalidState
 			}
-			if !found {
-				return ErrNotFound
+			out, e = committer.CommitAuthoringContent(ctx, s.Repository, actor, o, p, id, v)
+			if e == nil {
+				e = InvalidateAuthoringContent(ctx, s.Store, o, p, a.Kind)
 			}
-		case "document":
-			doc, e := s.Store.ActiveDocument(ctx, o, p)
-			if e != nil && !errors.Is(e, ErrNotFound) {
-				return e
-			}
-			if doc.Revision != a.ExpectedRevision {
-				return ErrRevisionConflict
-			}
-			if _, e = PublishChapterScripts(ctx, s.Store, o, p, a.Content); e != nil {
-				return e
-			}
+			return e
 		case "asset":
 			if committer, ok := s.Store.(AuthoringAssetCommitter); ok {
 				out, e = committer.CommitAuthoringAsset(ctx, s.Repository, o, p, id, v)
@@ -398,16 +399,6 @@ func (s AuthoringService) Apply(ctx context.Context, o, p, id string, v int64, c
 			}
 			if _, e = s.Store.UpdateShot(ctx, o, p, a.TargetID, *a.Shot); e != nil {
 				return e
-			}
-		}
-		if a.Kind == "chapter" && ScriptCollectionReady(st.Chapters) {
-			for _, c := range st.Chapters {
-				if strings.TrimSpace(c.ScriptText) != "" {
-					if _, e = PublishChapterCollection(ctx, s.Store, o, p, st.Chapters); e != nil {
-						return e
-					}
-					break
-				}
 			}
 		}
 		st.Proposals[index].Status = "applied"
