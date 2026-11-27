@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -33,8 +34,8 @@ var novelFetchTaskRetryDelays = []time.Duration{
 	30 * time.Minute,
 }
 
-// 参考实现把模型输出格式错误视为可立即重试，不占用普通退避序列。
-var novelFetchAIOutputRetryDelays = []time.Duration{0}
+// A confirmed malformed response gets one delayed retry within the same round.
+var novelFetchAIOutputRetryDelays = []time.Duration{30 * time.Second}
 
 var novelFetchAIRetryDelayPattern = regexp.MustCompile(`(?:约|请)\s*(\d+(?:\.\d+)?)\s*秒后重试`)
 
@@ -56,11 +57,14 @@ func novelFetchAIRetryDelayHintSeconds(failure error) time.Duration {
 	return time.Duration(seconds * float64(time.Second))
 }
 
-// novelFetchAIErrorIsOutputRejection 复刻参考实现 ai_error_is_output_rejection。
-// 模型返回了不合法正文属于“本次输出有问题”，不是服务不可用，应立即重试。
+// A typed validation failure is a confirmed bad output and shares the single
+// delayed repair budget with legacy output-rejection markers.
 func novelFetchAIErrorIsOutputRejection(failure error) bool {
 	if failure == nil {
 		return false
+	}
+	if errors.Is(failure, novelfetchworkshop.ErrRewriteValidation) {
+		return true
 	}
 	text := strings.ToLower(failure.Error())
 	for _, marker := range []string{"ai 返回异常", "ai_output_rejected", "invalid_json", "incomplete_prose"} {
@@ -207,18 +211,31 @@ func scheduleNovelFetchTaskRetry(meta map[string]any, stage string, failure erro
 		stage = novelFetchRetryStagePipeline
 	}
 	schedule := novelFetchRetrySchedule(meta)
-	attempt := intValue(schedule[stage]["attempt"]) + 1
+	previous := schedule[stage]
+	attempt := intValue(previous["attempt"]) + 1
 	errorText := ""
 	if failure != nil {
 		errorText = strings.TrimSpace(failure.Error())
 	}
-	if novelFetchAIManualRetryRequired(failure) {
+	firstAttempt := firstText(previous["first_attempt_at"])
+	if firstAttempt == "" && intValue(previous["attempt"]) == 0 {
+		firstAttempt = now.UTC().Format(time.RFC3339Nano)
+	}
+	outputRejection := novelFetchAIErrorIsOutputRejection(failure)
+	outputRejections := intValue(previous["output_rejections"])
+	if outputRejection {
+		outputRejections++
+	}
+	budget := map[string]any{"attempt": attempt, "first_attempt_at": firstAttempt, "output_rejections": outputRejections}
+	if novelFetchRetryStateExhausted(stage, previous, now) || novelFetchRetryStateExhausted(stage, budget, now) || (stage != novelFetchRetryStageOriginalFetch && novelFetchAIManualRetryRequired(failure)) || novelFetchRetryConfigurationFailure(failure) {
 		state := map[string]any{
-			"attempt":       attempt,
-			"next_retry_at": "",
-			"error":         errorText,
-			"manual_only":   true,
-			"updated_at":    now.UTC().Format(time.RFC3339Nano),
+			"attempt":           attempt,
+			"next_retry_at":     "",
+			"error":             errorText,
+			"manual_only":       true,
+			"updated_at":        now.UTC().Format(time.RFC3339Nano),
+			"first_attempt_at":  firstAttempt,
+			"output_rejections": outputRejections,
 		}
 		schedule[stage] = state
 		meta["retry_schedule"] = schedule
@@ -227,7 +244,6 @@ func scheduleNovelFetchTaskRetry(meta map[string]any, stage string, failure erro
 		return state
 	}
 	delays := novelFetchTaskRetryDelays
-	outputRejection := novelFetchAIErrorIsOutputRejection(failure)
 	if outputRejection {
 		delays = novelFetchAIOutputRetryDelays
 	}
@@ -243,10 +259,12 @@ func scheduleNovelFetchTaskRetry(meta map[string]any, stage string, failure erro
 		delay = retryAfter
 	}
 	state := map[string]any{
-		"attempt":       attempt,
-		"next_retry_at": now.Add(delay).UTC().Format(time.RFC3339Nano),
-		"error":         errorText,
-		"updated_at":    now.UTC().Format(time.RFC3339Nano),
+		"attempt":           attempt,
+		"next_retry_at":     now.Add(delay).UTC().Format(time.RFC3339Nano),
+		"error":             errorText,
+		"updated_at":        now.UTC().Format(time.RFC3339Nano),
+		"first_attempt_at":  firstAttempt,
+		"output_rejections": outputRejections,
 	}
 	if outputRejection && delay <= 0 {
 		state["immediate"] = true
@@ -306,33 +324,33 @@ func releaseNovelFetchAIManualRetryHold(meta map[string]any) bool {
 	return true
 }
 
-// novelFetchTaskRetryDue 复刻参考实现 task_retry_due。人工保持阶段被跳过；
-// 没有阶段记录、时间无法解析或已到期都视为可重试。
+// A missing schedule permits first execution. Every persisted stage must have
+// a valid due time and remaining budget; invalid dates require manual handling.
 func novelFetchTaskRetryDue(meta map[string]any, stage string, now time.Time) bool {
 	schedule := novelFetchRetrySchedule(meta)
-	states := make([]map[string]any, 0, len(schedule))
+	states := make(map[string]map[string]any, len(schedule))
 	if key := strings.TrimSpace(stage); key != "" {
 		if state, ok := schedule[key]; ok {
-			states = append(states, state)
+			states[key] = state
 		}
 	} else {
-		for _, state := range schedule {
-			states = append(states, state)
+		for key, state := range schedule {
+			states[key] = state
 		}
 	}
 	if len(states) == 0 {
 		return true
 	}
-	for _, state := range states {
-		if novelFetchRetryStateIsManual(state) {
-			continue
+	for key, state := range states {
+		if novelFetchRetryStateExhausted(key, state, now) {
+			return false
 		}
 		dueAt, ok := novelFetchParseRetryTime(firstText(state["next_retry_at"]))
-		if !ok || !dueAt.After(now) {
-			return true
+		if !ok || dueAt.After(now) {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // novelFetchRetryStageForError 把处理链路返回的错误归到对应阶段。

@@ -100,7 +100,7 @@ func (p ownerTextProvider) Complete(ctx context.Context, request batchfactoryv11
 }
 
 func (a novelFetchRewriteAdapter) Complete(ctx context.Context, request novelfetchworkshop.RewriteRequest) (string, error) {
-	callCtx, cancel := context.WithTimeout(ctx, novelFetchClassificationTimeout)
+	callCtx, cancel := context.WithTimeout(batchfactoryv11.WithSingleAttempt(ctx), novelFetchClassificationTimeout)
 	defer cancel()
 	return a.provider.Complete(callCtx, batchfactoryv11.TextCompletionRequest{
 		SystemPrompt:        request.SystemPrompt,
@@ -210,7 +210,7 @@ func textGenderJudge(provider *batchfactoryv11.OpenAICompatibleProvider) novelfe
 		return nil
 	}
 	return func(ctx context.Context, info novelfetchworkshop.BookInfo) (string, error) {
-		return provider.Complete(ctx, batchfactoryv11.TextCompletionRequest{
+		return provider.Complete(batchfactoryv11.WithSingleAttempt(ctx), batchfactoryv11.TextCompletionRequest{
 			SystemPrompt:        "你是小说男女频分类助手。只输出 JSON：{\"gender\":\"男频或女频\"}。必须从「男频」「女频」中选择最接近的一项，不要留空，不要输出 JSON 以外的内容。",
 			UserPrompt:          "请根据以下分类信息和正文片段判断小说男女频：分类=" + info.Category + "；题材=" + info.Genre + "；正文片段=" + genderTextExcerpt(info.Text),
 			Temperature:         0,

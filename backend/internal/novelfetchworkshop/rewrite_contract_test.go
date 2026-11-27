@@ -99,7 +99,8 @@ func TestRewriteKeepsSuccessfulVersionWhenNextFails(t *testing.T) {
 		return "", errors.New("upstream down")
 	}))
 	doc, _ := store.GetDocument(ctx, "a", "123")
-	if err == nil || doc.Versions["ai1"] != "已完成改文" || doc.Versions["ai2"] != nil {
+	saved, bodyErr := ReadBodyText(ctx, store, "a", doc, "ai1")
+	if err == nil || bodyErr != nil || saved != "已完成改文" || doc.Versions["ai2"] != nil {
 		t.Fatalf("lost completed version doc=%#v err=%v", doc, err)
 	}
 }

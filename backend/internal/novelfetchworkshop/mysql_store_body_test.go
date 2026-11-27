@@ -28,6 +28,7 @@ func TestMySQLStorePutBody(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery(regexp.QuoteMeta(lockBodySQL)).WithArgs("alice", "123", "ai3").WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec("INSERT INTO novel_fetch_workshop_bodies").WithArgs("alice", "123", "ai3", uint64(1), "gzip", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(2), "ready", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(1, 1))
+	expectBodyMetadataWrite(mock, "alice", "123")
 	mock.ExpectCommit()
 
 	ref, err := store.PutBody(ctx, "alice", BodyRecord{

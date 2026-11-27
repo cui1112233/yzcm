@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"github.com/DATA-DOG/go-sqlmock"
 	"regexp"
@@ -16,7 +17,7 @@ func expectLockedBody(mock sqlmock.Sqlmock, owner, book, version string, rev uin
 }
 func expectBodyRemoval(mock sqlmock.Sqlmock, owner, book, version string, rev uint64, encoding string, blob []byte) {
 	mock.ExpectExec("DELETE FROM novel_fetch_workshop_bodies").WithArgs(owner, book, version, rev, encoding, blob).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("UPDATE novel_fetch_workshop_documents SET document_json=JSON_REMOVE").WithArgs(bodyRefJSONPath(version), owner, book).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE novel_fetch_workshop_documents SET document_json=JSON_MERGE_PATCH").WithArgs(bodyRefJSONPath(version), sqlmock.AnyArg(), owner, book).WillReturnResult(sqlmock.NewResult(0, 1))
 }
 func fakeBodyObjects(s *MySQLStore, objects map[string]string, deletes *int) {
 	s.ObjectBodies = &BodyObjectStore{Bucket: "fake", Put: func(_ context.Context, _, key string, b []byte) error { objects[key] = string(b); return nil }, Get: func(_ context.Context, _, key string) ([]byte, error) { return []byte(objects[key]), nil }, Delete: func(_ context.Context, _, key string) error { *deletes++; delete(objects, key); return nil }}
@@ -60,6 +61,7 @@ func TestAudit20261127FailedTOSRewritePreservesPreviousBody(t *testing.T) {
 							mock.ExpectRollback()
 						} else {
 							retire.WillReturnResult(sqlmock.NewResult(0, 1))
+							expectBodyMetadataWrite(mock, "alice", "123")
 							mock.ExpectCommit().WillReturnError(injected)
 						}
 					}
@@ -102,6 +104,7 @@ func TestTOSWritesUseImmutableKeysAndReturnTheirExactRevision(t *testing.T) {
 			expectedState = "held"
 		}
 		mock.ExpectExec("INSERT INTO novel_fetch_body_object_retirements").WithArgs(previous, "alice", "123", "ai1", sqlmock.AnyArg(), sqlmock.AnyArg(), expectedState).WillReturnResult(sqlmock.NewResult(0, 1))
+		expectBodyMetadataWrite(mock, "alice", "123")
 		mock.ExpectCommit()
 		ref, err := s.PutBody(context.Background(), "alice", BodyRecord{BookID: "123", BodyRef: BodyRef{VersionID: "ai1"}, Content: "body"})
 		if err != nil || ref.Revision != i || ref.UpdatedAt == "" {
@@ -223,7 +226,7 @@ func TestBodyDeletionRecordsRetirementOnlyAfterSQLConfirmation(t *testing.T) {
 					mock.ExpectRollback()
 				} else {
 					deletion.WillReturnResult(sqlmock.NewResult(0, 1))
-					document := mock.ExpectExec("UPDATE novel_fetch_workshop_documents SET document_json=JSON_REMOVE")
+					document := mock.ExpectExec("UPDATE novel_fetch_workshop_documents SET document_json=JSON_MERGE_PATCH")
 					if failure == "document" {
 						document.WillReturnError(injected)
 						mock.ExpectRollback()
@@ -416,6 +419,87 @@ func TestReaperFailureDoesNotStarveOtherObjects(t *testing.T) {
 	deleted, err := s.ReapRetiredBodyObjects(context.Background(), now, 10)
 	if err == nil || deleted != 1 || len(calls) != 2 || calls[1] != b {
 		t.Fatalf("failed object starved next: deleted=%d calls=%v err=%v", deleted, calls, err)
+	}
+	assertBodyExpectations(t, mock)
+}
+
+func expectBodyMetadataWrite(mock sqlmock.Sqlmock, owner, book string) {
+	mock.ExpectExec("UPDATE novel_fetch_workshop_documents SET document_json=JSON_MERGE_PATCH").WithArgs(sqlmock.AnyArg(), owner, book).WillReturnResult(sqlmock.NewResult(0, 1))
+}
+
+func TestMySQLBodyMetadataFailureRollsBackReferenceAndRetirement(t *testing.T) {
+	_, mock, s := newBodySQLMock(t)
+	key := BodyObjectKey("alice", "123", "ai1")
+	objects := map[string]string{key: "old body"}
+	deletes := 0
+	fakeBodyObjects(s, objects, &deletes)
+	mock.ExpectBegin()
+	expectLockedBody(mock, "alice", "123", "ai1", 1, "tos", []byte(key), "ready", nil, nil)
+	mock.ExpectExec("UPDATE novel_fetch_workshop_bodies SET revision").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO novel_fetch_body_object_retirements").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE novel_fetch_workshop_documents SET document_json=JSON_MERGE_PATCH").WillReturnError(errors.New("metadata write failed"))
+	mock.ExpectRollback()
+	if _, err := s.PutBody(context.Background(), "alice", BodyRecord{BookID: "123", BodyRef: BodyRef{VersionID: "ai1"}, Content: "new body"}); err == nil {
+		t.Fatal("metadata failure was ignored")
+	}
+	if deletes != 0 || objects[key] != "old body" {
+		t.Fatal("metadata failure destroyed body")
+	}
+	assertBodyExpectations(t, mock)
+}
+
+type bodyPatchSQLArgument struct {
+	version  string
+	chars    int64
+	revision uint64
+}
+
+func (arg bodyPatchSQLArgument) Match(value driver.Value) bool {
+	raw, ok := value.(string)
+	if !ok {
+		return false
+	}
+	var patch map[string]any
+	if json.Unmarshal([]byte(raw), &patch) != nil {
+		return false
+	}
+	refs, ok := patch["bodyRefs"].(map[string]any)
+	if !ok {
+		return false
+	}
+	ref, ok := refs[arg.version].(map[string]any)
+	if !ok {
+		return false
+	}
+	if ref["revision"] != float64(arg.revision) || ref["charCount"] != float64(arg.chars) || ref["contentHash"] == "" {
+		return false
+	}
+	return patch["processedChars"] == float64(arg.chars) && patch["original"] == nil && patch["processedText"] == nil && patch["originalRawChars"] == nil
+}
+
+func TestMySQLPutBodySynchronizesMetadataInTheSameTransaction(t *testing.T) {
+	_, mock, s := newBodySQLMock(t)
+	mock.ExpectBegin()
+	expectLockedBody(mock, "alice", "123", "original", 6, "gzip", []byte("previous"), "ready", nil, nil)
+	mock.ExpectExec("UPDATE novel_fetch_workshop_bodies SET revision").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE novel_fetch_workshop_documents SET document_json=JSON_MERGE_PATCH").WithArgs(bodyPatchSQLArgument{version: "original", chars: 13, revision: 7}, "alice", "123").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	ref, err := s.PutBody(context.Background(), "alice", BodyRecord{BookID: "123", BodyRef: BodyRef{VersionID: "original"}, Content: "现在正文已经修改为更长内容"})
+	if err != nil || ref.CharCount != 13 || ref.Revision != 7 {
+		t.Fatalf("ref=%+v err=%v", ref, err)
+	}
+	assertBodyExpectations(t, mock)
+}
+
+func TestMySQLDeleteBodyClearsCurrentBodySummary(t *testing.T) {
+	_, mock, s := newBodySQLMock(t)
+	mock.ExpectBegin()
+	expectLockedBody(mock, "alice", "123", "original", 2, "gzip", []byte("old"), "ready", nil, nil)
+	mock.ExpectExec("DELETE FROM novel_fetch_workshop_bodies").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE novel_fetch_workshop_documents SET document_json=JSON_MERGE_PATCH").WithArgs(bodyRefJSONPath("original"), sqlmock.AnyArg(), "alice", "123").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	if removed, err := s.DeleteBody(context.Background(), "alice", "123", "original"); err != nil || !removed {
+		t.Fatal(removed, err)
 	}
 	assertBodyExpectations(t, mock)
 }

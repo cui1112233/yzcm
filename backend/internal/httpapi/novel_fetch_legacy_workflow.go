@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -183,35 +184,17 @@ func registerNovelFetchLegacyWorkflowRoutes(mux *http.ServeMux, store novelfetch
 				ids = append(ids, document.BookID)
 			}
 		}
-		rows := make([]novelfetchworkshop.Document, 0, len(ids))
-		stoppableIDs := make([]string, 0, len(ids))
-		for _, id := range ids {
-			row, err := store.GetDocument(req.Context(), identity.Username, strings.TrimSpace(id))
+		updated := 0
+		for _, id := range uniqueNovelFetchTaskIDs(ids) {
+			changed, err := stopWorkshopBook(req.Context(), store, queue, identity.Username, id, true)
 			if err != nil {
-				continue
-			}
-			status := strings.ToLower(firstText(row.Meta["status"], row.Meta["queueState"]))
-			if status == "completed" || status == "done" || status == "success" {
-				continue
-			}
-			rows = append(rows, row)
-			stoppableIDs = append(stoppableIDs, row.BookID)
-		}
-		if cancellationQueue, ok := queue.(novelfetchworkshop.ProcessCancellationQueue); ok {
-			if err := cancellationQueue.CancelBooks(req.Context(), identity.Username, stoppableIDs); err != nil {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "Redis 取消任务失败"})
+				if errors.Is(err, novelfetchworkshop.ErrNotFound) {
+					continue
+				}
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "停止任务失败，请刷新后重试"})
 				return
 			}
-		}
-		updated := 0
-		for _, row := range rows {
-			if row.Meta == nil {
-				row.Meta = map[string]any{}
-			}
-			row.Meta["status"] = "stopped"
-			row.Meta["queueState"] = "stopped"
-			row.Logs = append(row.Logs, map[string]any{"type": "stopped", "at": time.Now().UTC().Format(time.RFC3339Nano)})
-			if err := store.PutDocument(req.Context(), identity.Username, row); err == nil {
+			if changed {
 				updated++
 			}
 		}
@@ -582,12 +565,12 @@ func cancelWorkshopSchedule(w http.ResponseWriter, req *http.Request, store nove
 		}
 		ids := scheduleStringSlice(item["book_ids"])
 		if len(ids) > 0 {
-			cancellation, ok := queue.(novelfetchworkshop.ProcessCancellationQueue)
+			_, ok := queue.(novelfetchworkshop.ProcessCancellationQueue)
 			if !ok {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "任务队列暂不支持取消，请稍后重试"})
 				return
 			}
-			if err := cancellation.CancelBooks(req.Context(), identity.Username, ids); err != nil {
+			if err := cancelWorkshopBookMarkers(req.Context(), queue, identity.Username, ids); err != nil {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "取消队列任务失败，请重试"})
 				return
 			}
@@ -604,7 +587,7 @@ func cancelWorkshopSchedule(w http.ResponseWriter, req *http.Request, store nove
 					if !seenString(createdIDs, id) || strings.TrimSpace(doc.OriginalRaw) != "" || strings.TrimSpace(doc.Original) != "" || strings.TrimSpace(doc.ProcessedText) != "" || len(doc.Versions) > 0 || len(doc.BodyRefs) > 0 {
 						delete(doc.Meta, "scheduledHold")
 						doc.Meta["status"], doc.Meta["queueState"] = "stopped", "stopped"
-						if err := store.PutDocument(req.Context(), identity.Username, doc); err != nil {
+						if _, err := store.CompareAndSwapDocument(req.Context(), identity.Username, doc); err != nil {
 							writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保留定时书籍状态失败，请重试"})
 							return
 						}

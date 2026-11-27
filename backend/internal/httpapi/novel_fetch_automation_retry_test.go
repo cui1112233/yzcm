@@ -105,8 +105,11 @@ func TestNovelFetchAIManualRetryClassification(t *testing.T) {
 	if !novelFetchAIManualRetryRequired(errors.New("HTTP 403 · content policy violation")) {
 		t.Fatal("a content policy rejection must require manual retry")
 	}
-	if novelFetchAIManualRetryRequired(errors.New("dial tcp: connection reset")) {
-		t.Fatal("a transient network error must stay retryable")
+	if !novelFetchAIManualRetryRequired(errors.New("dial tcp: connection reset")) {
+		t.Fatal("a paid request with an unknown network result must require manual retry")
+	}
+	if novelFetchAIManualRetryRequired(errors.New("HTTP 429 rate limit")) {
+		t.Fatal("a confirmed rate limit should retain bounded delayed retry")
 	}
 }
 
@@ -167,10 +170,15 @@ func TestPermanentOriginalFetchFailureStopsImmediately(t *testing.T) {
 	if !strings.Contains(firstText(meta["error"]), "原文来源无效") || meta["originalFetchLastError"] != fetchErr.Error() {
 		t.Fatalf("source failure reason was lost: %#v", meta)
 	}
-	for _, key := range []string{"originalFetchNextRetryAt", "original_fetch_next_retry_at", "automationNextRetryAt", "automation_next_retry_at", "next_retry_at", "retry_schedule"} {
+	for _, key := range []string{"originalFetchNextRetryAt", "original_fetch_next_retry_at", "automationNextRetryAt", "automation_next_retry_at"} {
 		if _, ok := meta[key]; ok {
 			t.Fatalf("permanent failure kept %s: %#v", key, meta)
 		}
+	}
+	// Manual handling retains failed-stage evidence until an explicit new round.
+	schedule := novelFetchRetrySchedule(meta)
+	if !novelFetchRetryStateIsManual(schedule[novelFetchRetryStageOriginalFetch]) || firstText(schedule[novelFetchRetryStageOriginalFetch]["next_retry_at"]) != "" || intValue(schedule[novelFetchRetryStagePipeline]["attempt"]) != 1 {
+		t.Fatalf("manual original failure erased another stage: %#v", schedule)
 	}
 	if novelFetchAutomationEligible(document, now.Add(24*time.Hour)) {
 		t.Fatal("permanent failure must not return to automation")
@@ -205,10 +213,13 @@ func TestConfigurationOriginalFetchFailureWaitsForManualRetry(t *testing.T) {
 		!strings.Contains(firstText(meta["error"]), fetchErr.Error()) {
 		t.Fatalf("meta=%#v, want configuration hold with cause", meta)
 	}
-	for _, key := range []string{"originalFetchNextRetryAt", "automationNextRetryAt", "next_retry_at", "retry_schedule"} {
+	for _, key := range []string{"originalFetchNextRetryAt", "automationNextRetryAt"} {
 		if _, ok := meta[key]; ok {
 			t.Fatalf("configuration hold kept %s: %#v", key, meta)
 		}
+	}
+	if state := novelFetchRetrySchedule(meta)[novelFetchRetryStageOriginalFetch]; !novelFetchRetryStateIsManual(state) || firstText(state["next_retry_at"]) != "" {
+		t.Fatalf("configuration failure lost manual-stage evidence: %#v", state)
 	}
 	if novelFetchAutomationEligible(document, now.Add(24*time.Hour)) {
 		t.Fatal("configuration failure must stay paused even with an upload pending")
@@ -317,10 +328,13 @@ func TestTransientOriginalFetchStopsOnSixthFailure(t *testing.T) {
 		meta["manualOriginalFetchRequired"] != true || intValue(meta["originalFetchRetryAttempts"]) != 6 {
 		t.Fatalf("meta=%#v, want manual hold after sixth failed attempt", meta)
 	}
-	for _, key := range []string{"originalFetchNextRetryAt", "automationNextRetryAt", "next_retry_at", "retry_schedule"} {
+	for _, key := range []string{"originalFetchNextRetryAt", "automationNextRetryAt"} {
 		if _, ok := meta[key]; ok {
 			t.Fatalf("exhausted retry budget kept %s: %#v", key, meta)
 		}
+	}
+	if state := novelFetchRetrySchedule(meta)[novelFetchRetryStageOriginalFetch]; !novelFetchRetryStateIsManual(state) || intValue(state["attempt"]) != 6 || firstText(state["next_retry_at"]) != "" {
+		t.Fatalf("exhausted original retry evidence lost: %#v", state)
 	}
 	if novelFetchAutomationEligible(document, now.Add(24*time.Hour)) {
 		t.Fatal("exhausted retry budget must not return to automation")

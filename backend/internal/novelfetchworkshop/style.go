@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"qiantie/backend/internal/batchfactoryv11"
 	"regexp"
 	"strconv"
 	"strings"
@@ -52,13 +53,17 @@ func ResolveStyle(ctx context.Context, info BookInfo, provider RewriteProvider) 
 	}
 	var content string
 	var err error
-	for attempt := 0; attempt < 3; attempt++ {
+	maxAttempts := 3
+	if batchfactoryv11.SingleAttempt(ctx) {
+		maxAttempts = 1
+	}
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if ctx.Err() != nil {
 			err = ctx.Err()
 			break
 		}
 		content, err = provider.Complete(ctx, request)
-		if err == nil || !retryableStyleError(err) || attempt == 2 {
+		if err == nil || !retryableStyleError(err) || attempt == maxAttempts-1 {
 			break
 		}
 		timer := time.NewTimer(time.Duration(attempt+1) * 200 * time.Millisecond)

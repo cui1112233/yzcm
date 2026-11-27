@@ -3,6 +3,7 @@ package novelfetchworkshop
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -85,6 +86,72 @@ func TestBodySafetyMySQLStorage(t *testing.T) {
 	if _, err := s.PutBody(ctx, owner, body("existing", "old")); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("body-edit-and-stale-document-consistency", func(t *testing.T) {
+		stale := Document{BookID: "metadata", Original: "old", ProcessedChars: 3, Meta: map[string]any{"keep": "yes"}}
+		if err := s.PutDocument(ctx, owner, stale); err != nil {
+			t.Fatal(err)
+		}
+		rawRef, err := s.PutBody(ctx, owner, BodyRecord{BookID: "metadata", BodyRef: BodyRef{VersionID: "original_raw"}, Content: "完整原始正文不得截断"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref, err := s.PutBody(ctx, owner, BodyRecord{BookID: "metadata", BodyRef: BodyRef{VersionID: "original"}, Content: "现在正文已经修改为更长内容"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.PutDocument(ctx, owner, stale); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.GetDocument(ctx, owner, "metadata")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ProcessedChars != 13 || got.BodyRefs["original"].CharCount != 13 || got.BodyRefs["original"].Revision != ref.Revision || got.BodyRefs["original"].ContentHash != ref.ContentHash || got.Original != "" || got.BodyRefs["original_raw"].ContentHash != rawRef.ContentHash {
+			t.Fatalf("stale body/task summary: %+v", got)
+		}
+		raw, err := ReadBodyText(ctx, s, owner, got, "original_raw")
+		if err != nil || raw != "完整原始正文不得截断" {
+			t.Fatal("full raw body changed")
+		}
+	})
+	t.Run("deleted-body-is-not-resurrected-by-old-document", func(t *testing.T) {
+		if err := s.PutDocument(ctx, owner, Document{BookID: "deleted-stale", Original: "legacy original to migrate"}); err != nil {
+			t.Fatal(err)
+		}
+		old, err := s.GetDocument(ctx, owner, "deleted-stale")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if old.BodyRefs["original"].Revision == 0 {
+			t.Fatal("legacy document did not acquire actual body reference")
+		}
+		// A public hydrated snapshot carries both the old text and its body ref.
+		old.Original = "legacy original to migrate"
+		old.ProcessedText = old.Original
+		if removed, err := s.DeleteBody(ctx, owner, "deleted-stale", "original"); err != nil || !removed {
+			t.Fatal(removed, err)
+		}
+		afterDelete, readErr := s.GetDocument(ctx, owner, "deleted-stale")
+		if readErr != nil || afterDelete.ProcessedChars != 0 || afterDelete.Original != "" {
+			t.Fatalf("deleted body retained active summary: %+v %v", afterDelete, readErr)
+		}
+		if _, err := s.CompareAndSwapDocument(ctx, owner, old); !errors.Is(err, ErrDocumentChanged) {
+			t.Fatalf("CAS ignored body deletion: %v", err)
+		}
+		if err := s.PutDocument(ctx, owner, old); err != nil {
+			t.Fatal(err)
+		}
+		latest, err := s.GetDocument(ctx, owner, "deleted-stale")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := latest.BodyRefs["original"]; exists || latest.Original != "" || latest.ProcessedText != "" {
+			t.Fatalf("stale snapshot revived deleted body: %+v", latest)
+		}
+		if _, err := s.GetBody(ctx, owner, "deleted-stale", "original"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("legacy migration resurrected deleted body row: %v", err)
+		}
+	})
 	t.Run("concurrent-existing-revisions", func(t *testing.T) {
 		start := make(chan struct{})
 		type result struct {

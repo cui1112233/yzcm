@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"qiantie/backend/internal/novelfetchworkshop"
 )
@@ -29,7 +30,7 @@ func TestWorkshopGenerateRouteUsesSavedCountAndPreservesOutputs(t *testing.T) {
 	store.PutDocument(ctx, "alice", novelfetchworkshop.Document{BookID: "123", Original: "首行原文", Meta: map[string]any{"aiCount": 2}, Versions: map[string]any{"ai1": "旧版本"}})
 	provider := &countRouteRewriteProvider{}
 	mux := http.NewServeMux()
-	registerNovelFetchWorkshopRoutes(mux, store, nil, nil, nil, nil, provider, nil, "", nil, nil, nil)
+	registerNovelFetchWorkshopRoutes(mux, store, novelfetchworkshop.NewMemoryQueue(), nil, nil, nil, provider, nil, "", nil, nil, nil)
 	call := func() *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/novel-fetch-workshop/tasks/123/generate-ai", strings.NewReader(`{}`))
 		req = req.WithContext(context.WithValue(ctx, bridgeIdentityKey{}, BridgeIdentity{Username: "alice"}))
@@ -41,8 +42,20 @@ func TestWorkshopGenerateRouteUsesSavedCountAndPreservesOutputs(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("generation: %d %s", res.Code, res.Body.String())
 	}
-	doc, _ := store.GetDocument(ctx, "alice", "123")
-	if doc.Versions["ai1"] != "旧版本" || doc.Versions["ai2"] != "改后首行" || provider.calls != 1 || !strings.Contains(provider.prompts[0], "第 2 个") {
+	var doc novelfetchworkshop.Document
+	deadline := time.Now().Add(time.Second)
+	for {
+		doc, _ = store.GetDocument(ctx, "alice", "123")
+		text, err := novelfetchworkshop.ReadBodyText(ctx, store, "alice", doc, "ai2")
+		if err == nil && text == "改后首行" && doc.Meta["status"] == "completed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("queued generation not completed: %+v", doc)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if doc.Versions["ai1"] != "旧版本" || provider.calls != 1 || !strings.Contains(provider.prompts[0], "第 2 个") {
 		t.Fatalf("wrong target: %#v calls=%d", doc, provider.calls)
 	}
 	res = call()

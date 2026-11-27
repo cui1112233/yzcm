@@ -3,6 +3,7 @@ package novelfetchworkshop
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -76,10 +77,18 @@ func (s *MySQLStore) switchBodyReference(ctx context.Context, owner, bookID, ver
 			return BodyRef{}, err
 		}
 	}
+	ref := BodyRef{VersionID: versionID, Revision: revision, ContentHash: hash, CharCount: chars, State: state, UpdatedAt: now.Format(time.RFC3339Nano)}
+	patch, err := json.Marshal(bodyMetadataPatch(ref))
+	if err != nil {
+		return BodyRef{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE novel_fetch_workshop_documents SET document_json=JSON_MERGE_PATCH(document_json, CAST(? AS CHAR CHARACTER SET utf8mb4)), updated_at=GREATEST(CURRENT_TIMESTAMP(6), TIMESTAMPADD(MICROSECOND,1,updated_at)) WHERE owner_username=? AND book_id=?`, string(patch), owner, bookID); err != nil {
+		return BodyRef{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return BodyRef{}, err
 	}
-	return BodyRef{VersionID: versionID, Revision: revision, ContentHash: hash, CharCount: chars, State: state, UpdatedAt: now.Format(time.RFC3339Nano)}, nil
+	return ref, nil
 }
 
 func removeBody(ctx context.Context, tx *sql.Tx, b lockedBody, now time.Time) error {
@@ -94,7 +103,11 @@ func removeBody(ctx context.Context, tx *sql.Tx, b lockedBody, now time.Time) er
 	if n != 1 {
 		return errors.New("body changed during deletion")
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE novel_fetch_workshop_documents SET document_json=JSON_REMOVE(document_json, ?), updated_at=CURRENT_TIMESTAMP(6) WHERE owner_username=? AND book_id=?`, bodyRefJSONPath(b.versionID), b.owner, b.bookID); err != nil {
+	patch, err := json.Marshal(bodyRemovalMetadataPatch(b.versionID))
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE novel_fetch_workshop_documents SET document_json=JSON_MERGE_PATCH(JSON_REMOVE(document_json, ?), CAST(? AS CHAR CHARACTER SET utf8mb4)), updated_at=GREATEST(CURRENT_TIMESTAMP(6), TIMESTAMPADD(MICROSECOND,1,updated_at)) WHERE owner_username=? AND book_id=?`, bodyRefJSONPath(b.versionID), string(patch), b.owner, b.bookID); err != nil {
 		return err
 	}
 	return registerBodyRetirement(ctx, tx, b, now)
@@ -201,4 +214,40 @@ func (s *MySQLStore) reapBodyObject(ctx context.Context, key string, now time.Ti
 		return false, errRetiredBodyObjectDelete
 	}
 	return true, nil
+}
+
+// The document row lock orders metadata replacement against PutBody's final
+// metadata patch. The following body read is deliberately NONlocking: a writer
+// may hold a body row while waiting for this document. Before that writer can
+// commit it must patch the document, so either order leaves the latest refs.
+func prepareDocumentWrite(ctx context.Context, tx *sql.Tx, owner string, document Document) (Document, error) {
+	var updated time.Time
+	err := tx.QueryRowContext(ctx, `SELECT updated_at FROM novel_fetch_workshop_documents WHERE owner_username=? AND book_id=? FOR UPDATE`, owner, document.BookID).Scan(&updated)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return document, err
+	}
+	return canonicalDocumentBodyRefs(ctx, tx, owner, document)
+}
+
+const canonicalBodyRefsSQL = `SELECT version_id, revision, content_hash, char_count, state, updated_at FROM novel_fetch_workshop_bodies WHERE owner_username=? AND book_id=? ORDER BY version_id ASC`
+
+func canonicalDocumentBodyRefs(ctx context.Context, tx *sql.Tx, owner string, document Document) (Document, error) {
+	rows, err := tx.QueryContext(ctx, canonicalBodyRefsSQL, owner, document.BookID)
+	if err != nil {
+		return document, err
+	}
+	defer rows.Close()
+	document = cloneDocument(normalizeDocument(document))
+	active := map[string]bool{}
+	for rows.Next() {
+		var ref BodyRef
+		var updated time.Time
+		if err := rows.Scan(&ref.VersionID, &ref.Revision, &ref.ContentHash, &ref.CharCount, &ref.State, &updated); err != nil {
+			return document, err
+		}
+		ref.UpdatedAt = updated.UTC().Format(time.RFC3339Nano)
+		active[ref.VersionID] = true
+		document = applyDocumentBodyRef(document, ref)
+	}
+	return pruneMissingBodyReferences(document, active), rows.Err()
 }

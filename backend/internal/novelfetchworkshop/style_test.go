@@ -3,6 +3,7 @@ package novelfetchworkshop
 import (
 	"context"
 	"errors"
+	"qiantie/backend/internal/batchfactoryv11"
 	"strings"
 	"testing"
 )
@@ -161,5 +162,16 @@ func TestClassifyBookAlwaysReturnsUsablePair(t *testing.T) {
 	styleOnly := ClassifyBook(context.Background(), "", BookInfo{Genre: "现代悬疑"}, nil, nil)
 	if styleOnly.Gender.Gender != "女频" {
 		t.Fatalf("gender should follow style: %#v", styleOnly)
+	}
+}
+
+func TestResolveStyleControlledAttemptDoesNotRetryProvider(t *testing.T) {
+	calls := 0
+	got := ResolveStyle(batchfactoryv11.WithSingleAttempt(context.Background()), BookInfo{Text: "正文"}, styleProviderFunc(func(context.Context, RewriteRequest) (string, error) {
+		calls++
+		return "", errors.New("director provider returned HTTP 503")
+	}))
+	if calls != 1 || got.Style != "" || !strings.Contains(got.Reason, "503") {
+		t.Fatalf("style bypassed central attempt budget: calls=%d result=%+v", calls, got)
 	}
 }

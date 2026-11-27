@@ -206,7 +206,8 @@ func TestRulesBodyOriginalPrefersStoredBody(t *testing.T) {
 	out := rulesBodyRequest(t, s, "original")
 	rulesBodyResult(t, out, "original", "success")
 	d, _ := s.GetDocument(context.Background(), "alice", "123")
-	if d.ProcessedText != "独立正文" || d.OriginalRaw != "完整原始正文" {
+	text, readErr := novelfetchworkshop.ReadBodyText(context.Background(), s, "alice", d, "original")
+	if readErr != nil || text != "独立正文" || d.ProcessedChars != 4 || d.OriginalRaw != "完整原始正文" {
 		t.Fatalf("%+v", d)
 	}
 }
@@ -259,7 +260,7 @@ func TestRulesBodyProcessesTextAndPreservesFailedStoredVersion(t *testing.T) {
 	old, _ := s.GetBody(ctx, "alice", "123", "ai1")
 	newBody, _ := s.GetBody(ctx, "alice", "123", "ai2")
 	saved, _ := s.GetDocument(ctx, "alice", "123")
-	if old.Content != "坏词原文" || old.Revision != ref.Revision || newBody.Content != "好词正文" || !reflect.DeepEqual(saved.BodyRefs["ai1"], ref) {
+	if old.Content != "坏词原文" || old.Revision != ref.Revision || newBody.Content != "好词正文" || saved.BodyRefs["ai1"].Revision != ref.Revision || saved.BodyRefs["ai1"].ContentHash != ref.ContentHash || saved.BodyRefs["ai1"].CharCount != ref.CharCount {
 		t.Fatalf("old=%+v new=%+v saved=%+v", old, newBody, saved)
 	}
 	if out["replacements"] != float64(1) {
@@ -301,14 +302,14 @@ func TestRulesBodyRestorePrefersStoredRawAndHonorsMaxTxt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if body.Content != "真实原文" || saved.ProcessedText != "真实原文" || saved.Original != "真实原文" || saved.ProcessedChars != 4 {
+	if body.Content != "真实原文" || saved.ProcessedText != "" || saved.Original != "" || saved.ProcessedChars != 4 {
 		t.Fatalf("restore did not use bounded stored raw: body=%q saved=%+v", body.Content, saved)
 	}
 	raw, err := s.GetBody(ctx, "alice", "123", "original_raw")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if raw.Content != "真实原文后续保留" || raw.Revision != rawRef.Revision || raw.ContentHash != rawRef.ContentHash || saved.OriginalRaw != "过时内联原文" {
+	if raw.Content != "真实原文后续保留" || raw.Revision != rawRef.Revision || raw.ContentHash != rawRef.ContentHash || saved.OriginalRaw != "" {
 		t.Fatalf("restore rewrote raw source: raw=%+v inline=%q", raw, saved.OriginalRaw)
 	}
 }

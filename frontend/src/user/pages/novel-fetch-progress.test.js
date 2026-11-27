@@ -23,6 +23,14 @@ test('background generation reports queued rather than generated', () => {
   });
 });
 
+test('one deferred book does not finish a batch whose queue is still running', () => {
+  assert.equal(novelFetchJobFinished({ status: 'waiting_retry', queue_state: 'running' }), false);
+  assert.equal(novelFetchJobFinished({ status: 'failed', queue_state: 'running' }), false);
+  assert.equal(novelFetchJobFinished({ status: 'done', queue_state: 'processing' }), false);
+  assert.equal(novelFetchJobFinished({ status: 'running', queue_state: 'waiting_retry' }), true);
+  assert.equal(novelFetchJobFinished({ status: 'waiting_retry', queue_state: 'waiting_retry' }), true);
+});
+
 test('formats live progress with time, book name, id and message', () => {
   const lines = novelFetchProgressLines({
     progress: [

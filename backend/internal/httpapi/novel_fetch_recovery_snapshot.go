@@ -29,7 +29,7 @@ func saveNovelFetchJobSnapshot(ctx context.Context, store novelfetchworkshop.Sto
 				continue
 			}
 		}
-		doc.Meta["processSnapshot"] = map[string]any{"batch_id": job.BatchID, "schedule_id": job.ScheduleID, "platform_id": job.PlatformID, "max_txt": job.MaxTxt, "selected_versions": append([]string{}, job.SelectedVersions...), "rewrite_methods": job.RewriteMethods, "text_model_id": job.TextModelID, "sensitive_ai_enabled": job.SensitiveAIEnabled, "auto_submit": job.AutoSubmit}
+		doc.Meta["processSnapshot"] = map[string]any{"batch_id": job.BatchID, "schedule_id": job.ScheduleID, "platform_id": job.PlatformID, "max_txt": job.MaxTxt, "selected_versions": append([]string{}, job.SelectedVersions...), "rewrite_methods": job.RewriteMethods, "text_model_id": job.TextModelID, "sensitive_ai_enabled": job.SensitiveAIEnabled, "auto_submit": job.AutoSubmit, "generate_only": job.GenerateOnly}
 		doc.Meta["nextSelectedVersions"] = append([]string{}, job.SelectedVersions...)
 		if err = store.PutDocument(ctx, job.Owner, doc); err != nil {
 			return err
@@ -71,6 +71,7 @@ func novelFetchRecoveryJob(doc novelfetchworkshop.Document, settings map[string]
 		job.SelectedVersions = scheduleStringSlice(snap["selected_versions"])
 		job.RewriteMethods = scheduleStringMap(snap["rewrite_methods"])
 		job.SensitiveAIEnabled = snap["sensitive_ai_enabled"] == true
+		job.GenerateOnly = snap["generate_only"] == true
 		if explicit, ok := snap["auto_submit"].(bool); ok {
 			job.AutoSubmit = explicit
 		}
@@ -87,6 +88,10 @@ func novelFetchRecoveryJob(doc novelfetchworkshop.Document, settings map[string]
 	}
 	if job.MaxTxt <= 0 {
 		job.MaxTxt = 4000
+	}
+	if job.GenerateOnly {
+		job.AutoSubmit = false
+		job.ScheduleID = ""
 	}
 	return job
 }

@@ -26,7 +26,7 @@ import { readNovelFetchProcessSettings, writeNovelFetchProcessSettings } from '.
 import { NovelFetchAutomationOptions } from './novel-fetch-automation-options.js';
 import { withNovelFetchConfigDefaults, withNovelFetchVersionProfiles } from './novel-fetch-config-defaults.js';
 import { novelFetchAiVersions, novelFetchSensitiveComparisons, novelFetchSubmitDiagnostic, novelFetchTaskSummaryItems } from './novel-fetch-task-detail.js';
-import { novelFetchLatestJob, novelFetchProgressLines, novelFetchJobFinished, novelFetchActionNotice } from './novel-fetch-progress.js';
+import { novelFetchLatestJob, novelFetchProgressLines, novelFetchJobFinished, novelFetchJobState, novelFetchActionNotice } from './novel-fetch-progress.js';
 import { beijingDateKey, currentBatchBookIds, filterNovelFetchTasks, mergeNovelFetchQueueStatus, novelFetchBatchResultSummary, novelFetchCharCount, novelFetchCurrentBatchTaskDetail, novelFetchOriginalFetchRetry, novelFetchPollingPlan, novelFetchQueueSummary, novelFetchStageLabel, novelFetchSubmissionLabel, novelFetchTaskDateKey, novelFetchTaskStatus, novelFetchVersionReady, retainVisibleTaskIds, stoppableCurrentBatchBookIds, webSubmitStatusLabel, webSubmitRunStatusLabel } from './novel-fetch-status.js';
 import { singleVersionRetryPayload, submissionPreviewMatches } from './novel-fetch-submit.js';
 import { mergeDefaultUploadProfile, uploadSessionDisplayName } from './novel-fetch-upload-profile.js';
@@ -1259,7 +1259,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
         return;
       }
       finishedJob = novelFetchJobFinished(data);
-      const finalStatus = String(data?.status || '').trim().toLowerCase();
+      const finalStatus = novelFetchJobState(data);
       if (finalStatus === 'failed') throw new Error(data.error || '后台处理失败');
       if (['stopped', 'cancelled', 'canceled'].includes(finalStatus)) {
         setProcessRows(current => current.map(row => row.status === 'loading' ? { ...row, status: 'stopped' } : row));

@@ -9,9 +9,13 @@ export function novelFetchLatestJob(data = {}) {
   return latest && typeof latest === 'object' && Object.keys(latest).length ? latest : null;
 }
 
+export function novelFetchJobState(job) {
+  return String(job?.queue_state || job?.queueState || job?.status || '').trim().toLowerCase();
+}
+
 export function novelFetchJobFinished(job) {
   // Deferred work uses another dispatch; this job ID will no longer advance.
-  return ['done', 'failed', 'stopped', 'cancelled', 'canceled', 'completed', 'waiting_retry', 'waiting_classification', 'waiting_configuration', 'waiting_login', 'pending_confirmation', 'manual_only'].includes(String(job?.status ?? job?.queue_state ?? '').trim().toLowerCase());
+  return ['done', 'failed', 'stopped', 'cancelled', 'canceled', 'completed', 'waiting_retry', 'waiting_classification', 'waiting_configuration', 'waiting_login', 'pending_confirmation', 'manual_only'].includes(novelFetchJobState(job));
 }
 
 export function novelFetchActionNotice(result, fallbackText) {

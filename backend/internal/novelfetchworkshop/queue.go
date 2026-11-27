@@ -21,6 +21,7 @@ func (e *CancelledBooksError) Error() string { return ErrBookCancelled.Error() }
 func (e *CancelledBooksError) Unwrap() error { return ErrBookCancelled }
 
 type ProcessJob struct {
+	GenerateOnly       bool              `json:"generateOnly,omitempty"`
 	LeaseToken         string            `json:"-"`
 	ID                 string            `json:"id"`
 	Owner              string            `json:"owner"`

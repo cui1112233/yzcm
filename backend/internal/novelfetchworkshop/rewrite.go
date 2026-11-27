@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/prompt/batchbook"
 )
 
@@ -278,6 +279,14 @@ func rewriteWithinSize(result string, targetChars int) bool {
 	return len([]rune(strings.TrimSpace(result))) <= maxChars
 }
 
+// ErrRewritePersistence means a model result was received but its durable save
+// is not confirmed. Automatic provider replay would risk another paid request.
+var ErrRewritePersistence = errors.New("AI 输出保存结果未知")
+
+func rewritePersistenceFailure(err error) error {
+	return fmt.Errorf("AI 输出已返回但后续处理或保存失败，持久化结果未知，请核对后手动处理: %w", errors.Join(ErrRewritePersistence, err))
+}
+
 // GenerateAIRewrites 生成并保存 ai1、ai2... 版本。任何一次模型失败都不会保存半截版本。
 func GenerateAIRewrites(ctx context.Context, store Store, owner, bookID string, count int, provider RewriteProvider) (Document, error) {
 	if provider == nil {
@@ -285,17 +294,6 @@ func GenerateAIRewrites(ctx context.Context, store Store, owner, bookID string, 
 	}
 	if count < 1 || count > 20 {
 		return Document{}, errors.New("生成数量需为 1~20 的整数")
-	}
-	document, err := store.GetDocument(ctx, owner, bookID)
-	if err != nil {
-		return Document{}, err
-	}
-	original := strings.TrimSpace(document.Original)
-	if original == "" {
-		original = strings.TrimSpace(document.ProcessedText)
-	}
-	if original == "" {
-		return Document{}, errors.New("请先抓取原文，再生成 AI 改文")
 	}
 	versions := make([]string, 0, count)
 	for index := 1; index <= count; index++ {
@@ -321,10 +319,11 @@ func GenerateAIRewritesForVersionsProcessed(ctx context.Context, store Store, ow
 	if err != nil {
 		return Document{}, err
 	}
-	original := strings.TrimSpace(document.Original)
-	if original == "" {
-		original = strings.TrimSpace(document.ProcessedText)
+	original, err := ReadBodyText(ctx, store, owner, document, "original")
+	if err != nil {
+		return document, err
 	}
+	original = strings.TrimSpace(original)
 	if original == "" {
 		return Document{}, errors.New("请先抓取原文，再生成 AI 改文")
 	}
@@ -394,10 +393,10 @@ func GenerateAIRewritesForVersionsProcessed(ctx context.Context, store Store, ow
 		observed := &rewriteBudgetObserver{provider: provider}
 		result, generationErr := completeValidatedRewrite(ctx, observed, request, document.BookID, plan.ResponseMode, processCount, targetChars, sourceBlock)
 		if generationErr != nil {
-			document.Meta["rewriteValidationHold"] = errors.Is(generationErr, ErrRewriteValidation)
+			document.Meta["rewriteValidationHold"] = errors.Is(generationErr, ErrRewriteValidation) && !batchfactoryv11.SingleAttempt(ctx)
 			document.Meta["aiStatus"] = "failed"
 			document.Meta["aiError"] = generationErr.Error()
-			_ = store.PutDocument(ctx, owner, document)
+			_ = persistRewriteDocument(ctx, store, owner, document)
 			return document, generationErr
 		}
 		result = mergeRewriteBlock(original, result, processCount)
@@ -405,9 +404,10 @@ func GenerateAIRewritesForVersionsProcessed(ctx context.Context, store Store, ow
 			processed, trace, sensitiveItems, processErr := processor(ctx, versionID, result)
 			if processErr != nil {
 				document.Meta["aiStatus"] = "failed"
-				document.Meta["aiError"] = processErr.Error()
-				_ = store.PutDocument(ctx, owner, document)
-				return document, processErr
+				document.Meta["aiError"] = rewritePersistenceFailure(processErr).Error()
+				document.Meta["rewritePersistenceHold"] = true
+				_ = persistRewriteDocument(ctx, store, owner, document)
+				return document, rewritePersistenceFailure(processErr)
 			}
 			result = processed
 			traceByVersion, _ := document.Meta["rulesTraceByVersion"].(map[string]any)
@@ -428,7 +428,6 @@ func GenerateAIRewritesForVersionsProcessed(ctx context.Context, store Store, ow
 				SetSensitiveDetails(document.Meta, sensitiveItems, len(sensitiveItems))
 			}
 		}
-		document.Versions[versionID] = result
 		model := ""
 		if identity, ok := provider.(interface{ ModelIdentity() string }); ok {
 			model = strings.TrimSpace(identity.ModelIdentity())
@@ -453,14 +452,19 @@ func GenerateAIRewritesForVersionsProcessed(ctx context.Context, store Store, ow
 		})
 		if bodyErr != nil {
 			document.Meta["aiStatus"] = "failed"
-			document.Meta["aiError"] = bodyErr.Error()
-			_ = store.PutDocument(ctx, owner, document)
-			return document, bodyErr
+			document.Meta["aiError"] = rewritePersistenceFailure(bodyErr).Error()
+			document.Meta["rewritePersistenceHold"] = true
+			_ = persistRewriteDocument(ctx, store, owner, document)
+			return document, rewritePersistenceFailure(bodyErr)
 		}
+		document.Versions[versionID] = result
 		document.BodyRefs[versionID] = ref
 		// Persist each successful version before starting another model call.
-		if err := store.PutDocument(ctx, owner, document); err != nil {
-			return document, err
+		if err := persistRewriteDocument(ctx, store, owner, document); err != nil {
+			document.Meta["rewritePersistenceHold"] = true
+			document.Meta["aiStatus"] = "failed"
+			document.Meta["aiError"] = rewritePersistenceFailure(err).Error()
+			return document, rewritePersistenceFailure(err)
 		}
 	}
 	document.Meta["aiStatus"] = "done"
@@ -483,8 +487,11 @@ func GenerateAIRewritesForVersionsProcessed(ctx context.Context, store Store, ow
 		delete(document.Meta, "autoSubmitReadyFingerprint")
 	}
 	document.Meta["aiUpdatedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
-	if err := store.PutDocument(ctx, owner, document); err != nil {
-		return Document{}, err
+	if err := persistRewriteDocument(ctx, store, owner, document); err != nil {
+		document.Meta["rewritePersistenceHold"] = true
+		document.Meta["aiStatus"] = "failed"
+		document.Meta["aiError"] = rewritePersistenceFailure(err).Error()
+		return document, rewritePersistenceFailure(err)
 	}
 	return document, nil
 }

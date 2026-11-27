@@ -43,8 +43,16 @@ func TestMySQLDocumentCASChecksOwnerBookAndVersion(t *testing.T) {
 		_, mock, store := newBodySQLMock(t)
 		previous := time.Date(2026, 11, 23, 1, 0, 0, 123456000, time.UTC)
 		doc := Document{BookID: "book", Meta: map[string]any{"status": "queued"}, UpdatedAt: previous.Format(time.RFC3339Nano)}
+		mock.ExpectBegin()
+		mock.ExpectQuery("SELECT updated_at FROM novel_fetch_workshop_documents").WithArgs("alice", "book").WillReturnRows(sqlmock.NewRows([]string{"updated_at"}).AddRow(previous))
+		mock.ExpectQuery(regexp.QuoteMeta(canonicalBodyRefsSQL)).WithArgs("alice", "book").WillReturnRows(sqlmock.NewRows([]string{"version", "revision", "hash", "chars", "state", "updated"}))
 		mock.ExpectExec(regexp.QuoteMeta("UPDATE novel_fetch_workshop_documents SET document_json=CAST(? AS CHAR CHARACTER SET utf8mb4), updated_at=? WHERE owner_username=? AND book_id=? AND updated_at=?")).
 			WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "alice", "book", previous).WillReturnResult(sqlmock.NewResult(0, affected))
+		if affected == 0 {
+			mock.ExpectRollback()
+		} else {
+			mock.ExpectCommit()
+		}
 		version, err := store.CompareAndSwapDocument(context.Background(), "alice", doc)
 		if affected == 0 && !errors.Is(err, ErrDocumentChanged) || affected == 1 && (err != nil || version == "" || version == doc.UpdatedAt) {
 			t.Fatalf("affected=%d version=%s err=%v", affected, version, err)

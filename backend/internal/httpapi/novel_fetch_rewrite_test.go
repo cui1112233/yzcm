@@ -28,20 +28,27 @@ func TestNovelFetchWorkshopGenerateAIRouteUsesGoProvider(t *testing.T) {
 		}
 		return `{"id":"book-rewrite","changed_lines":[{"line_no":1,"text":"Go 改写正文"}]}`, nil
 	})
-	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store, NovelFetchRewrite: provider})
+	handler := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: store, NovelFetchQueue: novelfetchworkshop.NewMemoryQueue(), NovelFetchRewrite: provider})
 	response := doNovelFetchRequest(t, handler, http.MethodPost, "/api/novel-fetch-workshop/tasks/book-rewrite/generate-ai", map[string]any{"count": 1}, now, secret)
 	if response.Code != http.StatusOK {
 		t.Fatalf("generate route status=%d body=%s", response.Code, response.Body.String())
 	}
-	document, err := store.GetDocument(context.Background(), "tester", "book-rewrite")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if document.Versions["ai1"] != "Go 改写正文" {
-		t.Fatalf("Go rewrite version missing: %#v", document.Versions)
+	deadline := time.Now().Add(time.Second)
+	for {
+		document, err := store.GetDocument(context.Background(), "tester", "book-rewrite")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := novelfetchworkshop.ReadBodyText(context.Background(), store, "tester", document, "ai1")
+		if err == nil && body == "Go 改写正文" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Go queued rewrite missing: body=%q meta=%+v", body, document.Meta)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
-
 func TestNovelFetchWorkshopAITestRouteUsesGoProvider(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	secret := "test-secret"
@@ -361,8 +368,9 @@ func TestNovelFetchOriginalUsesEnabledSensitiveAIRepair(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if document.ProcessedText != "他说关系越界了" {
-		t.Fatalf("AI repair did not replace text: %q", document.ProcessedText)
+	processed, bodyErr := novelfetchworkshop.ReadBodyText(context.Background(), store, "tester", document, "original")
+	if bodyErr != nil || processed != "他说关系越界了" {
+		t.Fatalf("AI repair did not replace saved body: text=%q err=%v", processed, bodyErr)
 	}
 	fixed, _ := document.Meta["sensitiveFixed"].(map[string]any)
 	items, _ := fixed["items"].([]any)
@@ -545,9 +553,11 @@ func TestNovelFetchProcessStartGeneratesOnlySelectedAIVersion(t *testing.T) {
 		t.Fatalf("process start status=%d body=%s", response.Code, response.Body.String())
 	}
 	document := waitForNovelFetchDocument(t, store, "12345678901", func(document novelfetchworkshop.Document) bool {
-		return document.Versions["ai3"] == "改写后的正文"
+		text, err := novelfetchworkshop.ReadBodyText(context.Background(), store, "tester", document, "ai3")
+		return err == nil && text == "改写后的正文"
 	})
-	if rewriteCalls != 1 || document.Versions["ai3"] != "改写后的正文" {
+	text, bodyErr := novelfetchworkshop.ReadBodyText(context.Background(), store, "tester", document, "ai3")
+	if rewriteCalls != 1 || bodyErr != nil || text != "改写后的正文" {
 		t.Fatalf("selected AI version was not generated exactly once: rewrite=%d versions=%#v", rewriteCalls, document.Versions)
 	}
 	// The upstream category/genre already determines gender and style, so the
@@ -654,6 +664,11 @@ func waitForNovelFetchDocument(t *testing.T, store novelfetchworkshop.Store, boo
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		document, err := store.GetDocument(context.Background(), "tester", bookID)
+		// Match the public task-detail view: stored documents stay lightweight,
+		// while content assertions must read the independently saved bodies.
+		if err == nil {
+			document, err = hydrateNovelFetchDocument(context.Background(), store, "tester", document)
+		}
 		if err == nil && ready(document) {
 			return document
 		}
