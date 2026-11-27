@@ -27,5 +27,11 @@ export function deleteScriptEditorScript(workId, scriptId, revision) { return ap
 export function copyScriptEditorScript(workId, scriptId) { return apiRequest(`${root}/works/${id(workId)}/scripts/${id(scriptId)}/copy`, { method: 'POST' }); }
 export function preferScriptEditorScript(workId, scriptId, expectedRevision) { return apiRequest(`${root}/works/${id(workId)}/scripts/${id(scriptId)}/prefer`, { method: 'POST', body: JSON.stringify({ expectedRevision }) }); }
 export function generateScriptEditorScript(workId, input) { return apiRequest(`${root}/works/${id(workId)}/generate`, { method: 'POST', body: JSON.stringify(input), timeoutMs: 10 * 60 * 1000, suppressGlobalError: true }); }
+export function createScriptEditorGenerationJob(workId, input) { return apiRequest(`${root}/works/${id(workId)}/jobs/script-generation`, { method: 'POST', body: JSON.stringify(input), suppressGlobalError: true }); }
+export function createScriptEditorReviewJob(workId, input) { return apiRequest(`${root}/works/${id(workId)}/jobs/review`, { method: 'POST', body: JSON.stringify(input), suppressGlobalError: true }); }
+export function listScriptEditorJobs(workId, signal) { return apiRequest(`${root}/works/${id(workId)}/jobs`, { signal, suppressGlobalError: true }); }
+export function cancelScriptEditorJob(workId, jobId) { return apiRequest(`${root}/works/${id(workId)}/jobs/${id(jobId)}/cancel`, { method: 'POST', suppressGlobalError: true }); }
+export function retryScriptEditorJob(workId, jobId) { return apiRequest(`${root}/works/${id(workId)}/jobs/${id(jobId)}/retry`, { method: 'POST', suppressGlobalError: true }); }
+export function applyScriptEditorJob(workId, jobId) { return apiRequest(`${root}/works/${id(workId)}/jobs/${id(jobId)}/apply`, { method: 'POST', suppressGlobalError: true }); }
 export function exportScriptEditorWork(workId, format) { return apiRequest(`${root}/works/${id(workId)}/export?format=${encodeURIComponent(format)}`, { responseType: 'blob', suppressGlobalError: true }); }
 export function handoffScriptEditorWork(workId, input) { return apiRequest(`${root}/works/${id(workId)}/handoffs/comic-screenplay`, { method: 'POST', body: JSON.stringify(input), suppressGlobalError: true }); }
