@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSelectedNodeContext, canvasSaveAction, createCanvasSaveQueue, mergePendingCanvas, retainCanvasAssetPanel, retainCanvasEditorNodeID, shouldAcceptCanvasRefresh, shouldKeepPendingCreatedTask, shouldPersistFlowChanges, viewportHasChanged } from './agent-canvas-state.js';
+import { buildSelectedNodeContext, canvasSaveAction, createCanvasSaveQueue, mergePendingCanvas, normalizeCanvasCollections, retainCanvasAssetPanel, retainCanvasEditorNodeID, shouldAcceptCanvasRefresh, shouldKeepPendingCreatedTask, shouldPersistFlowChanges, viewportHasChanged } from './agent-canvas-state.js';
 
 function deferred() {
   let resolve;
@@ -19,6 +19,15 @@ test('buildSelectedNodeContext returns only selected public node fields', () => 
     { id: 'n2', type: 'video', title: '视频', summary: '完成', version: 1, status: 'ready' }
   ] }, ['n1']);
   assert.deepEqual(context, [{ id: 'n1', type: 'input', title: '小说原文', summary: '第一章', version: 2, status: 'confirmed', assetRef: { assetId: 'a1' } }]);
+});
+
+test('normalizeCanvasCollections makes empty API collections safe to render', () => {
+  assert.deepEqual(normalizeCanvasCollections({ version: 1, revision: 3, nodes: null, edges: null }), {
+    version: 1,
+    revision: 3,
+    nodes: [],
+    edges: []
+  });
 });
 
 test('selection-only flow changes do not create canvas revisions', () => {

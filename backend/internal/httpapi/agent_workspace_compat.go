@@ -383,7 +383,11 @@ func writeDirectorPlanError(w http.ResponseWriter, err error) {
 }
 
 func agentCanvasForResponse(projectID string, canvas agentworkspace.Canvas) agentworkspace.Canvas {
-	canvas.Nodes = append([]agentworkspace.Node(nil), canvas.Nodes...)
+	// Keep empty canvas collections as JSON arrays. Appending to a nil slice
+	// turns an intentionally empty [] into null, which breaks canvas clients
+	// that render collection lengths before the first node is created.
+	canvas.Nodes = append(make([]agentworkspace.Node, 0, len(canvas.Nodes)), canvas.Nodes...)
+	canvas.Edges = append(make([]agentworkspace.Edge, 0, len(canvas.Edges)), canvas.Edges...)
 	publicFields := []string{"id", "assetId", "projectId", "kind", "mediaType", "name", "contentType", "byteSize", "width", "height", "duration", "source"}
 	for index := range canvas.Nodes {
 		ref := canvas.Nodes[index].AssetRef
