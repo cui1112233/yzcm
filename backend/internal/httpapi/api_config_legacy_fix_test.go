@@ -5,10 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"qiantie/backend/internal/accountcenter"
+	"qiantie/backend/internal/auth"
+	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/novelfetchworkshop"
 	"qiantie/backend/internal/storage"
 )
@@ -201,7 +208,7 @@ func TestAPIConfigPolicyMySQLScrubsOnlyProvenLegacyEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "fixture", "api-config.json")
-	original := []byte(`{"modelCatalog":[{"id":"conflicted","kind":"text","modelId":"old","baseUrl":"https://old.example.test/v1","credential":"fixture-conflicting-key"}],
+	original := []byte(`{"modelCatalog":[{"id":"conflicted","kind":"text","modelId":"old","baseUrl":"https://old.example.test/v1","credential":["fixture-conflicting-key"]}],
  "settings":{"videoProviders":{"personal_api":{"apiKey":"fixture-importable-key","model":"fixture-video","createUrl":"https://video.example.test/create"}}},"layout":{"compact":true}}`)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -250,6 +257,251 @@ func TestAPIConfigPolicyMySQLScrubsOnlyProvenLegacyEntries(t *testing.T) {
 	}
 }
 
+func TestAPIConfigPolicyMySQLRecoversEachConflictingVideoKey(t *testing.T) {
+	ctx := context.Background()
+	db, _ := novelAttributionDatabase(t)
+	migrations := append(storage.AuthMigrations(), storage.AccountCenterMigrations()...)
+	migrations = append(migrations, storage.NovelFetchWorkshopMigrations()...)
+	if err := storage.RunMigrations(ctx, db, migrations); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	config := NewUserConfigStore(dir)
+	store := novelfetchworkshop.NewMySQLStore(db)
+	store.ModelSecrets, store.LegacyConfigDir = config.ModelConfigSecrets(), dir
+	if err := store.PutConfig(ctx, "manager", map[string]any{"modelCatalog": []any{
+		map[string]any{"id": "unrelated", "kind": "text", "modelId": "text", "baseUrl": "https://text.example.test/v1", "credential": "fixture-unrelated"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "manager", "api-config.json")
+	original := []byte(`{"videoProviders":{"personal_api":{"apiKey":"fixture-top-video-key","model":"fixture-video","createUrl":"https://video.example.test/create"}},
+ "settings":{"videoProviders":{"personal_api":{"apiKey":"fixture-nested-video-key","model":"fixture-video","createUrl":"https://video.example.test/create"}}},"layout":{"compact":true}}`)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE novel_fetch_workshop_configs SET settings_json=JSON_SET(settings_json,'$.modelCatalogLegacyMigrationVersion','entry-v1') WHERE owner_username='manager'`); err != nil {
+		t.Fatal(err)
+	}
+	lookupCiphertexts := func() map[string]string {
+		t.Helper()
+		rows, err := db.QueryContext(ctx, `SELECT id,ciphertext FROM novel_fetch_legacy_model_conflicts WHERE owner_username='manager'`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		found := map[string]string{}
+		for rows.Next() {
+			var id, cipher string
+			if err := rows.Scan(&id, &cipher); err != nil {
+				t.Fatal(err)
+			}
+			found[id] = cipher
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return found
+	}
+	var beforeText string
+	if err := db.QueryRowContext(ctx, `SELECT JSON_UNQUOTE(JSON_EXTRACT(settings_json,'$.modelCatalog[0].credential')) FROM novel_fetch_workshop_configs WHERE owner_username='manager'`).Scan(&beforeText); err != nil {
+		t.Fatal(err)
+	}
+	// A failure to update the plan rolls back the conflict rows too.
+	if _, err := db.ExecContext(ctx, `CREATE TRIGGER stop_conflict_plan BEFORE UPDATE ON novel_fetch_workshop_configs FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture plan failure'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetConfig(ctx, "manager"); err == nil || len(lookupCiphertexts()) != 0 {
+		t.Fatal("the archive must commit in the same transaction as its cleanup plan")
+	}
+	if file, err := os.ReadFile(path); err != nil || !bytes.Equal(file, original) {
+		t.Fatal("database interruption touched the unique old keys")
+	}
+	if _, err := db.ExecContext(ctx, "DROP TRIGGER stop_conflict_plan"); err != nil {
+		t.Fatal(err)
+	}
+	store.ReplaceLegacyConfig = func(string, map[string]any) error { return errors.New("fixture file failure") }
+	if _, err := store.GetConfig(ctx, "manager"); err == nil {
+		t.Fatal("expected file replacement fault")
+	}
+	committed := lookupCiphertexts()
+	if len(committed) != 2 {
+		t.Fatal("both conflicts must be written before the file replacement")
+	}
+	for _, cipher := range committed {
+		if !strings.HasPrefix(cipher, "enc:v2:") || strings.Contains(cipher, "fixture-") {
+			t.Fatal("archived key is not bound ciphertext")
+		}
+	}
+	if file, err := os.ReadFile(path); err != nil || !bytes.Equal(file, original) {
+		t.Fatal("failed atomic replacement changed the legacy file")
+	}
+	fresh := novelfetchworkshop.NewMySQLStore(db)
+	fresh.ModelSecrets, fresh.LegacyConfigDir = config.ModelConfigSecrets(), dir
+	records, _, err := fresh.ListLegacyModelConflicts(ctx, "manager", "")
+	if err != nil || len(records) != 2 {
+		t.Fatalf("both records should exist before cleanup: %v", err)
+	}
+	var topID, nestedID string
+	for _, record := range records {
+		if record.Source.Container == 0 {
+			topID = record.ID
+		} else if record.Source.Container == 1 {
+			nestedID = record.ID
+		}
+	}
+	if topID == "" || nestedID == "" {
+		t.Fatal("the two entries must have independent source locations")
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE novel_fetch_legacy_model_conflicts SET ciphertext=? WHERE owner_username='manager' AND id=?`, committed[nestedID], topID); err != nil {
+		t.Fatal(err)
+	}
+	if err := fresh.ResumeLegacyModelCleanup(ctx); err == nil {
+		t.Fatal("ciphertext from another source must not validate for cleanup")
+	}
+	partial, err := os.ReadFile(path)
+	if err != nil || !bytes.Contains(partial, []byte("fixture-top-video-key")) || bytes.Contains(partial, []byte("fixture-nested-video-key")) {
+		t.Fatal("a mismatched source must stay intact while its verified sibling is scrubbed")
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE novel_fetch_legacy_model_conflicts SET ciphertext=? WHERE owner_username='manager' AND id=?`, committed[topID], topID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TRIGGER stop_conflict_ack BEFORE UPDATE ON novel_fetch_workshop_configs FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture acknowledgement failure'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := fresh.ResumeLegacyModelCleanup(ctx); err == nil {
+		t.Fatal("post-replacement acknowledgement fault should remain retryable")
+	}
+	if _, err := db.ExecContext(ctx, "DROP TRIGGER stop_conflict_ack"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fresh.ResumeLegacyModelCleanup(ctx); err != nil {
+		t.Fatal(err)
+	}
+	store = fresh
+	if _, err := store.GetConfig(ctx, "manager"); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.ReadFile(path)
+	if err != nil || bytes.Contains(file, []byte("fixture-top-video-key")) || bytes.Contains(file, []byte("fixture-nested-video-key")) ||
+		!bytes.Contains(file, []byte("compact")) {
+		t.Fatal("cold recovery did not scrub both original entries and retain preferences")
+	}
+	var raw string
+	if err := db.QueryRowContext(ctx, `SELECT settings_json FROM novel_fetch_workshop_configs WHERE owner_username='manager'`).Scan(&raw); err != nil ||
+		!strings.Contains(raw, beforeText) || strings.Contains(raw, "modelCatalogLegacyScrubPending") || strings.Contains(raw, "fixture-top-video-key") {
+		t.Fatal("pending marker or unrelated ciphertext was changed incorrectly")
+	}
+	for id, cipher := range lookupCiphertexts() {
+		if committed[id] != cipher {
+			t.Fatal("restarting cleanup replaced an existing ciphertext")
+		}
+	}
+	authStore := auth.NewMySQLStore(db)
+	center := accountcenter.NewMySQLStore(db)
+	now := time.Now().UTC()
+	for username, role := range map[string]string{"founder": accountcenter.RoleFounder, "manager": accountcenter.RoleManager, "manager2": accountcenter.RoleManager, "member": accountcenter.RoleMember} {
+		if err := authStore.CreateAccount(ctx, auth.Account{Username: username, PasswordHash: "fixture", PasswordAlgorithm: "fixture",
+			Active: true, IsOwner: role == accountcenter.RoleFounder, CreatedAt: now, UpdatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO account_center_profiles(username,display_name,role) VALUES(?,?,?)`, username, username, role); err != nil {
+			t.Fatal(err)
+		}
+		if err := authStore.CreateSession(ctx, auth.Session{Username: username, Token: username, IssuedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := NewRouter(RouterOptions{BridgeSecret: "fixture-local-signature", AuthStore: authStore, AccountCenterStore: center,
+		NovelFetchStore: store, UserConfigStore: config, Now: func() time.Time { return now }})
+	const list = "/api/config/model-conflicts"
+	response := impersonationRequest(h, "GET", list, "manager", "", nil)
+	var result struct {
+		Conflicts []struct {
+			ID string `json:"id"`
+		} `json:"conflicts"`
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &result) != nil || len(result.Conflicts) != 2 {
+		t.Fatalf("expected two independent recoverable records, status=%d count=%d", response.Code, len(result.Conflicts))
+	}
+	if strings.Contains(response.Body.String(), "fixture-video") || strings.Contains(response.Body.String(), "https://") || strings.Contains(response.Body.String(), "fingerprint") {
+		t.Fatal("restricted recovery listing disclosed private metadata")
+	}
+	first := list + "/" + result.Conflicts[0].ID
+	for _, identity := range []string{"member", "manager2"} {
+		if got := impersonationRequest(h, "POST", first+"/reveal?owner=manager", identity, "", nil); got.Code != http.StatusForbidden {
+			t.Fatalf("cross-account recovery was accepted for %s: %d", identity, got.Code)
+		}
+	}
+	bridge := httptest.NewRequest("POST", first+"/reveal", nil)
+	SignBridgeRequest(bridge, "manager", false, now, "fixture-local-signature")
+	bridgeResponse := httptest.NewRecorder()
+	h.ServeHTTP(bridgeResponse, bridge)
+	if bridgeResponse.Code != http.StatusUnauthorized {
+		t.Fatal("bridge credentials cannot reveal archived keys")
+	}
+	cookie := startImpersonationForTest(t, h, "founder", "manager")
+	if got := impersonationRequest(h, "POST", first+"/reveal", "founder", "", cookie); got.Code != http.StatusForbidden {
+		t.Fatal("a switched session cannot reveal archived keys")
+	}
+	keys := map[string]bool{}
+	for _, item := range result.Conflicts {
+		response := impersonationRequest(h, "POST", list+"/"+item.ID+"/reveal", "manager", "", nil)
+		var revealed struct {
+			Value string `json:"value"`
+		}
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &revealed) != nil {
+			t.Fatalf("reveal failed: %d", response.Code)
+		}
+		keys[revealed.Value] = true
+	}
+	if !keys["fixture-top-video-key"] || !keys["fixture-nested-video-key"] {
+		t.Fatal("the two original keys must be independently recoverable")
+	}
+	if got := impersonationRequest(h, "POST", first+"/reveal?owner=manager", "founder", "", nil); got.Code != http.StatusOK {
+		t.Fatalf("founder recovery in a normal login: %d", got.Code)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TRIGGER stop_conflict_audit BEFORE INSERT ON account_center_audit_events FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture audit failure'`); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"reveal", "confirm", "discard"} {
+		if got := impersonationRequest(h, "POST", first+"/"+action, "manager", "", nil); got.Code != http.StatusServiceUnavailable || strings.Contains(got.Body.String(), "fixture-") {
+			t.Fatalf("audit failure must block %s: %d", action, got.Code)
+		}
+	}
+	var state string
+	if err := db.QueryRowContext(ctx, `SELECT state FROM novel_fetch_legacy_model_conflicts WHERE owner_username='manager' AND id=?`, result.Conflicts[0].ID).Scan(&state); err != nil || state != "pending" {
+		t.Fatal("audit failure changed the recovery state")
+	}
+	if _, err := db.ExecContext(ctx, "DROP TRIGGER stop_conflict_audit"); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"confirm", "discard"} {
+		if got := impersonationRequest(h, "POST", first+"/"+action, "manager", "", nil); got.Code != http.StatusOK {
+			t.Fatalf("normal %s failed: %d", action, got.Code)
+		}
+	}
+	if got := impersonationRequest(h, "POST", first+"/reveal", "manager", "", nil); got.Code != http.StatusForbidden {
+		t.Fatal("discarded credential is still readable")
+	}
+	var events int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM account_center_audit_events WHERE subject_username='manager' AND action LIKE 'legacy_key_%'`).Scan(&events); err != nil || events != 5 {
+		t.Fatalf("expected 3 reveals and two audited decisions; audit count %d, err %v", events, err)
+	}
+	video := NewCatalogVideoProviderRegistry(center, store)
+	if _, err := video.ResolveModel(ctx, "manager", batchfactoryv11.VideoProviderPersonalAPI, ""); err == nil {
+		t.Fatal("recovery entries must never become selectable video credentials")
+	}
+	for _, path := range []string{"/api/config/models?kind=video", "/api/models?kind=video"} {
+		if got := impersonationRequest(h, "GET", path, "manager", "", nil); got.Code != http.StatusOK || !bytes.Contains(got.Body.Bytes(), []byte(`"models":[]`)) {
+			t.Fatalf("ordinary model listing exposed recovery data: %d", got.Code)
+		}
+	}
+}
+
 func TestAPIConfigPolicyMySQLMigratesLegacyVideoSettings(t *testing.T) {
 	ctx := context.Background()
 	db, _ := novelAttributionDatabase(t)
@@ -279,6 +531,76 @@ func TestAPIConfigPolicyMySQLMigratesLegacyVideoSettings(t *testing.T) {
 	if err != nil || len(rows) != 1 || rows[0]["id"] != "legacy-video:personal_api" || rows[0]["credential"] != "old-fixture-video-key" ||
 		rows[0]["tasksEndpoint"] != "https://video.example.test/jobs" || config["workflow"].(map[string]any)["keep"] != true {
 		t.Fatal("video migration lost the established model, scope or preferences")
+	}
+}
+
+func TestAPIConfigPolicyMySQLSeparatesDatabaseVideoConflictsAndMergesExactCopies(t *testing.T) {
+	ctx := context.Background()
+	db, _ := novelAttributionDatabase(t)
+	if err := storage.RunMigrations(ctx, db, storage.NovelFetchWorkshopMigrations()); err != nil {
+		t.Fatal(err)
+	}
+	store := novelfetchworkshop.NewMySQLStore(db)
+	store.ModelSecrets = NewUserConfigStore(t.TempDir()).ModelConfigSecrets()
+	for _, tc := range []struct {
+		owner, nestedKey string
+		wantConflicts    int
+		preserveBound    bool
+	}{
+		{owner: "db-conflict", nestedKey: "fixture-other-db-key", wantConflicts: 2},
+		{owner: "db-exact-copy", nestedKey: "fixture-first-db-key", wantConflicts: 0},
+		{owner: "db-bound-conflict", nestedKey: "fixture-other-db-key", wantConflicts: 2, preserveBound: true},
+	} {
+		build := func(key string) map[string]any {
+			return map[string]any{"personal_api": map[string]any{"apiKey": key, "model": "fixture-video", "createUrl": "https://video.example.test/create"}}
+		}
+		doc, err := json.Marshal(map[string]any{"modelCatalogSecretVersion": "bound-v3", "modelCatalog": []any{},
+			"videoProviders": build("fixture-first-db-key"), "settings": map[string]any{"videoProviders": build(tc.nestedKey)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var originalCipher string
+		if tc.preserveBound {
+			cfg := map[string]any{"modelCatalog": []any{
+				map[string]any{"id": "legacy-video:personal_api", "kind": "video", "modelId": "fixture-video", "provider": "personal_api",
+					"endpoint": "https://video.example.test/create", "credential": "fixture-established"},
+			}}
+			if err := store.PutConfig(ctx, tc.owner, cfg); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.QueryRowContext(ctx, `SELECT JSON_UNQUOTE(JSON_EXTRACT(settings_json,'$.modelCatalog[0].credential')) FROM novel_fetch_workshop_configs WHERE owner_username=?`, tc.owner).Scan(&originalCipher); err != nil {
+				t.Fatal(err)
+			}
+			top, _ := json.Marshal(build("fixture-first-db-key"))
+			nested, _ := json.Marshal(build(tc.nestedKey))
+			if _, err := db.ExecContext(ctx, `UPDATE novel_fetch_workshop_configs SET settings_json=JSON_SET(settings_json,'$.videoProviders',CAST(? AS JSON),'$.settings',JSON_OBJECT('videoProviders',CAST(? AS JSON))) WHERE owner_username=?`, string(top), string(nested), tc.owner); err != nil {
+				t.Fatal(err)
+			}
+		} else if _, err := db.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_configs (owner_username,settings_json,created_at,updated_at) VALUES(?,?,NOW(6),NOW(6))`, tc.owner, string(doc)); err != nil {
+			t.Fatal(err)
+		}
+		settings, err := store.GetConfig(ctx, tc.owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		records, _, err := store.ListLegacyModelConflicts(ctx, tc.owner, "")
+		if err != nil || len(records) != tc.wantConflicts {
+			t.Fatalf("%s: recovery records=%d, err=%v", tc.owner, len(records), err)
+		}
+		rows := modelCatalog(settings)
+		if len(rows) != 1 || tc.wantConflicts == 0 && rows[0]["credential"] != "fixture-first-db-key" ||
+			tc.preserveBound && rows[0]["credential"] != "fixture-established" ||
+			!tc.preserveBound && tc.wantConflicts != 0 && rows[0]["credentialStatus"] != "needs_reentry" {
+			t.Fatalf("%s: expected a usable exact duplicate or an inactive conflict", tc.owner)
+		}
+		var raw []byte
+		if err := db.QueryRowContext(ctx, "SELECT settings_json FROM novel_fetch_workshop_configs WHERE owner_username=?", tc.owner).Scan(&raw); err != nil ||
+			bytes.Contains(raw, []byte("videoProviders")) || bytes.Contains(raw, []byte("-db-key")) {
+			t.Fatalf("%s: legacy database bytes were not scrubbed", tc.owner)
+		}
+		if tc.preserveBound && !bytes.Contains(raw, []byte(originalCipher)) {
+			t.Fatal("existing formal video ciphertext changed during legacy recovery")
+		}
 	}
 }
 

@@ -337,10 +337,21 @@ SET revoked_at = COALESCE(?, CURRENT_TIMESTAMP(6)) WHERE id = ? AND revoked_at I
 }
 
 func (s *MySQLStore) AppendAudit(ctx context.Context, event AuditEvent) error {
+	return appendAudit(ctx, s.db, event)
+}
+
+// AppendAuditInTransaction commits a related state change and its audit event together.
+func AppendAuditInTransaction(ctx context.Context, tx *sql.Tx, event AuditEvent) error {
+	return appendAudit(ctx, tx, event)
+}
+
+func appendAudit(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, event AuditEvent) error {
 	if event.ActorUsername == "" || event.SubjectUsername == "" || event.Action == "" {
 		return ErrInvalid
 	}
-	_, err := s.db.ExecContext(ctx, insertAuditSQL, event.ActorUsername, event.SubjectUsername, event.TeamID, event.ImpersonationID, event.Action, optionalTime(event.CreatedAt))
+	_, err := db.ExecContext(ctx, insertAuditSQL, event.ActorUsername, event.SubjectUsername, event.TeamID, event.ImpersonationID, event.Action, optionalTime(event.CreatedAt))
 	return err
 }
 

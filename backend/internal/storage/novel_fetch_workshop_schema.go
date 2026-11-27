@@ -82,6 +82,17 @@ func NovelFetchWorkshopMigrations() []Migration {
 		{Version: 1200003, SQL: NovelFetchWorkshopCleanupStatements(), CallbackChecksum: "novel-fetch-workshop-v3-body-cleanup"},
 		{Version: 1200004, SQL: NovelFetchWorkshopRunAuditStatements(), CallbackChecksum: "novel-fetch-workshop-v4-run-audit"},
 		{Version: 1200005, SQL: NovelFetchBodyObjectRetirementStatements(), CallbackChecksum: "novel-fetch-workshop-v5-body-object-retirements"},
+		{Version: 1200006, SQL: []string{`CREATE TABLE IF NOT EXISTS novel_fetch_legacy_model_conflicts (
+ owner_username VARCHAR(191) NOT NULL,
+ id CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+ source_json JSON NOT NULL,
+ fingerprint CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+ ciphertext TEXT NULL,
+ state ENUM('pending','confirmed','discarded') NOT NULL DEFAULT 'pending',
+ created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+ reviewed_at DATETIME(6) NULL,
+ PRIMARY KEY (owner_username, id)
+) ENGINE=InnoDB`}, CallbackChecksum: "novel-fetch-legacy-model-conflicts-v1"},
 	}
 }
 

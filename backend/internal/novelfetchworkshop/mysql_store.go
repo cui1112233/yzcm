@@ -34,6 +34,8 @@ const ModelSecretVersion = "bound-v3"
 type ModelConfigSecrets interface {
 	SealModelConfig(owner string, next, previous map[string]any) error
 	OpenModelConfig(owner string, settings map[string]any) error
+	SealLegacyConflict(owner string, source LegacyConflictSource, key string) (ciphertext, fingerprint string, err error)
+	OpenLegacyConflict(owner string, source LegacyConflictSource, ciphertext, fingerprint string) (string, error)
 }
 
 func (s *MySQLStore) GetDocument(ctx context.Context, owner, bookID string) (Document, error) {
@@ -67,12 +69,24 @@ func (s *MySQLStore) PutDocument(ctx context.Context, owner string, document Doc
 	if document.BookID == "" {
 		return errors.New("book id is required")
 	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	document, err = prepareDocumentWrite(ctx, tx, owner, document)
+	if err != nil {
+		return err
+	}
 	raw, err := json.Marshal(document)
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_documents(owner_username,book_id,document_json,created_at,updated_at) VALUES(?,?,CAST(? AS CHAR CHARACTER SET utf8mb4),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE document_json=VALUES(document_json), updated_at=GREATEST(CURRENT_TIMESTAMP(6), TIMESTAMPADD(MICROSECOND,1,updated_at))`, owner, document.BookID, string(raw))
-	return err
+	_, err = tx.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_documents(owner_username,book_id,document_json,created_at,updated_at) VALUES(?,?,CAST(? AS CHAR CHARACTER SET utf8mb4),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE document_json=VALUES(document_json), updated_at=GREATEST(CURRENT_TIMESTAMP(6), TIMESTAMPADD(MICROSECOND,1,updated_at))`, owner, document.BookID, string(raw))
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *MySQLStore) CompareAndSwapDocument(ctx context.Context, owner string, document Document) (string, error) {
@@ -88,6 +102,15 @@ func (s *MySQLStore) CompareAndSwapDocument(ctx context.Context, owner string, d
 			return "", err
 		}
 	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	document, err = prepareDocumentWrite(ctx, tx, owner, document)
+	if err != nil {
+		return "", err
+	}
 	next := nextDocumentWriteTime(previous)
 	document.UpdatedAt = next.Format(time.RFC3339Nano)
 	raw, err := json.Marshal(document)
@@ -95,14 +118,14 @@ func (s *MySQLStore) CompareAndSwapDocument(ctx context.Context, owner string, d
 		return "", err
 	}
 	if previous.IsZero() {
-		_, err = s.DB.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_documents(owner_username,book_id,document_json,created_at,updated_at) VALUES(?,?,CAST(? AS CHAR CHARACTER SET utf8mb4),?,?)`, owner, document.BookID, string(raw), next, next)
+		_, err = tx.ExecContext(ctx, `INSERT INTO novel_fetch_workshop_documents(owner_username,book_id,document_json,created_at,updated_at) VALUES(?,?,CAST(? AS CHAR CHARACTER SET utf8mb4),?,?)`, owner, document.BookID, string(raw), next, next)
 		var duplicate *mysql.MySQLError
 		if errors.As(err, &duplicate) && duplicate.Number == 1062 {
 			return "", ErrDocumentChanged
 		}
 	} else {
 		var result sql.Result
-		result, err = s.DB.ExecContext(ctx, `UPDATE novel_fetch_workshop_documents SET document_json=CAST(? AS CHAR CHARACTER SET utf8mb4), updated_at=? WHERE owner_username=? AND book_id=? AND updated_at=?`, string(raw), next, owner, document.BookID, previous.UTC())
+		result, err = tx.ExecContext(ctx, `UPDATE novel_fetch_workshop_documents SET document_json=CAST(? AS CHAR CHARACTER SET utf8mb4), updated_at=? WHERE owner_username=? AND book_id=? AND updated_at=?`, string(raw), next, owner, document.BookID, previous.UTC())
 		if err == nil {
 			var n int64
 			n, err = result.RowsAffected()
@@ -112,6 +135,9 @@ func (s *MySQLStore) CompareAndSwapDocument(ctx context.Context, owner string, d
 		}
 	}
 	if err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
 		return "", err
 	}
 	return document.UpdatedAt, nil
@@ -317,7 +343,7 @@ func (s *MySQLStore) ReadBoundModelConfig(ctx context.Context, owner string) (ma
 func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[string]any) (map[string]any, error) {
 	currentVersion := settings[ModelSecretVersionKey] == ModelSecretVersion
 	checkFile := s.LegacyConfigDir != "" && settings[legacyModelMigrationVersionKey] != legacyModelMigrationVersion
-	needsDBMigration := !currentVersion || hasLegacyVideoProviders(settings)
+	needsDBMigration := !currentVersion || hasLegacyVideoProviders(settings) || hasNestedLegacyModels(settings)
 	if needsDBMigration || checkFile {
 		path, err := s.legacyModelFilePath(owner)
 		if err != nil {
@@ -341,25 +367,37 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 		}
 		if (needsDBMigration || fileChecked) && (currentVersion || hasCatalog || len(rows) > 0 || len(legacy) > 0 || settings[legacyVideoMigratedKey] == true) {
 			previouslyBound := currentVersion || settings[ModelSecretVersionKey] == "bound-v2"
+			if previouslyBound {
+				rows, err = preserveBoundLegacyRows(settings)
+				if err != nil {
+					return nil, err
+				}
+			}
+			migration := &legacyConfigMigration{path: path}
+			for _, source := range collectLegacySources(settings) {
+				if !previouslyBound || source.Video || source.Container != 0 {
+					migration.database = append(migration.database, source)
+				}
+			}
 			if !previouslyBound && len(rows) > 0 {
 				mergeLegacyModelKeys(rows, legacyCatalogRows(legacy))
 			}
-			rows, entries := prepareLegacyModelEntries(rows, legacy, previouslyBound)
+			rows, migration.file = prepareLegacyModelEntries(rows, legacy, collectLegacySources(legacy), previouslyBound)
 			digest := legacyCatalogSecretDigest(legacy)
 			settings["modelCatalog"] = rows
 			if digest != "" {
 				pending := ModelConfigText(settings, modelLegacyScrubPendingKey)
-				if pending != "" && pending != digest && pending != priorLegacyModelDigest(legacy) {
+				if pending != "" && pending != digest && pending != priorLegacyModelDigest(legacy) &&
+					!legacySourcesMatchPreviousPlan(settings, legacy, migration.file) {
 					return nil, fmt.Errorf("legacy model file changed before credential cleanup")
 				}
 				settings[modelLegacyScrubPendingKey] = digest
-				settings[legacyModelScrubEntriesKey] = entries
 			}
 			settings[legacyVideoMigratedKey] = true
 			if fileChecked {
 				settings[legacyModelMigrationVersionKey] = legacyModelMigrationVersion
 			}
-			if err := s.putConfig(ctx, owner, settings, true); err != nil {
+			if err := s.putConfig(ctx, owner, settings, migration); err != nil {
 				return nil, err
 			}
 			return s.GetConfig(ctx, owner)
@@ -379,10 +417,10 @@ func (s *MySQLStore) openConfig(ctx context.Context, owner string, settings map[
 }
 
 func (s *MySQLStore) PutConfig(ctx context.Context, owner string, settings map[string]any) error {
-	return s.putConfig(ctx, owner, settings, false)
+	return s.putConfig(ctx, owner, settings, nil)
 }
 
-func (s *MySQLStore) putConfig(ctx context.Context, owner string, settings map[string]any, migrating bool) error {
+func (s *MySQLStore) putConfig(ctx context.Context, owner string, settings map[string]any, migration *legacyConfigMigration) error {
 	if settings == nil {
 		settings = map[string]any{}
 	}
@@ -413,10 +451,10 @@ func (s *MySQLStore) putConfig(ctx context.Context, owner string, settings map[s
 	}
 	updated := cloneMap(settings)
 	if s.ModelSecrets != nil {
-		if !migrating && (hasLegacyVideoProviders(previous) || ModelConfigText(previous, modelLegacyScrubPendingKey) != "") {
+		if migration == nil && (hasLegacyVideoProviders(previous) || hasNestedLegacyModels(previous) || ModelConfigText(previous, modelLegacyScrubPendingKey) != "") {
 			return ErrConfigConflict
 		}
-		if !migrating {
+		if migration == nil {
 			for _, key := range []string{modelLegacyScrubPendingKey, legacyModelScrubEntriesKey, legacyModelMigrationVersionKey} {
 				delete(updated, key)
 			}
@@ -447,6 +485,11 @@ func (s *MySQLStore) putConfig(ctx context.Context, owner string, settings map[s
 		} else if previous[ModelSecretVersionKey] == ModelSecretVersion {
 			updated["modelCatalog"] = []any{}
 			updated[ModelSecretVersionKey] = ModelSecretVersion
+		}
+		if migration != nil {
+			if err := s.stageLegacyRecovery(ctx, tx, owner, updated, migration); err != nil {
+				return err
+			}
 		}
 	}
 	updated[ConfigRevisionKey] = next

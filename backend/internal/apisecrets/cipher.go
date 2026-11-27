@@ -17,8 +17,11 @@ package apisecrets
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -65,6 +68,17 @@ func (c *Cipher) Source() string {
 		return ""
 	}
 	return c.source
+}
+
+// BoundFingerprint compares durable recovery evidence without keeping a
+// public hash of the credential. The binding is the same scope as its AEAD.
+func (c *Cipher) BoundFingerprint(plain string, binding []byte) []byte {
+	mac := hmac.New(sha256.New, c.key)
+	_, _ = mac.Write([]byte("qiantie:v88:api-config:bound-fingerprint:v1"))
+	_, _ = mac.Write(binary.BigEndian.AppendUint64(nil, uint64(len(binding))))
+	_, _ = mac.Write(binding)
+	_, _ = mac.Write([]byte(plain))
+	return mac.Sum(nil)
 }
 
 // NewCipher 用 32 字节密钥构造加解密器。

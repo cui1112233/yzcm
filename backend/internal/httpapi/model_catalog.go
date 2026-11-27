@@ -199,6 +199,7 @@ func (s resolvedOwnerModelCatalogStore) GetConfig(ctx context.Context, owner str
 }
 
 func registerModelCatalogRoutes(root *http.ServeMux, bridgeAuth NovelFetchBridgeAuth, configAuth BridgeAuth, store novelfetchworkshop.Store, userConfig *UserConfigStore, saved yzcmmodels.Reader) {
+	registerLegacyModelConflictRoutes(root, configAuth, store)
 	mux := http.NewServeMux()
 	policy := func(req *http.Request) apiConfigAccess {
 		return apiConfigPolicy(req.Context(), configAuth.AccountCenterStore)

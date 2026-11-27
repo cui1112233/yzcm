@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"crypto/hmac"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"os"
@@ -45,6 +47,35 @@ func (p *configSecretProvider) encryptStrict(config map[string]any) error {
 
 func (s *UserConfigStore) ModelConfigSecrets() novelfetchworkshop.ModelConfigSecrets {
 	return s.secrets
+}
+
+func legacyConflictBinding(owner string, source novelfetchworkshop.LegacyConflictSource) []byte {
+	data, _ := json.Marshal([]any{"qiantie:v88:legacy-model-conflict:v1", strings.ToLower(owner), source})
+	return data
+}
+
+func (p *configSecretProvider) SealLegacyConflict(owner string, source novelfetchworkshop.LegacyConflictSource, key string) (string, string, error) {
+	cipher, err := p.secrets.WriteCipher()
+	if err != nil {
+		return "", "", err
+	}
+	binding := legacyConflictBinding(owner, source)
+	ciphertext, err := cipher.SealBound(key, binding)
+	return ciphertext, hex.EncodeToString(cipher.BoundFingerprint(key, binding)), err
+}
+
+func (p *configSecretProvider) OpenLegacyConflict(owner string, source novelfetchworkshop.LegacyConflictSource, ciphertext, fingerprint string) (string, error) {
+	cipher, err := p.secrets.ReadCipher()
+	if err != nil {
+		return "", err
+	}
+	binding := legacyConflictBinding(owner, source)
+	key, err := cipher.OpenBound(ciphertext, binding)
+	stored, decodeErr := hex.DecodeString(fingerprint)
+	if err != nil || decodeErr != nil || !hmac.Equal(stored, cipher.BoundFingerprint(key, binding)) {
+		return "", apisecrets.ErrBadCiphertext
+	}
+	return key, nil
 }
 
 func modelSecretBinding(owner string, model map[string]any, field string) ([]byte, error) {
