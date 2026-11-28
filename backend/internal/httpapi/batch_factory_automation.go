@@ -3698,6 +3698,11 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 	jobAutoPublish := automationBoolValue(job["autoPublish"])
 	jobSubmitDeferred := c.automationSubmitDeferred(job)
 	ctx = withShuihuoGlobalImageConcurrency(ctx, int(imageGlobalConcurrency))
+	// 同一批次共用文本模型熔断器。第一本书先探测模型；若上游明确返回
+	// model_not_found，其余书直接复用该结论，不再逐本重复请求和烧重试。
+	textModelCtx, textModelCancel := context.WithCancelCause(ctx)
+	defer textModelCancel(nil)
+	textModelGate := newAutomationTextModelGate(textModelCancel)
 	var failed atomic.Int32
 	var workers sync.WaitGroup
 	var jobMu sync.Mutex
@@ -3818,7 +3823,7 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 			}()
 			// 每本书一个可取消上下文：停滞看门狗只跳过这一本书，其它书的
 			// goroutine 继续跑；取消原因用于区分「停滞」与上游错误。
-			bookCtx, bookCancel := context.WithCancelCause(ctx)
+			bookCtx, bookCancel := context.WithCancelCause(textModelCtx)
 			bookCtx = imageRequestIdentity(bookCtx, owner, book.ID)
 			defer bookCancel(nil)
 			ctx := bookCtx
@@ -3904,6 +3909,12 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 					entryLogMu.Unlock()
 				}
 				fail := func(stage string, err error, message string) {
+					// 批次内其它书触发 model_not_found 后，本书可能只看到
+					// context canceled。这里还原真实根因，避免被写成普通超时并重试。
+					if cause := context.Cause(ctx); batchfactoryv11.IsDirectorModelUnavailable(cause) && !batchfactoryv11.IsDirectorModelUnavailable(err) {
+						err = cause
+						message = "文本模型不存在或已下线，请更换模型后重试"
+					}
 					if errors.Is(context.Cause(ctx), errAutomationBookStalled) {
 						// 看门狗已经写好阶段/最后进展时间/跳过时长，并安排了续跑。
 						// 这里不能再把 context canceled 写成新的失败。
@@ -4006,6 +4017,10 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 				// the timeout dispatcher). Keep other terminal books untouched so a
 				// retry of one failed book cannot accidentally rerun its neighbours.
 				if entryStatus == "failed" || entryStatus == "blocked" || entryStatus == "stopped" {
+					continue
+				}
+				if cause := context.Cause(ctx); batchfactoryv11.IsDirectorModelUnavailable(cause) {
+					fail("model_config", cause, "文本模型不存在或已下线，请更换模型后重试")
 					continue
 				}
 				control, controlJob, controlErr := c.currentJobControl(owner, batchID, jobID)
@@ -4316,9 +4331,13 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 							}
 							entry["stage"], entry["message"], entry["updatedAt"] = "comic_assets", message, c.now()
 							persist()
-							stageCtx, cancel := context.WithTimeout(ctx, stageTimeout)
-							_, assetErr := c.stages.Run(stageCtx, owner, batchID, book.ID, batchfactoryv11.BookStageAssets, assetMode, jobID+"-comic-assets-"+book.ID, "")
-							cancel()
+							var assetErr error
+							assetErr = textModelGate.Do(ctx, func() error {
+								stageCtx, cancel := context.WithTimeout(ctx, stageTimeout)
+								defer cancel()
+								_, err := c.stages.Run(stageCtx, owner, batchID, book.ID, batchfactoryv11.BookStageAssets, assetMode, jobID+"-comic-assets-"+book.ID, "")
+								return err
+							})
 							if assetErr != nil {
 								fail("comic_assets", assetErr, "漫画资产提取失败")
 								continue
@@ -4349,23 +4368,27 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 						}
 						entry["stage"], entry["message"], entry["updatedAt"] = "comic_bootstrap", "正在分析原文、分页并生成每页漫画提示词", c.now()
 						persist()
-						stageCtx, cancel := context.WithTimeout(ctx, comicPromptStageTimeout)
-						// 每页提示词都是一次独立的文本请求，串行会把一本书压在
-						// 10 分钟超时线上，并把整批拖成“跑一早上”。
-						stageCtx = batchfactoryv11.WithComicPromptConcurrency(stageCtx, comicPromptConcurrency)
-						var bootstrapProgressMu sync.Mutex
-						stageCtx = batchfactoryv11.WithComicPromptProgress(stageCtx, func(completed, total int, pageLabel string) {
-							bootstrapProgressMu.Lock()
-							defer bootstrapProgressMu.Unlock()
-							if completed == 0 {
-								return
-							}
-							entry["message"] = fmt.Sprintf("漫画页提示词 %d/%d 已完成，最近完成：%s", completed, total, pageLabel)
-							entry["updatedAt"] = c.now()
-							persist()
+						var bootstrapErr error
+						bootstrapErr = textModelGate.Do(ctx, func() error {
+							stageCtx, cancel := context.WithTimeout(ctx, comicPromptStageTimeout)
+							defer cancel()
+							// 每页提示词都是一次独立的文本请求，串行会把一本书压在
+							// 10 分钟超时线上，并把整批拖成“跑一早上”。
+							stageCtx = batchfactoryv11.WithComicPromptConcurrency(stageCtx, comicPromptConcurrency)
+							var bootstrapProgressMu sync.Mutex
+							stageCtx = batchfactoryv11.WithComicPromptProgress(stageCtx, func(completed, total int, pageLabel string) {
+								bootstrapProgressMu.Lock()
+								defer bootstrapProgressMu.Unlock()
+								if completed == 0 {
+									return
+								}
+								entry["message"] = fmt.Sprintf("漫画页提示词 %d/%d 已完成，最近完成：%s", completed, total, pageLabel)
+								entry["updatedAt"] = c.now()
+								persist()
+							})
+							_, err := c.stages.RunComicBootstrap(stageCtx, owner, batchID, book.ID)
+							return err
 						})
-						_, bootstrapErr := c.stages.RunComicBootstrap(stageCtx, owner, batchID, book.ID)
-						cancel()
 						if bootstrapErr != nil {
 							fail("comic_bootstrap", bootstrapErr, "漫画原文分页与提示词提取失败")
 							continue
@@ -4377,10 +4400,14 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 						if identityRecovery {
 							entry["stage"], entry["message"], entry["updatedAt"] = "comic_prompt_recovery", "人物身份已修复，正在重新生成全部漫画页提示词", c.now()
 							persist()
-							stageCtx, cancel := context.WithTimeout(ctx, comicPromptStageTimeout)
-							stageCtx = batchfactoryv11.WithComicPromptConcurrency(stageCtx, comicPromptConcurrency)
-							_, promptErr := c.stages.RunComicPromptExtraction(stageCtx, owner, batchID, book.ID)
-							cancel()
+							var promptErr error
+							promptErr = textModelGate.Do(ctx, func() error {
+								stageCtx, cancel := context.WithTimeout(ctx, comicPromptStageTimeout)
+								defer cancel()
+								stageCtx = batchfactoryv11.WithComicPromptConcurrency(stageCtx, comicPromptConcurrency)
+								_, err := c.stages.RunComicPromptExtraction(stageCtx, owner, batchID, book.ID)
+								return err
+							})
 							if promptErr != nil {
 								fail("comic_prompt_recovery", promptErr, "漫画身份修复后的提示词重新生成失败")
 								continue
@@ -4392,28 +4419,31 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 					case comicPreparationMissingPrompts:
 						entry["stage"], entry["message"], entry["updatedAt"] = "comic_prompt_recovery", "正在补齐缺失的漫画页提示词", c.now()
 						persist()
-						stageCtx, cancel := context.WithTimeout(ctx, comicPromptStageTimeout)
-						stageCtx = batchfactoryv11.WithComicPromptConcurrency(stageCtx, comicPromptConcurrency)
-						var promptProgressMu sync.Mutex
-						stageCtx = batchfactoryv11.WithComicPromptProgress(stageCtx, func(completed, total int, pageLabel string) {
-							promptProgressMu.Lock()
-							defer promptProgressMu.Unlock()
-							if completed == 0 {
-								entry["message"] = fmt.Sprintf("正在并发生成漫画页提示词（共 %d 张）", total)
-							} else {
-								entry["message"] = fmt.Sprintf("漫画页提示词 %d/%d 已完成，最近完成：%s", completed, total, pageLabel)
-							}
-							entry["stage"], entry["updatedAt"] = "comic_prompt_recovery", c.now()
-							persist()
-						})
 						var partialResult batchfactoryv11.ComicPromptExtractionResult
-						var recoveryErr error
-						if hasMultipleComicStyles(effective) && firstMetadataString(book.SourceMetadata, "comicSharedStoryboardKey") != comicSharedStoryboardKey(book, effective) {
-							partialResult, recoveryErr = c.stages.RunComicPromptExtraction(stageCtx, owner, batchID, book.ID)
-						} else {
-							partialResult, recoveryErr = c.stages.RunMissingComicPromptExtraction(stageCtx, owner, batchID, book.ID)
-						}
-						cancel()
+						recoveryErr := textModelGate.Do(ctx, func() error {
+							stageCtx, cancel := context.WithTimeout(ctx, comicPromptStageTimeout)
+							defer cancel()
+							stageCtx = batchfactoryv11.WithComicPromptConcurrency(stageCtx, comicPromptConcurrency)
+							var promptProgressMu sync.Mutex
+							stageCtx = batchfactoryv11.WithComicPromptProgress(stageCtx, func(completed, total int, pageLabel string) {
+								promptProgressMu.Lock()
+								defer promptProgressMu.Unlock()
+								if completed == 0 {
+									entry["message"] = fmt.Sprintf("正在并发生成漫画页提示词（共 %d 张）", total)
+								} else {
+									entry["message"] = fmt.Sprintf("漫画页提示词 %d/%d 已完成，最近完成：%s", completed, total, pageLabel)
+								}
+								entry["stage"], entry["updatedAt"] = "comic_prompt_recovery", c.now()
+								persist()
+							})
+							var err error
+							if hasMultipleComicStyles(effective) && firstMetadataString(book.SourceMetadata, "comicSharedStoryboardKey") != comicSharedStoryboardKey(book, effective) {
+								partialResult, err = c.stages.RunComicPromptExtraction(stageCtx, owner, batchID, book.ID)
+							} else {
+								partialResult, err = c.stages.RunMissingComicPromptExtraction(stageCtx, owner, batchID, book.ID)
+							}
+							return err
+						})
 						if recoveryErr != nil {
 							// 只有「一页都没补上」才允许整本失败；部分成功时失败页只记账，
 							// 其余页继续进入页图阶段，页图阶段会自然跳过缺提示词的页。
@@ -4437,7 +4467,11 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 					}
 					if comicPromptMissing == 0 && hasMultipleComicStyles(effective) {
 						var sharedErr error
-						book, sharedErr = c.confirmComicSharedStory(ctx, owner, batchID, book, effective, comicPreparation != comicPreparationReady)
+						sharedErr = textModelGate.Do(ctx, func() error {
+							var err error
+							book, err = c.confirmComicSharedStory(ctx, owner, batchID, book, effective, comicPreparation != comicPreparationReady)
+							return err
+						})
 						if sharedErr != nil {
 							fail("comic_prompt_recovery", sharedErr, "共用漫画分镜准备失败")
 							continue
@@ -4803,9 +4837,12 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 							entry["message"] = "正在提取资产提示词（资产图片开关关闭，不生成资产图片）"
 						}
 						entry["updatedAt"] = c.now()
-						stageCtx, cancel = context.WithTimeout(ctx, stageTimeout)
-						_, stageErr = c.stages.Run(stageCtx, owner, batchID, book.ID, batchfactoryv11.BookStageAssets, stageMode, jobID+"-assets-"+book.ID, "")
-						cancel()
+						stageErr = textModelGate.Do(ctx, func() error {
+							stageCtx, cancel = context.WithTimeout(ctx, stageTimeout)
+							defer cancel()
+							_, err := c.stages.Run(stageCtx, owner, batchID, book.ID, batchfactoryv11.BookStageAssets, stageMode, jobID+"-assets-"+book.ID, "")
+							return err
+						})
 						if stageErr != nil {
 							fail("assets", stageErr, "资产提取失败")
 							continue
@@ -4826,9 +4863,12 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 							// 已存在 revision 直接跳过，所以这里只能显式 Force。
 							directorMode = batchfactoryv11.StageModeForce
 						}
-						stageCtx, cancel = context.WithTimeout(ctx, stageTimeout)
-						_, stageErr = c.stages.Run(stageCtx, owner, batchID, book.ID, batchfactoryv11.BookStageDirector, directorMode, jobID+"-director-"+book.ID, "")
-						cancel()
+						stageErr = textModelGate.Do(ctx, func() error {
+							stageCtx, cancel = context.WithTimeout(ctx, stageTimeout)
+							defer cancel()
+							_, err := c.stages.Run(stageCtx, owner, batchID, book.ID, batchfactoryv11.BookStageDirector, directorMode, jobID+"-director-"+book.ID, "")
+							return err
+						})
 						if stageErr != nil {
 							fail("director", stageErr, "分镜提示词生成失败")
 							continue
@@ -4847,9 +4887,12 @@ func (c *BatchAutomationCoordinator) run(ctx context.Context, epoch int64, owner
 					if automationResumeShouldRunStage(resumeStage, "opening") && automationOpeningEnabled(batch, book) && (forceRegenerate || !batchfactoryv11.OpeningStageComplete(batch, book)) {
 						entry["stage"], entry["message"], entry["updatedAt"] = "opening", "正在基于分镜提示词生成换开头", c.now()
 						persist()
-						stageCtx, cancel = context.WithTimeout(ctx, stageTimeout)
-						_, stageErr = c.stages.Run(stageCtx, owner, batchID, book.ID, batchfactoryv11.BookStageOpening, stageMode, jobID+"-opening-"+book.ID, "")
-						cancel()
+						stageErr = textModelGate.Do(ctx, func() error {
+							stageCtx, cancel = context.WithTimeout(ctx, stageTimeout)
+							defer cancel()
+							_, err := c.stages.Run(stageCtx, owner, batchID, book.ID, batchfactoryv11.BookStageOpening, stageMode, jobID+"-opening-"+book.ID, "")
+							return err
+						})
 						if stageErr != nil {
 							fail("opening", stageErr, "换开头提示词生成失败")
 							continue
