@@ -4786,7 +4786,7 @@ func saveNovelFetchConfig(w http.ResponseWriter, req *http.Request, store novelf
 	// cannot silently override a newly saved flat setting at execution time.
 	settings = cloneAnyMap(settings)
 	appPatch := cloneAnyMap(mapOrEmpty(settings["appConfig"]))
-	for _, key := range []string{"rewrite", "layout", "workflow", "fetch", "sensitive_ai", "storage", "parser", "work_form", "web_submit", "text_model_id", "processing_rule_prompt", "processing_rule_scope"} {
+	for _, key := range []string{"ai", "rewrite", "layout", "workflow", "fetch", "sensitive_ai", "storage", "parser", "work_form", "web_submit", "text_model_id", "processing_rule_prompt", "processing_rule_scope"} {
 		if value, supplied := settings[key]; supplied {
 			if flat, ok := value.(map[string]any); ok {
 				appPatch[key] = mergeWorkshopConfig(flat, mapOrEmpty(appPatch[key]))
