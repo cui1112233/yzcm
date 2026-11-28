@@ -173,12 +173,16 @@ func (s *MySQLStore) CreateBatch(ctx context.Context, batch *Batch) error {
 	if err != nil {
 		return err
 	}
+	authorization, err := productionAuthorizationJSON(batch.ProductionAuthorization)
+	if err != nil {
+		return err
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO screenplay_batches
-(id, project_id, owner_username, session_id, status, current_step, current_episode, plan_version, permission_mode, pending_actions, last_error, revision, created_at, updated_at, last_run_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+(id, project_id, owner_username, session_id, status, current_step, current_episode, plan_version, permission_mode, pending_actions, last_error, revision, created_at, updated_at, last_run_at, production_authorization)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		batch.ID, batch.ProjectID, batch.OwnerUsername, batch.SessionID, string(batch.Status),
 		batch.CurrentStep, batch.CurrentEpisode, batch.PlanVersion, string(batch.PermissionMode),
-		jsonDocumentText(pending), batch.LastError, batch.Revision, batch.CreatedAt, batch.UpdatedAt, batch.LastRunAt)
+		jsonDocumentText(pending), batch.LastError, batch.Revision, batch.CreatedAt, batch.UpdatedAt, batch.LastRunAt, nullableBytes(authorization))
 	var mysqlErr *mysql.MySQLError
 	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
 		return fmt.Errorf("%w: 项目 %s 已存在批次", ErrInvalidArgument, batch.ProjectID)
@@ -193,7 +197,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 }
 
 func (s *MySQLStore) GetBatch(ctx context.Context, owner, projectID string) (*Batch, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, project_id, owner_username, session_id, status, current_step, current_episode, plan_version, permission_mode, pending_actions, last_error, revision, created_at, updated_at, last_run_at
+	row := s.db.QueryRowContext(ctx, `SELECT id, project_id, owner_username, session_id, status, current_step, current_episode, plan_version, permission_mode, pending_actions, last_error, revision, created_at, updated_at, last_run_at, production_authorization
 FROM screenplay_batches WHERE project_id = ? AND owner_username = ?`, projectID, owner)
 	batch, err := scanBatch(row, owner)
 	if err != nil {
@@ -207,11 +211,29 @@ FROM screenplay_batches WHERE project_id = ? AND owner_username = ?`, projectID,
 
 // UpdateBatch 使用 revision 乐观锁写回。冲突时返回 ErrRevisionConflict，调用方应重新读取。
 func (s *MySQLStore) UpdateBatch(ctx context.Context, batch *Batch, expectedRevision int64) error {
+	if batch == nil {
+		return ErrInvalidArgument
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	// General batch updates cannot replace the identity frozen by trusted start.
+	// Lock the revision so a late update cannot import a previous run's identity.
+	var authorization []byte
+	if err := tx.QueryRowContext(ctx, `SELECT production_authorization FROM screenplay_batches WHERE id = ? AND owner_username = ? AND revision = ? FOR UPDATE`, batch.ID, batch.OwnerUsername, expectedRevision).Scan(&authorization); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrRevisionConflict
+		}
+		return err
+	}
+	batch.ProductionAuthorization = nil
+	if len(authorization) > 0 {
+		if err := json.Unmarshal(authorization, &batch.ProductionAuthorization); err != nil {
+			return fmt.Errorf("解析 production_authorization 失败: %w", err)
+		}
+	}
 	if err := updateBatchTx(ctx, tx, batch, expectedRevision); err != nil {
 		return err
 	}
@@ -234,7 +256,7 @@ func (s *MySQLStore) MutateBatch(ctx context.Context, owner, projectID string, f
 	}
 	defer tx.Rollback()
 
-	row := tx.QueryRowContext(ctx, `SELECT id, project_id, owner_username, session_id, status, current_step, current_episode, plan_version, permission_mode, pending_actions, last_error, revision, created_at, updated_at, last_run_at
+	row := tx.QueryRowContext(ctx, `SELECT id, project_id, owner_username, session_id, status, current_step, current_episode, plan_version, permission_mode, pending_actions, last_error, revision, created_at, updated_at, last_run_at, production_authorization
 FROM screenplay_batches WHERE project_id = ? AND owner_username = ? FOR UPDATE`, projectID, owner)
 	batch, err := scanBatch(row, owner)
 	if err != nil {
@@ -265,14 +287,18 @@ func updateBatchTx(ctx context.Context, tx *sql.Tx, batch *Batch, expectedRevisi
 	if err != nil {
 		return err
 	}
+	authorization, err := productionAuthorizationJSON(batch.ProductionAuthorization)
+	if err != nil {
+		return err
+	}
 	batch.UpdatedAt = time.Now().UTC()
 	result, err := tx.ExecContext(ctx, `UPDATE screenplay_batches SET
 session_id = ?, status = ?, current_step = ?, current_episode = ?, plan_version = ?, permission_mode = ?,
-pending_actions = ?, last_error = ?, revision = revision + 1, updated_at = ?, last_run_at = ?
+pending_actions = ?, last_error = ?, revision = revision + 1, updated_at = ?, last_run_at = ?, production_authorization = ?
 WHERE id = ? AND owner_username = ? AND revision = ?`,
 		batch.SessionID, string(NormalizeBatchStatus(batch.Status)), batch.CurrentStep, batch.CurrentEpisode,
 		batch.PlanVersion, string(batch.PermissionMode), jsonDocumentText(pending), batch.LastError, batch.UpdatedAt,
-		batch.LastRunAt, batch.ID, batch.OwnerUsername, expectedRevision)
+		batch.LastRunAt, nullableBytes(authorization), batch.ID, batch.OwnerUsername, expectedRevision)
 	if err != nil {
 		return err
 	}
@@ -288,11 +314,11 @@ type rowScanner interface {
 
 func scanBatch(row rowScanner, owner string) (*Batch, error) {
 	var batch Batch
-	var pending []byte
+	var pending, authorization []byte
 	var lastRun sql.NullTime
 	err := row.Scan(&batch.ID, &batch.ProjectID, &batch.OwnerUsername, &batch.SessionID, &batch.Status,
 		&batch.CurrentStep, &batch.CurrentEpisode, &batch.PlanVersion, &batch.PermissionMode,
-		&pending, &batch.LastError, &batch.Revision, &batch.CreatedAt, &batch.UpdatedAt, &lastRun)
+		&pending, &batch.LastError, &batch.Revision, &batch.CreatedAt, &batch.UpdatedAt, &lastRun, &authorization)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: 项目批次", ErrNotFound)
 	}
@@ -305,6 +331,11 @@ func scanBatch(row rowScanner, owner string) (*Batch, error) {
 	if len(pending) > 0 {
 		if err := json.Unmarshal(pending, &batch.PendingActions); err != nil {
 			return nil, fmt.Errorf("解析 pending_actions 失败: %w", err)
+		}
+	}
+	if len(authorization) > 0 {
+		if err := json.Unmarshal(authorization, &batch.ProductionAuthorization); err != nil {
+			return nil, fmt.Errorf("解析 production_authorization 失败: %w", err)
 		}
 	}
 	batch.OwnerUsername = owner
@@ -362,7 +393,7 @@ FROM screenplay_batch_steps WHERE batch_id = ? AND owner_username = ?`, batch.ID
 }
 
 func loadBatchEpisodes(ctx context.Context, q queryer, batch *Batch) error {
-	rows, err := q.QueryContext(ctx, `SELECT step_key, episode_no, status, artifact, reason, updated_at
+	rows, err := q.QueryContext(ctx, `SELECT step_key, episode_no, status, artifact, reason, updated_at, storyboard_generation
 FROM screenplay_batch_episodes WHERE batch_id = ? AND owner_username = ? ORDER BY step_key, episode_no`, batch.ID, batch.OwnerUsername)
 	if err != nil {
 		return err
@@ -372,8 +403,14 @@ FROM screenplay_batch_episodes WHERE batch_id = ? AND owner_username = ? ORDER B
 		var stepKey string
 		var ep EpisodeState
 		var reason sql.NullString
-		if err := rows.Scan(&stepKey, &ep.EpisodeNo, &ep.Status, &ep.Artifact, &reason, &ep.UpdatedAt); err != nil {
+		var generation []byte
+		if err := rows.Scan(&stepKey, &ep.EpisodeNo, &ep.Status, &ep.Artifact, &reason, &ep.UpdatedAt, &generation); err != nil {
 			return err
+		}
+		if len(generation) > 0 {
+			if err := json.Unmarshal(generation, &ep.StoryboardGeneration); err != nil {
+				return fmt.Errorf("解析 storyboard_generation 失败: %w", err)
+			}
 		}
 		ep.Reason = reason.String
 		step := batch.Steps[stepKey]
@@ -430,11 +467,18 @@ error = VALUES(error), review = VALUES(review)`,
 			if ep == nil {
 				continue
 			}
+			var generation []byte
+			if ep.StoryboardGeneration != nil {
+				generation, err = marshalJSON(ep.StoryboardGeneration)
+				if err != nil {
+					return err
+				}
+			}
 			_, err = tx.ExecContext(ctx, `INSERT INTO screenplay_batch_episodes
-(batch_id, owner_username, step_key, episode_no, status, artifact, reason, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-ON DUPLICATE KEY UPDATE status = VALUES(status), artifact = VALUES(artifact), reason = VALUES(reason), updated_at = VALUES(updated_at)`,
-				batch.ID, batch.OwnerUsername, def.Key, episodeNo, string(ep.Status), ep.Artifact, nullString(ep.Reason), ep.UpdatedAt)
+(batch_id, owner_username, step_key, episode_no, status, artifact, reason, updated_at, storyboard_generation)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE status = VALUES(status), artifact = VALUES(artifact), reason = VALUES(reason), updated_at = VALUES(updated_at), storyboard_generation = VALUES(storyboard_generation)`,
+				batch.ID, batch.OwnerUsername, def.Key, episodeNo, string(ep.Status), ep.Artifact, nullString(ep.Reason), ep.UpdatedAt, nullableBytes(generation))
 			if err != nil {
 				return err
 			}
@@ -520,6 +564,14 @@ func nullableBytes(value []byte) any {
 		return nil
 	}
 	return string(value)
+}
+
+// Preserve absent legacy identity as SQL NULL rather than guessing an actor.
+func productionAuthorizationJSON(value *ProductionAuthorization) ([]byte, error) {
+	if value == nil {
+		return nil, nil
+	}
+	return json.Marshal(value)
 }
 
 func jsonDocumentText(value []byte) string {

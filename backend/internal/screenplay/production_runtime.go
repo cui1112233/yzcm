@@ -76,6 +76,15 @@ func (r *ProductionRuntime) prepareProduction(ctx context.Context, owner, id str
 	if e != nil {
 		return ProductionJob{}, e
 	}
+	var authorization *ProductionAuthorization
+	if (project.CreativeConfig != nil && project.CreativeConfig.StoryboardPromptID == "luoshui_storyboard_138") || productionHasAuthorization(ctx, r.Store, owner, id) {
+		auth, _ := ctx.Value(productionAuthorizationKey{}).(ProductionAuthorization)
+		if auth.Actor == "" || auth.Subject != owner {
+			return ProductionJob{}, fmt.Errorf("%w: 138生产缺少可信发起人与费用归属", ErrAccessDenied)
+		}
+		auth.RunID = newScreenplayID("production-run")
+		authorization = &auth
+	}
 	if r.RedisDo == nil || r.Executor == nil {
 		return ProductionJob{}, fmt.Errorf("%w: 后台生产需要可用的 Redis 和执行器", ErrInvalidState)
 	}
@@ -88,6 +97,14 @@ func (r *ProductionRuntime) prepareProduction(ctx context.Context, owner, id str
 		return ProductionJob{}, err
 	}
 	defer func() { _ = r.Store.ReleaseLock(context.Background(), lockKey, token) }()
+	if authorization != nil {
+		batchLock := "screenplay-batch:" + owner + ":" + id
+		if err := r.Store.AcquireLock(ctx, batchLock, token, 30*time.Second); err != nil {
+			return ProductionJob{}, err
+		}
+		defer r.Store.ReleaseLock(context.Background(), batchLock, token)
+	}
+
 	if j, e := r.Repository.GetProductionJob(ctx, owner, id); e == nil && j.Status == "running" {
 		if runAt != nil {
 			return ProductionJob{}, fmt.Errorf("%w: 任务正在执行，请先暂停再安排定时", ErrInvalidState)
@@ -160,6 +177,11 @@ func (r *ProductionRuntime) prepareProduction(ctx context.Context, owner, id str
 	}
 	if e != nil {
 		return ProductionJob{}, e
+	}
+	if authorization != nil {
+		if _, e = r.Store.MutateBatch(ctx, owner, id, func(b *Batch) error { b.ProductionAuthorization = authorization; return nil }); e != nil {
+			return ProductionJob{}, e
+		}
 	}
 	if versions, ok := r.Repository.(VersionedProductionRepository); ok {
 		if e = versions.SetProductionRebuild(ctx, owner, id, rebuild); e != nil {
@@ -365,9 +387,27 @@ func (r *ProductionRuntime) RunOne(ctx context.Context, j ProductionJob) error {
 			return e
 		}
 	}
+	var runID string
+	if p, getErr := r.Store.GetProject(work, j.Owner, j.ProjectID); getErr != nil {
+		return getErr
+	} else if production138Selected(work, r.Store, j.Owner, p, 0) || productionHasAuthorization(work, r.Store, j.Owner, j.ProjectID) {
+		b, getErr := r.Store.GetBatch(work, j.Owner, j.ProjectID)
+		if getErr != nil {
+			return getErr
+		}
+		a := b.ProductionAuthorization
+		if a == nil || a.Actor == "" || a.Subject != j.Owner || a.RunID == "" {
+			current.Status = "blocked"
+			current.Error = "138生产缺少原发起人记录，请核对后重新明确启动；不会自动提交模型"
+			return r.Repository.SaveProductionProgress(work, current)
+		}
+		runID = a.RunID
+		work = productionUsageContext(work, a)
+	}
 	executor := r.Executor(j.Owner)
+	executor.ProductionRunID = runID
 	if executor.Generator != nil {
-		executor.Generator = productionGuardGenerator{generator: executor.Generator, repository: r.Repository, owner: j.Owner, projectID: j.ProjectID}
+		executor.Generator = productionGuardGenerator{generator: executor.Generator, repository: r.Repository, owner: j.Owner, projectID: j.ProjectID, store: r.Store, runID: runID, cancel: cancel}
 	}
 	result, e := executor.RunNext(work, j.Owner, j.ProjectID)
 	if work.Err() != nil {
@@ -387,6 +427,21 @@ func (r *ProductionRuntime) RunOne(ctx context.Context, j ProductionJob) error {
 	case result.Batch != nil && result.Batch.Status == BatchWaitingUser:
 		current.Status = "blocked"
 	}
+	// Serialize completion with pause/start and reject late workers from an older run.
+	if runID != "" {
+		control := "screenplay-production-control:" + j.Owner + ":" + j.ProjectID
+		if err := r.Store.AcquireLock(work, control, token, 30*time.Second); err != nil {
+			return err
+		}
+		defer r.Store.ReleaseLock(context.Background(), control, token)
+		b, err := r.Store.GetBatch(work, j.Owner, j.ProjectID)
+		if err != nil {
+			return err
+		}
+		if b.ProductionAuthorization == nil || b.ProductionAuthorization.RunID != runID {
+			return ErrRevisionConflict
+		}
+	}
 	if persist := r.Repository.SaveProductionProgress(work, current); persist != nil {
 		return persist
 	}
@@ -397,6 +452,9 @@ type productionGuardGenerator struct {
 	generator        TextGenerator
 	repository       ProductionRepository
 	owner, projectID string
+	store            Store
+	runID            string
+	cancel           context.CancelFunc
 }
 
 func (g productionGuardGenerator) Generate(ctx context.Context, request TextRequest) (TextResponse, error) {
@@ -410,7 +468,28 @@ func (g productionGuardGenerator) Generate(ctx context.Context, request TextRequ
 	if job.Status != "running" {
 		return TextResponse{}, ErrUserCancelled
 	}
-	return g.generator.Generate(ctx, request)
+	if g.runID != "" {
+		b, err := g.store.GetBatch(ctx, g.owner, g.projectID)
+		if err != nil {
+			return TextResponse{}, err
+		}
+		if b.ProductionAuthorization == nil || b.ProductionAuthorization.RunID != g.runID {
+			return TextResponse{}, ErrRevisionConflict
+		}
+	}
+	response, callErr := g.generator.Generate(ctx, request)
+	if callErr == nil && g.runID != "" {
+		job, err := g.repository.GetProductionJob(context.WithoutCancel(ctx), g.owner, g.projectID)
+		b, batchErr := g.store.GetBatch(context.WithoutCancel(ctx), g.owner, g.projectID)
+		if err != nil || batchErr != nil || job.Status != "running" || b.ProductionAuthorization == nil || b.ProductionAuthorization.RunID != g.runID {
+			if g.cancel != nil {
+				g.cancel()
+				return response, nil
+			}
+			return response, ErrUserCancelled
+		}
+	}
+	return response, callErr
 }
 
 func productionDueScore(j ProductionJob) string {

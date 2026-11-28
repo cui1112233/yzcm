@@ -11,6 +11,17 @@ const write=(id,path,body,request)=>request(comicWorkflowPath(id,path),{method:'
 const put=(id,path,body,request)=>request(comicWorkflowPath(id,path),{method:'PUT',body:JSON.stringify(body||{})});
 export const getComicProduction=(id,request=apiRequest)=>read(id,'production/status',request);
 export const startComicProduction=(id,request=apiRequest)=>write(id,'production/start',{},request);
+export function continueComicProductionStoryboard(id,input,request=apiRequest){
+  if(input?.confirmed!==true)return Promise.reject(new Error('请先确认继续生成下一批分镜'));
+  const key=String(input?.request_key||'');
+  if(!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(key))return Promise.reject(new Error('当前分镜请求无效，请刷新任务状态'));
+  return write(id,'production/storyboard/continue',{request_key:key,confirmed:true},request);
+}
+export function recoverComicProductionStoryboard(id,input,request=apiRequest){
+  const key=String(input?.request_key||'');
+  if(!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(key))return Promise.reject(new Error('当前分镜请求无效，请刷新任务状态'));
+  return write(id,'production/storyboard/recover',{request_key:key},request);
+}
 export function rebuildComicProduction(id,input,request=apiRequest){
   if(input?.confirmed!==true)return Promise.reject(new Error('请先确认重建变更镜头可能产生新的供应商费用'));
   return write(id,'production/start',{rebuild:true},request);

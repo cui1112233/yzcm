@@ -4,8 +4,12 @@ export function comicProductionView(data){
   const finalize=data?.batch?.steps?.['8_finalize'];
   const deliverables=finalize?.status==='done'?[...new Set((finalize.artifacts||[]).map(safeComicMediaUrl).filter(Boolean))]:[];
   const deliveryComplete=status==='completed'&&deliverables.length>0;
-  const label=status==='completed'?(deliveryComplete?'成片已生成，可查看交付结果':'生产步骤完成，尚无交付结果'):(labels[status]||status);
-  return {status,label,scheduled:status==='scheduled',active:['running','queued','submitting','submitted'].includes(status),deliveryComplete,deliverables};
+  const storyboardWaits=Object.values(data?.batch?.steps?.['5_storyboard']?.episodes||{}).filter(ep=>['awaiting_continue','unknown','calling','cancelled','failed'].includes(ep.storyboard_generation?.status)).map(ep=>{
+    const generation=ep.storyboard_generation;
+    return {episode:ep.episode_no,requestKey:generation.request_key,status:generation.status,canContinue:['blocked','paused'].includes(status)&&generation.status==='awaiting_continue'&&!!generation.request_key,canRecover:['blocked','paused'].includes(status)&&['unknown','calling','cancelled','failed'].includes(generation.status)&&!!generation.request_key};
+  });
+  const label=status==='completed'?(deliveryComplete?'成片已生成，可查看交付结果':'生产步骤完成，尚无交付结果'):status==='blocked'&&storyboardWaits.length?(storyboardWaits.some(row=>row.canContinue)?'等待确认继续分镜':'分镜结果待核对'):(labels[status]||status);
+  return {status,label,scheduled:status==='scheduled',active:['running','queued','submitting','submitted'].includes(status),deliveryComplete,deliverables,storyboardWaits};
 }
 export function comicProductionShotKey(row){return JSON.stringify([row.project_id||'',row.storyboard_id||'',row.episode,row.seq??row.shot_id??row.shot??row.id,row.request_hash||'']);}
 export function safeComicMediaUrl(value){

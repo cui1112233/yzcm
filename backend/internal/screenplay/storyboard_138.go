@@ -160,6 +160,10 @@ func (s *StoryboardService) generateScenes138(ctx context.Context, req Storyboar
 			if exists {
 				response.Content = cached.RawResponse
 			} else {
+				if req.recoveryOnly {
+					awaiting = true
+					break
+				}
 				remaining, e := remaining138(unit, covered)
 				if e != nil {
 					return nil, nil, e

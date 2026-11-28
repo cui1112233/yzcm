@@ -55,7 +55,7 @@ func registerScreenplayWorkflow(root *http.ServeMux, auth BridgeAuth, options Ro
 		runner = &screenplayVideoRunner{service: videoService, configs: configs, repo: productionRepo, References: media.References, ReferenceIDs: media.ReferenceIDs, Subjects: media.VideoSubjects}
 	}
 	runtime := &screenplay.ProductionRuntime{Store: options.Screenplay, Repository: productionRepo, Executor: func(owner string) screenplay.BatchExecutor {
-		return screenplay.BatchExecutor{Store: options.Screenplay, Generator: screenplayTextGenerator{owner: owner, resolver: resolver}, Media: runner, Finalizer: media}
+		return screenplay.BatchExecutor{Store: options.Screenplay, Authoring: authoring, Generator: screenplayProductionTextGenerator{generator: screenplayTextGenerator{owner: owner, resolver: resolver}, accounts: options.AccountCenterStore}, Media: runner, Finalizer: media}
 	}}
 	if redis, err := mergeworker.NewRedisStore(options.RedisURL, "qiantie:screenplay:production"); err == nil {
 		runtime.RedisDo = redis.Do

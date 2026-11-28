@@ -36,3 +36,40 @@ test('定时制作显示等待时间，未来时间使用本地输入转成明�
  assert.deepEqual(comicScheduleRequest('2026-11-14T01:00:00Z',now),{run_at:'2026-11-14T01:00:00.000Z'});
  const view=comicProductionView({status:'scheduled',run_at:'2026-11-14T01:00:00Z'});assert.equal(view.scheduled,true);assert.equal(view.active,false);assert.equal(view.label,'等待定时启动');
 });
+
+test('138分镜等待与质检阻断分开显示，仅明确待续批状态可继续',()=>{
+ const data=status=>({status:'blocked',batch:{steps:{'5_storyboard':{episodes:{1:{episode_no:1,storyboard_generation:{request_key:'batch-138',chapter_id:'c1',status}}}}}}});
+ const waiting=comicProductionView(data('awaiting_continue'));
+ assert.equal(waiting.label,'等待确认继续分镜');assert.equal(waiting.active,false);
+ assert.equal(waiting.storyboardWaits[0].canContinue,true);assert.equal(waiting.storyboardWaits[0].requestKey,'batch-138');
+ for(const status of ['calling','unknown','cancelled'])assert.equal(comicProductionView(data(status)).storyboardWaits[0].canContinue,false);
+ assert.equal(comicProductionView({status:'blocked'}).label,'等待处理质检问题');
+ assert.equal(comicProductionView(data('succeeded')).storyboardWaits.length,0);
+ assert.equal(comicProductionView(data('unknown')).label,'分镜结果待核对');
+ assert.equal(comicProductionView({...data('awaiting_continue'),status:'running'}).storyboardWaits[0].canContinue,false);
+});
+
+test('138生产未知、调用中或取消状态可手动恢复已返回回包',()=>{
+ for(const status of ['awaiting_continue','unknown','calling','cancelled']){
+ const data={status:'blocked',batch:{steps:{'5_storyboard':{episodes:{1:{episode_no:1,storyboard_generation:{request_key:'batch-138',status}}}}}}};
+ assert.equal(comicProductionView(data).storyboardWaits[0].canRecover,['unknown','calling','cancelled'].includes(status));
+ }
+});
+
+test('暂停保留138等待时仍能明确继续或免费恢复',()=>{
+ const data=status=>({status:'paused',batch:{steps:{'5_storyboard':{episodes:{1:{episode_no:1,storyboard_generation:{request_key:'batch-138',status}}}}}}});
+ assert.equal(comicProductionView(data('awaiting_continue')).storyboardWaits[0].canContinue,true);
+ for(const status of ['unknown','calling','cancelled']){
+  const wait=comicProductionView(data(status)).storyboardWaits[0];assert.equal(wait.canContinue,false);assert.equal(wait.canRecover,true);
+ }
+ assert.deepEqual(comicProductionView({status:'paused'}).storyboardWaits,[]);
+});
+
+test('138失败保留核验回包入口，不能把failed当成明确续批授权',()=>{
+ for(const jobStatus of ['blocked','paused']){
+  const data={status:jobStatus,batch:{steps:{'5_storyboard':{episodes:{1:{episode_no:1,storyboard_generation:{request_key:'received-save-failed',status:'failed'}}}}}}};
+  const view=comicProductionView(data);assert.equal(view.storyboardWaits.length,1);assert.equal(view.storyboardWaits[0].canRecover,true);assert.equal(view.storyboardWaits[0].canContinue,false);
+ }
+ const noKey=comicProductionView({status:'blocked',batch:{steps:{'5_storyboard':{episodes:{1:{episode_no:1,storyboard_generation:{status:'failed'}}}}}}});
+ assert.equal(noKey.storyboardWaits[0].canRecover,false);
+});

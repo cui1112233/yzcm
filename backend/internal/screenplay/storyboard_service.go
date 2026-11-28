@@ -26,6 +26,7 @@ type StoryboardRequest struct {
 	IdempotencyKey             string `json:"idempotency_key"`
 	RetryOf                    string `json:"retry_of"`
 	ConfirmedRetry             bool   `json:"confirmed_retry"`
+	recoveryOnly               bool
 	generationSession          *storyboardGenerationSession
 	sceneOnlyIndex             *int
 	ChapterID                  string           `json:"chapter_id"`
@@ -90,7 +91,7 @@ func (s *StoryboardService) Generate(ctx context.Context, req StoryboardRequest)
 	if !storyboardGenerationKeyRe.MatchString(req.IdempotencyKey) {
 		return out, fmt.Errorf("%w: 请提供稳定的分镜生成idempotencyKey", ErrInvalidArgument)
 	}
-	if s.Generator == nil {
+	if s.Generator == nil && !req.recoveryOnly {
 		return out, ErrAPIKeyMissing
 	}
 	var session *storyboardGenerationSession

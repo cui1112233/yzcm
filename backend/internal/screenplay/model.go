@@ -304,11 +304,12 @@ type PendingAction struct {
 
 // EpisodeState 记录按集步骤中每一集的状态。
 type EpisodeState struct {
-	EpisodeNo int        `json:"episode_no"`
-	Status    StepStatus `json:"status"`
-	Artifact  string     `json:"artifact"`
-	Reason    string     `json:"reason"`
-	UpdatedAt time.Time  `json:"updated_at"`
+	StoryboardGeneration *ProductionStoryboardGeneration `json:"storyboard_generation,omitempty"`
+	EpisodeNo            int                             `json:"episode_no"`
+	Status               StepStatus                      `json:"status"`
+	Artifact             string                          `json:"artifact"`
+	Reason               string                          `json:"reason"`
+	UpdatedAt            time.Time                       `json:"updated_at"`
 }
 
 // StepState 是单个批次步的状态。
@@ -326,22 +327,23 @@ type StepState struct {
 
 // Batch 是批次状态机的持久化形态（对应原版 state.json，但走 MySQL + revision）。
 type Batch struct {
-	ID             string                `json:"id"`
-	ProjectID      string                `json:"project_id"`
-	OwnerUsername  string                `json:"owner_username"`
-	SessionID      string                `json:"session_id"`
-	Status         BatchStatus           `json:"status"`
-	CurrentStep    string                `json:"current_step"`
-	CurrentEpisode int                   `json:"current_episode"`
-	PlanVersion    int                   `json:"plan_version"`
-	PermissionMode PermissionMode        `json:"permission_mode"`
-	PendingActions []PendingAction       `json:"pending_actions"`
-	LastError      string                `json:"last_error"`
-	Revision       int64                 `json:"revision"`
-	CreatedAt      time.Time             `json:"created_at"`
-	UpdatedAt      time.Time             `json:"updated_at"`
-	LastRunAt      *time.Time            `json:"last_run_at,omitempty"`
-	Steps          map[string]*StepState `json:"steps"`
+	ProductionAuthorization *ProductionAuthorization `json:"production_authorization,omitempty"`
+	ID                      string                   `json:"id"`
+	ProjectID               string                   `json:"project_id"`
+	OwnerUsername           string                   `json:"owner_username"`
+	SessionID               string                   `json:"session_id"`
+	Status                  BatchStatus              `json:"status"`
+	CurrentStep             string                   `json:"current_step"`
+	CurrentEpisode          int                      `json:"current_episode"`
+	PlanVersion             int                      `json:"plan_version"`
+	PermissionMode          PermissionMode           `json:"permission_mode"`
+	PendingActions          []PendingAction          `json:"pending_actions"`
+	LastError               string                   `json:"last_error"`
+	Revision                int64                    `json:"revision"`
+	CreatedAt               time.Time                `json:"created_at"`
+	UpdatedAt               time.Time                `json:"updated_at"`
+	LastRunAt               *time.Time               `json:"last_run_at,omitempty"`
+	Steps                   map[string]*StepState    `json:"steps"`
 }
 
 // Step 返回某一步的状态，不存在时返回 nil。

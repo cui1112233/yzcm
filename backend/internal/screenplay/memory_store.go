@@ -468,6 +468,7 @@ func (m *MemoryStore) UpdateBatch(_ context.Context, batch *Batch, expectedRevis
 		return ErrRevisionConflict
 	}
 	next := cloneBatch(batch)
+	next.ProductionAuthorization = cloneBatch(stored).ProductionAuthorization
 	next.Revision = expectedRevision + 1
 	m.batches[key] = next
 	batch.Revision = next.Revision
