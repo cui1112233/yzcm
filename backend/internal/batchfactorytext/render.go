@@ -97,6 +97,9 @@ type RenderInput struct {
 	DialogueRanges        []HighlightRange
 	DialogueRangesSet     bool
 	VerticalCenterRatio   float64
+	// AutoContrast is enabled for durable production renders. Preview keeps the
+	// requested color and reports low contrast so the editor remains truthful.
+	AutoContrast bool
 	// Preview samples the actual cropped background behind the glyphs.
 	WarnLowContrast func()
 }
@@ -534,6 +537,17 @@ func (r Renderer) Render(ctx context.Context, in RenderInput) ([]byte, string, e
 	if err = drawBackground(dst, in.Background, in.BackgroundImage); err != nil {
 		return nil, "", err
 	}
+	if in.AutoContrast {
+		var adjusted bool
+		normal, adjusted, err = readableTextColor(ctx, dst, face, text, c, size, in.VerticalCenterRatio, normal)
+		if err != nil {
+			return nil, "", err
+		}
+		if adjusted && in.WarnLowContrast != nil {
+			in.WarnLowContrast()
+			in.WarnLowContrast = nil
+		}
+	}
 	fg, accent := image.NewUniform(normal), image.NewUniform(highlight)
 	rangeIndex := 0
 	spread := boldSpread(c)
@@ -586,6 +600,10 @@ func (r Renderer) Render(ctx context.Context, in RenderInput) ([]byte, string, e
 }
 
 func lowContrast(fg, bg color.RGBA) bool {
+	return contrastRatio(fg, bg) < 3
+}
+
+func contrastRatio(fg, bg color.RGBA) float64 {
 	linear := func(b uint8) float64 {
 		c := float64(b) / 255
 		if c <= 0.04045 {
@@ -595,5 +613,53 @@ func lowContrast(fg, bg color.RGBA) bool {
 	}
 	lum := func(c color.RGBA) float64 { return .2126*linear(c.R) + .7152*linear(c.G) + .0722*linear(c.B) }
 	a, b := lum(fg), lum(bg)
-	return (max(a, b)+.05)/(min(a, b)+.05) < 3
+	return (max(a, b) + .05) / (min(a, b) + .05)
+}
+
+func readableTextColor(ctx context.Context, dst *image.RGBA, face font.Face, text string, c LayoutConfig, size image.Point, verticalCenterRatio float64, requested color.RGBA) (color.RGBA, bool, error) {
+	dark := color.RGBA{R: 17, G: 19, B: 24, A: 255}
+	light := color.RGBA{R: 255, G: 255, B: 255, A: 255}
+	var samples, low int
+	var requestedScore, darkScore, lightScore float64
+	_, err := layoutText(ctx, text, c, size, face, func(line lineGeometry, x, y int) error {
+		if verticalCenterRatio > 0 {
+			y += int(math.Round(float64(size.Y) * (verticalCenterRatio - 0.5)))
+		}
+		for _, g := range line.glyphs {
+			if unicode.IsSpace(g.r) {
+				continue
+			}
+			dot := fixed.P(x, y)
+			dot.X += g.x
+			rect, _, _, _, ok := face.Glyph(dot, g.r)
+			if !ok || rect.Empty() {
+				continue
+			}
+			point := rect.Min.Add(rect.Size().Div(2))
+			if !point.In(dst.Rect) {
+				continue
+			}
+			background := dst.RGBAAt(point.X, point.Y)
+			ratio := contrastRatio(requested, background)
+			requestedScore += ratio
+			darkScore += contrastRatio(dark, background)
+			lightScore += contrastRatio(light, background)
+			samples++
+			if ratio < 3 {
+				low++
+			}
+		}
+		return nil
+	})
+	if err != nil || samples == 0 || low*2 < samples {
+		return requested, false, err
+	}
+	choice, score := dark, darkScore
+	if lightScore > darkScore {
+		choice, score = light, lightScore
+	}
+	if score <= requestedScore {
+		return requested, false, nil
+	}
+	return choice, true, nil
 }

@@ -45,6 +45,17 @@ func TestTextLocalRecoveryHasPersistentBoundAndNeverRetriesUnknownPublish(t *tes
 	}
 }
 
+func TestTextDuplicatePageRecoveryDropsPinnedCollectionAndRerenders(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	entry := map[string]any{"textPendingPublishCollectionId": "blank-pages", "textCollectionId": "blank-pages"}
+	if !scheduleTextLocalRecovery(entry, "text_publish", txt.ErrDuplicatePageImage, now) {
+		t.Fatal("duplicate text images were not scheduled for local recovery")
+	}
+	if entry["textPendingPublishCollectionId"] != nil || entry["stage"] != "text_render" || entry["retryAt"] != now.Add(5*time.Second) {
+		t.Fatalf("duplicate recovery did not restart before the frozen collection: %+v", entry)
+	}
+}
+
 func TestTextWorkflowStageBudgetsLeaveSeparateTimeForUpload(t *testing.T) {
 	if automationTextStageTimeout("text_render") < 35*time.Minute || automationTextStageTimeout("text_publish") != 45*time.Minute || automationTextStageTimeout("text_validate") != 10*time.Minute {
 		t.Fatal("wrong phase budget")

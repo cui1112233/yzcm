@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	"image/png"
 	"math"
 	"strings"
@@ -407,5 +408,35 @@ func TestPreviewWarnsOnLowContrastWithoutChangingImage(t *testing.T) {
 		if called != tc.low {
 			t.Fatalf("background %s low contrast = %v", tc.bg, called)
 		}
+	}
+}
+
+func TestRenderAutoContrastKeepsWhitePaperTextVisible(t *testing.T) {
+	paper := image.NewRGBA(image.Rect(0, 0, 1080, 1440))
+	draw.Draw(paper, paper.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
+	var background bytes.Buffer
+	if err := png.Encode(&background, paper); err != nil {
+		t.Fatal(err)
+	}
+	c := DefaultRenderLayout()
+	c.TextColor = "#FFFFFF"
+	img, _ := renderCard(t, Renderer{}, RenderInput{
+		Text:            "白纸上的正文必须清楚可见。",
+		Layout:          c,
+		Background:      Background{Kind: "library", ID: "paper"},
+		BackgroundImage: background.Bytes(),
+		AutoContrast:    true,
+	})
+	dark := 0
+	for y := 0; y < img.Bounds().Dy(); y++ {
+		for x := 0; x < img.Bounds().Dx(); x++ {
+			pixel := img.RGBAAt(x, y)
+			if pixel.R < 128 && pixel.G < 128 && pixel.B < 128 {
+				dark++
+			}
+		}
+	}
+	if dark < 100 {
+		t.Fatalf("white paper stayed blank: dark pixels=%d", dark)
 	}
 }

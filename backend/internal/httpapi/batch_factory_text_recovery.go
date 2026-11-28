@@ -24,6 +24,21 @@ func automationTextStageTimeout(stage string) time.Duration {
 // Only local, reusable work is automatically resumed. Processing may call a model,
 // and an upload timeout may hide a committed remote publication: neither is retried here.
 func scheduleTextLocalRecovery(entry map[string]any, stage string, err error, now time.Time) bool {
+	if errors.Is(err, txt.ErrDuplicatePageImage) {
+		attempt := automationNumberValue(entry["textRecoveryAttempts"], 0)
+		if attempt >= 3 {
+			return false
+		}
+		const delay = 5 * time.Second
+		entry["textRecoveryAttempts"] = attempt + 1
+		entry["status"], entry["stage"], entry["error"], entry["updatedAt"] = "scheduled", "text_render", err.Error(), now
+		entry["retryRequested"], entry["retryAt"] = true, now.Add(delay)
+		entry["message"] = "检测到空白或重复文字页，正在重新渲染可读文字；不会复用错误合集"
+		delete(entry, "textPendingPublishCollectionId")
+		delete(entry, "textCollectionId")
+		delete(entry, "needsManual")
+		return true
+	}
 	switch stage {
 	case "text_render", "text_validate", "text_collection":
 	default:

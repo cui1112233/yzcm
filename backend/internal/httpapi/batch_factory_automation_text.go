@@ -399,6 +399,7 @@ func (c *BatchAutomationCoordinator) configureTextWorkflow(repo txt.Repository, 
 			if err != nil {
 				return err
 			}
+			input.AutoContrast = true
 			data, mime, err := renderer.Render(ctx, input)
 			if err != nil {
 				return textLayoutError(err)

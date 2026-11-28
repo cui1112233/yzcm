@@ -14,6 +14,7 @@ type workflowRepo struct {
 	doc         Document
 	pages       []Page
 	collections []Collection
+	artifactSHA map[string]string
 }
 
 func (r *workflowRepo) GetDocument(context.Context, Scope) (Document, error) {
@@ -35,10 +36,38 @@ func (r *workflowRepo) ListArtifacts(context.Context, Scope) ([]PageArtifact, er
 	arts := []PageArtifact{{ID: r.doc.CoverArtifactID, Kind: "cover", SourceKind: sourceKind(r.doc.CoverLocked)}}
 	for _, p := range r.pages {
 		if p.ActiveArtifactID != "" {
-			arts = append(arts, PageArtifact{ID: p.ActiveArtifactID, PageID: p.ID, Kind: "page", SourceKind: sourceKind(p.Locked), RenderVersion: p.RenderVersion})
+			arts = append(arts, PageArtifact{ID: p.ActiveArtifactID, PageID: p.ID, Kind: "page", SourceKind: sourceKind(p.Locked), RenderVersion: p.RenderVersion, ArtifactFile: ArtifactFile{SHA256: r.artifactSHA[p.ActiveArtifactID]}})
 		}
 	}
 	return arts, nil
+}
+
+func TestTextWorkflowRepairsDuplicateRenderedPagesBeforeUpload(t *testing.T) {
+	ctx := context.Background()
+	scope := Scope{"owner", "batch", "book"}
+	doc := Document{ID: "doc", ActiveVersionID: "version", PaginationVersion: 1}
+	pages := []Page{
+		{ID: "p1", VersionID: "version", PaginationVersion: 1, Ordinal: 1, Status: "ready", ActiveArtifactID: "a1", RenderVersion: 1},
+		{ID: "p2", VersionID: "version", PaginationVersion: 1, Ordinal: 2, Status: "ready", ActiveArtifactID: "a2", RenderVersion: 1},
+	}
+	repo := &workflowRepo{doc: doc, pages: pages, artifactSHA: map[string]string{"a1": "same-image", "a2": "same-image"}}
+	w := Workflow{Repo: repo, VerifyFile: func(context.Context, PageArtifact, string) error { return nil }}
+	repairs, err := w.inspectFiles(ctx, scope, doc, pages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pageID := range []string{"p1", "p2"} {
+		if !errors.Is(repairs[pageID], ErrDuplicatePageImage) {
+			t.Fatalf("duplicate page %s was not scheduled for rerender: %v", pageID, repairs)
+		}
+	}
+	collection := Collection{ID: "manual", Status: "ready", VersionID: "version", PaginationVersion: 1, Items: []CollectionItem{
+		{Ordinal: 1, PageID: "p1", ArtifactID: "a1", SHA256: "same-image"},
+		{Ordinal: 2, PageID: "p2", ArtifactID: "a2", SHA256: "same-image"},
+	}}
+	if err := w.verifyManifest(ctx, scope, collection, false); !errors.Is(err, ErrDuplicatePageImage) {
+		t.Fatalf("duplicate frozen collection reached upload: %v", err)
+	}
 }
 func (r *workflowRepo) ListCollections(context.Context, Scope) ([]Collection, error) {
 	return r.collections, nil

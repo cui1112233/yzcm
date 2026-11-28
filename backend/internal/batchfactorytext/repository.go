@@ -7,11 +7,12 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("找不到该书或对应文本记录")
-	ErrConflict = errors.New("内容版本已变化，请刷新后重试")
-	ErrLocked   = errors.New("已上传的锁定页无法自动修改，请核对页面或恢复系统生成")
-	ErrNotReady = errors.New("请先生成所选正文页")
-	ErrInvalid  = errors.New("文本生产数据无效")
+	ErrNotFound           = errors.New("找不到该书或对应文本记录")
+	ErrConflict           = errors.New("内容版本已变化，请刷新后重试")
+	ErrLocked             = errors.New("已上传的锁定页无法自动修改，请核对页面或恢复系统生成")
+	ErrNotReady           = errors.New("请先生成所选正文页")
+	ErrDuplicatePageImage = errors.New("文字页成品重复，请重新渲染后再上传")
+	ErrInvalid            = errors.New("文本生产数据无效")
 )
 
 type ConflictError struct{ Expected, Actual int64 }
