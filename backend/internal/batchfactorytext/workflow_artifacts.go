@@ -49,6 +49,23 @@ func (w Workflow) inspectFiles(ctx context.Context, scope Scope, doc Document, p
 			return nil, err
 		}
 	}
+	byDigest := map[string][]string{}
+	for _, p := range pages {
+		if repairs[p.ID] != nil {
+			continue
+		}
+		if digest := byID[p.ActiveArtifactID].SHA256; digest != "" {
+			byDigest[digest] = append(byDigest[digest], p.ID)
+		}
+	}
+	for _, pageIDs := range byDigest {
+		if len(pageIDs) < 2 {
+			continue
+		}
+		for _, pageID := range pageIDs {
+			repairs[pageID] = ErrDuplicatePageImage
+		}
+	}
 	return repairs, nil
 }
 
@@ -89,6 +106,7 @@ func (w Workflow) verifyManifest(ctx context.Context, scope Scope, c Collection,
 		return err
 	}
 	prev := 0
+	seenDigests := map[string]int{}
 	for _, item := range c.Items {
 		art := byID[item.ArtifactID]
 		if art.Kind != "page" || item.PageID == "" || art.PageID != item.PageID || art.StorageRef != item.StorageRef || art.SHA256 != item.SHA256 || art.MediaType != item.MediaType || item.Ordinal <= prev {
@@ -98,6 +116,12 @@ func (w Workflow) verifyManifest(ctx context.Context, scope Scope, c Collection,
 			if err := w.VerifyFile(ctx, art, fmt.Sprintf("第 %d 页", item.Ordinal)); err != nil {
 				return err
 			}
+		}
+		if item.SHA256 != "" {
+			if first, exists := seenDigests[item.SHA256]; exists {
+				return fmt.Errorf("%w（第 %d 页与第 %d 页成品完全相同）", ErrDuplicatePageImage, item.Ordinal, first)
+			}
+			seenDigests[item.SHA256] = item.Ordinal
 		}
 		prev = item.Ordinal
 	}
