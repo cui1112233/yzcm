@@ -148,6 +148,7 @@ func registerScreenplayAuthoringSessionRoutes(mux *http.ServeMux, auth BridgeAut
 		}
 		return true
 	}
+	registerAssistantReferenceRoutes(svc, handle, decode)
 	if sessionRepo, ok := repo.(*screenplay.MySQLAuthoringRepository); ok {
 		generatorFor := func(r *http.Request, actor string) screenplay.TextGenerator {
 			if channel == nil {
@@ -457,14 +458,27 @@ func registerScreenplayAuthoringSessionRoutes(mux *http.ServeMux, auth BridgeAut
 		path := path
 		handle("POST "+base+"/"+path, "generate", func(w http.ResponseWriter, r *http.Request, o, a string) {
 			var in struct {
-				Expected    int64  `json:"expected_revision"`
-				Instruction string `json:"instruction"`
-				Message     string `json:"message"`
-				Action      string `json:"action"`
-				Confirmed   bool   `json:"confirmed"`
+				Expected    int64                                   `json:"expected_revision"`
+				Instruction string                                  `json:"instruction"`
+				Message     string                                  `json:"message"`
+				Action      string                                  `json:"action"`
+				Confirmed   bool                                    `json:"confirmed"`
+				References  []screenplay.AssistantReferenceSelector `json:"references,omitempty"`
 			}
 			if !decode(w, r, &in) {
 				return
+			}
+			if path != "assistant/chat" && len(in.References) > 0 {
+				authoringError(w, screenplay.ErrInvalidArgument)
+				return
+			}
+			var authority sessionAuthorityCallbacks
+			if len(in.References) > 0 {
+				authority = newSessionAuthority(auth, r, a)
+				if err := authority.verify(r.Context()); err != nil {
+					authoringError(w, err)
+					return
+				}
 			}
 			if path == "chapters/{chapter}/script" {
 				authoring, err := svc.Load(r.Context(), o, r.PathValue("id"))
@@ -527,17 +541,39 @@ func registerScreenplayAuthoringSessionRoutes(mux *http.ServeMux, auth BridgeAut
 				if e != nil {
 					return e
 				}
+				var references []screenplay.AssistantReferenceSnapshot
+				if len(in.References) > 0 {
+					view, err := screenplay.LoadAssistantReferenceView(r.Context(), store, repo, o, st.ProjectID)
+					if err != nil {
+						return err
+					}
+					references, err = view.Resolve(in.References)
+					if err != nil {
+						return err
+					}
+				}
 				system := prompt.ScreenplayAuthoringAssistant
 				user := in.Message
 				jsonResponse := true
 				var chapterIndex = -1
-				// 会话压缩：折叠过长历史，保留最近若干条原文。仅作用于助手会话消息，
-				// 不改作品内容、不消耗额度。压缩结果写回 st.Messages 后随本次 Save 落库。
+				// 有引用的历史保留原消息和快照；模型单独使用压缩视图。
+				// 从未含引用的旧会话继续沿用原有持久化折叠行为。
+				hasReferenceHistory := false
+				for _, message := range st.Messages {
+					if len(message.References) > 0 {
+						hasReferenceHistory = true
+						break
+					}
+				}
 				conversation, compacted := screenplay.CompactAssistantMessages(st.Messages, screenplay.AssistantCompactConfig{})
-				if compacted && path == "assistant/chat" {
+				if compacted && path == "assistant/chat" && !hasReferenceHistory {
 					st.Messages = conversation
 				}
-				contextData := map[string]any{"project": project, "chapters": st.Chapters, "conversation": conversation}
+				modelConversation := append([]screenplay.AssistantMessage(nil), conversation...)
+				for i := range modelConversation {
+					modelConversation[i].References = nil
+				}
+				contextData := map[string]any{"project": project, "chapters": st.Chapters, "conversation": modelConversation}
 				var shots []screenplay.Shot
 				active, activeErr := screenplay.ReadAssistantActiveDocument(r.Context(), store, o, st.ProjectID)
 				if activeErr != nil && path == "assistant/chat" {
@@ -590,13 +626,29 @@ func registerScreenplayAuthoringSessionRoutes(mux *http.ServeMux, auth BridgeAut
 				}
 				b, _ := json.Marshal(contextData)
 				request := screenplay.TextRequest{Model: project.ModelID, SystemPrompt: system, UserPrompt: string(b) + "\n用户要求：" + user, JSONResponse: jsonResponse, MaxOutputTokens: 16000, Temperature: 0.4}
+				if len(references) > 0 {
+					// Reuse the bounded whitelist for reference-bearing default chats.
+					targets, err := captureSessionEditView(r.Context(), store, o, st.ProjectID)
+					if err != nil {
+						return err
+					}
+					request, err = sessionChatPromptWithReferences(screenplay.AssistantSessionRequest{Mode: "confirm", Chapters: st.Chapters, History: screenplay.AssistantSessionHistory{Messages: conversation, Proposals: st.Proposals}}, project, active, targets, user, references)
+					if err != nil {
+						return err
+					}
+				}
 				if chapterIndex >= 0 {
 					request, e = screenplay.BuildChapterTextRequest(project, st.Chapters[chapterIndex], user, string(b))
 					if e != nil {
 						return e
 					}
 				}
-				result, e := (screenplayTextGenerator{owner: o, resolver: resolver}).Generate(r.Context(), request)
+				var result screenplay.TextResponse
+				if len(references) > 0 {
+					result, e = generateReferenceText(r.Context(), o, resolver, request)
+				} else {
+					result, e = (screenplayTextGenerator{owner: o, resolver: resolver}).Generate(r.Context(), request)
+				}
 				if e != nil {
 					return e
 				}
@@ -648,11 +700,28 @@ func registerScreenplayAuthoringSessionRoutes(mux *http.ServeMux, auth BridgeAut
 							responseData = map[string]any{"review_tool": parsed.Tool}
 						}
 						responseData["tool_result"] = detail
+						if len(references) > 0 {
+							responseData = map[string]any{"tool_result": detail, "references": references}
+							responseSystem += prompt.ScreenplayAssistantReferences
+						}
 						payload, err := json.Marshal(responseData)
 						if err != nil {
 							return err
 						}
-						retry, retryErr := (screenplayTextGenerator{owner: o, resolver: resolver}).Generate(r.Context(), screenplay.TextRequest{Model: project.ModelID, SystemPrompt: responseSystem, UserPrompt: string(payload) + "\n用户要求：" + user, JSONResponse: true, MaxOutputTokens: 16000, Temperature: 0.4})
+						retryRequest := screenplay.TextRequest{Model: project.ModelID, SystemPrompt: responseSystem, UserPrompt: string(payload) + "\n用户要求：" + user, JSONResponse: true, MaxOutputTokens: 16000, Temperature: 0.4}
+						if len(references) > 0 {
+							retryRequest.RequestByteLimit = sessionPromptBytes
+							if err := checkReferenceRequestBudget(retryRequest); err != nil {
+								return err
+							}
+						}
+						var retry screenplay.TextResponse
+						var retryErr error
+						if len(references) > 0 {
+							retry, retryErr = generateReferenceText(r.Context(), o, resolver, retryRequest)
+						} else {
+							retry, retryErr = (screenplayTextGenerator{owner: o, resolver: resolver}).Generate(r.Context(), retryRequest)
+						}
 						if retryErr != nil {
 							return retryErr
 						}
@@ -722,12 +791,12 @@ func registerScreenplayAuthoringSessionRoutes(mux *http.ServeMux, auth BridgeAut
 					if strings.TrimSpace(parsed.Question) != "" {
 						// 主动追问落为独立消息，前端据此渲染追问卡片；不改任何作品数据。
 						st.Messages = append(st.Messages,
-							screenplay.AssistantMessage{Role: "user", Content: user},
+							screenplay.AssistantMessage{Role: "user", Content: user, References: references},
 							reply,
 							screenplay.AssistantMessage{Role: "assistant", Content: strings.TrimSpace(parsed.Question), Kind: screenplay.AssistantMessageKindQuestion})
 					} else {
 						st.Messages = append(st.Messages,
-							screenplay.AssistantMessage{Role: "user", Content: user},
+							screenplay.AssistantMessage{Role: "user", Content: user, References: references},
 							reply)
 					}
 					// 导航建议：校验入口标识后附加到最近一条普通助手消息，供前端点击跳转。
@@ -740,7 +809,15 @@ func registerScreenplayAuthoringSessionRoutes(mux *http.ServeMux, auth BridgeAut
 						}
 					}
 				}
-				out, e = svc.Save(r.Context(), o, st.ProjectID, st, in.Expected)
+				if len(references) > 0 {
+					mysql, ok := repo.(*screenplay.MySQLAuthoringRepository)
+					if !ok {
+						return screenplay.ErrInvalidState
+					}
+					out, e = mysql.SaveAssistantReferences(r.Context(), st, a, in.Expected, references, authority.commit)
+				} else {
+					out, e = svc.Save(r.Context(), o, st.ProjectID, st, in.Expected)
+				}
 				if e == nil && path == "chapters/{chapter}/script" {
 					e = screenplay.InvalidateAuthoringContent(r.Context(), store, o, st.ProjectID, "chapter")
 				}

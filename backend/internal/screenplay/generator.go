@@ -32,14 +32,17 @@ var (
 
 // TextRequest 是对模型的最小调用契约，便于替换 provider 与测试。
 type TextRequest struct {
-	Messages        []TextMessage
-	Model           string
-	SystemPrompt    string
-	UserPrompt      string
-	MaxOutputTokens int
-	Temperature     float64
-	JSONResponse    bool
-	SingleAttempt   bool `json:"single_attempt,omitempty"`
+	// Server-only limit for the final serialized provider payload. Never decoded
+	// from a client request, and never forwarded as a provider parameter.
+	RequestByteLimit int `json:"-"`
+	Messages         []TextMessage
+	Model            string
+	SystemPrompt     string
+	UserPrompt       string
+	MaxOutputTokens  int
+	Temperature      float64
+	JSONResponse     bool
+	SingleAttempt    bool `json:"single_attempt,omitempty"`
 }
 
 type TextMessage struct {

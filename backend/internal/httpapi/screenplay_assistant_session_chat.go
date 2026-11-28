@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -27,19 +28,32 @@ type sessionChatResult struct {
 // Only these fields enter the model request. The full chapter and document
 // snapshots are retained locally for validating a proposed edit.
 func sessionChatPrompt(req screenplay.AssistantSessionRequest, project screenplay.Project, active screenplay.Document, targets sessionEditView, message string) (screenplay.TextRequest, error) {
+	return sessionChatPromptWithReferences(req, project, active, targets, message, nil)
+}
+func sessionChatPromptWithReferences(req screenplay.AssistantSessionRequest, project screenplay.Project, active screenplay.Document, targets sessionEditView, message string, refs []screenplay.AssistantReferenceSnapshot) (screenplay.TextRequest, error) {
 	system := prompt.ScreenplayAuthoringAssistant + prompt.ScreenplayAuthoringReadTools
 	if req.Mode == "readonly" {
 		system += prompt.ScreenplayAssistantSessionReadonly
 	} else {
 		system += prompt.ScreenplayAuthoringAssetEditTools + prompt.ScreenplayAuthoringShotEditTools
 	}
-	payload, err := boundedSessionContext(req, project, active, targets, message, system)
+	if len(refs) > 0 {
+		system += prompt.ScreenplayAssistantReferences
+	}
+	payload, err := boundedSessionContext(req, project, active, targets, message, system, refs...)
 	if err != nil {
 		return screenplay.TextRequest{}, err
 	}
-	return screenplay.TextRequest{
+	request := screenplay.TextRequest{
 		Model: project.ModelID, SystemPrompt: system, UserPrompt: payload, JSONResponse: true, SingleAttempt: true, MaxOutputTokens: 16000, Temperature: 0.4,
-	}, nil
+	}
+	if len(refs) > 0 {
+		request.RequestByteLimit = sessionPromptBytes
+		if err := checkReferenceRequestBudget(request); err != nil {
+			return screenplay.TextRequest{}, err
+		}
+	}
+	return request, nil
 }
 
 var errSessionReceiptUnavailable = errors.New("当前模型通道无法关联会话请求与供应商回执，暂不能发送")
@@ -50,7 +64,7 @@ type sessionReceiptGenerator interface {
 	GenerateSessionStage(context.Context, screenplay.AssistantSessionRequest, string, screenplay.TextRequest) (screenplay.TextResponse, error)
 }
 
-func runSessionChat(ctx context.Context, repo sessionChatRequests, svc screenplay.AuthoringService, generator screenplay.TextGenerator, owner, projectID, actor, session string, expected int64, message string) (out sessionChatResult, resultErr error) {
+func runSessionChat(ctx context.Context, repo sessionChatRequests, svc screenplay.AuthoringService, generator screenplay.TextGenerator, owner, projectID, actor, session string, expected int64, message string, selectors ...screenplay.AssistantReferenceSelector) (out sessionChatResult, resultErr error) {
 	tracked, ok := generator.(sessionReceiptGenerator)
 	if !ok {
 		return out, errSessionReceiptUnavailable
@@ -87,6 +101,26 @@ func runSessionChat(ctx context.Context, repo sessionChatRequests, svc screenpla
 	if err != nil {
 		return out, err
 	}
+	var refs []screenplay.AssistantReferenceSnapshot
+	if len(selectors) > 0 {
+		view, e := screenplay.LoadAssistantReferenceView(ctx, svc.Store, svc.Repository, owner, projectID)
+		if e != nil {
+			return out, e
+		}
+		refs, e = view.Resolve(selectors)
+		if e != nil {
+			return out, e
+		}
+		// Validate full escaped budget before creating a request reservation.
+		st, e := svc.Load(ctx, owner, projectID)
+		if e != nil {
+			return out, e
+		}
+		_, e = sessionChatPromptWithReferences(screenplay.AssistantSessionRequest{Chapters: st.Chapters}, project, active, targets, message, refs)
+		if e != nil {
+			return out, e
+		}
+	}
 	req, err := repo.BeginAssistantRequest(ctx, owner, projectID, actor, session, expected)
 	if err != nil {
 		return out, err
@@ -95,22 +129,45 @@ func runSessionChat(ctx context.Context, repo sessionChatRequests, svc screenpla
 	// the reservation without saving the rejected reply or any proposed action.
 	var providerUncertain bool
 	var finishAttempted bool
+	var dispatched bool
 	defer func() {
 		if resultErr == nil || finishAttempted {
 			return
 		}
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
+		if len(selectors) > 0 && !dispatched {
+			if mysql, ok := repo.(*screenplay.MySQLAuthoringRepository); ok {
+				resultErr = errors.Join(resultErr, mysql.ReleaseAssistantReferencesUnsent(cleanup, req))
+				return
+			}
+		}
 		original := &req.History
 		if providerUncertain {
 			original = nil
 		}
 		resultErr = errors.Join(resultErr, repo.FinishAssistantRequest(cleanup, req, original))
 	}()
-	request, err := sessionChatPrompt(req, project, active, targets, message)
+	if len(refs) > 0 {
+		view, e := screenplay.LoadAssistantReferenceView(ctx, svc.Store, svc.Repository, owner, projectID)
+		if e != nil {
+			return out, e
+		}
+		refs, e = view.Resolve(selectors)
+		if e != nil {
+			return out, e
+		}
+		// Chapters used by references and the prompt must describe one version.
+		view.Chapters = req.Chapters
+		if _, e = view.Resolve(selectors); e != nil {
+			return out, e
+		}
+	}
+	request, err := sessionChatPromptWithReferences(req, project, active, targets, message, refs)
 	if err != nil {
 		return out, err
 	}
+	dispatched = true
 	response, err := tracked.GenerateSessionStage(ctx, req, "initial", request)
 	if err != nil {
 		providerUncertain = !errors.Is(err, yzcmusage.ErrSessionNotSent) && !errors.Is(err, screenplay.ErrModelRequestRejected) && !errors.Is(err, screenplay.ErrAPIKeyMissing)
@@ -136,7 +193,11 @@ func runSessionChat(ctx context.Context, repo sessionChatRequests, svc screenpla
 			return out, readErr
 		}
 		toolRuns = append(toolRuns, run)
-		payload, err := json.Marshal(map[string]any{"tool": wire.Tool, "tool_result": detail, "question": message})
+		data := map[string]any{"tool": wire.Tool, "tool_result": detail, "question": message}
+		if len(refs) > 0 {
+			data["references"] = refs
+		}
+		payload, err := json.Marshal(data)
 		if err != nil {
 			return out, err
 		}
@@ -146,7 +207,15 @@ func runSessionChat(ctx context.Context, repo sessionChatRequests, svc screenpla
 		if err = repo.CheckAssistantRequest(ctx, req); err != nil {
 			return out, err
 		}
-		reply, err := tracked.GenerateSessionStage(ctx, req, "read_reply", screenplay.TextRequest{Model: project.ModelID, SystemPrompt: prompt.ScreenplayAuthoringReviewReply, UserPrompt: string(payload), JSONResponse: true, SingleAttempt: true, MaxOutputTokens: 16000, Temperature: 0.4})
+		replyRequest := screenplay.TextRequest{Model: project.ModelID, SystemPrompt: prompt.ScreenplayAuthoringReviewReply, UserPrompt: string(payload), JSONResponse: true, SingleAttempt: true, MaxOutputTokens: 16000, Temperature: 0.4}
+		if len(refs) > 0 {
+			replyRequest.RequestByteLimit = sessionPromptBytes
+			replyRequest.SystemPrompt += prompt.ScreenplayAssistantReferences
+			if err := checkReferenceRequestBudget(replyRequest); err != nil {
+				return out, err
+			}
+		}
+		reply, err := tracked.GenerateSessionStage(ctx, req, "read_reply", replyRequest)
 		if err != nil {
 			providerUncertain = !errors.Is(err, yzcmusage.ErrSessionNotSent) && !errors.Is(err, screenplay.ErrModelRequestRejected) && !errors.Is(err, screenplay.ErrAPIKeyMissing)
 			return out, err
@@ -199,12 +268,21 @@ func runSessionChat(ctx context.Context, repo sessionChatRequests, svc screenpla
 		wire.Suggestions = nil
 		history.Proposals = append(history.Proposals, screenplay.AssistantProposal{ID: newAgentID("proposal"), Summary: summary, Actions: []screenplay.AuthoringAction{action}, Status: "pending", Revision: req.Revision + 1})
 	}
-	history.Messages = append(history.Messages, screenplay.AssistantMessage{Role: "user", Content: message}, screenplay.AssistantMessage{Role: "assistant", Content: wire.Reply, Tools: toolRuns, Suggestions: sanitizeAssistantSuggestions(wire.Suggestions)})
+	history.Messages = append(history.Messages, screenplay.AssistantMessage{Role: "user", Content: message, References: refs}, screenplay.AssistantMessage{Role: "assistant", Content: wire.Reply, Tools: toolRuns, Suggestions: sanitizeAssistantSuggestions(wire.Suggestions)})
 	if question := strings.TrimSpace(wire.Question); question != "" {
 		history.Messages = append(history.Messages, screenplay.AssistantMessage{Role: "assistant", Kind: screenplay.AssistantMessageKindQuestion, Content: question})
 	}
 	if err := checkAuthority(); err != nil {
 		return out, err
+	}
+	if len(refs) > 0 {
+		view, e := screenplay.LoadAssistantReferenceView(ctx, svc.Store, svc.Repository, owner, projectID)
+		if e != nil {
+			return out, e
+		}
+		if _, e = view.Resolve(selectors); e != nil {
+			return out, e
+		}
 	}
 	finishAttempted = true
 	// Only the concrete dedicated server adapter can select the SQL-guarded
@@ -214,7 +292,16 @@ func runSessionChat(ctx context.Context, repo sessionChatRequests, svc screenpla
 		if !ok || channel.commitGuard == nil {
 			return out, screenplay.ErrAccessDenied
 		}
-		if err := mysql.FinishAssistantRequestGuarded(ctx, req, &history, channel.commitGuard); err != nil {
+		guard := channel.commitGuard
+		if len(refs) > 0 {
+			guard = func(ctx context.Context, tx *sql.Tx) error {
+				if err := channel.commitGuard(ctx, tx); err != nil {
+					return err
+				}
+				return screenplay.CheckAssistantReferencesInTx(ctx, tx, owner, projectID, refs)
+			}
+		}
+		if err := mysql.FinishAssistantRequestGuarded(ctx, req, &history, guard); err != nil {
 			return out, err
 		}
 	} else if err := repo.FinishAssistantRequest(ctx, req, &history); err != nil {
@@ -236,14 +323,15 @@ func parseSessionReply(content string) (assistantWire, error) {
 func sessionChatHandler(sessionRepo sessionChatRequests, svc screenplay.AuthoringService, decode func(http.ResponseWriter, *http.Request, any) bool, generatorFor func(*http.Request, string) screenplay.TextGenerator) func(http.ResponseWriter, *http.Request, string, string) {
 	return func(w http.ResponseWriter, r *http.Request, owner, actor string) {
 		var input struct {
-			Message  string `json:"message"`
-			Expected int64  `json:"expected_revision"`
+			Message    string                                  `json:"message"`
+			Expected   int64                                   `json:"expected_revision"`
+			References []screenplay.AssistantReferenceSelector `json:"references,omitempty"`
 		}
 		if !decode(w, r, &input) {
 			return
 		}
 		generator := generatorFor(r, actor)
-		result, err := runSessionChat(r.Context(), sessionRepo, svc, generator, owner, r.PathValue("id"), actor, r.PathValue("session"), input.Expected, input.Message)
+		result, err := runSessionChat(r.Context(), sessionRepo, svc, generator, owner, r.PathValue("id"), actor, r.PathValue("session"), input.Expected, input.Message, input.References...)
 		if errors.Is(err, errSessionReceiptUnavailable) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 			return

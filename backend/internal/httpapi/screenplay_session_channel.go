@@ -228,6 +228,16 @@ func (g sessionChannelGenerator) GenerateSessionStage(ctx context.Context, req s
 	if err != nil {
 		return screenplay.TextResponse{}, errors.Join(yzcmusage.ErrSessionNotSent, err)
 	}
+	if input.RequestByteLimit > 0 {
+		checked := input
+		checked.Model = p.Model
+		if input.RequestByteLimit != sessionPromptBytes {
+			return screenplay.TextResponse{}, errors.Join(yzcmusage.ErrSessionNotSent, screenplay.ErrInvalidArgument)
+		}
+		if err := checkReferenceRequestBudget(checked); err != nil {
+			return screenplay.TextResponse{}, errors.Join(yzcmusage.ErrSessionNotSent, err)
+		}
+	}
 	ctx, team, actor, err := sessionBillingContext(ctx, g.subject)
 	if err != nil {
 		return screenplay.TextResponse{}, errors.Join(yzcmusage.ErrSessionNotSent, err)

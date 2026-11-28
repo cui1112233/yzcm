@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { message } from 'antd';
 import { applySessionProposal, changeComicSession, createComicSession, getComicAssistant, listComicSessions, readComicSession, sendSessionMessage } from '../../shared/api/comicScreenplayWorkflow.js';
+import {sendReferenceMessage} from '../../shared/api/comicScreenplayAssistantReferences.js';
 
 const defaultSession = {id:'default',title:'默认会话',visibility:'project',mode:'confirm',active:true};
 function row(cache, project, session) {
@@ -61,19 +62,20 @@ export function useComicAssistantSessions(project, initialRequest) {
   const session = (current.session?.revision ?? -1) >= (metadata.revision ?? 0) ? current.session : metadata;
   async function write(operation, input, afterSaved) {
     if(current.busy || !current.state || current.error) return;
-    const ticket=++current.operation, sentText=current.text;
+    const ticket=++current.operation, sentText=current.text, sentReferences=current.references;
     current.busy=operation;
     const expected=current.state.revision||0;
     current.stopRevision=expected+1;
     update();
     try {
-      const payload={...input,expected_revision:expected};
-      const response=operation==='chat' ? await sendSessionMessage(project,selected,payload) : await applySessionProposal(project,selected,payload);
+      const payload={...input,expected_revision:expected,...(operation==='chat'&&sentReferences?.length?{references:sentReferences}:{})};
+      const response=operation==='chat' ? await (payload.references?.length?sendReferenceMessage:sendSessionMessage)(project,selected,payload) : await applySessionProposal(project,selected,payload);
       if(ticket!==current.operation) return;
       ++current.read; current.loading=false;
       current.state=selected==='default' ? response.state : response;
       if(response.warning && live.current && activeKey.current===key) message.warning(response.warning);
       if(operation==='chat' && current.text===sentText) current.text='';
+      if(operation==='chat' && current.references===sentReferences) current.references=[];
       if(operation!=='chat' && live.current && activeKey.current===key) await afterSaved?.();
     } catch(error) {
       if(ticket===current.operation) {
@@ -104,5 +106,6 @@ export function useComicAssistantSessions(project, initialRequest) {
     }catch(error){if(live.current && activeKey.current===key)message.error(error.message||'创建会话失败');return false;}
   }
   return {current,session,list,listError:lists[project]?.error,select,refresh,loadList,manage,create,
+    setReferences(refs){current.references=refs;update();},
     setText(text){current.text=text;update();},write};
 }

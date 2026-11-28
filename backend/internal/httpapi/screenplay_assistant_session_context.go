@@ -46,9 +46,17 @@ func (d *contextDirectory) add(kind string, fields map[string]any) {
 	d.remaining -= len(raw) + 1
 }
 
-func boundedSessionContext(req screenplay.AssistantSessionRequest, project screenplay.Project, active screenplay.Document, targets sessionEditView, message, system string) (string, error) {
+func boundedSessionContext(req screenplay.AssistantSessionRequest, project screenplay.Project, active screenplay.Document, targets sessionEditView, message, system string, references ...screenplay.AssistantReferenceSnapshot) (string, error) {
 	const separator = "\n用户要求："
-	remaining := sessionPromptBytes - len(system) - len(message) - len(separator) - 2048
+	prefix := ""
+	if len(references) > 0 {
+		raw, err := json.Marshal(references)
+		if err != nil {
+			return "", err
+		}
+		prefix = "显式引用 references：" + string(raw) + "\n"
+	}
+	remaining := sessionPromptBytes - len(system) - len(message) - len(separator) - len(prefix) - 2048
 	if len(message) > sessionSourceBytes || remaining < 0 {
 		return "", screenplay.ErrInvalidArgument
 	}
@@ -111,7 +119,7 @@ func boundedSessionContext(req screenplay.AssistantSessionRequest, project scree
 	if err != nil {
 		return "", err
 	}
-	output := string(raw) + separator + message
+	output := prefix + string(raw) + separator + message
 	if len(system)+len(output) > sessionPromptBytes {
 		return "", screenplay.ErrInvalidArgument
 	}
