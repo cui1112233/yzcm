@@ -116,6 +116,11 @@ test('account governance follows the approved notice, four metrics, filters and 
   }
 });
 
+test('account governance actions wrap instead of clipping at 1280px', () => {
+  const css = read('shared/styles/account-center-pixel-parity.css');
+  assert.match(css, /@media \(max-width: 1440px\)[\s\S]*?\.pc-accounts-filters\s*>\s*\.ant-space\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/);
+});
+
 test('platform energy keeps the approved notice, metrics, analysis, table and detail hierarchy', () => {
   const source = read('user/pages/EnergyBillingPage.jsx');
   for (const region of ['pc-platform-notice', 'pc-platform-metrics', 'pc-platform-analysis', 'pc-platform-team-table', 'pc-platform-detail']) {

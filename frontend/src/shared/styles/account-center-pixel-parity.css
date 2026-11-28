@@ -523,6 +523,8 @@
   .pc-team-hero { grid-template-columns: minmax(180px, 1.25fr) repeat(3, minmax(110px, .7fr)) auto; padding-inline: 12px; }
   .pc-team-hero > div { gap: 9px; padding-inline: 14px; }
   .pc-team-hero > .ant-space { margin-left: 10px; }
+  .pc-accounts-filters { grid-template-columns: minmax(220px, 1.4fr) repeat(3, minmax(130px, .8fr)) auto; }
+  .pc-accounts-filters > .ant-space { grid-column: 1 / -1; justify-self: end; }
   .pc-profile-grid,
   .pc-security-grid,
   .pc-overview-dashboard,
