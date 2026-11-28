@@ -317,7 +317,14 @@ export default function ApiConfigPage() {
   if (loadError || !config) return <div className="account-center-page api-config-page"><Alert type="error" showIcon message="API 配置尚未就绪" description={loadError || '未取得有效配置，请刷新重试'} /></div>;
 
   return <div className={`account-center-page api-config-page ${policy.mode === 'restricted' ? 'pc-api-manager' : policy.mode === 'full' ? 'pc-api-founder' : 'pc-api-member'}`}>
-    <PageHeader title="API 配置" subtitle="统一管理平台预设模型与各渠道 API 接口；业务页面按凭证自动读取可用模型。" />
+    <PageHeader
+      title="API 配置"
+      subtitle={policy.mode === 'full'
+        ? '管理平台模型、调用凭证与自定义模型端点。'
+        : policy.mode === 'restricted'
+          ? '选择团队可用的 YZCM 模型，并为每个模型配置独立 Key。'
+          : '模型能力由所属团队统一托管。'}
+    />
     {memberError ? <Alert type="warning" showIcon message={memberError} /> : null}
     {policy.mode === 'none' ? <div className="ac-managed-api-card pc-api-member-card">
       <span><ShieldCheck size={28} /></span>

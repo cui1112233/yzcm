@@ -20,13 +20,15 @@ test('预设卡不再有锁定遮罩与“先关闭开关”提示', () => {
 });
 
 test('未保存时输入框保持可编辑，保存中才禁用', () => {
-  assert.match(source, /getPresetCardState\(preset, model, presetSavingId === preset\.id\)/);
-  assert.match(source, /disabled=\{!cardState\.editable\}/);
+  const settingsSource = fs.readFileSync(path.join(here, 'ApiIntegrationSettings.jsx'), 'utf8');
+  assert.match(settingsSource, /disabled=\{saving\}/);
+  assert.doesNotMatch(settingsSource, /disabled=\{!model\.hasCredential\}/);
 });
 
 test('文案明确说明清空 Key 等于停用，不依赖额外开关', () => {
-  assert.match(source, /填好 API Key 后立即生效/);
-  assert.match(source, /清空 Key 即从下拉移除/);
+  const settingsSource = fs.readFileSync(path.join(here, 'ApiIntegrationSettings.jsx'), 'utf8');
+  assert.match(settingsSource, /填写 Key 后立即生效并进入模型下拉/);
+  assert.match(settingsSource, /清空 Key 即从下拉移除/);
 });
 
 test('目录模型不再向三组传启用回调', () => {
@@ -72,4 +74,12 @@ test('restricted selection saves only display selection or kind and model id', (
   assert.match(source, /create: createManagedModel/);
   assert.match(source, /update: updateManagedModel/);
   assert.doesNotMatch(source, /deleteManagedModel/);
+});
+
+test('full mode keeps every catalog model Key directly editable on its model card', () => {
+  const settingsSource = fs.readFileSync(path.join(here, 'ApiIntegrationSettings.jsx'), 'utf8');
+  const card = settingsSource.slice(settingsSource.indexOf('function renderCatalogCard'), settingsSource.indexOf('function buildGroupMerge'));
+  assert.match(card, /className="api-channel-preset-line api-catalog-credential"/);
+  assert.doesNotMatch(card, /!userManaged\s*\?/);
+  assert.match(card, /userManaged\s*\?\s*\(/);
 });
