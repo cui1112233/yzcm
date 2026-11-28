@@ -278,3 +278,41 @@ func TestRestoreOriginalUsesSavedTaskModelWithoutFallback(t *testing.T) {
 		})
 	}
 }
+
+func TestRestoreOriginalThenFullProcessDoesNotRepeatSensitiveCall(t *testing.T) {
+	s, now, secret := restoreFixture(t)
+	ctx := context.Background()
+	d, _ := s.GetDocument(ctx, "tester", "12345678")
+	d.Gender = "女频"
+	d.Meta["style"] = "年代通用"
+	_ = s.PutDocument(ctx, "tester", d)
+	calls := 0
+	provider := rewriteProviderFunc(func(context.Context, novelfetchworkshop.RewriteRequest) (string, error) {
+		calls++
+		return "安全", nil
+	})
+	h := NewRouter(RouterOptions{BridgeSecret: secret, Now: func() time.Time { return now }, NovelFetchStore: s, NovelFetchRewrite: provider})
+	w := doNovelFetchRequest(t, h, http.MethodPost, "/api/novel-fetch-workshop/tasks/12345678/restore-original", map[string]any{"sensitive_ai_enabled": true}, now, secret)
+	if w.Code != 200 || calls != 1 {
+		t.Fatalf("restore status=%d calls=%d response=%s", w.Code, calls, w.Body.String())
+	}
+	before, _ := s.GetBody(ctx, "tester", "12345678", "original")
+	worker := &workshopProcessWorker{store: s, queue: novelfetchworkshop.NewMemoryQueue(), resolveRewriteProvider: func(context.Context, string) (novelfetchworkshop.RewriteProvider, error) { return provider, nil }}
+	if err := worker.execute(ctx, novelfetchworkshop.ProcessJob{ID: "after-restore", Owner: "tester", BookIDs: []string{"12345678"}, MaxTxt: 4, SensitiveAIEnabled: true, SelectedVersions: []string{"original"}}); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := s.GetBody(ctx, "tester", "12345678", "original")
+	if calls != 1 || after.Revision != before.Revision || after.Content != before.Content {
+		t.Fatalf("full process repeated restored original: calls=%d before revision=%d after=%d", calls, before.Revision, after.Revision)
+	}
+	latest, _ := s.GetDocument(ctx, "tester", "12345678")
+	found := false
+	for _, event := range latest.Logs {
+		if mapOrEmpty(event)["type"] == "original_restored" {
+			found = true
+		}
+	}
+	if !found || latest.Meta["originalStatus"] != "done" {
+		t.Fatalf("restore completion/event missing: meta=%v logs=%v", latest.Meta, latest.Logs)
+	}
+}

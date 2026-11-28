@@ -78,7 +78,8 @@ func saveNovelFetchSensitiveMetadata(ctx context.Context, store novelfetchworksh
 			latest.Meta["sensitiveByVersion"] = details
 			if change.VersionID == "original" {
 				if update.OriginalRestored {
-					latest.Meta["originalStatus"] = "restored"
+					latest.Meta["originalStatus"] = "done"
+					latest.Logs = append(latest.Logs, map[string]any{"type": "original_restored", "at": time.Now().UTC().Format(time.RFC3339Nano), "version": "original"})
 					if latest.MaxTxt <= 0 {
 						latest.MaxTxt = update.RestoredMaxTxt
 					}

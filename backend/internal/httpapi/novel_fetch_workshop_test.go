@@ -2629,7 +2629,7 @@ func TestNovelFetchWorkshopRestoreOriginalReprocessesStoredRawText(t *testing.T)
 	}
 	raw, rawErr := novelfetchworkshop.ReadBodyText(context.Background(), store, "tester", document, "original_raw")
 	processed, bodyErr := novelfetchworkshop.ReadBodyText(context.Background(), store, "tester", document, "original")
-	if rawErr != nil || bodyErr != nil || raw != "完整原文内容" || processed != "完整原文" || document.ProcessedChars != 4 || document.Meta["originalStatus"] != "restored" {
+	if rawErr != nil || bodyErr != nil || raw != "完整原文内容" || processed != "完整原文" || document.ProcessedChars != 4 || document.Meta["originalStatus"] != "done" {
 		t.Fatalf("restore mismatch: %#v", document)
 	}
 }
