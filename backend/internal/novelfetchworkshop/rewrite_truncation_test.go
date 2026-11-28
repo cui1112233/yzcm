@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestRewriteTruncationRaisesBudgetOnceAndKeepsCompleteOutput(t *testing.T) {
+func TestRewriteTruncationDoesNotEscalateBudgetOrResend(t *testing.T) {
 	budgets := []int{}
 	p := rewriteProviderFunc(func(_ context.Context, req RewriteRequest) (string, error) {
 		budgets = append(budgets, req.MaxTokens)
@@ -18,8 +18,8 @@ func TestRewriteTruncationRaisesBudgetOnceAndKeepsCompleteOutput(t *testing.T) {
 		return "她推开书店的门，朋友抬起头，两人终于把当年的误会说清。", nil
 	})
 	text, err := completeValidatedRewrite(context.Background(), p, RewriteRequest{MaxTokens: 1200}, "book", "plain_text", 1, 40, "")
-	if err != nil || text == "" || len(budgets) != 2 || budgets[0] != 1200 || budgets[1] != 12000 {
-		t.Fatalf("truncation did not recover with bounded budget: text=%q budgets=%v err=%v", text, budgets, err)
+	if !batchfactoryv11.IsModelOutputTruncated(err) || text != "" || len(budgets) != 1 || budgets[0] != 1200 {
+		t.Fatalf("truncation triggered an unapproved resend: text=%q budgets=%v err=%v", text, budgets, err)
 	}
 }
 
@@ -34,11 +34,8 @@ func TestRewriteTruncationStopsAtBudgetAndRequiresManualRetry(t *testing.T) {
 			return "", errors.New("director provider output truncated (finish_reason=length)")
 		})
 		_, err := completeValidatedRewrite(context.Background(), p, RewriteRequest{MaxTokens: initial}, "book", "plain_text", 1, 40, "")
-		want := 3
-		if initial == 24000 {
-			want = 1
-		}
-		if !errors.Is(err, ErrRewriteValidation) || calls != want {
+		want := 1
+		if !batchfactoryv11.IsModelOutputTruncated(err) || calls != want {
 			t.Fatalf("truncated output kept retrying: initial=%d calls=%d err=%v", initial, calls, err)
 		}
 	}
@@ -66,7 +63,7 @@ func TestControlledRewriteValidationMakesOnlyOneProviderAttempt(t *testing.T) {
 				return "{invalid output}", nil
 			})
 			_, err := completeValidatedRewrite(batchfactoryv11.WithSingleAttempt(context.Background()), provider, RewriteRequest{MaxTokens: 1200}, "book", "plain_text", 1, 40, "")
-			if !errors.Is(err, ErrRewriteValidation) || calls != 1 {
+			if err == nil || calls != 1 || (failure == "invalid-output" && !errors.Is(err, ErrRewriteValidation)) || (failure == "truncated" && !strings.Contains(err.Error(), "finish_reason=length")) {
 				t.Fatalf("controlled validation bypassed central budget: calls=%d err=%v", calls, err)
 			}
 			if strings.Contains(err.Error(), "最多 3 次") {
@@ -92,10 +89,7 @@ func TestControlledRewriteValidationLeavesHoldDecisionToCentralBudget(t *testing
 			t.Fatal(err)
 		}
 		got, _ := s.GetDocument(ctx, "alice", "123")
-		want := 3
-		if controlled {
-			want = 1
-		}
+		want := 1
 		if calls != want || got.Meta["rewriteValidationHold"] != !controlled {
 			t.Fatalf("controlled=%v calls=%d hold=%v", controlled, calls, got.Meta["rewriteValidationHold"])
 		}

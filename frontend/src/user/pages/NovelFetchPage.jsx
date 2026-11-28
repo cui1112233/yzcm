@@ -23,9 +23,11 @@ import {
 import { createNovelFetchIntake } from '../../shared/api/batchFactory';
 import { listAvailableModels as listAvailableTextModels, modelSelectOptions } from '../../shared/api/modelCatalog';
 import { readNovelFetchProcessSettings, writeNovelFetchProcessSettings, resolveNovelFetchTextModel, novelFetchTextModelError, resolveNovelFetchSelectedVersions } from './novel-fetch-process-settings';
-import { NovelFetchAutomationOptions } from './novel-fetch-automation-options.js';
-import { withNovelFetchConfigDefaults, withNovelFetchVersionProfiles, NOVEL_FETCH_PROFILE_VERSIONS } from './novel-fetch-config-defaults.js';
+import { NovelFetchAutomationOptions, NovelFetchThinkingOptions } from './novel-fetch-automation-options.js';
+import { withNovelFetchConfigDefaults, withNovelFetchVersionProfiles, NOVEL_FETCH_PROFILE_VERSIONS, NOVEL_FETCH_AI_VERSION_LIMIT } from './novel-fetch-config-defaults.js';
 import { novelFetchAiVersions, novelFetchSensitiveComparisons, novelFetchSubmitDiagnostic, novelFetchTaskSummaryItems } from './novel-fetch-task-detail.js';
+import { summarizeWorkshopProgress } from './novel-fetch-progress-summary.js';
+import { novelFetchAIFormPatch, novelFetchReadbackLabel, novelFetchCanReadback } from './novel-fetch-ai-form.js';
 import { novelFetchLatestJob, novelFetchProgressLines, novelFetchJobFinished, novelFetchJobState, novelFetchActionNotice } from './novel-fetch-progress.js';
 import { beijingDateKey, currentBatchBookIds, filterNovelFetchTasks, mergeNovelFetchQueueStatus, novelFetchBatchResultSummary, novelFetchCharCount, novelFetchCurrentBatchTaskDetail, novelFetchOriginalFetchRetry, novelFetchPollingPlan, novelFetchQueueSummary, novelFetchStageLabel, novelFetchSubmissionLabel, novelFetchTaskDateKey, novelFetchTaskStatus, novelFetchVersionReady, novelFetchClassificationLabel, retainVisibleTaskIds, stoppableCurrentBatchBookIds, webSubmitStatusLabel, webSubmitRunStatusLabel } from './novel-fetch-status.js';
 import { singleVersionRetryPayload, submissionPreviewMatches } from './novel-fetch-submit.js';
@@ -174,33 +176,6 @@ function parseRuleEditorValue(value) {
   }
 }
 
-function summarizeWorkshopProgress(rows, fallbackSubmissions = []) {
-  const source = Array.isArray(rows) ? rows : [];
-  const text = value => String(value ?? '').trim().toLowerCase();
-  const isDone = value => /^(done|success|completed|complete|ready|ai_done|uploaded|submitted|已提交|已完成|完成|成功|已上传)$/.test(text(value));
-  const isFailed = value => /fail|error|failed|失败|错误/.test(text(value));
-  const originalDone = source.filter(row => isDone(row.originalStatus ?? row.original_status) || Number(row.originalRawChars ?? row.original_raw_chars) > 0).length;
-  const aiDone = source.filter(row => {
-    const aiStatus = row.aiStatus ?? row.ai_status;
-    const versionMap = row.versions && typeof row.versions === 'object' ? row.versions : {};
-    const hasReadyVersion = Object.values(versionMap).some(value => String(value ?? '').trim());
-    return isDone(aiStatus) && hasReadyVersion;
-  }).length;
-  const failed = source.filter(row => isFailed(row.status) || isFailed(row.originalStatus ?? row.original_status) || isFailed(row.aiStatus ?? row.ai_status) || isFailed(row.siteSubmitStatus ?? row.site_submit_status)).length;
-  const processing = source.filter(row => ['queued', 'processing'].includes(novelFetchTaskStatus(row).status)).length;
-  const waitingRetry = source.filter(row => novelFetchTaskStatus(row).status === 'waiting_retry').length;
-  const submissionDone = source.filter(row => isDone(row.siteSubmitStatus ?? row.site_submit_status)).length;
-  const fallbackSubmissionDone = fallbackSubmissions.filter(row => isDone(row.status)).length;
-  return {
-    total: source.length,
-    originalDone,
-    aiDone,
-    processing,
-    waitingRetry,
-    failed,
-    submissionDone: source.length ? submissionDone : fallbackSubmissionDone
-  };
-}
 
 // 规则编辑器保留 V78 的业务边界：规则结构由 Go 保存，React 只编辑字段，不在前端复制处理逻辑。
 function RuleEditor({ kind, value, onChange }) {
@@ -323,7 +298,7 @@ function NovelFetchConfigPanel({ form, effectiveValues, dirty, onDirty, versionP
       {sectionItems.map(item => <button type="button" key={item.key} className={section === item.key ? 'is-active' : ''} onClick={() => onSectionChange(item.key)}><strong>{item.label}</strong><span>{item.description}</span></button>)}
     </nav>
     <main className="novel-fetch-config-main">
-      <Form className="novel-fetch-panel novel-fetch-config-form" form={form} layout="vertical" onValuesChange={onDirty}>
+      <Form className="novel-fetch-panel novel-fetch-config-form" form={form} layout="vertical" onValuesChange={(changed, values) => { const patch = novelFetchAIFormPatch(changed, values); if (Object.keys(patch).length) form.setFieldsValue(patch); onDirty(); }}>
       <section hidden={section !== 'workflow'}>
         <Typography.Title level={5}>工作流与原文抓取</Typography.Title>
         <div className="novel-fetch-config-grid">
@@ -333,7 +308,7 @@ function NovelFetchConfigPanel({ form, effectiveValues, dirty, onDirty, versionP
           <Form.Item name={['fetch', 'retries']} label="抓取重试"><InputNumber min={0} max={10} style={{ width: '100%' }} /></Form.Item>
           <Form.Item name={['fetch', 'original_fetch_retry_interval_minutes']} label="抓取失败再试（分钟）"><InputNumber min={1} max={1440} placeholder="默认 60" style={{ width: '100%' }} /></Form.Item>
           <Form.Item name={['fetch', 'timeout_seconds']} label="抓取超时（秒）"><InputNumber min={1} max={300} style={{ width: '100%' }} /></Form.Item>
-          <Form.Item name={['rewrite', 'default_ai_count']} label="默认 AI 数量"><InputNumber min={1} max={20} style={{ width: '100%' }} /></Form.Item>
+          <Form.Item name={['rewrite', 'default_ai_count']} label="默认 AI 数量"><InputNumber min={1} max={NOVEL_FETCH_AI_VERSION_LIMIT} style={{ width: '100%' }} /></Form.Item>
           <Form.Item name={['rewrite', 'process_line_count']} label="默认处理行数"><InputNumber min={1} max={100} style={{ width: '100%' }} /></Form.Item>
           <Form.Item name={['rewrite', 'anchor_line_count']} label="锚点行数"><InputNumber min={0} max={100} style={{ width: '100%' }} /></Form.Item>
           <Form.Item name={['rewrite', 'temperature']} label="改文温度"><InputNumber min={0} max={2} step={0.01} style={{ width: '100%' }} /></Form.Item>
@@ -377,7 +352,7 @@ function NovelFetchConfigPanel({ form, effectiveValues, dirty, onDirty, versionP
         <div className="novel-fetch-config-grid">
           <Form.Item name={['ai', 'timeout_seconds']} label="超时（秒）"><InputNumber min={1} max={900} style={{ width: '100%' }} /></Form.Item>
           <Form.Item name={['ai', 'max_concurrency']} label="最大并发"><InputNumber min={1} max={50} style={{ width: '100%' }} /></Form.Item>
-          <Form.Item name={['ai', 'retry_times']} label="重试次数"><InputNumber min={0} max={10} style={{ width: '100%' }} /></Form.Item>
+          <Form.Item name={['ai', 'retry_times']} label="自动重试次数（首次失败后）"><InputNumber min={0} max={2} style={{ width: '100%' }} /></Form.Item>
           <Form.Item name={['ai', 'max_tokens']} label="最大 Token"><InputNumber min={1} max={100000} style={{ width: '100%' }} /></Form.Item>
           <Form.Item name={['ai', 'temperature']} label="Temperature"><InputNumber min={0} max={2} step={0.01} style={{ width: '100%' }} /></Form.Item>
           <Form.Item name={['ai', 'top_p']} label="Top P"><InputNumber min={0} max={1} step={0.01} style={{ width: '100%' }} /></Form.Item>
@@ -385,10 +360,9 @@ function NovelFetchConfigPanel({ form, effectiveValues, dirty, onDirty, versionP
           <Form.Item name={['ai', 'frequency_penalty']} label="Frequency Penalty"><InputNumber step={0.01} style={{ width: '100%' }} /></Form.Item>
         </div>
         <Space wrap>
-          <Form.Item name={['ai', 'stream']} valuePropName="checked" noStyle><label><input type="checkbox" /> 流式响应</label></Form.Item>
-          <Form.Item name={['ai', 'json_mode']} valuePropName="checked" noStyle><label><input type="checkbox" /> JSON 模式</label></Form.Item>
-          <Form.Item name={['ai', 'enable_thinking']} valuePropName="checked" noStyle><label><input type="checkbox" /> 启用思考</label></Form.Item>
-          <Form.Item name={['ai', 'disable_thinking']} valuePropName="checked" noStyle><label><input type="checkbox" /> 禁用思考</label></Form.Item>
+          <label><input type="checkbox" disabled checked={false} readOnly /> 流式响应（测书暂不支持）</label>
+          <Typography.Text type="secondary">JSON 输出方式由当前改文模板决定。</Typography.Text>
+          <NovelFetchThinkingOptions />
         </Space>
       </section>
       <section hidden={section !== 'catalog'}>
@@ -937,7 +911,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
         workflow: { ...(config.workflow || {}) },
         fetch: { ...(config.fetch || {}) },
         rewrite,
-        ai: { ...(config.ai || {}), ...aiConfig },
+        ai: { ...(config.ai || {}), ...aiConfig, temperature: rewrite.temperature ?? aiConfig.temperature ?? 0.45 },
         sensitive_ai: { ...(config.sensitive_ai || {}) },
         storage: { ...(config.storage || {}) },
         knowledge: { ...(config.knowledge || {}) },
@@ -1900,7 +1874,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
       savedRewrite.method_sequence_text = Array.isArray(savedRewrite.method_sequence)
         ? savedRewrite.method_sequence.join(',')
         : String(savedRewrite.method_sequence || '');
-      const effectiveValues = { ...savedSettings, rewrite: savedRewrite };
+      const effectiveValues = { ...savedSettings, rewrite: savedRewrite, ai: { ...(savedSettings.ai || {}), temperature: savedRewrite.temperature ?? savedSettings.ai?.temperature ?? 0.45 } };
       configForm.setFieldsValue(effectiveValues);
       setConfigEffective(effectiveValues);
       setConfigDirty(false);
@@ -1977,7 +1951,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
   const versionConfigPanel = <div className="novel-fetch-panel novel-fetch-version-config-panel">
     <div className="novel-fetch-public-heading"><div><Typography.Title level={4}>版本对应配置档</Typography.Title><Typography.Text type="secondary">管理默认上传配置档和各版本的配置档绑定，统一使用右上角保存。</Typography.Text></div></div>
     <Space wrap><Button onClick={() => handleWebSubmit(syncWebSubmitConfigs, '已同步批量后台配置')}>同步批量后台配置</Button><Button onClick={syncWebSubmitOrganizations}>同步组织归属</Button><Button onClick={() => handleWebSubmit(syncWebSubmitStyles, '已同步批量风格类型')}>同步批量风格类型</Button></Space>
-    <div className="novel-fetch-version-profile-grid"><label>默认上传配置档<Select value={selectedUploadProfile || undefined} placeholder="选择默认配置档" options={uploadProfiles.map(profile => ({ value: String(profile.id || profile.name), label: profile.name || profile.id }))} onChange={value => { setSelectedUploadProfile(value); setConfigDirty(true); }} /></label>{AI_VERSIONS.map(version => <label key={version}>{AI_VERSION_LABELS[version]} 配置档<Select allowClear value={profileBindings[version] || undefined} placeholder="跟随默认配置档" options={uploadProfiles.map(profile => ({ value: String(profile.id || profile.name), label: profile.name || profile.id }))} onChange={value => { setProfileBindings(current => ({ ...withNovelFetchVersionProfiles(current), [version]: value || '' })); setConfigDirty(true); }} /></label>)}</div><Typography.Text type="secondary">原文和 AI1-AI20 均可单独指定；未绑定版本统一跟随默认配置档。</Typography.Text><Typography.Text type="secondary">提示词请在“提示词配置”中编辑；全部修改统一点击右上角“保存配置”。</Typography.Text>
+    <div className="novel-fetch-version-profile-grid"><label>默认上传配置档<Select value={selectedUploadProfile || undefined} placeholder="选择默认配置档" options={uploadProfiles.map(profile => ({ value: String(profile.id || profile.name), label: profile.name || profile.id }))} onChange={value => { setSelectedUploadProfile(value); setConfigDirty(true); }} /></label>{AI_VERSIONS.map(version => <label key={version}>{AI_VERSION_LABELS[version]} 配置档<Select allowClear value={profileBindings[version] || undefined} placeholder="跟随默认配置档" options={uploadProfiles.map(profile => ({ value: String(profile.id || profile.name), label: profile.name || profile.id }))} onChange={value => { setProfileBindings(current => ({ ...withNovelFetchVersionProfiles(current), [version]: value || '' })); setConfigDirty(true); }} /></label>)}</div><Typography.Text type="secondary">原文和 AI1-AI5 均可单独指定；未绑定版本统一跟随默认配置档。</Typography.Text><Typography.Text type="secondary">提示词请在“提示词配置”中编辑；全部修改统一点击右上角“保存配置”。</Typography.Text>
   </div>;
   const submissionStatus = [
     { key: 'environment', label: '环境', value: webSubmitEnvironment ? '已检测' : '待检测' },
@@ -1992,7 +1966,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
     <div className="novel-fetch-panel novel-fetch-submit-summary"><Typography.Text>已选任务 <strong>{selectedTaskKeys.length}</strong></Typography.Text><Typography.Text>配置版本 <strong>{(webSubmitConfig?.submit_versions || webSubmitConfig?.submitVersions || []).join('、') || '默认'}</strong></Typography.Text><Typography.Text>可用组织 <strong>{webSubmitConfig?.organization_catalog?.length || 0}</strong></Typography.Text></div>
     {webSubmitPlan ? <><Alert type="info" message={webSubmitPreviewReady ? '当前选择的提交预览已生成（仅用于查看，不阻塞提交）' : '当前选择还没有预览；可以直接提交，系统会按最新正文和配置生成计划'} description={`提交组：${webSubmitPlan.groups?.length || 0}，跳过：${webSubmitPlan.skipped?.length || 0}`} /><Table className="novel-fetch-panel" size="small" rowKey={(group, index) => group.group_id || index} pagination={false} dataSource={webSubmitPlan.groups || []} columns={[{ title: '版本', dataIndex: 'version' }, { title: '配置档', render: (_, group) => group.summary?.profile_name || group.summary?.profile_id || '默认配置' }, { title: '组织', render: (_, group) => group.summary?.organization || '未设置' }, { title: '风格', render: (_, group) => group.summary?.style || '未分类' }, { title: '任务数', render: (_, group) => group.items?.length || 0 }]} /><Table className="novel-fetch-panel" size="small" rowKey={(item, index) => `${item.id || index}-${item.version || ''}`} pagination={false} locale={{ emptyText: '没有跳过项' }} dataSource={webSubmitPlan.skipped || []} columns={[{ title: '跳过任务', dataIndex: 'id' }, { title: '版本', dataIndex: 'version' }, { title: '状态', render: (_, item) => webSubmitStatusLabel(item.status) }, { title: '原因', dataIndex: 'error' }]} /></> : null}
   </Space>;
-  const submitResultPanel = <Table className="novel-fetch-panel" scroll={{ x: 720 }} rowKey={(row, index) => `${row.bookId || row.book_id}-${row.version}-${index}`} dataSource={webSubmitResults} locale={{ emptyText: '暂无本次提交结果' }} columns={[{ title: '任务', render: (_, row) => row.bookId || row.book_id }, { title: '版本', dataIndex: 'version' }, { title: '状态', render: (_, row) => webSubmitStatusLabel(row.status_label || row.status) }, { title: '结果', render: (_, row) => row.result || row.message || row.error || '-' }, { title: '操作', render: (_, row) => row.status === 'pending_confirmation' ? <Button size="small" icon={<RefreshCw size={14} />} loading={webSubmitLoading} onClick={() => reconcileWebSubmitVersion(row)}>重新核对</Button> : /error|fail|失败/i.test(String(row.status || '')) ? <Button size="small" loading={webSubmitLoading} onClick={() => retryWebSubmitVersion(row)}>重试该版本</Button> : '-' }]} />;
+  const submitResultPanel = <Table className="novel-fetch-panel" scroll={{ x: 720 }} rowKey={(row, index) => `${row.bookId || row.book_id}-${row.version}-${index}`} dataSource={webSubmitResults} locale={{ emptyText: '暂无本次提交结果' }} columns={[{ title: '任务', render: (_, row) => row.bookId || row.book_id }, { title: '版本', dataIndex: 'version' }, { title: '状态', render: (_, row) => webSubmitStatusLabel(row.status_label || row.status) }, { title: '核对证据', render: (_, row) => novelFetchReadbackLabel(row) }, { title: '结果', render: (_, row) => row.result || row.message || row.error || '-' }, { title: '操作', render: (_, row) => novelFetchCanReadback(row) ? <Button size="small" icon={<RefreshCw size={14} />} loading={webSubmitLoading} onClick={() => reconcileWebSubmitVersion(row)}>重新核对</Button> : /error|fail|失败/i.test(String(row.status || '')) ? <Button size="small" loading={webSubmitLoading} onClick={() => retryWebSubmitVersion(row)}>重试该版本</Button> : '-' }]} />;
   const submitHistoryPanel = <div className="novel-fetch-panel"><div className="novel-fetch-toolbar"><Typography.Title level={5}>最近提交轮次</Typography.Title><span className="novel-fetch-toolbar-spacer" /><Button size="small" icon={<RefreshCw size={14} />} loading={webSubmitLoading} onClick={loadWebSubmit}>刷新历史</Button></div><Table size="small" scroll={{ x: 760 }} rowKey={(run, index) => run.submission_run_id || index} dataSource={webSubmitRuns} pagination={{ pageSize: 5 }} locale={{ emptyText: '暂无提交轮次' }} columns={[{ title: '轮次', render: (_, run) => run.submission_run_id || '-' }, { title: '来源', render: (_, run) => run.reason === 'auto_submit' ? '自动提交' : run.reason === 'dry_run' ? '演练' : '手动提交' }, { title: '状态', render: (_, run) => webSubmitRunStatusLabel(run.status) }, { title: '任务/计划/延后/失败', render: (_, run) => `${run.requested_count || 0}/${run.planned_count || 0}/${run.deferred_count || 0}/${run.failed_count || 0}` }, { title: '时间', render: (_, run) => formatWorkDateTime(run.updated_at || run.created_at) }]} /><div className="novel-fetch-toolbar" style={{ marginTop: 12 }}><Typography.Title level={5}>逐本提交历史</Typography.Title></div><Table size="small" scroll={{ x: 760 }} rowKey={(row, index) => `${row.book_id || row.bookId}-${row.version}-${index}`} dataSource={webSubmitHistory} pagination={{ pageSize: 10 }} columns={[{ title: '书名', render: (_, row) => row.book_name || row.bookName || row.book_id || row.bookId }, { title: '版本', dataIndex: 'version' }, { title: '状态', render: (_, row) => webSubmitStatusLabel(row.status_label || row.status) }, { title: '结果', dataIndex: 'result' }, { title: '时间', render: (_, row) => formatWorkDateTime(row.time || row.created_at || row.createdAt) }]} /></div>;
   const submitLogsPanel = <div className="novel-fetch-panel"><div className="novel-fetch-toolbar"><Typography.Title level={5}>操作日志</Typography.Title><span className="novel-fetch-toolbar-spacer" /><Button size="small" icon={<RefreshCw size={14} />} onClick={loadGlobalLogs}>刷新日志</Button></div><Select value={selectedTask || undefined} className="novel-fetch-log-task-select" placeholder="选择任务查看日志" options={tasks.map(task => ({ value: task.bookId || task.book_id, label: task.bookName || task.book_name || task.bookId || task.book_id }))} onChange={selectTask} />{selectedTaskData ? <Collapse items={(selectedTaskData.logs || []).map((log, index) => ({ key: String(index), label: `${log.time || ''} ${log.event || '操作日志'}`, children: <Typography.Paragraph style={{ whiteSpace: 'pre-wrap' }}>{log.detail || JSON.stringify(log)}</Typography.Paragraph> }))} /> : <Table size="small" pagination={{ pageSize: 20 }} rowKey={(row, index) => row.id || index} dataSource={globalLogs} locale={{ emptyText: '暂无操作记录' }} columns={[{ title: '时间', dataIndex: 'time', render: (value, row) => formatWorkDateTime(value || row.createdAt || row.created_at) }, { title: '事件', dataIndex: 'event' }, { title: '详情', render: (_, row) => String(row.detail || row.message || '').slice(0, 120) }]} />}</div>;
   const submissionPanel = <Space direction="vertical" size={12} style={{ width: '100%' }}><NovelFetchMetricStrip items={submissionStatus} /><Tabs className="novel-fetch-section-tabs" activeKey={submitView} onChange={setSubmitView} items={[{ key: 'ready', label: '提交准备', children: submitReadyPanel }, { key: 'result', label: `本次结果${webSubmitResults.length ? ` (${webSubmitResults.length})` : ''}`, children: submitResultPanel }, { key: 'history', label: '提交历史', children: submitHistoryPanel }, { key: 'logs', label: '操作日志', children: submitLogsPanel }]} /></Space>;
@@ -2053,8 +2027,8 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
       </div>
       <div className="novel-fetch-status-layout">
         <div className="novel-fetch-public-result"><div className="novel-fetch-result-heading"><div className="novel-fetch-public-result-title">处理状态</div><span className="novel-fetch-result-side">{processScopeLabel}</span></div><div className="novel-fetch-stat-grid">
-          {[['总数量', processSummary.total], ['原文就绪', processSummary.originalDone], ['处理中', processSummary.processing], ['已完成', processSummary.aiDone], ['失败', processSummary.failed]].map(([label, value]) => <div className="novel-fetch-stat-card" key={label}><span>{label}</span><strong>{value}</strong></div>)}
-        </div><div className="novel-fetch-progress-list"><div><span>原文获取</span><i style={{ '--progress': `${progressPercent(processSummary.originalDone)}%` }} /><b>{processSummary.originalDone} / {processSummary.total}</b></div><div><span>AI 文案生成</span><i style={{ '--progress': `${progressPercent(processSummary.aiDone)}%` }} /><b>{processSummary.aiDone} / {processSummary.total}</b></div><div><span>视频管理系统提交</span><i style={{ '--progress': `${progressPercent(processSummary.submissionDone)}%` }} /><b>{processSummary.submissionDone} / {processSummary.total}</b></div></div>
+          {[['总数量', processSummary.total], ['原文就绪', processSummary.originalDone], ['处理中', processSummary.processing], ['本轮 AI 就绪', processSummary.aiDone], ['失败', processSummary.failed]].map(([label, value]) => <div className="novel-fetch-stat-card" key={label}><span>{label}</span><strong>{value}</strong></div>)}
+        </div><div className="novel-fetch-progress-list"><div><span>原文获取</span><i style={{ '--progress': `${progressPercent(processSummary.originalDone)}%` }} /><b>{processSummary.originalDone} / {processSummary.total}</b></div><div><span>{processSummary.aiRequired ? '本轮 AI 文案生成' : '本轮无需生成 AI'}</span><i style={{ '--progress': `${processSummary.aiRequired ? Math.min(100, Math.round(processSummary.aiDone / processSummary.aiRequired * 100)) : 0}%` }} /><b>{processSummary.aiDone} / {processSummary.aiRequired}</b></div><div><span>视频管理系统提交</span><i style={{ '--progress': `${progressPercent(processSummary.submissionDone)}%` }} /><b>{processSummary.submissionDone} / {processSummary.total}</b></div></div>
         <div className="novel-fetch-live-log-title">实时日志</div><div className="novel-fetch-live-log"><pre>{liveLogLines.join('\n')}</pre></div></div>
       </div>
       <div className="novel-fetch-public-actions novel-fetch-process-secondary-actions"><V88Button variant="secondary" loading={taskActionBusy === 'retry-failed'} onClick={retryFailedTasks}>重试当前失败</V88Button><V88Button variant="secondary" loading={taskActionBusy === 'rules-current-batch'} onClick={applyAllRules}>处理当前规则</V88Button><V88Button variant="secondary" loading={webSubmitLoading} onClick={() => submitVisibleTasks()}>提交当前批次</V88Button><label className="novel-fetch-factory-version-picker"><span>入厂内容</span><Select aria-label="入厂内容版本" value={batchFactorySourceVersion} onChange={setBatchFactorySourceVersion} options={['sensitive', 'original', 'ai1', 'ai2', 'ai3', 'ai4', 'ai5'].map(value => ({ value, label: batchFactoryVersionLabel(value) }))} /></label><V88Button variant="secondary" loading={tasksLoading} onClick={() => transferToBatchFactory('batch')}>当前批次入厂</V88Button></div>
@@ -2126,7 +2100,7 @@ export function LegacyNovelFetchPage({ theme = 'dark' }) {
           <V88Button variant="secondary" loading={taskActionBusy === 'generate-ai'} onClick={handleGenerateAi}>生成 AI 改文</V88Button>
           <V88Button variant="secondary" loading={taskActionBusy === 'sensitive-repair'} onClick={handleSensitiveRepair}>敏感词 AI 修复</V88Button>
           <Typography.Text type="secondary">AI 数量</Typography.Text>
-          <InputNumber min={1} max={20} value={batchAiCount} onChange={value => setBatchAiCount(value || 1)} />
+          <InputNumber min={1} max={NOVEL_FETCH_AI_VERSION_LIMIT} value={batchAiCount} onChange={value => setBatchAiCount(value || 1)} />
           <V88Button variant="secondary" loading={taskActionBusy === 'ai-count'} onClick={updateSelectedAiCount}>调整选中</V88Button>
           <V88Button variant="secondary" loading={taskActionBusy === 'rules-selected'} onClick={applySelectedRules}>规则处理选中</V88Button>
           <V88Button variant="secondary" icon={<Factory size={16} />} title={`入厂内容：${batchFactoryVersionLabel(batchFactorySourceVersion)}`} onClick={transferToBatchFactory}>进入批量工厂</V88Button>

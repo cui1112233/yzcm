@@ -10,6 +10,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"qiantie/backend/internal/safehttp"
 	"qiantie/backend/internal/yzcmusage"
 	"strconv"
 	"strings"
@@ -304,6 +305,10 @@ func (t *admittedTransport) RoundTrip(request *http.Request) (*http.Response, er
 	finish := func(outcome Outcome) { stop(); cancel(); permit.Finish(outcome) }
 	response, err := t.base.RoundTrip(request.Clone(ctx))
 	if err != nil {
+		if errors.Is(err, safehttp.ErrRequestNotSent) {
+			finish(Outcome{Duration: time.Since(started)})
+			return response, fmt.Errorf("图片请求未向上游提交：%w", err)
+		}
 		finish(Outcome{Unknown: true, Duration: time.Since(started)})
 		return response, fmt.Errorf("%w: %w", ErrOutcomeUnknown, err)
 	}

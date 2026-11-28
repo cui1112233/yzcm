@@ -125,86 +125,7 @@ func (s *MySQLStore) CommitAuthoringShot(ctx context.Context, repository Authori
 	if e != nil {
 		return AuthoringState{}, e
 	}
-	d := a.CreativeShot
-	b := Storyboard{ProjectID: p, OwnerUsername: o, EpisodeNo: d.Episode, Engine: d.Engine}
-	if e = tx.QueryRowContext(ctx, `SELECT id,revision FROM screenplay_storyboards WHERE project_id=? AND owner_username=? AND episode_no=? AND engine=? FOR UPDATE`, p, o, d.Episode, string(d.Engine)).Scan(&b.ID, &b.Revision); e != nil {
-		return AuthoringState{}, e
-	}
-	if b.ID != d.BoardID || b.Revision != a.ExpectedRevision {
-		return AuthoringState{}, ErrRevisionConflict
-	}
-	var sh StoryboardShot
-	var protocol []byte
-	e = tx.QueryRowContext(ctx, `SELECT id,storyboard_id,project_id,owner_username,seq,scene_id,duration_sec,characters_text,scene_name,props_text,video_desc,protocol_json FROM screenplay_storyboard_shots WHERE id=? AND storyboard_id=? AND project_id=? AND owner_username=? FOR UPDATE`, a.TargetID, b.ID, p, o).Scan(&sh.ID, &sh.StoryboardID, &sh.ProjectID, &sh.OwnerUsername, &sh.Seq, &sh.SceneID, &sh.Duration, &sh.Characters, &sh.Scene, &sh.Props, &sh.VideoDesc, &protocol)
-	if e != nil {
-		return AuthoringState{}, e
-	}
-	var fields storyboardProtocol
-	if len(protocol) > 0 {
-		if e = json.Unmarshal(protocol, &fields); e != nil {
-			return AuthoringState{}, e
-		}
-		fields.apply(&sh)
-	}
-	b.Shots = []StoryboardShot{sh}
-	if e = applyCreativeShot(&b, a); e != nil {
-		return AuthoringState{}, e
-	}
-	// Serialize through the existing protocol contract, then merge only requested
-	// fields into the original object so unknown extension keys survive as well.
-	encoded, e := marshalStoryboardProtocol(d.After)
-	if e != nil {
-		return AuthoringState{}, e
-	}
-	known := map[string]json.RawMessage{}
-	original := map[string]json.RawMessage{}
-	if e = json.Unmarshal([]byte(encoded), &known); e != nil {
-		return AuthoringState{}, e
-	}
-	if len(protocol) > 0 {
-		if e = json.Unmarshal(protocol, &original); e != nil {
-			return AuthoringState{}, e
-		}
-	}
-	if original == nil {
-		original = map[string]json.RawMessage{}
-	}
-	if d.Binding != nil {
-		for _, expected := range d.Binding.Assets {
-			var current bindingAsset
-			current.ID = expected.ID
-			e = tx.QueryRowContext(ctx, `SELECT asset_type,name,revision FROM screenplay_assets WHERE id=? AND project_id=? AND owner_username=? FOR UPDATE`, expected.ID, p, o).Scan(&current.Type, &current.Name, &current.Revision)
-			if errors.Is(e, sql.ErrNoRows) || e == nil && current != expected {
-				return AuthoringState{}, ErrRevisionConflict
-			}
-			if e != nil {
-				return AuthoringState{}, e
-			}
-		}
-		original["protocol_fields"] = known["protocol_fields"]
-	} else {
-		for _, c := range d.Changes {
-			if c.Field != "video_desc" {
-				original[c.Field] = known[c.Field]
-			}
-		}
-	}
-	merged, e := json.Marshal(original)
-	if e != nil {
-		return AuthoringState{}, e
-	}
-	now := time.Now().UTC()
-	var result sql.Result
-	if d.Binding != nil {
-		result, e = tx.ExecContext(ctx, `UPDATE screenplay_storyboard_shots SET characters_text=?,scene_name=?,props_text=?,protocol_json=?,updated_at=? WHERE id=? AND storyboard_id=? AND project_id=? AND owner_username=?`, d.After.Characters, d.After.Scene, d.After.Props, string(merged), now, a.TargetID, b.ID, p, o)
-	} else {
-		result, e = tx.ExecContext(ctx, `UPDATE screenplay_storyboard_shots SET video_desc=?,protocol_json=?,updated_at=? WHERE id=? AND storyboard_id=? AND project_id=? AND owner_username=?`, d.After.VideoDesc, string(merged), now, a.TargetID, b.ID, p, o)
-	}
-	if e = oneShotRow(result, e); e != nil {
-		return AuthoringState{}, e
-	}
-	result, e = tx.ExecContext(ctx, `UPDATE screenplay_storyboards SET revision=revision+1,updated_at=? WHERE id=? AND project_id=? AND owner_username=? AND revision=?`, now, b.ID, p, o, a.ExpectedRevision)
-	if e = oneShotRow(result, e); e != nil {
+	if e = applyAssistantShotInTx(ctx, tx, o, p, a); e != nil {
 		return AuthoringState{}, e
 	}
 	markShotApplied(&st, i, v)
@@ -212,7 +133,7 @@ func (s *MySQLStore) CommitAuthoringShot(ctx context.Context, repository Authori
 	if e != nil {
 		return AuthoringState{}, e
 	}
-	result, e = tx.ExecContext(ctx, `UPDATE screenplay_authoring SET body=?,revision=? WHERE project_id=? AND owner_username=? AND revision=?`, string(body), st.Revision, p, o, v)
+	result, e := tx.ExecContext(ctx, `UPDATE screenplay_authoring SET body=?,revision=? WHERE project_id=? AND owner_username=? AND revision=?`, string(body), st.Revision, p, o, v)
 	if e = oneShotRow(result, e); e != nil {
 		return AuthoringState{}, e
 	}
@@ -231,6 +152,93 @@ func oneShotRow(result sql.Result, e error) error {
 	}
 	if n != 1 {
 		return ErrRevisionConflict
+	}
+	return nil
+}
+
+func applyAssistantShotInTx(ctx context.Context, tx *sql.Tx, o, p string, a AuthoringAction) error {
+	var e error
+	d := a.CreativeShot
+	b := Storyboard{ProjectID: p, OwnerUsername: o, EpisodeNo: d.Episode, Engine: d.Engine}
+	if e = tx.QueryRowContext(ctx, `SELECT id,revision FROM screenplay_storyboards WHERE project_id=? AND owner_username=? AND episode_no=? AND engine=? FOR UPDATE`, p, o, d.Episode, string(d.Engine)).Scan(&b.ID, &b.Revision); e != nil {
+		return e
+	}
+	if b.ID != d.BoardID || b.Revision != a.ExpectedRevision {
+		return ErrRevisionConflict
+	}
+	var sh StoryboardShot
+	var protocol []byte
+	e = tx.QueryRowContext(ctx, `SELECT id,storyboard_id,project_id,owner_username,seq,scene_id,duration_sec,characters_text,scene_name,props_text,video_desc,protocol_json FROM screenplay_storyboard_shots WHERE id=? AND storyboard_id=? AND project_id=? AND owner_username=? FOR UPDATE`, a.TargetID, b.ID, p, o).Scan(&sh.ID, &sh.StoryboardID, &sh.ProjectID, &sh.OwnerUsername, &sh.Seq, &sh.SceneID, &sh.Duration, &sh.Characters, &sh.Scene, &sh.Props, &sh.VideoDesc, &protocol)
+	if e != nil {
+		return e
+	}
+	var fields storyboardProtocol
+	if len(protocol) > 0 {
+		if e = json.Unmarshal(protocol, &fields); e != nil {
+			return e
+		}
+		fields.apply(&sh)
+	}
+	b.Shots = []StoryboardShot{sh}
+	if e = applyCreativeShot(&b, a); e != nil {
+		return e
+	}
+	// Serialize through the existing protocol contract, then merge only requested
+	// fields into the original object so unknown extension keys survive as well.
+	encoded, e := marshalStoryboardProtocol(d.After)
+	if e != nil {
+		return e
+	}
+	known := map[string]json.RawMessage{}
+	original := map[string]json.RawMessage{}
+	if e = json.Unmarshal([]byte(encoded), &known); e != nil {
+		return e
+	}
+	if len(protocol) > 0 {
+		if e = json.Unmarshal(protocol, &original); e != nil {
+			return e
+		}
+	}
+	if original == nil {
+		original = map[string]json.RawMessage{}
+	}
+	if d.Binding != nil {
+		for _, expected := range d.Binding.Assets {
+			var current bindingAsset
+			current.ID = expected.ID
+			e = tx.QueryRowContext(ctx, `SELECT asset_type,name,revision FROM screenplay_assets WHERE id=? AND project_id=? AND owner_username=? FOR UPDATE`, expected.ID, p, o).Scan(&current.Type, &current.Name, &current.Revision)
+			if errors.Is(e, sql.ErrNoRows) || e == nil && current != expected {
+				return ErrRevisionConflict
+			}
+			if e != nil {
+				return e
+			}
+		}
+		original["protocol_fields"] = known["protocol_fields"]
+	} else {
+		for _, c := range d.Changes {
+			if c.Field != "video_desc" {
+				original[c.Field] = known[c.Field]
+			}
+		}
+	}
+	merged, e := json.Marshal(original)
+	if e != nil {
+		return e
+	}
+	now := time.Now().UTC()
+	var result sql.Result
+	if d.Binding != nil {
+		result, e = tx.ExecContext(ctx, `UPDATE screenplay_storyboard_shots SET characters_text=?,scene_name=?,props_text=?,protocol_json=?,updated_at=? WHERE id=? AND storyboard_id=? AND project_id=? AND owner_username=?`, d.After.Characters, d.After.Scene, d.After.Props, string(merged), now, a.TargetID, b.ID, p, o)
+	} else {
+		result, e = tx.ExecContext(ctx, `UPDATE screenplay_storyboard_shots SET video_desc=?,protocol_json=?,updated_at=? WHERE id=? AND storyboard_id=? AND project_id=? AND owner_username=?`, d.After.VideoDesc, string(merged), now, a.TargetID, b.ID, p, o)
+	}
+	if e = oneShotRow(result, e); e != nil {
+		return e
+	}
+	result, e = tx.ExecContext(ctx, `UPDATE screenplay_storyboards SET revision=revision+1,updated_at=? WHERE id=? AND project_id=? AND owner_username=? AND revision=?`, now, b.ID, p, o, a.ExpectedRevision)
+	if e = oneShotRow(result, e); e != nil {
+		return e
 	}
 	return nil
 }

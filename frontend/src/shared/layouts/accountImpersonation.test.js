@@ -1,18 +1,19 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { getAccountImpersonation, startAccountImpersonation, stopAccountImpersonation } from '../api/accountImpersonation.js';
+import { getAccountImpersonation, getAccountImpersonationTargets, startAccountImpersonation, stopAccountImpersonation } from '../api/accountImpersonation.js';
 
 async function loadLocalModule(file, ...companions) {
   const result = await build({
     ...(companions.length ? { stdin: { contents: [file, ...companions].map(module => `export * from ${JSON.stringify(module)};`).join('\n'), resolveDir: fileURLToPath(new URL('.', import.meta.url)) } }
       : { entryPoints: [fileURLToPath(new URL(file, import.meta.url))] }),
     platform: 'node', packages: 'external', format: 'cjs', bundle: true, write: false,
-    jsx: 'automatic', loader: { '.css': 'empty' }
+    jsx: 'automatic', loader: { '.css': 'empty', '.png': 'dataurl', '.webp': 'dataurl' }
   });
   const exports = {};
   const module = { exports };
@@ -24,20 +25,37 @@ test('reads, starts and stops the server-managed switch with the login session c
   const requests = [];
   const active = { active: true, canSwitch: false, subject: { username: 'member' } };
   const inactive = { active: false, canSwitch: true };
+  const targets = { groups: [{ teamId: 'one', teamName: '一战晟铭', accounts: [{ username: 'member', displayName: '组员甲', role: 'member' }] }] };
   const request = async (path, options) => {
     requests.push([path, options]);
+    if (path.endsWith('/targets')) return targets;
     return options.method === 'DELETE' ? inactive : active;
   };
 
   assert.deepEqual(await getAccountImpersonation(undefined, request), active);
+  assert.deepEqual(await getAccountImpersonationTargets(request), targets);
   assert.deepEqual(await startAccountImpersonation('member', request), active);
   assert.deepEqual(await stopAccountImpersonation(request), inactive);
   assert.deepEqual(requests.map(([path, options]) => [path, options.method, options.credentials]), [
     ['/api/account-impersonation/current', 'GET', 'same-origin'],
+    ['/api/account-impersonation/targets', 'GET', 'same-origin'],
     ['/api/account-impersonation', 'POST', 'same-origin'],
     ['/api/account-impersonation/current', 'DELETE', 'same-origin']
   ]);
-  assert.deepEqual(JSON.parse(requests[1][1].body), { username: 'member' });
+  assert.equal(requests[1][1].cache, 'no-store');
+  assert.deepEqual(JSON.parse(requests[2][1].body), { username: 'member' });
+});
+
+test('account switcher opens with authorized accounts, supports search, and requires confirmation', () => {
+  const switchPath = fileURLToPath(new URL('./AccountSwitchMenu.jsx', import.meta.url));
+  assert.equal(fs.existsSync(switchPath), true, 'AccountSwitchMenu.jsx must exist');
+  const source = fs.readFileSync(switchPath, 'utf8');
+  assert.match(source, /getAccountImpersonationTargets/);
+  assert.match(source, /placeholder="搜索组员名称或用户名"/);
+  assert.match(source, /displayName[\s\S]*username|username[\s\S]*displayName/);
+  assert.match(source, /确认切换/);
+  assert.match(source, /无法读取可切换账号/);
+  assert.doesNotMatch(source, /输入目标账号用户名/);
 });
 
 test('successful start and exit block old-page writes and discard a late status response', async () => {

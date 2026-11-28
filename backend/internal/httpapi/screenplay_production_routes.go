@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"qiantie/backend/internal/screenplay"
+	"qiantie/backend/internal/yzcmusage"
 	"strings"
 	"time"
 )
@@ -33,6 +34,15 @@ func RegisterScreenplayProductionRoutes(mux *http.ServeMux, auth BridgeAuth, run
 				}
 				owner = resolved
 			}
+			team, actor := yzcmusage.AttributionForOwner(r.Context(), identity.Username)
+			if actor == "" && auth.AccountCenterStore != nil && r.Method != http.MethodGet {
+				writeScreenplayError(w, screenplay.ErrAccessDenied)
+				return
+			}
+			if actor == "" {
+				actor = identity.Username
+			}
+			r = r.WithContext(screenplay.WithProductionAuthorization(r.Context(), identity.Username, team, actor))
 			job, err := fn(r, owner)
 			if err != nil {
 				writeScreenplayError(w, err)
@@ -51,6 +61,29 @@ func RegisterScreenplayProductionRoutes(mux *http.ServeMux, auth BridgeAuth, run
 			return screenplay.ProductionJob{}, screenplay.ErrInvalidArgument
 		}
 		return runtime.StartWithOptions(r.Context(), o, r.PathValue("id"), input.Rebuild)
+	})
+	register("POST /api/comic-screenplays/projects/{id}/production/storyboard/recover", func(r *http.Request, o string) (screenplay.ProductionJob, error) {
+		var input struct {
+			RequestKey string `json:"request_key"`
+		}
+		decoder := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 4096))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&input); err != nil || input.RequestKey == "" {
+			return screenplay.ProductionJob{}, screenplay.ErrInvalidArgument
+		}
+		return runtime.RecoverProductionStoryboard138(r.Context(), o, r.PathValue("id"), input.RequestKey)
+	})
+	register("POST /api/comic-screenplays/projects/{id}/production/storyboard/continue", func(r *http.Request, o string) (screenplay.ProductionJob, error) {
+		var input struct {
+			RequestKey string `json:"request_key"`
+			Confirmed  bool   `json:"confirmed"`
+		}
+		decoder := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 4096))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&input); err != nil {
+			return screenplay.ProductionJob{}, screenplay.ErrInvalidArgument
+		}
+		return runtime.ContinueStoryboard138(r.Context(), o, r.PathValue("id"), input.RequestKey, input.Confirmed)
 	})
 	register("POST /api/comic-screenplays/projects/{id}/production/schedule", func(r *http.Request, o string) (screenplay.ProductionJob, error) {
 		var input struct {

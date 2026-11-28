@@ -20,3 +20,10 @@ export function NovelFetchAutomationOptions() {
     ))
   );
 }
+
+export function NovelFetchThinkingOptions() {
+  return React.createElement(Space, { wrap: true },
+    [['enable_thinking', '启用思考'], ['disable_thinking', '禁用思考']].map(([name, label]) =>
+      React.createElement(Form.Item, { name: ['ai', name], valuePropName: 'checked', noStyle: true, key: name },
+        React.createElement(Checkbox, null, label))));
+}

@@ -22,13 +22,13 @@ test('a valid explicit model is unchanged and can run',()=>{
 
 test('version profiles keep every supported AI version through a settings round trip', async()=>{
  const {withNovelFetchVersionProfiles,NOVEL_FETCH_PROFILE_VERSIONS}=await import('./novel-fetch-config-defaults.js');
- const profiles=withNovelFetchVersionProfiles({original:'raw',ai1:'p1',ai20:'p20'});
- assert.equal(profiles.ai20,'p20');
- assert.equal(NOVEL_FETCH_PROFILE_VERSIONS.length,21);
- assert.equal(NOVEL_FETCH_PROFILE_VERSIONS.at(-1),'ai20');
+ const profiles=withNovelFetchVersionProfiles({original:'raw',ai1:'p1',ai5:'p20'});
+ assert.equal(profiles.ai5,'p20');
+ assert.equal(NOVEL_FETCH_PROFILE_VERSIONS.length,6);
+ assert.equal(NOVEL_FETCH_PROFILE_VERSIONS.at(-1),'ai5');
  assert.equal(profiles.ai1,'p1');
  assert.equal(profiles.original,'raw');
- assert.equal(profiles.ai21,undefined);
+ assert.equal(profiles.ai6,undefined);
 });
 
 
@@ -36,9 +36,9 @@ test('an explicitly cleared version selection survives save and reload',()=>{
  const values=new Map(); const storage={getItem:key=>values.get(key),setItem:(key,value)=>values.set(key,value)};
  state.writeNovelFetchProcessSettings({selectedVersions:[],textModel:'chosen'},storage);
  const restored=state.readNovelFetchProcessSettings(storage);
- assert.deepEqual(state.resolveNovelFetchSelectedVersions(restored.selectedVersions,['original','ai1','ai20']),[]);
- assert.deepEqual(state.resolveNovelFetchSelectedVersions(undefined,['original','ai1','ai20']),['original','ai1']);
- assert.deepEqual(state.resolveNovelFetchSelectedVersions(['ai20'],['original','ai1','ai20']),['ai20']);
+ assert.deepEqual(state.resolveNovelFetchSelectedVersions(restored.selectedVersions,['original','ai1','ai5']),[]);
+ assert.deepEqual(state.resolveNovelFetchSelectedVersions(undefined,['original','ai1','ai5']),['original','ai1']);
+ assert.deepEqual(state.resolveNovelFetchSelectedVersions(['ai5'],['original','ai1','ai5']),['ai5']);
 });
 
 

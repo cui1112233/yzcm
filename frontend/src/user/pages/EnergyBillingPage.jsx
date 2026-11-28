@@ -8,7 +8,7 @@ import { DesignedEmptyState, GlassPanel } from '../components/PersonalCenterVisu
 import { FEATURE_LABELS, PageHeader, Panel, RoleBadge } from './accountCenterShared.jsx';
 import {
   canSelectEnergyTeam, energyAmount, energyRoleLabel, energyTime, EnergyMetrics, EnergyPager, EnergyQueryState,
-  EnergyRanking, EnergyRecharge, EnergyTeamCards, useEnergyQuery
+  EnergyRanking, EnergyRecharge, useEnergyQuery
 } from './accountCenterEnergyShared.jsx';
 
 const blankFilters = { from: '', to: '', member: '' };
@@ -168,25 +168,64 @@ export default function EnergyBillingPage() {
     setTeamOffset(0);
   }
 
+  const directoryRows = teams || [];
+  const selectedDirectoryRow = directoryRows.find(({ team }) => team.id === scope) || directoryRows[0];
+  const platformConsumption = directoryRows.reduce((sum, item) => sum + (Number(item.consumption?.actualCost) || 0), 0);
+  const platformPending = directoryRows.reduce((sum, item) => sum + (Number(item.consumption?.pendingCount) || 0), 0);
+  const teamRanking = [...directoryRows].sort((left, right) => (Number(right.consumption?.actualCost) || 0) - (Number(left.consumption?.actualCost) || 0));
+  const energyValue = value => Number.isFinite(Number(value)) ? `${Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 2 })}` : '—';
+
   return <div className={`account-center-page energy-page pc-platform-consumption ${selectTeam ? 'is-platform-scope' : 'is-team-scope'}`}>
     <PageHeader title={selectTeam ? '全平台团队消耗' : '能量与账单'} subtitle={selectTeam ? '查看各团队余额与能量使用情况' : '查看所属团队余额与真实核账记录'} actions={<Button onClick={overview.retry}>刷新账单</Button>} />
     <EnergyQueryState query={overview} label="账号与团队" />
-    {current && <>
+    {current && selectTeam && <>
+      <div className="pc-platform-notice">各团队余额独立显示，不合并为平台总余额；消耗、待核账和排行均来自真实核账记录。</div>
+      <div className="pc-platform-metrics">
+        <div><span className="pc-platform-metric-icon">月</span><small>本月总消耗</small><strong>{directory.data ? energyValue(platformConsumption) : '—'}</strong></div>
+        <div><span className="pc-platform-metric-icon">日</span><small>今日消耗</small><strong>—</strong><em>接口暂未提供日汇总</em></div>
+        <div><span className="pc-platform-metric-icon">核</span><small>待核账</small><strong>{directory.data ? platformPending : '—'}</strong></div>
+        <div><span className="pc-platform-metric-icon">队</span><small>活跃团队</small><strong>{directory.data ? directoryRows.filter(({ team }) => !team.archivedAt).length : '—'}</strong></div>
+      </div>
+      <div className="pc-platform-analysis">
+        <GlassPanel className="pc-platform-trend" title="各团队消耗趋势" icon="trend">
+          <DesignedEmptyState icon="trend" title="趋势数据暂未接通" description="不会用模拟数字替代真实消耗；时间序列接口接通后在此展示。" />
+        </GlassPanel>
+        <GlassPanel className="pc-platform-ranking" title="团队消耗排行" icon="ranking">
+          {teamRanking.length ? <ol>{teamRanking.slice(0, 6).map((item, index) => <li key={item.team.id} className={item.team.id === scope ? 'is-active' : ''}>
+            <em>{index + 1}</em><button type="button" onClick={() => changeTeam(item.team.id)}>{item.team.name}</button><strong>{energyValue(item.consumption?.actualCost)}</strong>
+          </li>)}</ol> : <DesignedEmptyState icon="ranking" title="暂无团队消耗" description="当前时间范围还没有可排行的真实核账数据。" />}
+        </GlassPanel>
+      </div>
+      <EnergyFiltersForm ownOnly={false} applied={applied} onApply={applyFilters} />
+      <div className="pc-platform-directory-grid">
+        <GlassPanel className="pc-platform-team-table" title="团队余额与消耗" icon="team">
+          <EnergyQueryState query={directory} label="团队目录" />
+          <div className="pc-platform-table-scroll"><table><thead><tr><th>团队</th><th>负责人</th><th>剩余能量</th><th>本月消耗</th><th>待核账</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody>{directoryRows.map(item => <tr key={item.team.id} className={item.team.id === scope ? 'is-active' : ''}>
+              <td>{item.team.name}</td><td>{item.team.managerUsername || '—'}</td><td>{item.balance?.available ? energyValue(item.balance.amount) : '暂无法获取'}</td>
+              <td>{energyValue(item.consumption?.actualCost)}</td><td>{item.consumption?.pendingCount ?? '—'}</td><td>{item.team.archivedAt ? '已归档' : '运行中'}</td>
+              <td><Button size="small" onClick={() => changeTeam(item.team.id)}>查看详情</Button></td>
+            </tr>)}</tbody></table></div>
+          {!directoryRows.length && !directory.loading && <DesignedEmptyState icon="team" title="暂无可查看团队" description="团队创建后会在这里显示真实余额与消耗。" />}
+          {directory.data && <EnergyPager page={directory.data} onPage={setTeamOffset} label="团队" />}
+        </GlassPanel>
+        <GlassPanel className="pc-platform-detail" title={`团队详情：${ready?.summary.team?.name || selectedDirectoryRow?.team.name || '等待选择'}`} icon="team">
+          {detailForbidden ? <Alert showIcon type="warning" message="所选团队账单无法查看" /> : <EnergyQueryState query={dashboard} label="所选团队账单" />}
+          <div className="pc-platform-detail-summary"><strong>成员消耗排行（本月）</strong>{ready ? <EnergyRanking ranking={ready.ranking} /> : <p className="ac-empty">选择团队后显示真实成员排行</p>}</div>
+          <div className="pc-platform-detail-ledger"><strong>近期账单</strong>{ready?.ledger?.entries?.length ? <ul>{ready.ledger.entries.slice(0, 5).map(entry => <li key={entry.requestId}><span>{entry.owner}</span><b>{entry.status === 'reconciled' ? energyAmount(entry.actualCost) : '待核账'}</b><time>{energyTime(entry.at)}</time></li>)}</ul> : <p className="ac-empty">暂无近期账单</p>}</div>
+          <EnergyRecharge url={current.rechargeUrl} />
+        </GlassPanel>
+      </div>
+    </>}
+    {current && !selectTeam && <>
       <Panel title={ready?.summary.team?.name || (scope === current.team?.id ? current.team?.name : '') || '团队能量'}
         action={<RoleBadge canonicalRole={energyRoleLabel(current.subject.role)} />}>
         <EnergyRecharge url={current.rechargeUrl} />
       </Panel>
-      {(selectTeam || scope) && <EnergyFiltersForm ownOnly={current.subject.role === 'member'} applied={applied} onApply={applyFilters} />}
-      {selectTeam && <div className="pc-platform-teams"><EnergyTeamCards currentTeamId={currentTeamId} selectedTeamId={selectedTeamId}
-        onSelect={changeTeam} teams={directory.data} onPage={setTeamOffset} member={criteria.member} activeSummary={ready?.summary}>
-        <EnergyQueryState query={directory} label="团队目录" />
-      </EnergyTeamCards></div>}
-      {selectTeam && detailForbidden && !replaceMissingTeam
-        ? <Alert showIcon type="warning" message="所选团队账单无法查看"
-          description={applied.member ? '请从团队卡片切换团队，或清除成员筛选。' : '请从团队卡片切换团队。'} />
-        : <EnergyQueryState query={dashboard} label="所选团队账单" />}
-      {!scope && !currentTeamId && (!selectTeam || teams?.length > 0) && <>
-        <p className="ac-empty">{selectTeam ? '当前账号没有所属团队，请选择一个团队查看账单' : '当前账号没有可查询的所属团队'}</p>
+      {scope && <EnergyFiltersForm ownOnly={current.subject.role === 'member'} applied={applied} onApply={applyFilters} />}
+      <EnergyQueryState query={dashboard} label="所属团队账单" />
+      {!scope && !currentTeamId && <>
+        <p className="ac-empty">当前账号没有可查询的所属团队</p>
         <div className="pc-platform-metrics"><EnergyMetrics data={current} /></div>
       </>}
       {ready && <>

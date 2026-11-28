@@ -666,6 +666,10 @@ func nullableRunString(value string) any {
 }
 
 func (s *MySQLStore) PutBody(ctx context.Context, owner string, body BodyRecord) (BodyRef, error) {
+	return s.putBody(ctx, owner, body)
+}
+
+func (s *MySQLStore) putBody(ctx context.Context, owner string, body BodyRecord, expected ...Document) (BodyRef, error) {
 	bookID, versionID := strings.TrimSpace(body.BookID), strings.TrimSpace(body.VersionID)
 	if bookID == "" {
 		return BodyRef{}, errors.New("book id is required")
@@ -692,7 +696,7 @@ func (s *MySQLStore) PutBody(ctx context.Context, owner string, body BodyRecord)
 		}
 		encoding, blob = "tos", []byte(key)
 	}
-	ref, err := s.switchBodyReference(ctx, owner, bookID, versionID, encoding, blob, hash, charCount, state)
+	ref, err := s.switchBodyReference(ctx, owner, bookID, versionID, encoding, blob, hash, charCount, state, expected...)
 	if err != nil && encoding == "tos" {
 		// An ambiguous commit must never trigger object deletion.
 		log.Printf("novel fetch body reference not confirmed; uploaded object retained id=%x", sha256.Sum256(blob))

@@ -330,7 +330,7 @@ func TestWebSubmitAppliesSavedProfileAndDoesNotResendAfterUncertainSubmit(t *tes
 	if res.Code != http.StatusOK || connector.submitCalls != 1 || connector.readbackCalls != 0 {
 		t.Fatalf("status=%d submits=%d readbacks=%d body=%s", res.Code, connector.submitCalls, connector.readbackCalls, res.Body.String())
 	}
-	if fields := connector.lastInput.FormFields; fields["organization"] != "org-9" || fields["platform_id"] != "6" || fields["ziti"] != "4" {
+	if fields := connector.lastInput.FormFields; fields["organization"] != "org-9" || fields["platform_id"] != "1" || fields["ziti"] != "4" {
 		t.Fatalf("saved submit settings were not applied: %#v", fields)
 	}
 	var payload struct {
@@ -412,9 +412,9 @@ func TestWebSubmitUncertainOutcomeOnlyReadsBackAndNeverUploadsTwice(t *testing.T
 	if document.Meta["siteSubmitStatus"] != "submitted" {
 		t.Fatalf("submitted upload status=%#v", document.Meta)
 	}
-	// 已确认的版本再次提交时必须被跳过，绝不能重复上传。
+	// 已接收但未核对的版本只能回读，绝不能重复上传。
 	second, err := executeWebSubmit(context.Background(), "tester", usersDir, store, webSubmitRequest{TaskIDs: []string{"654321"}, Versions: []string{"ai1"}}, nil, connector)
-	if err != nil || connector.submitCalls != 1 || second.Success != 0 {
+	if err != nil || connector.submitCalls != 1 || connector.readbackCalls != 2 || second.Success != 1 || mapOrEmpty(second.Results[0])["verified"] != true {
 		t.Fatalf("second result=%#v err=%v submits=%d", second, err, connector.submitCalls)
 	}
 }
@@ -664,7 +664,7 @@ func TestWebSubmitForceResubmitsConfirmedVersion(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(usersDir, "tester", "upload-target.json"), []byte(`{"cookie":"session=ok"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	connector := &cloneSubmissionEvidenceSpy{bookReceiptIDs: []string{"initial-ai1-receipt"}}
+	connector := &cloneSubmissionEvidenceSpy{bookReceiptIDs: []string{"initial-ai1-receipt"}, readback: &videomanagementconnector.Submission{ID: "cloned-ai1-receipt", Status: "submitted"}}
 	request := webSubmitRequest{TaskIDs: []string{"777777"}, Versions: []string{"ai1"}, Force: true}
 	result, err := executeWebSubmit(context.Background(), "tester", usersDir, store, request, nil, connector)
 	if err != nil || connector.submitCalls != 0 || connector.cloneSource != "initial-ai1-receipt" || result.Success != 1 {

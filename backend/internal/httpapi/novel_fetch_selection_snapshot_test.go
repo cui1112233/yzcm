@@ -28,7 +28,7 @@ func assertSelectionRoundTrip(t *testing.T, job novelfetchworkshop.ProcessJob, e
 }
 
 func TestSelectionSnapshotKeepsNilAndEmptyThroughRecovery(t *testing.T) {
-	for _, versions := range [][]string{nil, {}, {"ai20"}} {
+	for _, versions := range [][]string{nil, {}, {"ai5"}} {
 		ctx := context.Background()
 		s := novelfetchworkshop.NewMemoryStore()
 		if err := s.PutDocument(ctx, "alice", novelfetchworkshop.Document{BookID: "123", Meta: map[string]any{}}); err != nil {
@@ -49,7 +49,7 @@ func TestSelectionSnapshotKeepsNilAndEmptyThroughRecovery(t *testing.T) {
 }
 
 func TestSelectionAdmissionSnapshotKeepsNilAndEmptyThroughRecovery(t *testing.T) {
-	for _, versions := range [][]string{nil, {}, {"ai20"}} {
+	for _, versions := range [][]string{nil, {}, {"ai5"}} {
 		ctx := context.Background()
 		s := novelfetchworkshop.NewMemoryStore()
 		q := novelfetchworkshop.NewMemoryQueue()

@@ -46,8 +46,9 @@ test('energy page exposes the all-team dashboard regions in approved reference 0
     'pc-platform-metrics',
     'pc-platform-trend',
     'pc-platform-ranking',
-    'pc-platform-teams',
-    'pc-platform-ledger'
+    'pc-platform-team-table',
+    'pc-platform-detail',
+    'pc-platform-notice'
   ]) assert.match(energy, new RegExp(region));
   assert.match(energy, /全平台团队消耗/);
   assert.doesNotMatch(energy, /486\.20|32\.80|186\.40/);

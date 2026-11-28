@@ -19,10 +19,12 @@ type BatchMediaRunner interface {
 // BatchExecutor 把九步状态机接到已有的剧本、资产、分镜和媒体服务。
 // 每次 RunNext 只执行一个最小单元，便于暂停、重试和刷新恢复。
 type BatchExecutor struct {
-	Store     Store
-	Generator TextGenerator
-	Media     BatchMediaRunner
-	Finalizer ProductionFinalizer
+	Store           Store
+	ProductionRunID string
+	Authoring       *AuthoringService
+	Generator       TextGenerator
+	Media           BatchMediaRunner
+	Finalizer       ProductionFinalizer
 }
 
 type BatchRunResult struct {
@@ -32,9 +34,10 @@ type BatchRunResult struct {
 }
 
 type batchUnitOutcome struct {
-	artifacts    []string
-	review       *Review
-	episodeCount int
+	artifacts            []string
+	storyboardGeneration *ProductionStoryboardGeneration
+	review               *Review
+	episodeCount         int
 }
 
 // RunNext 执行并落库一个步骤或一集。失败也会写回 failed 和错误原因。
@@ -105,7 +108,32 @@ func (e BatchExecutor) RunNext(ctx context.Context, owner, projectID string) (Ba
 	_ = e.Store.AppendBatchLog(ctx, started.ID, owner, "info", "开始执行："+unit.String())
 
 	outcome, runErr := e.executeUnit(ctx, owner, projectID, unit, regenerate)
+	if e.ProductionRunID != "" {
+		latest, err := e.Store.GetBatch(context.WithoutCancel(ctx), owner, projectID)
+		if err != nil {
+			return BatchRunResult{}, err
+		}
+		if latest.ProductionAuthorization == nil || latest.ProductionAuthorization.RunID != e.ProductionRunID {
+			return BatchRunResult{}, ErrRevisionConflict
+		}
+	}
 	if runErr != nil {
+		if outcome.storyboardGeneration != nil {
+			waiting, persistErr := e.Store.MutateBatch(context.Background(), owner, projectID, func(b *Batch) error {
+				st := b.Step(unit.StepKey)
+				st.Status = StepBlocked
+				st.Error = runErr.Error()
+				ep := st.Episodes[unit.Episode]
+				ep.Status = StepBlocked
+				ep.Reason = runErr.Error()
+				ep.StoryboardGeneration = outcome.storyboardGeneration
+				if b.Status != BatchPaused {
+					b.Status = BatchWaitingUser
+				}
+				return nil
+			})
+			return BatchRunResult{Batch: waiting, Unit: unit}, persistErr
+		}
 		if errors.Is(runErr, context.Canceled) || errors.Is(runErr, ErrUserCancelled) {
 			paused, persistErr := e.Store.MutateBatch(context.Background(), owner, projectID, func(batch *Batch) error {
 				PauseStep(batch, unit)
@@ -142,6 +170,11 @@ func (e BatchExecutor) RunNext(ctx context.Context, owner, projectID string) (Ba
 				batch.Status = BatchPaused
 			}
 		}()
+		if unit.StepKey == "5_storyboard" {
+			if ep := batch.Step(unit.StepKey).Episodes[unit.Episode]; ep != nil && ep.StoryboardGeneration != nil {
+				ep.StoryboardGeneration.Status = "succeeded"
+			}
+		}
 		if outcome.episodeCount > 0 {
 			for _, key := range []string{"5_storyboard", "6_storyboard_doctor", "7_video"} {
 				if step := batch.Step(key); step != nil {
@@ -256,6 +289,9 @@ func (e BatchExecutor) executeUnit(ctx context.Context, owner, projectID string,
 		return e.doctor(ctx, project, unit, assets)
 
 	case "5_storyboard":
+		if production138Selected(ctx, e.Store, owner, project, unit.Episode) {
+			return e.executeStoryboard138(ctx, owner, project, unit, regenerate)
+		}
 		episode := unit.Episode
 		if episode <= 0 {
 			episode = 1

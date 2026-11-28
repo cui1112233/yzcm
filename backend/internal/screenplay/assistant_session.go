@@ -6,6 +6,7 @@ import (
 )
 
 type AssistantSession struct {
+	ChatAvailable bool `json:"chat_available"`
 	requestActor  string
 	ID            string `json:"id"`
 	ParentID      string `json:"parent_id,omitempty"`
@@ -16,6 +17,9 @@ type AssistantSession struct {
 	Revision      int64  `json:"revision"`
 	Archived      bool   `json:"archived"`
 	RequestStatus string `json:"request_status,omitempty"`
+	Active        bool   `json:"active"`
+	CanManage     bool   `json:"can_manage"`
+	CanStop       bool   `json:"can_stop"`
 }
 
 type AssistantSessionHistory struct {

@@ -970,6 +970,13 @@ func novelFetchConfiguredConcurrency(ctx context.Context, store novelfetchworksh
 		if configured := toInt(mapOrEmpty(settings["fetch"])["concurrency"]); configured > 0 {
 			concurrency = configured
 		}
+		ai := mapOrEmpty(settings["ai"])
+		if configured := mapOrEmpty(mapOrEmpty(settings["appConfig"])["ai"]); len(configured) > 0 {
+			ai = configured
+		}
+		if maximum := toInt(ai["max_concurrency"]); maximum > 0 && maximum < concurrency {
+			concurrency = maximum
+		}
 	}
 	if concurrency > 20 {
 		concurrency = 20
@@ -1547,6 +1554,7 @@ func appendNovelFetchDocumentLog(document *novelfetchworkshop.Document, event, d
 		event = "operation"
 	}
 	detail = strings.TrimSpace(detail)
+	detail = batchfactoryv11.SafeProviderErrorText(detail)
 	detail = novelFetchBearerSecretPattern.ReplaceAllString(detail, `${1}[已隐藏]`)
 	detail = novelFetchCookieSecretPattern.ReplaceAllString(detail, `${1}[已隐藏]`)
 	detail = novelFetchNamedSecretPattern.ReplaceAllString(detail, `${1}[已隐藏]`)
@@ -3706,7 +3714,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 				return
 			}
 		}
-		writeJSON(w, http.StatusOK, verifiedWorkshopJobView(req.Context(), store, queue, identity.Username, job))
+		writeJSON(w, http.StatusOK, safeNovelFetchErrorView(verifiedWorkshopJobView(req.Context(), store, queue, identity.Username, job)))
 	})
 
 	mux.HandleFunc("GET /api/novel-fetch-workshop/runs", func(w http.ResponseWriter, req *http.Request) {
@@ -3720,6 +3728,9 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "获取执行审计失败"})
 			return
+		}
+		for i := range runs {
+			runs[i].ErrorMessage = batchfactoryv11.SafeProviderErrorText(runs[i].ErrorMessage)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
 	})
@@ -4041,53 +4052,26 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存原文失败"})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"task": document})
+		writeJSON(w, http.StatusOK, map[string]any{"task": safeNovelFetchDocumentErrors(document)})
 	})
 
 	mux.HandleFunc("POST /api/novel-fetch-workshop/tasks/{bookId}/restore-original", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
-		bookID := strings.TrimSpace(req.PathValue("bookId"))
-		if !novelFetchBookIDPattern.MatchString(bookID) {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "非法的书籍ID"})
-			return
-		}
-		document, err := store.GetDocument(req.Context(), identity.Username, bookID)
-		if errors.Is(err, novelfetchworkshop.ErrNotFound) {
-			writeJSON(w, http.StatusNotFound, map[string]any{"error": "任务不存在"})
-			return
-		}
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取任务失败"})
-			return
-		}
-		document, err = hydrateNovelFetchDocument(req.Context(), store, identity.Username, document)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取正文失败"})
-			return
-		}
-		if strings.TrimSpace(document.OriginalRaw) == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "没有可恢复的原始正文"})
-			return
-		}
-		processed := novelfetchworkshop.ProcessRawText(document.OriginalRaw, document.MaxTxt)
-		document.Original = processed.ProcessedText
-		document.ProcessedText = processed.ProcessedText
-		document.OriginalRawChars = processed.OriginalRawChars
-		document.ProcessedChars = processed.ProcessedChars
-		document.MaxTxt = processed.MaxTxt
-		if document.Meta == nil {
-			document.Meta = map[string]any{}
-		}
-		document.Meta["originalStatus"] = "restored"
-		if err := persistNovelFetchBodies(req.Context(), store, identity.Username, &document, document.OriginalRaw, document.ProcessedText); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存恢复正文失败"})
-			return
-		}
-		if err := store.PutDocument(req.Context(), identity.Username, document); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存恢复结果失败"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"task": document})
+		restoreWorkshopOriginal(w, req, store, func(modelRequest *http.Request) (novelfetchworkshop.RewriteProvider, error) {
+			// An explicit saved task model cannot fall back to the account's
+			// static/default provider when its resolver cannot supply it.
+			if novelfetchworkshop.ProcessTextModel(modelRequest.Context()) != "" {
+				if rewriteResolver == nil {
+					return nil, errors.New("所选任务模型不可用")
+				}
+				identity, _ := BridgeIdentityFromContext(modelRequest.Context())
+				provider, err := rewriteResolver(modelRequest.Context(), identity.Username)
+				if err == nil && provider == nil {
+					err = errors.New("所选任务模型不可用")
+				}
+				return provider, err
+			}
+			return resolveRewriteProvider(modelRequest)
+		})
 	})
 
 	mux.HandleFunc("POST /api/novel-fetch-workshop/tasks/{bookId}/generate-ai", func(w http.ResponseWriter, req *http.Request) {
@@ -4104,8 +4088,8 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求内容无效"})
 			return
 		}
-		if input.Count < 0 || input.Count > 20 {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "AI 数量须为 1 到 20"})
+		if input.Count < 0 || input.Count > novelfetchworkshop.MaxAIVersions {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "AI 数量须为 1 到 5"})
 			return
 		}
 		queueWorkshopGenerate(w, req, store, queue, input.Count)
@@ -4786,7 +4770,7 @@ func saveNovelFetchConfig(w http.ResponseWriter, req *http.Request, store novelf
 	// cannot silently override a newly saved flat setting at execution time.
 	settings = cloneAnyMap(settings)
 	appPatch := cloneAnyMap(mapOrEmpty(settings["appConfig"]))
-	for _, key := range []string{"rewrite", "layout", "workflow", "fetch", "sensitive_ai", "storage", "parser", "work_form", "web_submit", "text_model_id", "processing_rule_prompt", "processing_rule_scope"} {
+	for _, key := range []string{"ai", "rewrite", "layout", "workflow", "fetch", "sensitive_ai", "storage", "parser", "work_form", "web_submit", "text_model_id", "processing_rule_prompt", "processing_rule_scope"} {
 		if value, supplied := settings[key]; supplied {
 			if flat, ok := value.(map[string]any); ok {
 				appPatch[key] = mergeWorkshopConfig(flat, mapOrEmpty(appPatch[key]))
@@ -4857,7 +4841,7 @@ func novelFetchClassificationResolved(document novelfetchworkshop.Document) bool
 }
 
 // canonicalNovelFetchAIVersion maps aliases such as ai01/ai001 to the
-// canonical ai1..ai20 identifier. Anything outside that range is rejected so a
+// canonical ai1..ai5 identifier. Anything outside that range is rejected so a
 // single job cannot request an unbounded number of AI rewrites per book.
 func canonicalNovelFetchAIVersion(value string) (string, bool) {
 	name := strings.ToLower(strings.TrimSpace(value))
@@ -4865,7 +4849,7 @@ func canonicalNovelFetchAIVersion(value string) (string, bool) {
 		return "", false
 	}
 	index, err := strconv.Atoi(strings.TrimPrefix(name, "ai"))
-	if err != nil || index < 1 || index > 20 {
+	if err != nil || index < 1 || index > novelfetchworkshop.MaxAIVersions {
 		return "", false
 	}
 	return "ai" + strconv.Itoa(index), true
@@ -4893,7 +4877,7 @@ func normalizeNovelFetchAIVersions(values []string) ([]string, error) {
 		}
 		canonical, ok := canonicalNovelFetchAIVersion(value)
 		if !ok {
-			return nil, fmt.Errorf("不支持的AI版本：%s（仅支持 ai1 到 ai20）", value)
+			return nil, fmt.Errorf("不支持的AI版本：%s（仅支持 ai1 到 ai5）", value)
 		}
 		if seen[canonical] {
 			continue
@@ -5126,6 +5110,7 @@ func publicNovelFetchConfig(input map[string]any) map[string]any {
 }
 
 func novelFetchTaskDetailPayload(document novelfetchworkshop.Document) map[string]any {
+	document = safeNovelFetchDocumentErrors(document)
 	raw, _ := json.Marshal(document)
 	payload := map[string]any{}
 	_ = json.Unmarshal(raw, &payload)
@@ -5142,6 +5127,7 @@ func novelFetchTaskDetailPayload(document novelfetchworkshop.Document) map[strin
 }
 
 func legacyNovelFetchTask(document novelfetchworkshop.Document) map[string]any {
+	document = safeNovelFetchDocumentErrors(document)
 	raw, _ := json.Marshal(document)
 	result := map[string]any{}
 	_ = json.Unmarshal(raw, &result)

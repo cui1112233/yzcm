@@ -51,6 +51,20 @@ test('the visual system provides glass energy motion and reduced-motion fallback
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
 });
 
+test('long personal-center settings scroll inside the fixed viewport shell', () => {
+  const css = read('shared/styles/account-center-pixel-parity.css');
+  assert.match(css, /\.pc-shell\s*\{[^}]*height:\s*100dvh/s);
+  assert.match(css, /\.pc-main\s*\{[^}]*overflow-y:\s*auto/s);
+});
+
+test('personal-center glass stays neutral and responsive without zoom scaling', () => {
+  const css = read('shared/styles/account-center-pixel-parity.css');
+  assert.match(css, /--pc-glass-1:\s*rgba\(5,\s*9,\s*18,\s*\.24\)/);
+  assert.match(css, /--pc-glass-2:\s*rgba\(8,\s*13,\s*24,\s*\.34\)/);
+  assert.doesNotMatch(css, /zoom:\s*(?:1\.125|1\.5)/);
+  assert.match(css, /grid-template-columns:\s*repeat\(12,\s*minmax\(0,\s*1fr\)\)/);
+});
+
 test('all seven approved pages stay inside the common account-center page contract', () => {
   for (const file of [
     'user/pages/AccountOverviewPage.jsx',
@@ -71,14 +85,47 @@ test('team governance uses the approved 团队管理 title consistently', () => 
   assert.doesNotMatch(team, /title="组员管理"/);
 });
 
-test('team and account governance share the designed summary, filter, directory and actions regions', () => {
+test('team and account governance keep separate approved information hierarchies', () => {
   const source = read('user/pages/AccountRolePage.jsx');
-  for (const region of ['pc-governance-summary', 'pc-governance-filter', 'pc-governance-directory', 'pc-governance-actions']) {
+  for (const region of ['pc-team-hero', 'pc-team-workspace', 'pc-accounts-notice', 'pc-accounts-filters', 'pc-accounts-directory']) {
     assert.match(source, new RegExp(region));
   }
   assert.match(source, /teamsOnly\s*\?\s*['"]pc-team['"]\s*:\s*['"]pc-accounts['"]/);
   assert.match(source, /RoleBadge/);
   assert.doesNotMatch(source, /className="admin-page account-role-page"/);
+});
+
+test('team management has the approved team hero, member workspace and real-consumption ranking', () => {
+  const source = read('user/pages/AccountRolePage.jsx');
+  for (const region of ['pc-team-hero', 'pc-team-workspace', 'pc-team-ranking', 'pc-team-audit']) {
+    assert.match(source, new RegExp(region));
+  }
+  assert.match(source, /monthConsumption/);
+});
+
+test('team summary keeps full energy values at common 1280px desktop width', () => {
+  const css = read('shared/styles/account-center-pixel-parity.css');
+  assert.match(css, /@media \(max-width: 1440px\)[\s\S]*?\.pc-team-hero\s*\{[^}]*grid-template-columns:\s*minmax\(180px,\s*1\.25fr\)\s+repeat\(3,\s*minmax\(110px,\s*\.7fr\)\)\s+auto/);
+  assert.match(css, /@media \(max-width: 1440px\)[\s\S]*?\.pc-team-hero\s*>\s*div\s*\{[^}]*padding-inline:\s*14px/);
+});
+
+test('account governance follows the approved notice, four metrics, filters and team accordion hierarchy', () => {
+  const source = read('user/pages/AccountRolePage.jsx');
+  for (const region of ['pc-accounts-notice', 'pc-accounts-metrics', 'pc-accounts-filters', 'pc-accounts-team']) {
+    assert.match(source, new RegExp(region));
+  }
+});
+
+test('account governance actions wrap instead of clipping at 1280px', () => {
+  const css = read('shared/styles/account-center-pixel-parity.css');
+  assert.match(css, /@media \(max-width: 1440px\)[\s\S]*?\.pc-accounts-filters\s*>\s*\.ant-space\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/);
+});
+
+test('platform energy keeps the approved notice, metrics, analysis, table and detail hierarchy', () => {
+  const source = read('user/pages/EnergyBillingPage.jsx');
+  for (const region of ['pc-platform-notice', 'pc-platform-metrics', 'pc-platform-analysis', 'pc-platform-team-table', 'pc-platform-detail']) {
+    assert.match(source, new RegExp(region));
+  }
 });
 
 test('API configuration has distinct manager and founder visual contracts', () => {
@@ -94,6 +141,7 @@ test('API configuration has distinct manager and founder visual contracts', () =
   assert.match(settings, /添加自定义模型/);
   assert.match(presetModal, /className="pc-api-modal"/);
   assert.match(customModal, /className="pc-api-modal"/);
-  const css = read('shared/styles/account-center-pixel-parity.css');
-  assert.match(css, /\.pc-api-founder-panel \.ac-platform-preset-grid\s*\{[^}]*display:\s*grid/s);
+  assert.doesNotMatch(page, /<Panel title="平台预设模型"/);
+  assert.match(settings, /选择 YZCM 模型/);
+  assert.match(settings, /api-catalog-credential/);
 });

@@ -45,6 +45,23 @@ test('exposes the YZCM API console entry in the sidebar', () => {
   assert.match(source, /YZCM API/);
 });
 
+test('uses the searchable authorized account switcher instead of free-text usernames', () => {
+  const source = fs.readFileSync(sourcePath, 'utf8');
+
+  assert.match(source, /<AccountSwitchMenu status=\{impersonation\} onSwitched=\{reloadForAccountSwitch\} \/>/);
+  assert.doesNotMatch(source, /placeholder="输入目标账号用户名"/);
+});
+
+test('keeps sidebar actions visible while navigation and page content scroll independently', () => {
+  const css = fs.readFileSync(cssPath, 'utf8');
+
+  assert.match(css, /\.pc-sidebar\s*\{[^}]*overflow:\s*hidden/s);
+  assert.match(css, /\.pc-sidebar-profile\s*\{[^}]*flex:\s*0\s+0\s+auto/s);
+  assert.match(css, /\.pc-sidebar-nav\s*\{[^}]*flex:\s*1\s+1\s+auto[^}]*overflow-y:\s*auto/s);
+  assert.match(css, /\.pc-sidebar-actions\s*\{[^}]*flex:\s*0\s+0\s+auto/s);
+  assert.match(css, /\.pc-main\s*\{[^}]*overflow-y:\s*auto/s);
+});
+
 test('pixel-parity shell is the only account-center visual authority', () => {
   const css = fs.readFileSync(cssPath, 'utf8');
   const main = fs.readFileSync(mainPath, 'utf8');

@@ -1,6 +1,7 @@
 import { Avatar, Progress } from 'antd';
 import { canonicalRoleLabel } from './accountCenterMemberState.js';
 import RoleEnergyIcon from '../components/RoleEnergyIcon.jsx';
+import PersonalCenterIcon from '../components/PersonalCenterIcon.jsx';
 
 const ROLE_META = {
   开发创始: { style: 'dev' },
@@ -55,8 +56,9 @@ export function RoleBadge({ canonicalRole, compact = false }) {
 }
 
 export function PageHeader({ title, subtitle, actions }) {
+  const icon = ({ '账户总览': 'home', '个人资料': 'profile', '能量与账单': 'layers', '全平台团队消耗': 'trend', '账号安全': 'security', '团队管理': 'team', '账号与角色': 'accounts', 'API 配置': 'api' })[title];
   return <div className="ac-page-header">
-    <div><h1>{title}</h1>{subtitle ? <p>{subtitle}</p> : null}</div>
+    <div>{icon ? <PersonalCenterIcon name={icon} /> : null}<h1>{title}</h1>{subtitle ? <p>{subtitle}</p> : null}</div>
     {actions ? <div className="ac-page-actions">{actions}</div> : null}
   </div>;
 }

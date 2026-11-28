@@ -341,7 +341,7 @@ func RegisterBatchRewriteConfigCompat(root *http.ServeMux, middleware BridgeAuth
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取提交配置失败"})
 			return
@@ -402,7 +402,7 @@ func RegisterBatchRewriteConfigCompat(root *http.ServeMux, middleware BridgeAuth
 			}
 			delete(body.Settings, "password")
 		}
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取提交配置失败"})
 			return
@@ -410,7 +410,7 @@ func RegisterBatchRewriteConfigCompat(root *http.ServeMux, middleware BridgeAuth
 		appConfig := mapOrEmpty(settings["appConfig"])
 		appConfig["web_submit"] = body.Settings
 		settings["appConfig"] = appConfig
-		if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+		if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, settings); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存提交配置失败"})
 			return
 		}
@@ -424,10 +424,12 @@ func RegisterBatchRewriteConfigCompat(root *http.ServeMux, middleware BridgeAuth
 			return
 		}
 		session := readUploadTargetSession(usersDir, identity.Username)
-		accountUsername := ""
-		if settings, err := store.GetConfig(req.Context(), identity.Username); err == nil {
-			accountUsername = firstText(mapOrEmpty(mapOrEmpty(settings["appConfig"])["web_submit"])["username"], session["targetUsername"])
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取提交配置失败"})
+			return
 		}
+		accountUsername := firstText(mapOrEmpty(mapOrEmpty(settings["appConfig"])["web_submit"])["username"], session["targetUsername"])
 		credential := resolveTargetCredential(req.Context(), session, accountUsername, targets...)
 		loggedIn := credential.verified()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": loggedIn, "credential": credential, "checks": []any{map[string]any{"name": "目标站登录会话", "ok": loggedIn, "detail": credential.Message}, map[string]any{"name": "上传接口", "ok": true, "detail": "/tttadmin/api/zbooklist_upload.php"}}})
@@ -481,7 +483,7 @@ func RegisterBatchRewriteConfigCompat(root *http.ServeMux, middleware BridgeAuth
 			records = records[:200]
 		}
 		groups := []any{}
-		if settings, configErr := store.GetConfig(req.Context(), identity.Username); configErr == nil {
+		if settings, configErr := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username); configErr == nil {
 			groups = append(groups, arrayOrEmpty(settings["site_submit_groups"])...)
 			app := mapOrEmpty(settings["appConfig"])
 			groups = append(groups, arrayOrEmpty(app["site_submit_groups"])...)
@@ -506,7 +508,7 @@ func RegisterBatchRewriteConfigCompat(root *http.ServeMux, middleware BridgeAuth
 		}
 		_ = json.NewDecoder(http.MaxBytesReader(w, req.Body, 16<<10)).Decode(&body)
 		session := readUploadTargetSession(usersDir, identity.Username)
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取提交配置失败"})
 			return
@@ -554,7 +556,7 @@ func RegisterBatchRewriteConfigCompat(root *http.ServeMux, middleware BridgeAuth
 		settings["appConfig"] = app
 		if body.Persist == nil || *body.Persist {
 			settings["styles"] = newNames
-			if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+			if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, settings); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存风格目录失败"})
 				return
 			}
@@ -573,7 +575,7 @@ func RegisterBatchRewriteConfigCompat(root *http.ServeMux, middleware BridgeAuth
 		}
 		_ = json.NewDecoder(http.MaxBytesReader(w, req.Body, 16<<10)).Decode(&body)
 		session := readUploadTargetSession(usersDir, identity.Username)
-		settings, err := store.GetConfig(req.Context(), identity.Username)
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(req.Context(), store, identity.Username)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取提交配置失败"})
 			return
@@ -642,7 +644,7 @@ func RegisterBatchRewriteConfigCompat(root *http.ServeMux, middleware BridgeAuth
 		app["web_submit"] = web
 		settings["appConfig"] = app
 		if body.Persist == nil || *body.Persist {
-			if err := store.PutConfig(req.Context(), identity.Username, settings); err != nil {
+			if err := novelfetchworkshop.WriteWorkflowConfig(req.Context(), store, identity.Username, settings); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存配置档失败"})
 				return
 			}
@@ -684,6 +686,7 @@ func targetConfigItems(payload map[string]any) ([]any, bool) {
 // Without this adapter the API had the data, but every visible column read an
 // empty legacy field name.
 func legacyBatchRewriteTask(document novelfetchworkshop.Document) map[string]any {
+	document = safeNovelFetchDocumentErrors(document)
 	task := map[string]any{}
 	for key, value := range document.Meta {
 		task[key] = value

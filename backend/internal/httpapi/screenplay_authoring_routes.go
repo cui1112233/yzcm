@@ -101,6 +101,10 @@ func RegisterScreenplayAuthoringRoutes(mux *http.ServeMux, auth BridgeAuth, stor
 }
 
 func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth BridgeAuth, store screenplay.Store, repo screenplay.AuthoringRepository, resolver func(context.Context, string, string) (batchfactoryv11.DirectorProvider, error), receipts screenplay.ScriptBatchReceipts, mediaStore ...screenplay.MediaStore) {
+	registerScreenplayAuthoringSessionRoutes(mux, auth, store, repo, resolver, receipts, nil, mediaStore...)
+}
+
+func registerScreenplayAuthoringSessionRoutes(mux *http.ServeMux, auth BridgeAuth, store screenplay.Store, repo screenplay.AuthoringRepository, resolver func(context.Context, string, string) (batchfactoryv11.DirectorProvider, error), receipts screenplay.ScriptBatchReceipts, channel *ScreenplaySessionChannel, mediaStore ...screenplay.MediaStore) {
 	var media screenplay.MediaStore
 	if len(mediaStore) > 0 {
 		media = mediaStore[0]
@@ -144,8 +148,20 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 		}
 		return true
 	}
+	registerAssistantReferenceRoutes(svc, auth, handle, decode)
 	if sessionRepo, ok := repo.(*screenplay.MySQLAuthoringRepository); ok {
-		registerAssistantSessionManagement(sessionRepo, handle, decode)
+		generatorFor := func(r *http.Request, actor string) screenplay.TextGenerator {
+			if channel == nil {
+				return nil
+			}
+			authority := newSessionAuthority(auth, r, actor)
+			return sessionChannelGenerator{channel: channel, repo: sessionRepo, subject: actor, verify: authority.verify, commitGuard: authority.commit}
+		}
+		registerAssistantSessionManagement(sessionRepo, handle, decode, func(r *http.Request, owner, actor string) bool {
+			return sessionChatAvailable(r.Context(), svc, generatorFor(r, actor), owner, r.PathValue("id"), actor)
+		})
+		registerSessionProposals(svc, sessionRepo, handle, decode)
+		handle("POST /api/comic-screenplays/projects/{id}/assistant/sessions/{session}/chat", "generate", sessionChatHandler(sessionRepo, svc, decode, generatorFor, auth))
 	}
 	respond := func(w http.ResponseWriter, st screenplay.AuthoringState, e error, actor string) {
 		if e != nil {
@@ -442,14 +458,43 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 		path := path
 		handle("POST "+base+"/"+path, "generate", func(w http.ResponseWriter, r *http.Request, o, a string) {
 			var in struct {
-				Expected    int64  `json:"expected_revision"`
-				Instruction string `json:"instruction"`
-				Message     string `json:"message"`
-				Action      string `json:"action"`
-				Confirmed   bool   `json:"confirmed"`
+				Expected    int64                                   `json:"expected_revision"`
+				Instruction string                                  `json:"instruction"`
+				Message     string                                  `json:"message"`
+				Action      string                                  `json:"action"`
+				Confirmed   bool                                    `json:"confirmed"`
+				References  []screenplay.AssistantReferenceSelector `json:"references,omitempty"`
 			}
 			if !decode(w, r, &in) {
 				return
+			}
+			if path != "assistant/chat" && len(in.References) > 0 {
+				authoringError(w, screenplay.ErrInvalidArgument)
+				return
+			}
+			var authority sessionAuthorityCallbacks
+			var attachmentAccess assistantAttachmentAccess
+			hasAttachments := hasAssistantAttachmentSelectors(in.References)
+			textResolver := resolver
+			operationID := ""
+			if len(in.References) > 0 {
+				if hasAttachments {
+					var err error
+					attachmentAccess, err = assistantAttachmentRequestAccess(auth, r, svc, o, a, "default", true)
+					if err != nil {
+						authoringError(w, err)
+						return
+					}
+					authority = sessionAuthorityCallbacks{verify: attachmentAccess.VerifyPrepare, commit: attachmentAccess.CommitPrepare}
+					textResolver = freezeAssistantAttachmentResolver(resolver)
+					operationID = newAgentID("reference-operation")
+				} else {
+					authority = newSessionAuthority(auth, r, a)
+				}
+				if err := authority.verify(r.Context()); err != nil {
+					authoringError(w, err)
+					return
+				}
 			}
 			if path == "chapters/{chapter}/script" {
 				authoring, err := svc.Load(r.Context(), o, r.PathValue("id"))
@@ -512,17 +557,40 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 				if e != nil {
 					return e
 				}
+				var references []screenplay.AssistantReferenceSnapshot
+				if len(in.References) > 0 {
+					view, err := screenplay.LoadAssistantReferenceView(r.Context(), store, repo, o, st.ProjectID)
+					if err != nil {
+						return err
+					}
+					if hasAttachments {
+						references, err = screenplay.ResolveAssistantReferencesScoped(r.Context(), view, assistantReferenceAttachmentRepository(store), attachmentAccess.Scope, in.References, attachmentAccess.ReadGuard)
+					} else {
+						references, err = view.Resolve(in.References)
+					}
+					if err != nil {
+						return err
+					}
+				}
 				system := prompt.ScreenplayAuthoringAssistant
 				user := in.Message
 				jsonResponse := true
 				var chapterIndex = -1
-				// 会话压缩：折叠过长历史，保留最近若干条原文。仅作用于助手会话消息，
-				// 不改作品内容、不消耗额度。压缩结果写回 st.Messages 后随本次 Save 落库。
+				// 有引用的历史保留原消息和快照；模型单独使用压缩视图。
+				// 从未含引用的旧会话继续沿用原有持久化折叠行为。
+				hasReferenceHistory := false
+				for _, message := range st.Messages {
+					if len(message.References) > 0 || message.ReferenceOperationID != "" {
+						hasReferenceHistory = true
+						break
+					}
+				}
 				conversation, compacted := screenplay.CompactAssistantMessages(st.Messages, screenplay.AssistantCompactConfig{})
-				if compacted && path == "assistant/chat" {
+				if compacted && path == "assistant/chat" && !hasReferenceHistory && !hasAttachments {
 					st.Messages = conversation
 				}
-				contextData := map[string]any{"project": project, "chapters": st.Chapters, "conversation": conversation}
+				modelConversation := assistantReferenceModelHistory(conversation)
+				contextData := map[string]any{"project": project, "chapters": st.Chapters, "conversation": modelConversation}
 				var shots []screenplay.Shot
 				active, activeErr := screenplay.ReadAssistantActiveDocument(r.Context(), store, o, st.ProjectID)
 				if activeErr != nil && path == "assistant/chat" {
@@ -575,13 +643,29 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 				}
 				b, _ := json.Marshal(contextData)
 				request := screenplay.TextRequest{Model: project.ModelID, SystemPrompt: system, UserPrompt: string(b) + "\n用户要求：" + user, JSONResponse: jsonResponse, MaxOutputTokens: 16000, Temperature: 0.4}
+				if len(references) > 0 {
+					// Reuse the bounded whitelist for reference-bearing default chats.
+					targets, err := captureSessionEditView(r.Context(), store, o, st.ProjectID)
+					if err != nil {
+						return err
+					}
+					request, err = sessionChatPromptWithReferences(screenplay.AssistantSessionRequest{Mode: "confirm", Chapters: st.Chapters, History: screenplay.AssistantSessionHistory{Messages: conversation, Proposals: st.Proposals}}, project, active, targets, user, references)
+					if err != nil {
+						return err
+					}
+				}
 				if chapterIndex >= 0 {
 					request, e = screenplay.BuildChapterTextRequest(project, st.Chapters[chapterIndex], user, string(b))
 					if e != nil {
 						return e
 					}
 				}
-				result, e := (screenplayTextGenerator{owner: o, resolver: resolver}).Generate(r.Context(), request)
+				var result screenplay.TextResponse
+				if len(references) > 0 {
+					result, e = generateReferenceText(r.Context(), o, textResolver, request)
+				} else {
+					result, e = (screenplayTextGenerator{owner: o, resolver: resolver}).Generate(r.Context(), request)
+				}
 				if e != nil {
 					return e
 				}
@@ -633,11 +717,28 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 							responseData = map[string]any{"review_tool": parsed.Tool}
 						}
 						responseData["tool_result"] = detail
+						if len(references) > 0 {
+							responseData = map[string]any{"tool_result": detail, "references": references}
+							responseSystem += prompt.ScreenplayAssistantReferences
+						}
 						payload, err := json.Marshal(responseData)
 						if err != nil {
 							return err
 						}
-						retry, retryErr := (screenplayTextGenerator{owner: o, resolver: resolver}).Generate(r.Context(), screenplay.TextRequest{Model: project.ModelID, SystemPrompt: responseSystem, UserPrompt: string(payload) + "\n用户要求：" + user, JSONResponse: true, MaxOutputTokens: 16000, Temperature: 0.4})
+						retryRequest := screenplay.TextRequest{Model: project.ModelID, SystemPrompt: responseSystem, UserPrompt: string(payload) + "\n用户要求：" + user, JSONResponse: true, MaxOutputTokens: 16000, Temperature: 0.4}
+						if len(references) > 0 {
+							retryRequest.RequestByteLimit = sessionPromptBytes
+							if err := checkReferenceRequestBudget(retryRequest); err != nil {
+								return err
+							}
+						}
+						var retry screenplay.TextResponse
+						var retryErr error
+						if len(references) > 0 {
+							retry, retryErr = generateReferenceText(r.Context(), o, textResolver, retryRequest)
+						} else {
+							retry, retryErr = (screenplayTextGenerator{owner: o, resolver: resolver}).Generate(r.Context(), retryRequest)
+						}
 						if retryErr != nil {
 							return retryErr
 						}
@@ -707,12 +808,12 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 					if strings.TrimSpace(parsed.Question) != "" {
 						// 主动追问落为独立消息，前端据此渲染追问卡片；不改任何作品数据。
 						st.Messages = append(st.Messages,
-							screenplay.AssistantMessage{Role: "user", Content: user},
+							screenplay.AssistantMessage{Role: "user", Content: user, References: references, ReferenceOperationID: operationID},
 							reply,
 							screenplay.AssistantMessage{Role: "assistant", Content: strings.TrimSpace(parsed.Question), Kind: screenplay.AssistantMessageKindQuestion})
 					} else {
 						st.Messages = append(st.Messages,
-							screenplay.AssistantMessage{Role: "user", Content: user},
+							screenplay.AssistantMessage{Role: "user", Content: user, References: references, ReferenceOperationID: operationID},
 							reply)
 					}
 					// 导航建议：校验入口标识后附加到最近一条普通助手消息，供前端点击跳转。
@@ -725,7 +826,19 @@ func registerScreenplayAuthoringRoutesWithReceipts(mux *http.ServeMux, auth Brid
 						}
 					}
 				}
-				out, e = svc.Save(r.Context(), o, st.ProjectID, st, in.Expected)
+				if len(references) > 0 {
+					mysql, ok := repo.(*screenplay.MySQLAuthoringRepository)
+					if !ok {
+						return screenplay.ErrInvalidState
+					}
+					if hasAttachments {
+						out, e = mysql.SaveAssistantReferencesScoped(r.Context(), st, attachmentAccess.Scope, in.Expected, operationID, user, references, authority.commit)
+					} else {
+						out, e = mysql.SaveAssistantReferences(r.Context(), st, a, in.Expected, references, authority.commit)
+					}
+				} else {
+					out, e = svc.Save(r.Context(), o, st.ProjectID, st, in.Expected)
+				}
 				if e == nil && path == "chapters/{chapter}/script" {
 					e = screenplay.InvalidateAuthoringContent(r.Context(), store, o, st.ProjectID, "chapter")
 				}

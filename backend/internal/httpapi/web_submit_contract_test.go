@@ -30,6 +30,7 @@ func (c *contractChangedConnector) GetSubmission(ctx context.Context, session vi
 	if c.receiptProof {
 		receipt.ReadbackRaw = map[string]any{
 			"bookid": c.lastInput.BookID, "content_sha256": fmt.Sprintf("%x", sha256.Sum256(c.lastInput.Content)),
+			"addtime": time.Now().In(time.FixedZone("Asia/Shanghai", 8*60*60)).Format(time.DateTime),
 		}
 	}
 	return receipt, err

@@ -347,7 +347,10 @@ func (s *MemoryStore) ListConfigOwners(_ context.Context) ([]string, error) {
 func (s *MemoryStore) PutBody(_ context.Context, owner string, body BodyRecord) (BodyRef, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.putBodyLocked(owner, body)
+}
 
+func (s *MemoryStore) putBodyLocked(owner string, body BodyRecord) (BodyRef, error) {
 	body.BookID = strings.TrimSpace(body.BookID)
 	body.VersionID = strings.TrimSpace(body.VersionID)
 	if body.State == "" {

@@ -8,6 +8,10 @@ export function getAccountImpersonation(signal, request = apiRequest) {
   return request(`${path}/current`, { ...options, method: 'GET', signal, cache: 'no-store' });
 }
 
+export function getAccountImpersonationTargets(request = apiRequest) {
+  return request(`${path}/targets`, { ...options, method: 'GET', cache: 'no-store' });
+}
+
 export async function startAccountImpersonation(username, request = apiRequest) {
   const result = await request(path, { ...options, method: 'POST', body: JSON.stringify({ username }) });
   blockPageIdentityUntilReload();

@@ -293,7 +293,7 @@ function RestrictedApiIntegrationSettings({
       </div>
       <div className="api-integration-toolbar pc-api-manager-toolbar">
         <span className="api-integration-count"><ShieldCheck size={14} aria-hidden="true" />已展示 {selected.length} 个模型</span>
-        <Button className="api-channel-open api-preset-open" size="small" onClick={() => setPresetOpen(true)}>自定义预设</Button>
+        <Button className="api-channel-open api-preset-open" size="small" onClick={() => setPresetOpen(true)}>选择 YZCM 模型</Button>
         <Button size="small" icon={<RefreshCw size={14} />} loading={quotaLoading} onClick={() => {
           const componentEpoch = epochRef.current;
           void onRefreshQuotas?.({ isActive: () => isActive(componentEpoch) });
@@ -884,8 +884,8 @@ function FullApiIntegrationSettings({
       : '';
     const expanded = expandedCatalog[model.id] === true;
     const saving = catalogModelSavingId === model.id;
-    // 用户自建的目录模型：编辑入口走统一表单，Key 也只在表单里改，
-    // 避免同一条数据出现两个可写位置。带适配器的目录模型仍保留行内 Key。
+    // 所有目录模型都在卡片里直接维护 Key；用户自建模型额外提供“编辑”，
+    // 地址与模型名留在弹窗里，避免把卡片撑成旧版密集表单。
     const userManaged = isUserManagedCatalogModel(model, platformPresetIdSet);
     return (
       <div className="api-channel-card is-catalog" key={`catalog-${model.id}`}>
@@ -904,23 +904,21 @@ function FullApiIntegrationSettings({
           {model.modelId ? <>模型 <code>{model.modelId}</code></> : null}
           {!model.baseUrl && !model.modelId ? '该模型使用平台适配器，不需要地址与模型名' : ''}
         </p>
-        {model.hasCredential && !userManaged ? (
-          <label className="api-channel-preset-line api-catalog-credential">
-            <span>目录 Key</span>
-            <Input.Password
-              value={catalogKeyDrafts[model.id] || ''}
-              prefix={<KeyRound size={15} />}
-              disabled={saving}
-              placeholder={saving ? '保存中…' : '已保存；输入新 Key 覆盖，输入后清空并离开即停用'}
-              aria-label={`${model.displayName || model.id} API Key`}
-              onChange={event => {
-                catalogKeyTouchedRef.current.add(model.id);
-                setCatalogKeyDrafts(current => ({ ...current, [model.id]: event.target.value }));
-              }}
-              onBlur={() => commitCatalogKey(model)}
-            />
-          </label>
-        ) : null}
+        <label className="api-channel-preset-line api-catalog-credential">
+          <span>目录 Key</span>
+          <Input.Password
+            value={catalogKeyDrafts[model.id] || ''}
+            prefix={<KeyRound size={15} />}
+            disabled={saving}
+            placeholder={saving ? '保存中…' : model.hasCredential ? '已保存；输入新 Key 覆盖，输入后清空并离开即停用' : '输入 API Key'}
+            aria-label={`${model.displayName || model.id} API Key`}
+            onChange={event => {
+              catalogKeyTouchedRef.current.add(model.id);
+              setCatalogKeyDrafts(current => ({ ...current, [model.id]: event.target.value }));
+            }}
+            onBlur={() => commitCatalogKey(model)}
+          />
+        </label>
         {mergedChannels.length ? (
           <div className="api-catalog-merged">
             <button
@@ -1039,8 +1037,8 @@ function FullApiIntegrationSettings({
       <div className="api-integration-groups pc-api-founder-groups">
         {groups.map(group => {
           const channelDef = API_CHANNEL_PRESETS[group.id];
-          // 渠道组默认展开；非渠道组是纯配置项，默认收起。
-          const open = collapsed[group.id] !== undefined ? collapsed[group.id] !== true : Boolean(channelDef);
+          // 设计稿首屏只展开文本模型，其余模型组按需进入，避免回到旧版全展开长表单。
+          const open = collapsed[group.id] !== undefined ? collapsed[group.id] !== true : group.id === 'text';
           const groupFields = group.fields.filter(field => !field.subheading);
           const groupConfigured = groupFields.filter(field => hasValue(field.key)).length;
           // 顶部计数与组内计数用同一份合并结果，避免出现“渠道 9 / 实际 8 张卡”。

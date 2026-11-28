@@ -41,3 +41,21 @@ test('定时制作必须选择未来时间，并明确发出定时或取消请�
 });
 
 test('媒体工程包导入带时间线版本，成片通过登录请求下载',async()=>{const {importComicMediaPackage,listComicMediaVoices,downloadComicMediaResult}=await import('./comicScreenplayWorkflow.js');const calls=[];const request=async(path,options)=>{calls.push([path,options]);return {};};await importComicMediaPackage('comic-1',new Blob(['zip']),7,request);assert.equal(calls[0][0],'/api/comic-screenplays/projects/comic-1/media/import');assert.equal(calls[0][1].body.get('expectedRevision'),'7');await listComicMediaVoices('comic-1',request);assert.equal(calls[1][0],'/api/comic-screenplays/projects/comic-1/media/voices');await downloadComicMediaResult('comic-1','export-1',request);assert.deepEqual(calls[2],['/api/comic-screenplays/projects/comic-1/media/exports/export-1',{responseType:'blob'}]);});
+
+test('138生产续批只发送当前请求标识和明确确认，不借用启动入口',async()=>{
+  const {continueComicProductionStoryboard}=await import('./comicScreenplayWorkflow.js');
+  const calls=[];const request=async(path,options)=>{calls.push([path,JSON.parse(options.body)]);return {};};
+  await assert.rejects(()=>continueComicProductionStoryboard('comic-1',{request_key:'batch-138'},request),/确认/);
+  await assert.rejects(()=>continueComicProductionStoryboard('comic-1',{confirmed:true},request),/请求/);
+  assert.equal(calls.length,0);
+  await continueComicProductionStoryboard('comic-1',{request_key:'batch-138',confirmed:true,ignored:'value'},request);
+  assert.deepEqual(calls,[['/api/comic-screenplays/projects/comic-1/production/storyboard/continue',{request_key:'batch-138',confirmed:true}]]);
+});
+
+test('138生产恢复只读取原请求回包，不发送继续或生成授权',async()=>{
+ const {recoverComicProductionStoryboard}=await import('./comicScreenplayWorkflow.js');
+ const calls=[];const request=async(path,options)=>{calls.push([path,JSON.parse(options.body)]);return {};};
+ await assert.rejects(()=>recoverComicProductionStoryboard('comic-1',{},request),/请求/);assert.equal(calls.length,0);
+ await recoverComicProductionStoryboard('comic-1',{request_key:'batch-138',confirmed:true,retry_of:'ignored'},request);
+ assert.deepEqual(calls,[['/api/comic-screenplays/projects/comic-1/production/storyboard/recover',{request_key:'batch-138'}]]);
+});

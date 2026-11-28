@@ -188,12 +188,19 @@ func workshopPendingReadbackMatches(receipt videomanagementconnector.Submission,
 	}
 	// If the connector supplies a creation time, stale content cannot prove
 	// that a new attempt using the same body was received.
-	return firstText(record["addtime"]) == "" || submissionMatchesAttempt(receipt, bookID, firstText(attempt["started_at"]))
+	if hasOperationEvidence {
+		return true
+	}
+	if recordBook != bookID {
+		return false
+	}
+	return firstText(record["addtime"]) != "" && submissionMatchesAttempt(receipt, bookID, firstText(attempt["started_at"]))
 }
 
 // Read the same durable events that submission workers write. Metadata-only
 // history belongs to imported tasks and is retained as a fallback.
 func workshopSubmitDiagnostic(document novelfetchworkshop.Document) map[string]any {
+	document = safeNovelFetchDocumentErrors(document)
 	logs := []any{}
 	for _, raw := range document.Logs {
 		entry := mapOrEmpty(raw)

@@ -159,7 +159,7 @@ test('account pages render scoped energy, preserve amount precision, and export 
         document.body.dataset.result = 'passed';
       })().catch(error => { document.body.dataset.result = 'failed'; document.body.dataset.error = error.message; });
     ` },
-    bundle: true, jsx: 'automatic', write: false, format: 'iife', platform: 'browser', loader: { '.css': 'empty' }
+    bundle: true, jsx: 'automatic', write: false, format: 'iife', platform: 'browser', loader: { '.css': 'empty', '.png': 'dataurl', '.webp': 'dataurl' }
   });
   const dir = mkdtempSync(path.join(tmpdir(), 'v88-energy-page-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

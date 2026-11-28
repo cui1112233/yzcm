@@ -216,6 +216,7 @@ type integrationTextProvider struct {
 	APIKey     string
 	Model      string
 	Client     *http.Client
+	Params     map[string]any
 }
 
 func (p *integrationTextProvider) Complete(ctx context.Context, input batchfactoryv11.TextCompletionRequest) (string, error) {
@@ -226,7 +227,9 @@ func (p *integrationTextProvider) Complete(ctx context.Context, input batchfacto
 		"temperature": input.Temperature,
 		"max_tokens":  input.MaxTokens,
 	}
-	batchfactoryv11.ApplyTextParameterOmissions(payload, input)
+	if err := batchfactoryv11.ApplyTextRequestParameters(payload, input, p.Params); err != nil {
+		return "", err
+	}
 	if !input.DisableJSONResponse {
 		payload["response_format"] = map[string]string{"type": "json_object"}
 	}
@@ -244,44 +247,26 @@ func (p *integrationTextProvider) Complete(ctx context.Context, input batchfacto
 	if client == nil {
 		client = safehttp.NewClientWithTimeout(300 * time.Second)
 	}
-	response, err := batchfactoryv11.SingleAttemptClient(ctx, client, request).Do(request)
+	response, err := batchfactoryv11.TextCompletionHTTPClient(ctx, client, request, input.Timeout).Do(request)
 	if err != nil {
-		return "", fmt.Errorf("渠道「%s」连接失败: %v", p.Label, err)
+		return "", batchfactoryv11.SafeProviderError(fmt.Errorf("渠道「%s」连接失败: %w", p.Label, err), p.APIKey)
 	}
 	defer response.Body.Close()
 	raw, readErr := io.ReadAll(io.LimitReader(response.Body, 8<<20))
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		snippet := strings.TrimSpace(string(raw))
+		snippet := batchfactoryv11.SafeProviderErrorText(strings.TrimSpace(string(raw)), p.APIKey)
 		if len(snippet) > 300 {
 			snippet = snippet[:300]
 		}
 		if batchfactoryv11.SingleAttempt(ctx) {
-			return "", &batchfactoryv11.DirectorHTTPError{StatusCode: response.StatusCode, Model: p.Model, Body: snippet}
+			return "", batchfactoryv11.SafeProviderError(&batchfactoryv11.DirectorHTTPError{StatusCode: response.StatusCode, Model: p.Model, Body: snippet}, p.APIKey)
 		}
-		return "", fmt.Errorf("渠道「%s」请求失败（HTTP %d）：%s", p.Label, response.StatusCode, snippet)
+		return "", batchfactoryv11.SafeProviderError(fmt.Errorf("渠道「%s」请求失败（HTTP %d）：%s", p.Label, response.StatusCode, snippet), p.APIKey)
 	}
 	if readErr != nil {
-		return "", fmt.Errorf("渠道「%s」响应读取失败", p.Label)
+		return "", batchfactoryv11.SafeProviderError(fmt.Errorf("渠道「%s」响应读取失败: %w", p.Label, errors.Join(batchfactoryv11.ErrTextResultUnknown, readErr)), p.APIKey)
 	}
-	var decoded struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-			Text string `json:"text"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(raw, &decoded); err != nil || len(decoded.Choices) == 0 {
-		return "", fmt.Errorf("渠道「%s」返回了无法识别的响应", p.Label)
-	}
-	content := strings.TrimSpace(decoded.Choices[0].Message.Content)
-	if content == "" {
-		content = strings.TrimSpace(decoded.Choices[0].Text)
-	}
-	if content == "" {
-		return "", fmt.Errorf("渠道「%s」没有返回文本内容", p.Label)
-	}
-	return content, nil
+	return batchfactoryv11.DecodeTextCompletionResponse(raw)
 }
 
 // ResolveIntegrationTextProvider 把 channel:/custom: 候选解析成可用的文本 provider。
@@ -307,7 +292,7 @@ func ResolveIntegrationTextProvider(ctx context.Context, userConfig *UserConfigS
 	}
 	return &integrationTextProvider{
 		UsageOwner: owner,
-		Metadata:   target.Metadata, Label: target.Label, Endpoint: endpoint, APIKey: target.Credential, Model: target.ModelID,
+		Metadata:   target.Metadata, Label: target.Label, Endpoint: endpoint, APIKey: target.Credential, Model: target.ModelID, Params: target.Params,
 	}, true, nil
 }
 

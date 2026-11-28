@@ -58,7 +58,8 @@ import (
 var novelFetchClassificationTimeout = 60 * time.Second
 
 type novelFetchRewriteAdapter struct {
-	provider batchfactoryv11.DirectorProvider
+	extraBody map[string]any
+	provider  batchfactoryv11.DirectorProvider
 }
 
 func (a novelFetchRewriteAdapter) ModelIdentity() string {
@@ -109,14 +110,20 @@ func (p ownerTextProvider) Complete(ctx context.Context, request batchfactoryv11
 }
 
 func (a novelFetchRewriteAdapter) Complete(ctx context.Context, request novelfetchworkshop.RewriteRequest) (string, error) {
-	callCtx, cancel := context.WithTimeout(batchfactoryv11.WithSingleAttempt(ctx), novelFetchClassificationTimeout)
+	timeout := request.Timeout
+	if timeout <= 0 {
+		timeout = 180 * time.Second
+	}
+	callCtx, cancel := context.WithTimeout(batchfactoryv11.WithSingleAttempt(ctx), timeout)
 	defer cancel()
 	return a.provider.Complete(callCtx, batchfactoryv11.TextCompletionRequest{
+		Timeout:             timeout,
 		SystemPrompt:        request.SystemPrompt,
 		UserPrompt:          request.UserPrompt,
 		Temperature:         request.Temperature,
 		MaxTokens:           request.MaxTokens,
-		DisableJSONResponse: true,
+		DisableJSONResponse: !request.JSONResponse,
+		ExtraBody:           novelFetchExtraParameters(a.extraBody, request.ExtraBody),
 	})
 }
 
@@ -214,7 +221,7 @@ func loadSubjectModelConfig(ctx context.Context, accounts accountcenter.Store, c
 	return novelfetchworkshop.ReadRuntimeConfig(ctx, catalog, owner)
 }
 
-func textGenderJudge(provider batchfactoryv11.DirectorProvider) novelfetchworkshop.AIGenderJudge {
+func textGenderJudge(provider batchfactoryv11.DirectorProvider, defaults ...map[string]any) novelfetchworkshop.AIGenderJudge {
 	if novelFetchTextProviderMissing(provider) {
 		return nil
 	}
@@ -222,10 +229,12 @@ func textGenderJudge(provider batchfactoryv11.DirectorProvider) novelfetchworksh
 		callCtx, cancel := context.WithTimeout(batchfactoryv11.WithSingleAttempt(ctx), novelFetchClassificationTimeout)
 		defer cancel()
 		return provider.Complete(callCtx, batchfactoryv11.TextCompletionRequest{
+			Timeout:             novelFetchClassificationTimeout,
 			SystemPrompt:        "你是小说男女频分类助手。只输出 JSON：{\"gender\":\"男频或女频\"}。必须从「男频」「女频」中选择最接近的一项，不要留空，不要输出 JSON 以外的内容。",
 			UserPrompt:          "请根据以下分类信息和正文片段判断小说男女频：分类=" + info.Category + "；题材=" + info.Genre + "；正文片段=" + genderTextExcerpt(info.Text),
 			Temperature:         0,
 			MaxTokens:           256,
+			ExtraBody:           novelFetchExtraParameters(defaults...),
 			DisableJSONResponse: false,
 		})
 	}
@@ -276,6 +285,7 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	migrations = append(migrations, storage.AuthMigrations()...)
 	migrations = append(migrations, storage.ScreenplayMigrations()...)
 	migrations = append(migrations, storage.NovelCreationMigrations()...)
+	migrations = append(migrations, storage.ScreenplayAssistantTextAttachmentMigrations()...)
 	if err := storage.RunMigrations(ctx, db, migrations); err != nil {
 		return nil, err
 	}
@@ -439,8 +449,19 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 		if providerErr != nil {
 			return nil, providerErr
 		}
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, novelFetchStore, owner)
+		if err != nil {
+			return nil, err
+		}
+		_, extraBody, err := novelfetchworkshop.AIRequestParameters(settings)
+		if err != nil {
+			return nil, err
+		}
+		if provider == nil && textProvider != nil {
+			provider = textProvider
+		}
 		if provider != nil {
-			return novelFetchRewriteAdapter{provider: provider}, nil
+			return novelFetchRewriteAdapter{provider: provider, extraBody: extraBody}, nil
 		}
 		return novelFetchRewrite, nil
 	}
@@ -449,8 +470,19 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 		if providerErr != nil {
 			return nil, providerErr
 		}
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, novelFetchStore, owner)
+		if err != nil {
+			return nil, err
+		}
+		_, extraBody, err := novelfetchworkshop.AIRequestParameters(settings)
+		if err != nil {
+			return nil, err
+		}
+		if provider == nil && textProvider != nil {
+			provider = textProvider
+		}
 		if provider != nil {
-			return textGenderJudge(provider), nil
+			return textGenderJudge(provider, extraBody), nil
 		}
 		return novelFetchAIGenderJudge, nil
 	}
@@ -486,7 +518,8 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	}
 	imageCapacityController := imagecapacity.NewController(imageCapacityPolicies, imageCapacityRedis, "qiantie:imagecapacity")
 	usageTracker := &yzcmusage.Tracker{Store: usageStore, Client: yzcmusage.Client{HTTP: safehttp.NewClientWithTimeout(12 * time.Second)}, ReceiptDir: filepath.Join(cfg.MemberSystemDir, "usage-receipts")}
-	if err := usageTracker.InitializeReceiptStorage(ctx); err != nil {
+	receiptStartupErr := usageTracker.InitializeReceiptStorage(ctx)
+	if err := receiptStartupErr; err != nil {
 		log.Printf("YZCM usage: receipt storage unavailable at startup: %v", err)
 	}
 	safehttp.SetManagedOutboundDecorator(func(base http.RoundTripper, timeout time.Duration) http.RoundTripper {
@@ -821,7 +854,12 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	n8ProducerDirectory := n8catalog.NewClient(nil, cfg.N8AdminBaseURL, cfg.QingyuN8AdminToken)
 	n8ComicWorks := n8catalog.NewWorksClientWithPath(nil, cfg.N8ComicBaseURL, cfg.QingyuN8AdminToken, os.Getenv("QIANTIE_N8_WORKS_PATH"))
 	upscaleService := upscale.NewService(upscale.NewClient(cfg.VolcanoMediaKitBaseURL, cfg.VolcanoMediaKitAPIKey), time.Now)
-	router := httpapi.NewRouter(httpapi.RouterOptions{AgentVideoWorkerContext: context.Background(), AgentScriptSplitWorkerContext: context.Background(), AgentImageWorkerContext: context.Background(), AgentAudioWorkerContext: context.Background(), BridgeSecret: cfg.BridgeSecret, ReleaseSHA: cfg.ReleaseSHA, RuntimeManifestPath: os.Getenv("QIANTIE_RUNTIME_MANIFEST_PATH"), Health: databaseHealth(db), AuthRateLimits: httpapi.AuthRateLimitConfig{LoginWindow: cfg.AuthRateLimitLoginWindow, LoginMaxFailures: cfg.AuthRateLimitLoginMaxFailures, LoginLockout: cfg.AuthRateLimitLoginLockout, RegisterWindow: cfg.AuthRateLimitRegisterWindow, RegisterMax: cfg.AuthRateLimitRegisterMax, RegisterLockout: cfg.AuthRateLimitRegisterLockout, PasswordResetWindow: cfg.AuthRateLimitPasswordResetWindow, PasswordResetMax: cfg.AuthRateLimitPasswordResetMax, PasswordResetLockout: cfg.AuthRateLimitPasswordResetLockout}, Users: &storage.BridgeUsers{DB: db}, AuthStore: authStore, AccountCenterStore: accountCenterStore, YZCMModelCatalog: &yzcmmodels.Store{DB: db}, SessionResolver: nil, Slice: cfg.Slice, Store: store, TextRepository: batchfactorytext.NewMySQLRepository(db), Director: director, Compiler: compiler, Production: production, Merge: merge, MergeOutput: mergeOutput, External: externalPublish, NovelFetchStore: novelFetchStore, NovelFetchQueue: novelFetchQueue, NovelFetchAIGenderJudge: novelFetchAIGenderJudge, NovelFetchAIGenderJudgeResolver: novelFetchAIGenderJudgeResolver, NovelFetchFetcher: &novelfetchworkshop.UpstreamFetcher{Endpoint: cfg.NovelFetch121Endpoint, Client: safehttp.NewClientWithTimeout(cfg.NovelFetch121Timeout)}, NovelFetchRewrite: novelFetchRewrite, NovelFetchRewriteResolver: novelFetchRewriteResolver, LocalExecutors: localExecutorService, GiantMaterialExecutor: giantMaterialExecutorService, GiantMaterialResolver: giantMaterialResolver, LocalArtifacts: artifactStore, ImageGenerationCache: imageGenerationCache, LocalExecutorDownloadsDir: cfg.LocalExecutorDownloadsDir, PresetCatalog: prompt.NewCatalog(cfg.PresetPath), AutomationPresetStore: automationPresetStore, AutomationStatusReader: httpapi.NewFileAutomationStatusReader(cfg.AutomationStatePath), AutomationStateStore: automationStateStore, BatchExecutionService: executionService, PersonalPromptStore: prompt.NewPersonalStore(cfg.PersonalPromptPath), ScriptHistoryStore: httpapi.NewScriptHistoryStore(cfg.ScriptHistoryDir), MemberProfileStore: memberProfiles, MemberAvatarDir: cfg.MemberAvatarDir, UserDataDir: cfg.ScriptHistoryDir, UserConfigStore: userConfigStore, TextProvider: effectiveTextProvider, TextProviderResolver: textProviderForModel, AgentWorkspace: agentWorkspaceStore, AgentProxy: agentProxyStore, AICut: aiCutStore, AICutPersonalTemplates: aicut.NewMySQLPersonalTemplateStore(db), AICutTimelines: aiCutTimelines, Screenplay: screenplayStore, ScriptEditor: scriptEditorService, NovelCreation: novelCreationService, ProjectRetention: projectRetention, NovelCreationRunStarter: novelCreationRunStarter, AICutASR: aiCutASRService, AICutExport: aiCutExportService, AICutAgentStore: aiCutStore, AICutAgentStarter: aiCutAgentStarter, Upscale: upscaleService, AgentAssets: agentAssetStore, AgentAssetObjects: agentAssetObjects, RedisURL: cfg.RedisURL, ImageCapacity: imageCapacityController, RegisterV11: register, VideoManagementConnector: &videomanagementconnector.TargetHTTPService{BaseURL: targetBaseURL}, N8ComicPublisher: &httpapi.BatchFactoryN8ComicPublisher{Store: store, LocalFiles: artifactStore, Client: n8ComicClient, ProducerDirectory: n8ProducerDirectory, WorksDirectory: n8ComicWorks, ProducerAccounts: cfg.N8ComicProducerAccounts, WorkTitleMapPath: os.Getenv("QIANTIE_N8_WORK_TITLE_MAP_PATH")}, ComicDirectRecordPath: comicDirectRecordPath(cfg)})
+	var sessionChannel *httpapi.ScreenplaySessionChannel
+	if receiptStartupErr == nil && os.Getenv("QIANTIE_SESSION_RECEIPTS_ENABLED") == "1" {
+		sessionChannel = httpapi.NewScreenplaySessionChannel(authStore, accountCenterStore, resolveCatalogTextProviderWithSelection, usageTracker)
+	}
+	attachmentObjects, attachmentReason := configuredScreenplayAttachmentObjects(cfg)
+	router := httpapi.NewRouter(httpapi.RouterOptions{ScreenplayAttachmentObjects: attachmentObjects, ScreenplayAttachmentUnavailableReason: attachmentReason, ScreenplaySessionChannel: sessionChannel, AgentVideoWorkerContext: context.Background(), AgentScriptSplitWorkerContext: context.Background(), AgentImageWorkerContext: context.Background(), AgentAudioWorkerContext: context.Background(), BridgeSecret: cfg.BridgeSecret, ReleaseSHA: cfg.ReleaseSHA, RuntimeManifestPath: os.Getenv("QIANTIE_RUNTIME_MANIFEST_PATH"), Health: databaseHealth(db), AuthRateLimits: httpapi.AuthRateLimitConfig{LoginWindow: cfg.AuthRateLimitLoginWindow, LoginMaxFailures: cfg.AuthRateLimitLoginMaxFailures, LoginLockout: cfg.AuthRateLimitLoginLockout, RegisterWindow: cfg.AuthRateLimitRegisterWindow, RegisterMax: cfg.AuthRateLimitRegisterMax, RegisterLockout: cfg.AuthRateLimitRegisterLockout, PasswordResetWindow: cfg.AuthRateLimitPasswordResetWindow, PasswordResetMax: cfg.AuthRateLimitPasswordResetMax, PasswordResetLockout: cfg.AuthRateLimitPasswordResetLockout}, Users: &storage.BridgeUsers{DB: db}, AuthStore: authStore, AccountCenterStore: accountCenterStore, YZCMModelCatalog: &yzcmmodels.Store{DB: db}, SessionResolver: nil, Slice: cfg.Slice, Store: store, TextRepository: batchfactorytext.NewMySQLRepository(db), Director: director, Compiler: compiler, Production: production, Merge: merge, MergeOutput: mergeOutput, External: externalPublish, NovelFetchStore: novelFetchStore, NovelFetchQueue: novelFetchQueue, NovelFetchAIGenderJudge: novelFetchAIGenderJudge, NovelFetchAIGenderJudgeResolver: novelFetchAIGenderJudgeResolver, NovelFetchFetcher: &novelfetchworkshop.UpstreamFetcher{Endpoint: cfg.NovelFetch121Endpoint, Client: safehttp.NewClientWithTimeout(cfg.NovelFetch121Timeout)}, NovelFetchRewrite: novelFetchRewrite, NovelFetchRewriteResolver: novelFetchRewriteResolver, LocalExecutors: localExecutorService, GiantMaterialExecutor: giantMaterialExecutorService, GiantMaterialResolver: giantMaterialResolver, LocalArtifacts: artifactStore, ImageGenerationCache: imageGenerationCache, LocalExecutorDownloadsDir: cfg.LocalExecutorDownloadsDir, PresetCatalog: prompt.NewCatalog(cfg.PresetPath), AutomationPresetStore: automationPresetStore, AutomationStatusReader: httpapi.NewFileAutomationStatusReader(cfg.AutomationStatePath), AutomationStateStore: automationStateStore, BatchExecutionService: executionService, PersonalPromptStore: prompt.NewPersonalStore(cfg.PersonalPromptPath), ScriptHistoryStore: httpapi.NewScriptHistoryStore(cfg.ScriptHistoryDir), MemberProfileStore: memberProfiles, MemberAvatarDir: cfg.MemberAvatarDir, UserDataDir: cfg.ScriptHistoryDir, UserConfigStore: userConfigStore, TextProvider: effectiveTextProvider, TextProviderResolver: textProviderForModel, AgentWorkspace: agentWorkspaceStore, AgentProxy: agentProxyStore, AICut: aiCutStore, AICutPersonalTemplates: aicut.NewMySQLPersonalTemplateStore(db), AICutTimelines: aiCutTimelines, Screenplay: screenplayStore, ScriptEditor: scriptEditorService, NovelCreation: novelCreationService, ProjectRetention: projectRetention, NovelCreationRunStarter: novelCreationRunStarter, AICutASR: aiCutASRService, AICutExport: aiCutExportService, AICutAgentStore: aiCutStore, AICutAgentStarter: aiCutAgentStarter, Upscale: upscaleService, AgentAssets: agentAssetStore, AgentAssetObjects: agentAssetObjects, RedisURL: cfg.RedisURL, ImageCapacity: imageCapacityController, RegisterV11: register, VideoManagementConnector: &videomanagementconnector.TargetHTTPService{BaseURL: targetBaseURL}, N8ComicPublisher: &httpapi.BatchFactoryN8ComicPublisher{Store: store, LocalFiles: artifactStore, Client: n8ComicClient, ProducerDirectory: n8ProducerDirectory, WorksDirectory: n8ComicWorks, ProducerAccounts: cfg.N8ComicProducerAccounts, WorkTitleMapPath: os.Getenv("QIANTIE_N8_WORK_TITLE_MAP_PATH")}, ComicDirectRecordPath: comicDirectRecordPath(cfg)})
 	scripteditor.StartWorker(context.Background(), scriptEditorService, time.Second)
 	executionDispatcher := &batchfactoryexecution.Dispatcher{Repository: executionRepository, Handler: executionService.DispatchOutboxEvent, RetryDelay: time.Minute}
 	go func() {

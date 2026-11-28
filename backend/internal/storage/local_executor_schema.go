@@ -125,7 +125,7 @@ func AppMigrations() []Migration {
 	out = append(out, ScreenplayProductionMigrations()...)
 	out = append(out, ScreenplayMediaMigrations()...)
 	out = append(out, ScreenplayAuthoringMigrations()...)
-	out = append(out, screenplayAssistantSessionMigration(), screenplayAssistantSessionUpgrade())
+	out = append(out, screenplayAssistantSessionMigration(), screenplayAssistantSessionUpgrade(), screenplaySessionAttemptsMigration())
 	out = append(out, NovelCreationMigrations()...)
 	out = append(out, ProjectRetentionMigrations()...)
 	out = append(out, ImageCapacityMigrations()...)

@@ -46,6 +46,7 @@ func ResolveStyle(ctx context.Context, info BookInfo, provider RewriteProvider) 
 		return StyleDecision{Reason: "平台未提供明确风格且 AI 风格判断未配置"}
 	}
 	request := RewriteRequest{
+		Timeout: 60 * time.Second, JSONResponse: true,
 		SystemPrompt: "你是小说分类器。只返回 JSON：{\"style\":\"风格\"}。style 必须从以下值中选择最接近的一项：古风虐文、古风甜文、古风通用、年代虐文、年代甜文、年代通用、现代虐文、现代甜文、现代悬疑、现代通用、男频都市、现代女主、玄幻、历史、家庭奇葩、家庭伤感、职场打脸。必须选择，不要留空，不要解释 JSON 以外的内容。",
 		UserPrompt:   "请判断这段小说的投稿风格：\n" + info.Text,
 		Temperature:  0,

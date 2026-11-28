@@ -20,8 +20,8 @@ func workshopAIRequestedCount(document novelfetchworkshop.Document, config map[s
 	if maximum < 1 {
 		maximum = 5
 	}
-	if maximum > 20 {
-		maximum = 20
+	if maximum > novelfetchworkshop.MaxAIVersions {
+		maximum = novelfetchworkshop.MaxAIVersions
 	}
 	count := explicit
 	if count < 1 {

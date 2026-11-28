@@ -53,10 +53,11 @@ func TestSessionReservationAndLateCompletion(t *testing.T) {
 	r := MySQLAuthoringRepository{db: db}
 	ctx := context.Background()
 	expectSessionScope(m, "s", "default", "alice", "project", "", 1)
+	m.ExpectQuery("SELECT body FROM screenplay_assistant_sessions").WithArgs("owner", "project", "s").WillReturnRows(sqlmock.NewRows([]string{"body"}).AddRow(`{"messages":[{"role":"user","content":"selected session only"}]}`))
 	m.ExpectExec("UPDATE screenplay_assistant_sessions SET request_actor=").WithArgs("alice", sqlmock.AnyArg(), "owner", "project", "s").WillReturnResult(sqlmock.NewResult(0, 1))
 	m.ExpectCommit()
 	req, err := r.BeginAssistantRequest(ctx, "owner", "project", "alice", "s", 1)
-	if err != nil || req.Token == "" || req.Revision != 2 {
+	if err != nil || req.Token == "" || req.Revision != 2 || req.Mode != "confirm" || len(req.History.Messages) != 1 || req.History.Messages[0].Content != "selected session only" {
 		t.Fatal(req, err)
 	}
 	expectSessionScope(m, "s", "default", "alice", "project", "running", 2)
@@ -185,6 +186,37 @@ func TestSessionParentArchiveRestoreStalesAllPending(t *testing.T) {
 		}
 	}
 	if err = m.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionGuardedFinishChecksAuthorityAfterProjectAndSessionLocks(t *testing.T) {
+	db, m, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	r := MySQLAuthoringRepository{db: db}
+	expectSessionScope(m, "s", "default", "alice", "project", "running", 2)
+	// This current read occurs after the project/session locks. Revocation while
+	// waiting for the project must therefore be observed before any history write.
+	m.ExpectQuery("SELECT username FROM auth_sessions.*FOR UPDATE").WillReturnError(sql.ErrNoRows)
+	m.ExpectRollback()
+	called := false
+	guard := func(ctx context.Context, tx *sql.Tx) error {
+		called = true
+		var username string
+		if err := tx.QueryRowContext(ctx, "SELECT username FROM auth_sessions WHERE token_hash=? FOR UPDATE", "original").Scan(&username); err != nil {
+			return ErrAccessDenied
+		}
+		return nil
+	}
+	req := AssistantSessionRequest{Owner: "owner", Project: "project", Actor: "alice", SessionID: "s", Token: "request", Revision: 2}
+	err = r.FinishAssistantRequestGuarded(context.Background(), req, &AssistantSessionHistory{Messages: []AssistantMessage{{Role: "assistant", Content: "late"}}}, guard)
+	if !called || !errors.Is(err, ErrAccessDenied) {
+		t.Fatal(called, err)
+	}
+	if err := m.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -1,11 +1,14 @@
 import { Alert, Button, Checkbox, Empty, Input, InputNumber, message, Modal, Popconfirm, Select, Space, Spin, Switch, Tag } from 'antd';
 import { BookOpen, Check, Download, Plus, Save, Send, Sparkles, Trash2, Users } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import ComicAssistantSessionControls from './ComicAssistantSessionControls.jsx';
+import ComicAssistantReferencePicker,{AssistantReferenceHistory} from './ComicAssistantReferencePicker.jsx';
+import { useComicAssistantSessions } from './useComicAssistantSessions.js';
 import { comicStageLocation } from './comic-screenplay-stages.js';
 import { exportChapterText } from './comic-screenplay-chapter-export.js';
 import { chapterHeadingMatches, splitSourceChapters } from './comic-screenplay-episode-headings.js';
 import { loadComicScreenplayWorkspace } from '../../shared/api/comicScreenplay.js';
-import { applyComicProposal, generateComicChapter, getComicAssistant, getComicChapters, getComicDisplay, getComicTeam, planComicChapters, saveComicChapters, saveComicDisplay, saveComicTeam, sendComicAssistant } from '../../shared/api/comicScreenplayWorkflow.js';
+import { generateComicChapter, getComicChapters, getComicDisplay, getComicTeam, planComicChapters, saveComicChapters, saveComicDisplay, saveComicTeam } from '../../shared/api/comicScreenplayWorkflow.js';
 
 const assistantReadToolLabels={storyboard_failures:'分镜失败核对',get_current_screenplay:'读取当前剧本',analyze_screenplay:'分析剧本',get_editor_status:'读取编辑状态',get_shot_numbers:'读取镜头序号',get_shot_detail:'读取镜头详情',read_assets:'读取资产',read_shot_video_prompts:'读取视频提示词',read_shot_image_prompts:'读取图片提示词',get_all_shots_voicetext:'读取镜头台词',compare_original_vs_voicetext:'对比原文与台词',review_voice_emotions:'审查配音情绪',review_image_prompts:'检查画面提示词',review_video_prompts:'检查视频提示词',review_asset_bindings:'检查资产绑定'};
 function AssistantShotPreview({edit}) {
@@ -100,23 +103,35 @@ export function ComicChaptersPanel({projectId,onSaved,readOnly=false,canGenerate
 }
 
 export function ComicAssistantPanel({projectId,onSaved,onNavigate,readOnly=false,canGenerate=true,initialRequest}){
-  const {data,setData,loading,error,refresh}=useAuthoringResource(projectId,getComicAssistant);
-  const [text,setText]=useState(''),[busy,setBusy]=useState('');
-  useEffect(()=>{if(initialRequest?.text)setText(initialRequest.text);},[initialRequest?.id,initialRequest?.text,projectId]);
-  const state=data?.state||{};const messages=state.messages||state.conversation||[];const proposals=state.proposals||[];
+  const view = useComicAssistantSessions(projectId,initialRequest);
+  const {current,session,refresh,setText} = view;
+  const {text,busy,loading,error} = current;
+  const state=current.state||{}, messages=state.messages||state.conversation||[], proposals=state.proposals||[];
+  const inactive = session.id!=='default' && (!session.active || session.archived);
+  const waiting = !!session.request_status;
+  const chatUnavailable = session.id!=='default' && session.chat_available!==true;
+  const canSend = canGenerate && !inactive && !waiting && !chatUnavailable;
+  const canApply = !readOnly && !inactive && !waiting && session.mode!=='readonly';
   const navigateLabel={source:'剧本',script:'剧本',assets:'资产',storyboard:'分镜',media:'媒体'};
-  async function send(){if(!canGenerate||!text.trim()||busy||loading||error)return;setBusy('chat');try{setData(await sendComicAssistant(projectId,{message:text.trim(),expected_revision:state.revision||0}));setText('');}catch(err){errorMessage(err);}finally{setBusy('');}}
-  async function apply(proposal){if(readOnly||busy||proposal.status!=='pending')return;setBusy(proposal.id);try{setData(await applyComicProposal(projectId,{proposal_id:proposal.id,expected_revision:state.revision||0,confirmed:true}));await onSaved?.();message.success('修改已应用并保存');}catch(err){errorMessage(err);if(err.status===409)await refresh();}finally{setBusy('');}}
-  return <div className="comic-assistant-panel"><ResourceError error={error} retry={refresh}/><div className="comic-panel-heading"><div><h3>作品助手</h3><p>读取当前作品与章节，提出可查看、可确认的修改。不会自行启动图片或视频生产。</p></div><Button onClick={refresh}>刷新会话</Button></div><Spin spinning={loading}>
+  function send(){if(canSend && text.trim() && !loading && !error) void view.write('chat',{message:text.trim()});}
+  function apply(proposal){if(canApply && proposal.status==='pending') void view.write(proposal.id,{proposal_id:proposal.id,confirmed:true},onSaved);}
+  return <div className="comic-assistant-panel"><ResourceError error={error} retry={refresh}/><div className="comic-panel-heading"><div><h3>作品助手</h3><p>读取当前作品与章节，提出可查看、可确认的修改。不会自行启动图片或视频生产。</p></div></div>
+    <ComicAssistantSessionControls key={JSON.stringify([projectId,session.id])} sessions={view.list} current={session} select={view.select} readOnly={readOnly} sending={busy==='chat'} manage={view.manage} create={view.create} reload={()=>{void refresh();void view.loadList();}}/>
+    <ResourceError error={view.listError} retry={view.loadList}/>
+    {chatUnavailable && <Alert type="info" message="新会话暂未开放模型聊天，可查看历史和确认已准备的方案。"/>}
+    {inactive && <Alert type="info" message="当前会话或上级会话已归档，可查看历史。"/>}
+    {waiting && <Alert type="info" message={session.request_status==='unknown'?'上次请求结果不确定，请核对后停止该请求。':'正在等待模型回复。'}/>}
+    <Spin spinning={loading}>
     <div className="comic-assistant-messages">{messages.length?messages.map((item,index)=>{
       const kind=item.kind||'';
       if(kind==='compacted')return <article key={item.id||index} className="comic-assistant-compacted"><div>{item.content||''}</div></article>;
       if(kind==='question')return <article key={item.id||index} className="comic-assistant-question"><b>作品助手想确认</b><div>{item.content||item.text||''}</div><small className="comic-assistant-question-tip">在下方输入框回答，助手会据此继续。</small></article>;
       const suggestions=Array.isArray(item.suggestions)?item.suggestions:[];
-      return <article key={item.id||index} className={`role-${item.role}`}><b>{item.role==='user'?'你':'作品助手'}</b><div>{item.content||item.text||''}</div>{Array.isArray(item.tools)&&item.tools.length?<div className="comic-assistant-tools">{item.tools.map((tool,toolIndex)=><Tag key={toolIndex} color={tool.ok===false?'error':'blue'}>{(Object.hasOwn(assistantReadToolLabels,tool.name)?assistantReadToolLabels[tool.name]:'只读工具')}{tool.summary?` · ${tool.summary}`:''}</Tag>)}</div>:null}{suggestions.length?<div className="comic-assistant-suggestions">{suggestions.map((s,i)=><Button key={i} size="small" onClick={()=>onNavigate?.(s.entry)} title={s.reason||undefined}>{s.label||navigateLabel[s.entry]||'前往面板'}</Button>)}</div>:null}</article>;
+      return <article key={item.id||index} className={`role-${item.role}`}><b>{item.role==='user'?'你':'作品助手'}</b><div>{item.content||item.text||''}</div><AssistantReferenceHistory references={item.references}/>{Array.isArray(item.tools)&&item.tools.length?<div className="comic-assistant-tools">{item.tools.map((tool,toolIndex)=><Tag key={toolIndex} color={tool.ok===false?'error':'blue'}>{(Object.hasOwn(assistantReadToolLabels,tool.name)?assistantReadToolLabels[tool.name]:'只读工具')}{tool.summary?` · ${tool.summary}`:''}</Tag>)}</div>:null}{suggestions.length?<div className="comic-assistant-suggestions">{suggestions.map((s,i)=><Button key={i} size="small" onClick={()=>onNavigate?.(s.entry)} title={s.reason||undefined}>{s.label||navigateLabel[s.entry]||'前往面板'}</Button>)}</div>:null}</article>;
     }):<Empty description="说明你想修改的章节、人物或分镜"/>}</div>
-    {proposals.map(proposal=><article key={proposal.id} className="comic-assistant-proposal"><b>{proposal.summary||'建议修改'}</b>{Array.isArray(proposal.actions)?<ul>{proposal.actions.map((action,index)=><li key={index}>{(action.kind==='asset'?({add:'新增资产',delete:'删除资产',update:'修改资产'}[action.asset_operation]||'修改资产'):null)||action.summary||action.title||action.description||({replace_chapters:'更新章节',save_document:'保存剧本新版本',update_asset:'修改资产设定',update_shot:'修改分镜'}[action.kind])||({document:'更新剧本',chapter:'修改章节',asset:'修改资产',shot:'修改场次',creative_shot:action.creative_shot?.binding?'绑定分镜资产':'修改分镜文字'}[action.kind])||'作品内容修改'}{action.kind==='asset'&&action.asset?.name?<small> · {action.asset.name}</small>:null}{action.kind==='asset'&&action.asset_operation==='delete'?<small> · 保留原素材文件</small>:null}{action.target_id&&!action.content_edit?<small> · {action.target_id}</small>:null}<AssistantActionPreview action={action}/></li>)}</ul>:null}<Popconfirm title="确认应用这些修改？" description="应用后会保存到当前作品，请先核对上述内容。" onConfirm={()=>apply(proposal)}><Button icon={<Check size={14}/>} type="primary" loading={busy===proposal.id} disabled={readOnly||!!busy||proposal.status!=='pending'||proposal.applied}> {proposal.status==='applied'||proposal.applied?'已应用':proposal.status==='stale'?'方案已过期，请重新准备':'应用修改'}</Button></Popconfirm></article>)}
-    <div className="comic-assistant-compose"><Input.TextArea value={text} onChange={event=>setText(event.target.value)} rows={3} maxLength={10000} placeholder="例如：检查第一集节奏，给出修改建议；或把人物称呼统一。" disabled={!canGenerate}/><Button type="primary" icon={<Send size={14}/>} loading={busy==='chat'} disabled={!canGenerate||!text.trim()||!!busy||loading||!!error} onClick={send}>发送</Button></div>
+    {proposals.map(proposal=><article key={proposal.id} className="comic-assistant-proposal"><b>{proposal.summary||'建议修改'}</b>{Array.isArray(proposal.actions)?<ul>{proposal.actions.map((action,index)=><li key={index}>{(action.kind==='asset'?({add:'新增资产',delete:'删除资产',update:'修改资产'}[action.asset_operation]||'修改资产'):null)||action.summary||action.title||action.description||({replace_chapters:'更新章节',save_document:'保存剧本新版本',update_asset:'修改资产设定',update_shot:'修改分镜'}[action.kind])||({document:'更新剧本',chapter:'修改章节',asset:'修改资产',shot:'修改场次',creative_shot:action.creative_shot?.binding?'绑定分镜资产':'修改分镜文字'}[action.kind])||'作品内容修改'}{action.kind==='asset'&&action.asset?.name?<small> · {action.asset.name}</small>:null}{action.kind==='asset'&&action.asset_operation==='delete'?<small> · 保留原素材文件</small>:null}{action.target_id&&!action.content_edit?<small> · {action.target_id}</small>:null}<AssistantActionPreview action={action}/></li>)}</ul>:null}<Popconfirm title="确认应用这些修改？" description="应用后会保存到当前作品，请先核对上述内容。" onConfirm={()=>apply(proposal)}><Button icon={<Check size={14}/>} type="primary" loading={busy===proposal.id} disabled={!canApply||!!busy||proposal.status!=='pending'||proposal.applied}> {proposal.status==='applied'||proposal.applied?'已应用':proposal.status==='stale'?'方案已过期，请重新准备':'应用修改'}</Button></Popconfirm></article>)}
+    <ComicAssistantReferencePicker key={JSON.stringify([projectId,session.id])} projectId={projectId} sessionId={session.id} references={current.references||[]} onChange={view.setReferences} disabled={inactive||waiting||!!busy||loading||!!error}/>
+    <div className="comic-assistant-compose"><Input.TextArea value={text} onChange={event=>setText(event.target.value)} rows={3} maxLength={10000} placeholder="例如：检查第一集节奏，给出修改建议；或把人物称呼统一。" disabled={!canSend}/><Button type="primary" icon={<Send size={14}/>} loading={busy==='chat'} disabled={!canSend||!text.trim()||!!busy||loading||!!error} onClick={send}>发送</Button></div>
   </Spin></div>;
 }
 

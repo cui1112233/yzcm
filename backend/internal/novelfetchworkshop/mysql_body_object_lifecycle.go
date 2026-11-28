@@ -46,12 +46,17 @@ func registerBodyRetirement(ctx context.Context, tx *sql.Tx, b lockedBody, now t
 	return err
 }
 
-func (s *MySQLStore) switchBodyReference(ctx context.Context, owner, bookID, versionID, encoding string, blob []byte, hash string, chars int64, state string) (BodyRef, error) {
+func (s *MySQLStore) switchBodyReference(ctx context.Context, owner, bookID, versionID, encoding string, blob []byte, hash string, chars int64, state string, expected ...Document) (BodyRef, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return BodyRef{}, err
 	}
 	defer tx.Rollback()
+	if len(expected) > 0 {
+		if err := checkBodyWriteDocument(ctx, tx, owner, bookID, expected[0]); err != nil {
+			return BodyRef{}, err
+		}
+	}
 	previous, err := lockBody(ctx, tx, owner, bookID, versionID)
 	missing := errors.Is(err, sql.ErrNoRows)
 	if err != nil && !missing {

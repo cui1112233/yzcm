@@ -11,6 +11,17 @@ const write=(id,path,body,request)=>request(comicWorkflowPath(id,path),{method:'
 const put=(id,path,body,request)=>request(comicWorkflowPath(id,path),{method:'PUT',body:JSON.stringify(body||{})});
 export const getComicProduction=(id,request=apiRequest)=>read(id,'production/status',request);
 export const startComicProduction=(id,request=apiRequest)=>write(id,'production/start',{},request);
+export function continueComicProductionStoryboard(id,input,request=apiRequest){
+  if(input?.confirmed!==true)return Promise.reject(new Error('请先确认继续生成下一批分镜'));
+  const key=String(input?.request_key||'');
+  if(!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(key))return Promise.reject(new Error('当前分镜请求无效，请刷新任务状态'));
+  return write(id,'production/storyboard/continue',{request_key:key,confirmed:true},request);
+}
+export function recoverComicProductionStoryboard(id,input,request=apiRequest){
+  const key=String(input?.request_key||'');
+  if(!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(key))return Promise.reject(new Error('当前分镜请求无效，请刷新任务状态'));
+  return write(id,'production/storyboard/recover',{request_key:key},request);
+}
 export function rebuildComicProduction(id,input,request=apiRequest){
   if(input?.confirmed!==true)return Promise.reject(new Error('请先确认重建变更镜头可能产生新的供应商费用'));
   return write(id,'production/start',{rebuild:true},request);
@@ -82,4 +93,20 @@ export function bindComicPositioningImage(id, itemId, input, request = apiReques
 export function editComicPositioningImage(id, itemId, input, request = apiRequest) {
   const { signal, ...body } = input || {};
   return request(comicWorkflowPath(id, `positioning/${identifier(itemId, '站位条目')}/image/edit`), { method: 'POST', body: JSON.stringify(body), signal, timeoutMs: 0, suppressGlobalError: true });
+}
+
+const sessionPath = (session) => `assistant/sessions/${identifier(session, '会话')}`;
+export const listComicSessions = (project, request = apiRequest) => read(project, 'assistant/sessions', request);
+export const createComicSession = (project, input, request = apiRequest) => write(project, 'assistant/sessions', input, request);
+export const readComicSession = (project, session, request = apiRequest) => read(project, sessionPath(session), request);
+export function changeComicSession(project, session, action, input, request = apiRequest) {
+  if (!['rename', 'archive', 'restore', 'stop'].includes(action)) throw new Error('会话操作无效');
+  return write(project, `${sessionPath(session)}/${action}`, input, request);
+}
+export function sendSessionMessage(project, session, input, request = apiRequest) {
+  return session === 'default' ? sendComicAssistant(project, input, request) : write(project, `${sessionPath(session)}/chat`, input, request);
+}
+export function applySessionProposal(project, session, input, request = apiRequest) {
+  if (!input?.confirmed) throw new Error('请先确认应用这些修改');
+  return session === 'default' ? applyComicProposal(project, input, request) : write(project, `${sessionPath(session)}/apply`, input, request);
 }

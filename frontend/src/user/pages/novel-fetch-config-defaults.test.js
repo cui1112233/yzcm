@@ -1,10 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import React from 'react';
-import { Form } from 'antd';
+import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { NovelFetchAutomationOptions } from './novel-fetch-automation-options.js';
+// Exercise the real component and real Antd controls without loading the whole
+// Antd barrel (which imports every unrelated widget during this SSR test).
+const require = createRequire(import.meta.url);
+const Form = require('antd/lib/form').default;
+const Checkbox = require('antd/lib/checkbox').default;
+const Space = require('antd/lib/space').default;
+const componentSource = readFileSync(new URL('./novel-fetch-automation-options.js', import.meta.url), 'utf8')
+  .replaceAll('\r\n', '\n').replace(/^import .*;$/gm, '').replaceAll('export function ', 'function ');
+const { NovelFetchAutomationOptions, NovelFetchThinkingOptions } = new Function('React', 'Form', 'Checkbox', 'Space', componentSource + '\nreturn { NovelFetchAutomationOptions, NovelFetchThinkingOptions };')(React, Form, Checkbox, Space);
 import { withNovelFetchConfigDefaults } from './novel-fetch-config-defaults.js';
 
 test('旧配置缺少自动处理开关时默认开启', () => {
@@ -26,7 +35,7 @@ test('旧配置缺少自动处理开关时默认开启', () => {
     retries: 1,
     temperature: 0.2
   });
-  assert.deepEqual(result.web_submit.version_profiles, Object.fromEntries(['original', ...Array.from({ length: 20 }, (_, i) => `ai${i + 1}`)].map(version => [version, ''])));
+  assert.deepEqual(result.web_submit.version_profiles, Object.fromEntries(['original', ...Array.from({ length: 5 }, (_, i) => `ai${i + 1}`)].map(version => [version, ''])));
 });
 
 test('敏感词 AI 参数保留用户已保存的 REA 字段', () => {
@@ -80,4 +89,16 @@ test('自动处理选项把表单值绑定到真实复选框', () => {
   assert.equal((enabledMarkup.match(/type="checkbox"/g) || []).length, 5);
   assert.equal((enabledMarkup.match(/checked=""/g) || []).length, 5);
   assert.equal((disabledMarkup.match(/checked=""/g) || []).length, 0);
+});
+
+test('思考模式保存值绑定到真实复选框', () => {
+  for (const [enable, disable] of [[true, false], [false, true], [false, false]]) {
+    const html = renderToStaticMarkup(React.createElement(Form,
+      { initialValues: { ai: { enable_thinking: enable, disable_thinking: disable } } },
+      React.createElement(NovelFetchThinkingOptions)));
+    const inputs = html.match(/<input[^>]*type="checkbox"[^>]*>/g);
+    assert.equal(inputs.length, 2);
+    assert.equal(inputs[0].includes('checked=""'), enable);
+    assert.equal(inputs[1].includes('checked=""'), disable);
+  }
 });
