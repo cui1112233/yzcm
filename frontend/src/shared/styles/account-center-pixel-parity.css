@@ -48,15 +48,15 @@
 .pc-online i { width: 7px; height: 7px; border-radius: 50%; background: var(--pc-success); box-shadow: 0 0 10px rgba(88, 230, 169, .7); }
 .pc-top-account .ant-btn { color: var(--pc-text); border-color: rgba(205, 232, 255, .32); background: var(--pc-glass-2); }
 
-.pc-sidebar { position: relative; z-index: 4; grid-area: sidebar; display: flex; min-height: 0; flex-direction: column; padding: 18px 10px 12px; border-right: 1px solid rgba(205, 232, 255, .28); border-radius: 0 0 22px 0; background: linear-gradient(145deg, rgba(255,255,255,.045), transparent 44%), var(--pc-glass-1); box-shadow: inset -1px 0 var(--pc-glass-highlight), 10px 0 30px rgba(0, 5, 26, .18); backdrop-filter: blur(24px) saturate(1.12); }
-.pc-sidebar-profile { display: grid; justify-items: center; gap: 12px; padding: 5px 8px 18px; }
+.pc-sidebar { position: relative; z-index: 4; grid-area: sidebar; display: flex; min-height: 0; flex-direction: column; overflow: hidden; padding: 18px 10px 12px; border-right: 1px solid rgba(205, 232, 255, .28); border-radius: 0 0 22px 0; background: linear-gradient(145deg, rgba(255,255,255,.045), transparent 44%), var(--pc-glass-1); box-shadow: inset -1px 0 var(--pc-glass-highlight), 10px 0 30px rgba(0, 5, 26, .18); backdrop-filter: blur(24px) saturate(1.12); }
+.pc-sidebar-profile { display: grid; flex: 0 0 auto; justify-items: center; gap: 12px; padding: 5px 8px 18px; }
 .pc-sidebar-profile .ant-avatar { box-shadow: 0 0 0 2px rgba(204, 232, 255, .74), 0 0 30px rgba(77, 220, 255, .2); }
 .pc-sidebar-profile > div { display: grid; justify-items: center; gap: 4px; min-width: 0; }
 .pc-sidebar-name { display: flex; align-items: center; gap: 7px; max-width: 180px; }
 .pc-sidebar-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pc-sidebar-profile small { color: var(--pc-muted); }
 .pc-sidebar-profile em { padding: 4px 12px; border: 1px solid rgba(246, 212, 139, .5); border-radius: 999px; color: var(--pc-gold); background: rgba(246, 212, 139, .07); font-size: 11px; font-style: normal; }
-.pc-sidebar-nav { display: grid; gap: 2px; min-height: 0; overflow: auto; }
+.pc-sidebar-nav { display: grid; flex: 1 1 auto; gap: 2px; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding-right: 2px; scrollbar-width: thin; }
 .pc-sidebar-group { display: grid; gap: 4px; padding: 9px 0; border-top: 1px solid rgba(132, 202, 255, .15); }
 .pc-sidebar-group > span { padding: 5px 14px 2px; color: rgba(184, 200, 230, .64); font-size: 10px; font-weight: 700; letter-spacing: .12em; }
 .pc-sidebar a,
@@ -66,7 +66,7 @@
 .pc-sidebar a.active { color: #fff; border-color: rgba(112, 226, 255, .78); background: linear-gradient(90deg, rgba(47, 188, 255, .58), rgba(91, 101, 238, .28)); box-shadow: inset 0 0 18px rgba(107, 231, 255, .18), 0 0 22px rgba(77, 220, 255, .2); }
 .pc-sidebar a.active::before { content: ''; position: absolute; left: -1px; top: 9px; bottom: 9px; width: 3px; border-radius: 5px; background: #e7fbff; box-shadow: 0 0 10px var(--pc-cyan); }
 .pc-sidebar-developer a { color: #ecdcae; }
-.pc-sidebar-actions { display: grid; gap: 7px; margin-top: auto; padding-top: 12px; }
+.pc-sidebar-actions { display: grid; flex: 0 0 auto; gap: 7px; margin-top: 0; padding-top: 12px; }
 .pc-sidebar-actions button { justify-content: center; border-color: rgba(205, 232, 255, .26); background: var(--pc-glass-2); }
 .pc-sidebar-actions .pc-logout { color: #f5f8ff; }
 
@@ -92,6 +92,27 @@
 .pc-main .ant-input-number { color: var(--pc-text) !important; border-color: rgba(205, 232, 255, .28) !important; background: var(--pc-glass-input) !important; }
 .pc-main .ant-btn-primary { color: #051226; border-color: #81e9ff; background: linear-gradient(135deg, #6fe6ff, #7198ff); box-shadow: 0 0 18px rgba(77, 220, 255, .28); }
 .pc-main * { scrollbar-color: rgba(105, 173, 224, .62) rgba(3, 12, 35, .46); }
+
+.pc-account-switch-menu { width: min(390px, calc(100vw - 24px)); overflow: hidden; padding: 13px; border: 1px solid rgba(191, 228, 255, .42); border-radius: 18px; color: var(--pc-text); background: linear-gradient(145deg, rgba(255,255,255,.075), transparent 46%), rgba(5, 10, 24, .76); box-shadow: inset 0 1px rgba(255,255,255,.18), 0 24px 64px rgba(0, 3, 18, .52), 0 0 24px rgba(77, 220, 255, .12); backdrop-filter: blur(28px) saturate(1.24); }
+.pc-account-switch-menu > header, .pc-account-switch-menu > footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.pc-account-switch-menu > header { margin-bottom: 11px; }
+.pc-account-switch-menu > header span { display: inline-flex; align-items: center; gap: 8px; font-weight: 650; }
+.pc-account-switch-menu > header small, .pc-account-switch-menu > footer span { overflow: hidden; color: var(--pc-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.pc-account-switch-menu .ant-input-affix-wrapper { color: var(--pc-text); border-color: rgba(191, 228, 255, .28); background: rgba(8, 16, 38, .55); }
+.pc-account-switch-menu .ant-input { color: var(--pc-text); background: transparent; }
+.pc-account-switch-results { max-height: min(420px, 52vh); margin: 11px -4px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding: 0 4px; scrollbar-width: thin; }
+.pc-account-switch-state { display: flex; min-height: 116px; align-items: center; justify-content: center; gap: 9px; color: var(--pc-muted); }
+.pc-account-switch-group + .pc-account-switch-group { margin-top: 10px; }
+.pc-account-switch-group h3 { margin: 0; padding: 5px 4px 7px; color: rgba(196, 214, 241, .76); font-size: 11px; letter-spacing: .08em; }
+.pc-account-switch-group button { display: grid; width: 100%; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 54px; padding: 7px 9px; border: 1px solid transparent; border-radius: 12px; color: var(--pc-text); background: transparent; cursor: pointer; text-align: left; }
+.pc-account-switch-group button:hover { border-color: rgba(77, 220, 255, .25); background: rgba(77, 220, 255, .08); }
+.pc-account-switch-group button.selected { border-color: rgba(126, 232, 255, .64); background: linear-gradient(90deg, rgba(37, 179, 244, .28), rgba(91, 101, 238, .2)); box-shadow: inset 0 0 18px rgba(107, 231, 255, .1); }
+.pc-account-switch-group button > span:not(.ant-avatar) { display: grid; min-width: 0; }
+.pc-account-switch-group button strong, .pc-account-switch-group button small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-account-switch-group button small { color: var(--pc-muted); }
+.pc-account-switch-group button em { padding: 3px 8px; border: 1px solid rgba(246, 212, 139, .35); border-radius: 999px; color: var(--pc-gold); background: rgba(246, 212, 139, .06); font-size: 11px; font-style: normal; }
+.pc-account-switch-menu > footer { padding-top: 10px; border-top: 1px solid rgba(132, 202, 255, .18); }
+.pc-account-switch-menu > footer .ant-btn-primary { color: #fff; border-color: #8cecff; background: linear-gradient(180deg, rgba(44,211,255,.95), rgba(73,107,244,.92)); }
 
 .pc-energy-scene { position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; isolation: isolate; }
 .pc-energy-far, .pc-energy-flow, .pc-energy-near { position: absolute; inset: 0; }

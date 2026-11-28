@@ -1,6 +1,6 @@
-import { Alert, Avatar, Button, Input, Modal, Spin, message } from 'antd';
+import { Alert, Avatar, Button, Spin, message } from 'antd';
 import { useEffect, useRef, useState } from 'react';
-import { getAccountImpersonation, startAccountImpersonation, stopAccountImpersonation } from '../api/accountImpersonation.js';
+import { getAccountImpersonation, stopAccountImpersonation } from '../api/accountImpersonation.js';
 import { ENERGY_CONSOLE_URL } from '../api/accountCenterEnergy.js';
 import { getPageIdentityGeneration } from '../api/accountImpersonationState.js';
 import { setEffectiveImpersonationAccount } from '../api/auth';
@@ -10,6 +10,7 @@ import PersonalCenterIcon from '../../user/components/PersonalCenterIcon.jsx';
 import { EnergyScene } from '../../user/components/PersonalCenterVisuals.jsx';
 import RoleEnergyIcon from '../../user/components/RoleEnergyIcon.jsx';
 import brandLogoNeon from '../../user/assets/personal-center/brand-logo-neon.png';
+import AccountSwitchMenu from './AccountSwitchMenu.jsx';
 
 const switchChannel = 'qiantie:account-impersonation';
 const PAGE_TITLES = {
@@ -142,41 +143,6 @@ export function AccountImpersonationBanner({ status }) {
   </div>;
 }
 
-function AccountSwitchEntry({ status }) {
-  const [open, setOpen] = useState(false);
-  const [target, setTarget] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  if (!status?.canSwitch || status.active) return null;
-
-  function openDialog() {
-    setTarget('');
-    setError('');
-    setOpen(true);
-  }
-
-  async function submit() {
-    if (busy || !target.trim()) return;
-    setBusy(true);
-    setError('');
-    try {
-      await startAccountImpersonation(target.trim());
-      reloadForAccountSwitch();
-    } catch (failure) {
-      setError(failure.message || '账号切换失败');
-      setBusy(false);
-    }
-  }
-
-  return <>
-    <Button size="small" onClick={openDialog}>切换账号</Button>
-    <Modal title="切换账号" open={open} okText="切换" cancelText="取消" confirmLoading={busy} okButtonProps={{ disabled: !target.trim() }} onOk={submit} onCancel={() => { if (!busy) setOpen(false); }}>
-      <Input autoComplete="off" aria-label="目标账号" placeholder="输入目标账号用户名" maxLength={32} value={target} onChange={event => setTarget(event.target.value)} onPressEnter={submit} />
-      {error ? <Alert type="error" message={error} style={{ marginTop: 12 }} /> : null}
-    </Modal>
-  </>;
-}
-
 export function AccountCenterLayout({ account, username, avatar, pathname, onReturn, onLogout, impersonation, impersonationRequired = Boolean(username), impersonationError, onRetryImpersonation, children }) {
   const capabilities = account?.capabilities || [];
   const canManage = capabilities.includes('team_governance');
@@ -193,7 +159,7 @@ export function AccountCenterLayout({ account, username, avatar, pathname, onRet
     <header className="pc-topbar">
       <button type="button" className="pc-brand" onClick={onReturn} aria-label="一战晟铭，返回工作台"><img src={brandLogoNeon} alt="" /><strong>一战晟铭</strong></button>
       <div className="pc-breadcrumb"><span>个人中心</span><b>·</b><strong>{pathname === '/usage' ? usageTitle : (PAGE_TITLES[pathname] || '个人中心')}</strong></div>
-      <div className="pc-top-account"><Avatar size={34} src={account?.avatarUrl} style={{ backgroundColor: avatar?.background }}>{avatar?.emoji}</Avatar><strong>{account?.displayName || username}</strong><RoleEnergyIcon role={account?.canonicalRole} /><em>{account?.canonicalRole}</em><span className="pc-online"><i />当前身份：{account?.canonicalRole}</span><AccountSwitchEntry status={impersonation} /></div>
+      <div className="pc-top-account"><Avatar size={34} src={account?.avatarUrl} style={{ backgroundColor: avatar?.background }}>{avatar?.emoji}</Avatar><strong>{account?.displayName || username}</strong><RoleEnergyIcon role={account?.canonicalRole} /><em>{account?.canonicalRole}</em><span className="pc-online"><i />当前身份：{account?.canonicalRole}</span><AccountSwitchMenu status={impersonation} onSwitched={reloadForAccountSwitch} /></div>
     </header>
     <aside className="pc-sidebar" aria-label="个人中心导航">
       <div className="pc-sidebar-profile">
@@ -214,7 +180,7 @@ export function AccountCenterLayout({ account, username, avatar, pathname, onRet
           {canAccessAdmin && <Link href="/admin/presets" reload><PersonalCenterIcon name="settings" />管理后台</Link>}
         </div> : null}
       </nav>
-      <div className="pc-sidebar-actions"><button type="button" aria-label="返回工作台" onClick={onReturn}><PersonalCenterIcon name="home" />返回工作台</button><button type="button" className="pc-logout" onClick={onLogout}><PersonalCenterIcon name="lock" />退出登录</button></div>
+      <div className="pc-sidebar-actions"><button type="button" aria-label="返回工作台" onClick={onReturn}><PersonalCenterIcon name="home" />返回工作台</button><button type="button" className="pc-logout" aria-label="退出登录" onClick={onLogout}><PersonalCenterIcon name="lock" />退出登录</button></div>
     </aside>
     <main className="pc-main">{content}</main>
   </div>;
