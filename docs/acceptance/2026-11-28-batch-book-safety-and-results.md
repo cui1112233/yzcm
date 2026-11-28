@@ -1,5 +1,7 @@
 # 批量测书 R1–R7 修复与本地验收
 
+更新：上传管理遗漏的500错误已补齐，已有账号已真实登录、同步并保存成功；最新本地运行2e744ac1，见[真实登录与上传配置验收](2026-11-28-batch-book-upload-management-live-repair.md)。以下保留首轮R1–R7验收记录。
+
 日期：2026-11-28。范围为批量测书完整链路，依据已批准的[设计](../superpowers/specs/2026-11-28-batch-book-safety-and-results-design.md)、[执行计划](../superpowers/plans/2026-11-28-batch-book-safety-and-results.md)和[源码对比审查](../audit/2026-11-28-batch-book-deep-chain-design-audit.md)。安全与并发处理属于V88补强，不代表参考源码已有同样实现。
 
 ## 修复结果
