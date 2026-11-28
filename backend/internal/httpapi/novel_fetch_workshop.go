@@ -4045,49 +4045,22 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 	})
 
 	mux.HandleFunc("POST /api/novel-fetch-workshop/tasks/{bookId}/restore-original", func(w http.ResponseWriter, req *http.Request) {
-		identity, _ := BridgeIdentityFromContext(req.Context())
-		bookID := strings.TrimSpace(req.PathValue("bookId"))
-		if !novelFetchBookIDPattern.MatchString(bookID) {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "非法的书籍ID"})
-			return
-		}
-		document, err := store.GetDocument(req.Context(), identity.Username, bookID)
-		if errors.Is(err, novelfetchworkshop.ErrNotFound) {
-			writeJSON(w, http.StatusNotFound, map[string]any{"error": "任务不存在"})
-			return
-		}
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取任务失败"})
-			return
-		}
-		document, err = hydrateNovelFetchDocument(req.Context(), store, identity.Username, document)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取正文失败"})
-			return
-		}
-		if strings.TrimSpace(document.OriginalRaw) == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "没有可恢复的原始正文"})
-			return
-		}
-		processed := novelfetchworkshop.ProcessRawText(document.OriginalRaw, document.MaxTxt)
-		document.Original = processed.ProcessedText
-		document.ProcessedText = processed.ProcessedText
-		document.OriginalRawChars = processed.OriginalRawChars
-		document.ProcessedChars = processed.ProcessedChars
-		document.MaxTxt = processed.MaxTxt
-		if document.Meta == nil {
-			document.Meta = map[string]any{}
-		}
-		document.Meta["originalStatus"] = "restored"
-		if err := persistNovelFetchBodies(req.Context(), store, identity.Username, &document, document.OriginalRaw, document.ProcessedText); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存恢复正文失败"})
-			return
-		}
-		if err := store.PutDocument(req.Context(), identity.Username, document); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存恢复结果失败"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"task": document})
+		restoreWorkshopOriginal(w, req, store, func(modelRequest *http.Request) (novelfetchworkshop.RewriteProvider, error) {
+			// An explicit saved task model cannot fall back to the account's
+			// static/default provider when its resolver cannot supply it.
+			if novelfetchworkshop.ProcessTextModel(modelRequest.Context()) != "" {
+				if rewriteResolver == nil {
+					return nil, errors.New("所选任务模型不可用")
+				}
+				identity, _ := BridgeIdentityFromContext(modelRequest.Context())
+				provider, err := rewriteResolver(modelRequest.Context(), identity.Username)
+				if err == nil && provider == nil {
+					err = errors.New("所选任务模型不可用")
+				}
+				return provider, err
+			}
+			return resolveRewriteProvider(modelRequest)
+		})
 	})
 
 	mux.HandleFunc("POST /api/novel-fetch-workshop/tasks/{bookId}/generate-ai", func(w http.ResponseWriter, req *http.Request) {

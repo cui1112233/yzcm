@@ -41,12 +41,15 @@ type novelFetchSensitiveVersionChange struct {
 	Items     []map[string]any
 }
 type novelFetchSensitiveMetadataUpdate struct {
-	Changes    []novelFetchSensitiveVersionChange
-	Failures   map[string]string
-	ExplicitAI bool
-	CoveredAll bool
-	Restore    bool
-	Scope      string
+	OriginalRestored bool
+	RestoredRawChars int
+	RestoredMaxTxt   int
+	Changes          []novelFetchSensitiveVersionChange
+	Failures         map[string]string
+	ExplicitAI       bool
+	CoveredAll       bool
+	Restore          bool
+	Scope            string
 }
 
 // PutBody already updates authoritative references and text counts. This CAS
@@ -74,6 +77,21 @@ func saveNovelFetchSensitiveMetadata(ctx context.Context, store novelfetchworksh
 			details[change.VersionID] = change.Items
 			latest.Meta["sensitiveByVersion"] = details
 			if change.VersionID == "original" {
+				if update.OriginalRestored {
+					latest.Meta["originalStatus"] = "restored"
+					if latest.MaxTxt <= 0 {
+						latest.MaxTxt = update.RestoredMaxTxt
+					}
+					if rawRef, ok := latest.BodyRefs["original_raw"]; ok {
+						latest.OriginalRawChars = int(rawRef.CharCount)
+					} else if latest.OriginalRaw != "" {
+						latest.OriginalRawChars = len([]rune(latest.OriginalRaw))
+					} else {
+						latest.OriginalRawChars = update.RestoredRawChars
+					}
+					latest.Meta["originalRawChars"] = latest.OriginalRawChars
+				}
+
 				latest.Meta["sensitiveReplacementCount"] = len(change.Items)
 				latest.Meta["sensitiveReplaced"] = len(change.Items)
 				setSensitiveDetails(latest.Meta, change.Items, len(change.Items))
