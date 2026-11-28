@@ -18,15 +18,16 @@ type AssistantReferenceSelector struct {
 	ShotIDs          []string `json:"shot_ids,omitempty"`
 }
 type AssistantReferenceSnapshot struct {
-	Kind     string   `json:"kind"`
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	Revision int64    `json:"revision,omitempty"`
-	Version  int      `json:"version,omitempty"`
-	Digest   string   `json:"digest"`
-	ShotIDs  []string `json:"shot_ids,omitempty"`
-	Text     string   `json:"text"`
-	Bytes    int      `json:"bytes"`
+	Kind       string                           `json:"kind"`
+	ID         string                           `json:"id"`
+	Name       string                           `json:"name"`
+	Revision   int64                            `json:"revision,omitempty"`
+	Version    int                              `json:"version,omitempty"`
+	Digest     string                           `json:"digest"`
+	ShotIDs    []string                         `json:"shot_ids,omitempty"`
+	Text       string                           `json:"text"`
+	Bytes      int                              `json:"bytes"`
+	Attachment *AssistantTextAttachmentEvidence `json:"attachment,omitempty"`
 }
 
 func (s AssistantReferenceSnapshot) Selector() AssistantReferenceSelector {
@@ -191,13 +192,17 @@ func (v AssistantReferenceView) Describe(sel AssistantReferenceSelector) (out As
 	return out, nil
 }
 func (v AssistantReferenceView) Resolve(selectors []AssistantReferenceSelector) ([]AssistantReferenceSnapshot, error) {
+	return resolveAssistantReferences(selectors, v.Describe)
+}
+
+func resolveAssistantReferences(selectors []AssistantReferenceSelector, describe func(AssistantReferenceSelector) (AssistantReferenceSnapshot, error)) ([]AssistantReferenceSnapshot, error) {
 	if len(selectors) > 8 {
 		return nil, ErrInvalidArgument
 	}
 	out := make([]AssistantReferenceSnapshot, 0, len(selectors))
 	seen := map[string]bool{}
 	for _, sel := range selectors {
-		item, err := v.Describe(sel)
+		item, err := describe(sel)
 		if err != nil {
 			return nil, err
 		}
@@ -207,7 +212,7 @@ func (v AssistantReferenceView) Resolve(selectors []AssistantReferenceSelector) 
 		if !digestMatches && sel.Kind == "storyboard" && len(sel.ShotIDs) > 0 {
 			whole := sel
 			whole.ShotIDs = nil
-			all, e := v.Describe(whole)
+			all, e := describe(whole)
 			digestMatches = e == nil && all.Digest == sel.ExpectedDigest
 		}
 		if len(sel.ExpectedDigest) != 64 || !digestMatches || sel.ExpectedRevision != item.Revision {

@@ -276,6 +276,7 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 	migrations = append(migrations, storage.AuthMigrations()...)
 	migrations = append(migrations, storage.ScreenplayMigrations()...)
 	migrations = append(migrations, storage.NovelCreationMigrations()...)
+	migrations = append(migrations, storage.ScreenplayAssistantTextAttachmentMigrations()...)
 	if err := storage.RunMigrations(ctx, db, migrations); err != nil {
 		return nil, err
 	}
