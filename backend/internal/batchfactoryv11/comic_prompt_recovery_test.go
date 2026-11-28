@@ -3,8 +3,22 @@ package batchfactoryv11
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"testing"
 )
+
+type unavailableComicPromptProvider struct {
+	calls int
+}
+
+func (p *unavailableComicPromptProvider) Complete(context.Context, TextCompletionRequest) (string, error) {
+	p.calls++
+	return "", &DirectorHTTPError{
+		StatusCode: http.StatusServiceUnavailable,
+		Model:      "missing-model",
+		Body:       `{"error":{"code":"model_not_found","message":"当前模型暂不可用"}}`,
+	}
+}
 
 // 回补只调用缺失页：已成功的 7 条提示词绝不能被重新请求。
 func TestPromptRecoveryOnlyCallsMissing(t *testing.T) {
@@ -153,5 +167,45 @@ func TestPromptExtractionOnlyTargetsRequestedPages(t *testing.T) {
 	}
 	if got := persisted.Books[0].Videos[0].ComicPrompt; got != "重抽第 1 页" {
 		t.Fatalf("指定页未重抽: %q", got)
+	}
+}
+
+func TestPromptRecoveryStopsRemainingPagesWhenModelIsUnavailable(t *testing.T) {
+	ctx := WithComicPromptConcurrency(context.Background(), 1)
+	store := NewMemoryStore()
+	videos := make([]CreateVideoInput, 0, 3)
+	for index := 0; index < 3; index++ {
+		videos = append(videos, CreateVideoInput{
+			Label:       fmt.Sprintf("漫画页 %02d", index+1),
+			VideoPrompt: fmt.Sprintf("第 %d 页画面。", index+1),
+		})
+	}
+	batch, err := store.CreateBatch(ctx, "alice", CreateBatchInput{Title: "B", Books: []CreateBookInput{{
+		Title: "K", SourceText: "女主依次走过三个房间。", Videos: videos,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	book := batch.Books[0]
+	config := rawSetting(t, map[string]any{"comic": map[string]any{"enabled": true, "body": "整书漫画页提示词"}})
+	if _, err := store.SaveSettings(ctx, "alice", ScopeRef{Kind: ScopeBook, BatchID: batch.ID, BookID: book.ID}, SettingsUpdate{
+		Patch: SettingsPatch{"productionMode": rawSetting(t, "comic"), "aiPromptConfig": config}, ExpectedRevision: book.Revision,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	store.bookAssets["comic-asset"] = memoryOwned[BookAsset]{Owner: "alice", Value: BookAsset{ID: "comic-asset", BatchID: batch.ID, BookID: book.ID, Kind: "character", Name: "女主", Prompt: "漫画少女", Source: "comic"}}
+	store.mu.Unlock()
+
+	provider := &unavailableComicPromptProvider{}
+	result, err := (&DirectorService{Store: store, Provider: provider}).RunMissingComicPromptExtraction(ctx, "alice", batch.ID, book.ID)
+	if err == nil {
+		t.Fatal("expected prompt extraction to fail")
+	}
+	if provider.calls != 1 {
+		t.Fatalf("provider calls=%d, want one call before stopping the remaining pages", provider.calls)
+	}
+	if len(result.Updated) != 0 || len(result.Failed) != 1 {
+		t.Fatalf("updated=%d failed=%d, want 0/1", len(result.Updated), len(result.Failed))
 	}
 }

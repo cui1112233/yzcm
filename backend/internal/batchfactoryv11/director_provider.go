@@ -110,7 +110,7 @@ func directorHTTPFailureHeadline(status int, body string) string {
 		strings.Contains(lower, "token limit") || strings.Contains(lower, "too long") ||
 		strings.Contains(body, "超长") || strings.Contains(body, "过长"):
 		return "本次请求超出模型上下文长度，请缩短这一页的描述或更换模型。"
-	case status == http.StatusNotFound || strings.Contains(lower, "model not found") ||
+	case directorProviderDefiniteModelRejection(body) || status == http.StatusNotFound || strings.Contains(lower, "model not found") ||
 		strings.Contains(lower, "unknown model") || strings.Contains(lower, "invalid model"):
 		return "文本模型不存在或当前账号不支持，请更换模型。"
 	case status >= 500:
@@ -150,10 +150,31 @@ func (e *directorTransportError) Unwrap() error { return e.err }
 // configuration problems. 400/401/403/404/422 must not be advertised as a
 // transient "capability unavailable" outage.
 func (e *DirectorHTTPError) Unwrap() error {
+	if directorProviderDefiniteModelRejection(e.Body) {
+		return ErrConfigRequired
+	}
 	if directorProviderRetryableStatus(e.StatusCode) {
 		return ErrUpstream
 	}
 	return ErrConfigRequired
+}
+
+func directorProviderDefiniteModelRejection(body string) bool {
+	var response struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	return json.Unmarshal([]byte(body), &response) == nil &&
+		strings.EqualFold(strings.TrimSpace(response.Error.Code), "model_not_found")
+}
+
+// IsDirectorModelUnavailable identifies a definite upstream model rejection.
+// It is safe for page-level callers to stop sibling work because retrying the
+// same model cannot succeed until the configured model changes or recovers.
+func IsDirectorModelUnavailable(err error) bool {
+	var providerErr *DirectorHTTPError
+	return errors.As(err, &providerErr) && directorProviderDefiniteModelRejection(providerErr.Body)
 }
 
 func directorProviderRetryableStatus(status int) bool {
@@ -318,7 +339,7 @@ func (p *OpenAICompatibleProvider) Complete(ctx context.Context, input TextCompl
 				continue
 			}
 		}
-		if SingleAttempt(ctx) || !directorProviderRetryableStatus(statusCode) || attempt >= maxAttempts {
+		if SingleAttempt(ctx) || !errors.Is(httpErr, ErrUpstream) || attempt >= maxAttempts {
 			return "", SafeProviderError(httpErr, p.APIKey)
 		}
 		if waitErr := directorProviderWaitRetry(ctx, attempt); waitErr != nil {

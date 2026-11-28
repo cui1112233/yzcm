@@ -604,6 +604,9 @@ func (s *DirectorService) runComicPromptExtraction(ctx context.Context, owner, b
 		}
 		if err != nil {
 			recordFailure(target, err)
+			if IsDirectorModelUnavailable(err) {
+				cancel()
+			}
 			return
 		}
 		finished := int(completed.Add(1))
@@ -621,6 +624,9 @@ func (s *DirectorService) runComicPromptExtraction(ctx context.Context, owner, b
 					return
 				case target, ok := <-jobs:
 					if !ok {
+						return
+					}
+					if workCtx.Err() != nil {
 						return
 					}
 					process(target)

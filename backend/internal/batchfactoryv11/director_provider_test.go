@@ -386,3 +386,29 @@ func TestOpenAICompatibleProviderStopsAfterBoundedServerErrorRetries(t *testing.
 		t.Fatalf("5xx calls=%d, want exactly 3 attempts", got)
 	}
 }
+
+func TestOpenAICompatibleProviderDoesNotRetryStructuredModelNotFound503(t *testing.T) {
+	var calls int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"code":"model_not_found","message":"当前模型暂不可用"}}`))
+	}))
+	defer server.Close()
+
+	provider := OpenAICompatibleProvider{Endpoint: server.URL, APIKey: "test-key", Model: "missing-model", Client: server.Client()}
+	_, err := provider.Complete(context.Background(), TextCompletionRequest{})
+	if err == nil {
+		t.Fatal("expected a model rejection")
+	}
+	if !errors.Is(err, ErrConfigRequired) {
+		t.Fatalf("structured model_not_found must be a configuration error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "文本模型不存在或当前账号不支持") {
+		t.Fatalf("error must explain that the model is unavailable, got %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("model_not_found calls=%d, want exactly one attempt", got)
+	}
+}
