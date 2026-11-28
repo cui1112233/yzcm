@@ -279,10 +279,10 @@ func (p *OpenAICompatibleProvider) Complete(ctx context.Context, input TextCompl
 		resp, reqErr := p.do(ctx, body, input.Timeout)
 		if reqErr != nil {
 			if SingleAttempt(ctx) || !directorProviderRetryableTransportError(reqErr) || attempt == maxAttempts {
-				return "", &directorTransportError{err: reqErr}
+				return "", SafeProviderError(&directorTransportError{err: reqErr}, p.APIKey)
 			}
 			if waitErr := directorProviderWaitRetry(ctx, attempt); waitErr != nil {
-				return "", &directorTransportError{err: reqErr}
+				return "", SafeProviderError(&directorTransportError{err: reqErr}, p.APIKey)
 			}
 			continue
 		}
@@ -290,19 +290,16 @@ func (p *OpenAICompatibleProvider) Complete(ctx context.Context, input TextCompl
 		resp.Body.Close()
 		statusCode = resp.StatusCode
 		if err != nil {
-			if SingleAttempt(ctx) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || attempt == maxAttempts {
-				return "", &directorTransportError{err: err}
-			}
-			if waitErr := directorProviderWaitRetry(ctx, attempt); waitErr != nil {
-				return "", &directorTransportError{err: err}
-			}
-			continue
+			// A completed HTTP response whose body cannot be read is not evidence
+			// that the provider did no work (including non-network checksum errors).
+			return "", SafeProviderError(&directorTransportError{err: errors.Join(ErrTextResultUnknown, err)}, p.APIKey)
 		}
 		if statusCode >= 200 && statusCode < 300 {
 			break
 		}
-		httpErr := &DirectorHTTPError{StatusCode: statusCode, Model: strings.TrimSpace(p.Model), Body: string(raw)}
-		log.Printf("director provider error model=%s status=%d endpoint=%s body=%s", p.Model, statusCode, directorProviderEndpointHost(p.Endpoint), directorHTTPBodySnippet(raw, 400))
+		safeBody := SafeProviderErrorText(string(raw), p.APIKey)
+		httpErr := &DirectorHTTPError{StatusCode: statusCode, Model: strings.TrimSpace(p.Model), Body: safeBody}
+		log.Printf("%s", SafeProviderErrorText(fmt.Sprintf("director provider error model=%s status=%d endpoint=%s body=%s", p.Model, statusCode, directorProviderEndpointHost(p.Endpoint), directorHTTPBodySnippet([]byte(safeBody), 400)), p.APIKey))
 		if !SingleAttempt(ctx) && statusCode == http.StatusBadRequest && !fallbackTried && director400LooksLikeParameterRejection(raw) {
 			fallbackTried = true
 			fallbackMaxTokens := input.MaxTokens
@@ -316,21 +313,21 @@ func (p *OpenAICompatibleProvider) Complete(ctx context.Context, input TextCompl
 				"max_tokens":  fallbackMaxTokens,
 			}
 			if fallbackBody, marshalErr := json.Marshal(fallbackPayload); marshalErr == nil {
-				log.Printf("director provider retry without response_format model=%s endpoint=%s max_tokens=%d", p.Model, directorProviderEndpointHost(p.Endpoint), fallbackMaxTokens)
+				log.Printf("%s", SafeProviderErrorText(fmt.Sprintf("director provider retry without response_format model=%s endpoint=%s max_tokens=%d", p.Model, directorProviderEndpointHost(p.Endpoint), fallbackMaxTokens), p.APIKey))
 				body = fallbackBody
 				continue
 			}
 		}
 		if SingleAttempt(ctx) || !directorProviderRetryableStatus(statusCode) || attempt >= maxAttempts {
-			return "", httpErr
+			return "", SafeProviderError(httpErr, p.APIKey)
 		}
 		if waitErr := directorProviderWaitRetry(ctx, attempt); waitErr != nil {
-			return "", httpErr
+			return "", SafeProviderError(httpErr, p.APIKey)
 		}
 	}
 	if statusCode < 200 || statusCode >= 300 {
 		// Defensive: the loop only exits with a 2xx status or an explicit return.
-		return "", &DirectorHTTPError{StatusCode: statusCode, Model: strings.TrimSpace(p.Model), Body: string(raw)}
+		return "", SafeProviderError(&DirectorHTTPError{StatusCode: statusCode, Model: strings.TrimSpace(p.Model), Body: SafeProviderErrorText(string(raw), p.APIKey)}, p.APIKey)
 	}
 	return DecodeTextCompletionResponse(raw)
 }
