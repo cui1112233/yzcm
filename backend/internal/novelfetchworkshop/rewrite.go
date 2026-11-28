@@ -14,6 +14,9 @@ import (
 
 // RewriteRequest 是小说改文模型收到的最小请求。提示词放在后端，前端只能选择数量。
 type RewriteRequest struct {
+	Timeout      time.Duration
+	ExtraBody    map[string]any
+	JSONResponse bool
 	SystemPrompt string
 	UserPrompt   string
 	Temperature  float64
@@ -126,11 +129,11 @@ func rewritePlan(settings map[string]any, versionID string, index int, documents
 		ai = configured
 	}
 	plan := rewriteRuntimePlan{ProcessLines: ruleInt(rewrite["process_line_count"], rewriteProcessLines), AnchorLines: ruleInt(rewrite["anchor_line_count"], rewriteAnchorLines), Temperature: rewriteTemperature, MaxTokens: rewriteMaxTokens, TemplateID: rewriteString(rewrite["default_template_id"])}
-	if value, ok := rewrite["temperature"].(float64); ok {
-		plan.Temperature = value
+	if temperature, err := rewriteEffectiveTemperature(settings); err == nil {
+		plan.Temperature = temperature
 	}
-	if value, ok := ai["max_tokens"].(float64); ok && value > 0 {
-		plan.MaxTokens = int(value)
+	if value := ruleInt(ai["max_tokens"], rewriteMaxTokens); value > 0 {
+		plan.MaxTokens = value
 	}
 	if slots := mapOrEmpty(rewrite["ai_slot_methods"]); rewriteString(slots[versionID]) != "" && rewriteString(slots[versionID]) != "auto" {
 		plan.Method = rewriteString(slots[versionID])
@@ -358,6 +361,10 @@ func GenerateAIRewritesForVersionsProcessed(ctx context.Context, store Store, ow
 		app["rewrite"] = rewrite
 		settings["appConfig"] = app
 	}
+	timeout, extraBody, parameterErr := AIRequestParameters(settings)
+	if parameterErr != nil {
+		return document, parameterErr
+	}
 	seen := map[string]bool{}
 	requested := make([]string, 0, len(versions))
 	for _, versionID := range versions {
@@ -386,6 +393,7 @@ func GenerateAIRewritesForVersionsProcessed(ctx context.Context, store Store, ow
 		}
 		userPrompt, processCount, targetChars, sourceBlock := buildRewritePrompt(document, original, index, plan)
 		request := RewriteRequest{
+			Timeout: timeout, ExtraBody: extraBody, JSONResponse: plan.ResponseMode == "changed_lines_json",
 			SystemPrompt: batchbook.RewriteSystem,
 			UserPrompt:   userPrompt,
 			Temperature:  plan.Temperature,
@@ -394,11 +402,14 @@ func GenerateAIRewritesForVersionsProcessed(ctx context.Context, store Store, ow
 		if plan.SystemPrompt != "" {
 			request.SystemPrompt = fillRewriteTemplate(plan.SystemPrompt, map[string]string{"content_id": document.BookID, "book_id": document.BookID})
 		}
+		if err := batchfactoryv11.ApplyTextRequestParameters(map[string]any{}, batchfactoryv11.TextCompletionRequest{Temperature: request.Temperature, MaxTokens: request.MaxTokens, ExtraBody: request.ExtraBody}, nil); err != nil {
+			return document, err
+		}
 		observed := &rewriteBudgetObserver{provider: provider}
 		result, generationErr := completeValidatedRewrite(ctx, observed, request, document.BookID, plan.ResponseMode, processCount, targetChars, sourceBlock)
 		if generationErr != nil {
 			generationErr = batchfactoryv11.SafeProviderError(generationErr)
-			document.Meta["rewriteValidationHold"] = errors.Is(generationErr, ErrRewriteValidation) && !batchfactoryv11.SingleAttempt(ctx)
+			document.Meta["rewriteValidationHold"] = errors.Is(generationErr, ErrRewriteValidation) && !batchfactoryv11.SingleAttempt(ctx) || errors.Is(generationErr, batchfactoryv11.ErrTextRefused) || batchfactoryv11.IsModelOutputTruncated(generationErr) || errors.Is(generationErr, batchfactoryv11.ErrTextResultUnknown)
 			document.Meta["aiStatus"] = "failed"
 			document.Meta["aiError"] = generationErr.Error()
 			_ = persistRewriteDocument(ctx, store, owner, document)

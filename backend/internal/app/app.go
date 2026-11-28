@@ -58,7 +58,8 @@ import (
 var novelFetchClassificationTimeout = 60 * time.Second
 
 type novelFetchRewriteAdapter struct {
-	provider batchfactoryv11.DirectorProvider
+	extraBody map[string]any
+	provider  batchfactoryv11.DirectorProvider
 }
 
 func (a novelFetchRewriteAdapter) ModelIdentity() string {
@@ -109,14 +110,20 @@ func (p ownerTextProvider) Complete(ctx context.Context, request batchfactoryv11
 }
 
 func (a novelFetchRewriteAdapter) Complete(ctx context.Context, request novelfetchworkshop.RewriteRequest) (string, error) {
-	callCtx, cancel := context.WithTimeout(batchfactoryv11.WithSingleAttempt(ctx), novelFetchClassificationTimeout)
+	timeout := request.Timeout
+	if timeout <= 0 {
+		timeout = 180 * time.Second
+	}
+	callCtx, cancel := context.WithTimeout(batchfactoryv11.WithSingleAttempt(ctx), timeout)
 	defer cancel()
 	return a.provider.Complete(callCtx, batchfactoryv11.TextCompletionRequest{
+		Timeout:             timeout,
 		SystemPrompt:        request.SystemPrompt,
 		UserPrompt:          request.UserPrompt,
 		Temperature:         request.Temperature,
 		MaxTokens:           request.MaxTokens,
-		DisableJSONResponse: true,
+		DisableJSONResponse: !request.JSONResponse,
+		ExtraBody:           novelFetchExtraParameters(a.extraBody, request.ExtraBody),
 	})
 }
 
@@ -214,7 +221,7 @@ func loadSubjectModelConfig(ctx context.Context, accounts accountcenter.Store, c
 	return novelfetchworkshop.ReadRuntimeConfig(ctx, catalog, owner)
 }
 
-func textGenderJudge(provider batchfactoryv11.DirectorProvider) novelfetchworkshop.AIGenderJudge {
+func textGenderJudge(provider batchfactoryv11.DirectorProvider, defaults ...map[string]any) novelfetchworkshop.AIGenderJudge {
 	if novelFetchTextProviderMissing(provider) {
 		return nil
 	}
@@ -222,10 +229,12 @@ func textGenderJudge(provider batchfactoryv11.DirectorProvider) novelfetchworksh
 		callCtx, cancel := context.WithTimeout(batchfactoryv11.WithSingleAttempt(ctx), novelFetchClassificationTimeout)
 		defer cancel()
 		return provider.Complete(callCtx, batchfactoryv11.TextCompletionRequest{
+			Timeout:             novelFetchClassificationTimeout,
 			SystemPrompt:        "你是小说男女频分类助手。只输出 JSON：{\"gender\":\"男频或女频\"}。必须从「男频」「女频」中选择最接近的一项，不要留空，不要输出 JSON 以外的内容。",
 			UserPrompt:          "请根据以下分类信息和正文片段判断小说男女频：分类=" + info.Category + "；题材=" + info.Genre + "；正文片段=" + genderTextExcerpt(info.Text),
 			Temperature:         0,
 			MaxTokens:           256,
+			ExtraBody:           novelFetchExtraParameters(defaults...),
 			DisableJSONResponse: false,
 		})
 	}
@@ -440,8 +449,19 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 		if providerErr != nil {
 			return nil, providerErr
 		}
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, novelFetchStore, owner)
+		if err != nil {
+			return nil, err
+		}
+		_, extraBody, err := novelfetchworkshop.AIRequestParameters(settings)
+		if err != nil {
+			return nil, err
+		}
+		if provider == nil && textProvider != nil {
+			provider = textProvider
+		}
 		if provider != nil {
-			return novelFetchRewriteAdapter{provider: provider}, nil
+			return novelFetchRewriteAdapter{provider: provider, extraBody: extraBody}, nil
 		}
 		return novelFetchRewrite, nil
 	}
@@ -450,8 +470,19 @@ func Build(ctx context.Context, cfg config.Config, db *sql.DB, register func(*ht
 		if providerErr != nil {
 			return nil, providerErr
 		}
+		settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, novelFetchStore, owner)
+		if err != nil {
+			return nil, err
+		}
+		_, extraBody, err := novelfetchworkshop.AIRequestParameters(settings)
+		if err != nil {
+			return nil, err
+		}
+		if provider == nil && textProvider != nil {
+			provider = textProvider
+		}
 		if provider != nil {
-			return textGenderJudge(provider), nil
+			return textGenderJudge(provider, extraBody), nil
 		}
 		return novelFetchAIGenderJudge, nil
 	}

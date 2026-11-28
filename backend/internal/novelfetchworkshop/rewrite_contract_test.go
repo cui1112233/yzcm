@@ -66,7 +66,7 @@ func TestRewriteRejectsWrongIDAndDoesNotSavePollution(t *testing.T) {
 	calls := 0
 	_, err := GenerateAIRewrites(ctx, store, "a", "123", 1, rewriteProviderFunc(func(context.Context, RewriteRequest) (string, error) { calls++; return "抱歉，我无法协助", nil }))
 	doc, _ := store.GetDocument(ctx, "a", "123")
-	if err == nil || calls != 3 || len(doc.Versions) != 0 {
+	if err == nil || calls != 1 || len(doc.Versions) != 0 {
 		t.Fatalf("err=%v calls=%d doc=%#v", err, calls, doc)
 	}
 	if doc.Meta["rewriteValidationHold"] != true {
@@ -123,7 +123,7 @@ func TestRewriteRejectsPromptLeakAndRepeatedParagraph(t *testing.T) {
 			calls++
 			return output, nil
 		}), RewriteRequest{MaxTokens: 2400}, "book", "plain_text", 1, 120, rewriteQualitySource)
-		if !errors.Is(err, ErrRewriteValidation) || calls != 3 {
+		if !errors.Is(err, ErrRewriteValidation) || calls != 1 {
 			t.Fatalf("accepted polluted output %q: calls=%d err=%v", output, calls, err)
 		}
 	}
@@ -139,7 +139,7 @@ func TestRewriteRejectsUnchangedOriginalAndAcceptsRealRewrite(t *testing.T) {
 		return rewriteQualitySource, nil
 	}))
 	doc, _ := store.GetDocument(ctx, "a", "123")
-	if !errors.Is(err, ErrRewriteValidation) || calls != 3 || len(doc.Versions) != 0 {
+	if !errors.Is(err, ErrRewriteValidation) || calls != 1 || len(doc.Versions) != 0 {
 		t.Fatalf("unchanged original accepted: calls=%d err=%v versions=%#v", calls, err, doc.Versions)
 	}
 	if _, err := GenerateAIRewrites(ctx, store, "a", "123", 1, rewriteProviderFunc(func(context.Context, RewriteRequest) (string, error) {

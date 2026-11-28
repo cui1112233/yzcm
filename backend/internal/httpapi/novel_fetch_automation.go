@@ -2,12 +2,14 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
 	"strings"
 	"time"
 
+	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/novelfetchworkshop"
 )
 
@@ -83,6 +85,9 @@ const novelFetchOriginalConfigurationMessage = "原文获取配置不可用，�
 func novelFetchAIManualRetryRequired(err error) bool {
 	if err == nil {
 		return false
+	}
+	if errors.Is(err, batchfactoryv11.ErrTextOutputTruncated) || errors.Is(err, batchfactoryv11.ErrTextRefused) || errors.Is(err, batchfactoryv11.ErrTextResultUnknown) {
+		return true
 	}
 	if novelFetchRetryResultUnknown(err) || novelFetchRetryConfigurationFailure(err) {
 		return true

@@ -64,11 +64,11 @@ func novelFetchAIErrorIsOutputRejection(failure error) bool {
 	if failure == nil {
 		return false
 	}
-	if errors.Is(failure, novelfetchworkshop.ErrRewriteValidation) {
+	if errors.Is(failure, novelfetchworkshop.ErrRewriteValidation) || errors.Is(failure, batchfactoryv11.ErrTextEmpty) {
 		return true
 	}
 	text := strings.ToLower(failure.Error())
-	for _, marker := range []string{"ai 返回异常", "ai_output_rejected", "invalid_json", "incomplete_prose"} {
+	for _, marker := range []string{"ai 返回异常", "ai_output_rejected", "invalid_json", "incomplete_prose", "文本模型返回了空正文"} {
 		if strings.Contains(text, marker) {
 			return true
 		}
@@ -227,7 +227,16 @@ func scheduleNovelFetchTaskRetry(meta map[string]any, stage string, failure erro
 	if outputRejection {
 		outputRejections++
 	}
-	budget := map[string]any{"attempt": attempt, "first_attempt_at": firstAttempt, "output_rejections": outputRejections}
+	limit := novelFetchRetryLimit(stage)
+	if novelFetchRetryIsAIStage(stage) {
+		if configured := intValue(meta["ai_retry_max_failures"]); configured > 0 && configured < limit {
+			limit = configured
+		}
+		if saved := intValue(previous["max_failures"]); saved > 0 && saved < limit {
+			limit = saved
+		}
+	}
+	budget := map[string]any{"attempt": attempt, "first_attempt_at": firstAttempt, "output_rejections": outputRejections, "max_failures": limit}
 	if novelFetchRetryStateExhausted(stage, previous, now) || novelFetchRetryStateExhausted(stage, budget, now) || (stage != novelFetchRetryStageOriginalFetch && novelFetchAIManualRetryRequired(failure)) || novelFetchRetryConfigurationFailure(failure) {
 		state := map[string]any{
 			"attempt":           attempt,
@@ -237,6 +246,7 @@ func scheduleNovelFetchTaskRetry(meta map[string]any, stage string, failure erro
 			"updated_at":        now.UTC().Format(time.RFC3339Nano),
 			"first_attempt_at":  firstAttempt,
 			"output_rejections": outputRejections,
+			"max_failures":      limit,
 		}
 		schedule[stage] = state
 		meta["retry_schedule"] = schedule
@@ -266,6 +276,7 @@ func scheduleNovelFetchTaskRetry(meta map[string]any, stage string, failure erro
 		"updated_at":        now.UTC().Format(time.RFC3339Nano),
 		"first_attempt_at":  firstAttempt,
 		"output_rejections": outputRejections,
+		"max_failures":      limit,
 	}
 	if outputRejection && delay <= 0 {
 		state["immediate"] = true
@@ -384,6 +395,11 @@ func scheduleNovelFetchDocumentRetry(ctx context.Context, store novelfetchworksh
 	// The worker may observe that same failure; do not count it a second time.
 	if stage == novelFetchRetryStageClassify && novelFetchRetryStateIsManual(novelFetchRetrySchedule(document.Meta)[stage]) {
 		return nil
+	}
+	if novelFetchRetryIsAIStage(stage) {
+		if err := applyNovelFetchAIStageBudget(ctx, store, owner, document.Meta); err != nil {
+			return err
+		}
 	}
 	scheduleNovelFetchTaskRetry(document.Meta, stage, failure, novelFetchAIRetryDelayHintSeconds(failure), now)
 	return store.PutDocument(ctx, owner, document)

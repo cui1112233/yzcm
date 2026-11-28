@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 var DirectorPrefixKeys = []string{
@@ -16,6 +17,8 @@ var DirectorPrefixKeys = []string{
 }
 
 type TextCompletionRequest struct {
+	Timeout             time.Duration
+	ExtraBody           map[string]any
 	Messages            []TextCompletionMessage
 	SystemPrompt        string
 	UserPrompt          string

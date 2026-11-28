@@ -970,6 +970,13 @@ func novelFetchConfiguredConcurrency(ctx context.Context, store novelfetchworksh
 		if configured := toInt(mapOrEmpty(settings["fetch"])["concurrency"]); configured > 0 {
 			concurrency = configured
 		}
+		ai := mapOrEmpty(settings["ai"])
+		if configured := mapOrEmpty(mapOrEmpty(settings["appConfig"])["ai"]); len(configured) > 0 {
+			ai = configured
+		}
+		if maximum := toInt(ai["max_concurrency"]); maximum > 0 && maximum < concurrency {
+			concurrency = maximum
+		}
 	}
 	if concurrency > 20 {
 		concurrency = 20

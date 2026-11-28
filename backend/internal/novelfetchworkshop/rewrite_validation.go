@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"qiantie/backend/internal/batchfactoryv11"
-	"qiantie/backend/internal/prompt/batchbook"
 	"regexp"
 	"sort"
 	"strings"
@@ -56,6 +55,9 @@ func ValidateRewriteProse(text string) error {
 		"<!doctype", "<html",
 	} {
 		if strings.Contains(lower, marker) {
+			if strings.Contains(marker, "抱歉") || strings.Contains(marker, "对不起") || strings.Contains(marker, "我无法") || strings.Contains(marker, "我不能") || strings.Contains(marker, "sorry") || strings.Contains(marker, "assist") || marker == "as an ai" {
+				return batchfactoryv11.ErrTextRefused
+			}
 			return fmt.Errorf("AI 改文包含拒答、错误消息或未解析格式，请重试或检查模型")
 		}
 	}
@@ -264,114 +266,30 @@ func completeValidatedRewrite(ctx context.Context, provider RewriteProvider, req
 	if mode != "" && mode != "plain_text" && mode != "changed_lines_json" {
 		return "", fmt.Errorf("不支持的改文响应模式：%s", mode)
 	}
-	base := request.UserPrompt
-	var lastErr error
-	maxAttempts := 3
-	if batchfactoryv11.SingleAttempt(ctx) {
-		maxAttempts = 1
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		raw, err := provider.Complete(ctx, request)
-		if err != nil {
-			message := strings.ToLower(err.Error())
-			truncated := strings.Contains(message, "输出被长度截断") || strings.Contains(message, "finish_reason=length") || strings.Contains(message, "max_output_tokens") && strings.Contains(message, "truncat")
-			if truncated {
-				lastErr = err
-				// Compact budgets can be consumed by reasoning before any prose
-				// is returned. Escalate only an explicit truncation, at most twice.
-				// Exhaustion becomes a manual hold instead of another queue loop.
-				if request.MaxTokens >= 24000 {
-					break
-				}
-				next := request.MaxTokens * 2
-				if next < 12000 {
-					next = 12000
-				}
-				if next > 24000 {
-					next = 24000
-				}
-				request.MaxTokens = next
-				continue
-			}
-			return "", err
-		}
-		result, err := parseRewriteOutput(raw, mode, bookID, lineCount)
-		// 与批量原文改文系统源码保持一致：不设 135% 长度硬上限。
-		// 只保留空输出、污染、过短和几乎未改写这几类真正影响成品的检查。
-		// Very short source snippets are legitimate. Apply the floor only to substantial blocks.
-		if err == nil && targetChars >= 200 && len([]rune(result)) < targetChars/10 {
-			err = fmt.Errorf("AI 改文输出异常过短")
-		}
-		if err == nil {
-			err = validateRewriteQuality(result, source)
-		}
-		if err == nil {
-			return result, nil
-		}
-		lastErr = err
-		// 与源码一致：后续重试降低随机性并放大输出预算，
-		// 避免同一个提示词原样重试三次仍然得到同样的问题输出。
-		if request.Temperature > 0.1 {
-			request.Temperature = 0.1
-		}
-		if request.MaxTokens < 24000 {
-			next := request.MaxTokens * 2
-			if next < 12000 {
-				next = 12000
-			}
-			if next > 24000 {
-				next = 24000
-			}
-			request.MaxTokens = next
-		}
-		// 与源码对齐：上游策略拒绝时不再重发带全文的原提示词，
-		// 改成只含目标片段的最小 payload；其他失败才追加格式纠正。
-		if isProviderRejection(err) {
-			request.SystemPrompt = rewriteCompactSystem
-			if strings.EqualFold(strings.TrimSpace(mode), "changed_lines_json") {
-				request.UserPrompt = fmt.Sprintf(rewriteCompactJSON, lineCount, bookID, lineCount, source)
-			} else {
-				request.UserPrompt = fmt.Sprintf(rewriteCompactText, lineCount, source)
-			}
-		} else {
-			request.UserPrompt = base + fmt.Sprintf(batchbook.Repair, err.Error())
-		}
+	// Exactly one provider call. Confirmed format failures share the queue's one
+	// delayed repair; truncation/refusal/unknown results never resend here.
+	raw, err := provider.Complete(batchfactoryv11.WithSingleAttempt(ctx), request)
+	if err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("%w，已停止（最多 %d 次）：%v", ErrRewriteValidation, maxAttempts, lastErr)
-}
-
-var providerRejectionMarkers = []string{
-	"policy", "prohibited", "could not be submitted", "try rephrasing",
-	"policies.google.com", "content filter", "safety", "拒答", "违规", "敏感",
-}
-
-// isProviderRejection reports whether the failure came from an upstream policy
-// rejection rather than from the model's prose. Such retries must drop the full
-// text payload to avoid triggering the same rejection again.
-func isProviderRejection(err error) bool {
+	if rejection := ValidateRewriteProse(raw); errors.Is(rejection, batchfactoryv11.ErrTextRefused) {
+		return "", rejection
+	}
+	result, err := parseRewriteOutput(raw, mode, bookID, lineCount)
+	if err == nil && targetChars >= 200 && len([]rune(result)) < targetChars/10 {
+		err = fmt.Errorf("AI 改文输出异常过短")
+	}
 	if err == nil {
-		return false
+		err = validateRewriteQuality(result, source)
 	}
-	text := strings.ToLower(err.Error())
-	for _, marker := range providerRejectionMarkers {
-		if strings.Contains(text, marker) {
-			return true
-		}
+	if err == nil {
+		return result, nil
 	}
-	return false
+	if errors.Is(err, batchfactoryv11.ErrTextRefused) {
+		return "", err
+	}
+	return "", fmt.Errorf("%w：%v", ErrRewriteValidation, err)
 }
-
-const rewriteCompactSystem = "你是小说改文助手，只处理用户给出的这一小段正文，不要复述、解释或拒绝。"
-
-const rewriteCompactJSON = `只改写下面这段小说正文，共 %d 行。保持人物、情节、视角不变，只做表达层改写。
-只输出 JSON，不要解释：{"id":"%s","changed_lines":[{"line_no":1,"text":"第一行改写结果"}]}
-line_no 从 1 开始，必须正好 %d 条，每条不要包含换行。
-原文：
-%s`
-
-const rewriteCompactText = `只改写下面这段小说正文，共 %d 行。保持人物、情节、视角不变，只做表达层改写。直接输出改写后的正文，不要解释。
-原文：
-%s`

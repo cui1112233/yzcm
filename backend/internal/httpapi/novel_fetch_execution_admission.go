@@ -410,6 +410,11 @@ func saveWorkshopStageFailure(ctx context.Context, store novelfetchworkshop.Stor
 	if failure.FailureID != "" && firstText(previous["failure_id"]) == failure.FailureID {
 		return nil
 	}
+	if novelFetchRetryIsAIStage(failure.Stage) {
+		if err := applyNovelFetchAIStageBudget(ctx, store, owner, doc.Meta); err != nil {
+			return err
+		}
+	}
 	cause := errors.New(failure.Message)
 	now := time.Now().UTC()
 	state := scheduleNovelFetchTaskRetry(doc.Meta, failure.Stage, cause, novelFetchAIRetryDelayHintSeconds(cause), now)

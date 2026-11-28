@@ -255,7 +255,9 @@ func (p *OpenAICompatibleProvider) Complete(ctx context.Context, input TextCompl
 	// SD director cards and opening variants have a deliberately plain-text
 	// wire protocol. Sending OpenAI's JSON-only response_format for those calls
 	// contradicts their required ===VIDEO/时长 lines and causes false failures.
-	ApplyTextParameterOmissions(payload, input)
+	if err := ApplyTextRequestParameters(payload, input, nil); err != nil {
+		return "", err
+	}
 	if !input.DisableJSONResponse {
 		payload["response_format"] = map[string]string{"type": "json_object"}
 	}
@@ -274,7 +276,7 @@ func (p *OpenAICompatibleProvider) Complete(ctx context.Context, input TextCompl
 	// 并把输出预算压到安全值后再试一次；仍然 400 才按确定性失败返回。
 	fallbackTried := false
 	for attempt := 1; attempt <= maxAttempts+1; attempt++ {
-		resp, reqErr := p.do(ctx, body)
+		resp, reqErr := p.do(ctx, body, input.Timeout)
 		if reqErr != nil {
 			if SingleAttempt(ctx) || !directorProviderRetryableTransportError(reqErr) || attempt == maxAttempts {
 				return "", &directorTransportError{err: reqErr}
@@ -330,39 +332,12 @@ func (p *OpenAICompatibleProvider) Complete(ctx context.Context, input TextCompl
 		// Defensive: the loop only exits with a 2xx status or an explicit return.
 		return "", &DirectorHTTPError{StatusCode: statusCode, Model: strings.TrimSpace(p.Model), Body: string(raw)}
 	}
-	var decoded struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-			Text         string `json:"text"`
-			FinishReason string `json:"finish_reason"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(raw, &decoded); err != nil || len(decoded.Choices) == 0 {
-		return "", fmt.Errorf("文本模型返回的响应格式无效，请重试或更换模型")
-	}
-	choice := decoded.Choices[0]
-	// A partial JSON response must never reach the H3 parser as a generic
-	// "invalid input".  OpenAI-compatible services expose this condition as
-	// finish_reason=length; make it retryable and tell the caller to use a
-	// model/output budget that can complete the frozen director contract.
-	if strings.EqualFold(strings.TrimSpace(choice.FinishReason), "length") {
-		return "", errDirectorOutputTruncated
-	}
-	content := strings.TrimSpace(choice.Message.Content)
-	if content == "" {
-		content = strings.TrimSpace(choice.Text)
-	}
-	if content == "" {
-		return "", fmt.Errorf("文本模型返回了空内容，请重试或更换模型")
-	}
-	return content, nil
+	return DecodeTextCompletionResponse(raw)
 }
 
 // do sends one logical request. It keeps the HTTP/2 protocol-mismatch retry
 // exactly once, separate from the bounded 429/5xx attempt loop.
-func (p *OpenAICompatibleProvider) do(ctx context.Context, body []byte) (*http.Response, error) {
+func (p *OpenAICompatibleProvider) do(ctx context.Context, body []byte, timeouts ...time.Duration) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -373,7 +348,11 @@ func (p *OpenAICompatibleProvider) do(ctx context.Context, body []byte) (*http.R
 	if client == nil {
 		client = openAICompatibleHTTPClient(p.Endpoint)
 	}
-	resp, err := SingleAttemptClient(ctx, client, req).Do(req)
+	timeout := time.Duration(0)
+	if len(timeouts) > 0 {
+		timeout = timeouts[0]
+	}
+	resp, err := TextCompletionHTTPClient(ctx, client, req, timeout).Do(req)
 	if err == nil {
 		return resp, nil
 	}

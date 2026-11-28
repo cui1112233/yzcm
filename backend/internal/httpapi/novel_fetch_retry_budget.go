@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"qiantie/backend/internal/batchfactoryv11"
+	"qiantie/backend/internal/novelfetchworkshop"
 	"strings"
 	"time"
 )
@@ -39,6 +41,9 @@ func novelFetchRetryConfigurationFailure(failure error) bool {
 	if failure == nil {
 		return false
 	}
+	if errors.Is(failure, batchfactoryv11.ErrConfigRequired) {
+		return true
+	}
 	text := strings.ToLower(failure.Error())
 	for _, marker := range []string{"未配置", "配置不可用", "配置错误", "未登录", "登录已失效", "unauthorized", "forbidden", "invalid api key", "http 401", "http 403", "not found", "来源无效", "参数无效"} {
 		if strings.Contains(text, marker) {
@@ -59,7 +64,7 @@ func novelFetchRetryLimit(stage string) int {
 }
 
 func novelFetchRetryStateExhausted(stage string, state map[string]any, now time.Time) bool {
-	if novelFetchRetryStateIsManual(state) || intValue(state["attempt"]) >= novelFetchRetryLimit(stage) {
+	if novelFetchRetryStateIsManual(state) || intValue(state["attempt"]) >= novelFetchRetryLimitForState(stage, state) {
 		return true
 	}
 	if intValue(state["output_rejections"]) > 1 {
@@ -72,4 +77,27 @@ func novelFetchRetryStateExhausted(stage string, state map[string]any, now time.
 		}
 	}
 	return false
+}
+
+func novelFetchRetryLimitForState(stage string, state map[string]any) int {
+	limit := novelFetchRetryLimit(stage)
+	if novelFetchRetryIsAIStage(stage) {
+		if configured := intValue(state["max_failures"]); configured > 0 && configured < limit {
+			limit = configured
+		}
+	}
+	return limit
+}
+
+func applyNovelFetchAIStageBudget(ctx context.Context, store novelfetchworkshop.Store, owner string, meta map[string]any) error {
+	settings, err := novelfetchworkshop.ReadWorkflowConfig(ctx, store, owner)
+	if err != nil {
+		return err
+	}
+	meta["ai_retry_max_failures"] = novelfetchworkshop.AIRetryMaxFailures(settings)
+	return nil
+}
+
+func novelFetchRetryIsAIStage(stage string) bool {
+	return stage == novelFetchRetryStageRewrite || stage == novelFetchRetryStageSensitive
 }

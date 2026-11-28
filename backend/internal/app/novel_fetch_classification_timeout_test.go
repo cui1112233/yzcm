@@ -15,7 +15,7 @@ import (
 // 分类 LLM 调用必须自带短超时：模型网关挂起时不能继承 300 秒的导演链路
 // 超时，否则「AI 判断发布信息」会长时间转圈才兜底。这里收紧超时后验证
 // adapter 对挂起的端点会按超时快速失败，而不是等到导演链路的 300 秒。
-func TestNovelFetchRewriteAdapterAppliesClassificationTimeout(t *testing.T) {
+func TestNovelFetchRewriteAdapterAppliesConfiguredTimeout(t *testing.T) {
 	original := novelFetchClassificationTimeout
 	novelFetchClassificationTimeout = 120 * time.Millisecond
 	t.Cleanup(func() { novelFetchClassificationTimeout = original })
@@ -31,7 +31,7 @@ func TestNovelFetchRewriteAdapterAppliesClassificationTimeout(t *testing.T) {
 
 	adapter := novelFetchRewriteAdapter{provider: &batchfactoryv11.OpenAICompatibleProvider{Endpoint: server.URL, APIKey: "key", Model: "test-model"}}
 	started := time.Now()
-	if _, err := adapter.Complete(context.Background(), novelfetchworkshop.RewriteRequest{}); err == nil {
+	if _, err := adapter.Complete(context.Background(), novelfetchworkshop.RewriteRequest{Timeout: 120 * time.Millisecond}); err == nil {
 		t.Fatal("Complete should fail when the model gateway hangs")
 	}
 	elapsed := time.Since(started)
