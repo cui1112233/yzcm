@@ -40,7 +40,17 @@ export function summarizeWorkshopProgress(rows, fallbackSubmissions = []) {
     aiDone, aiRequired,
     processing: source.filter(row => ['queued', 'processing'].includes(novelFetchTaskStatus(row).status)).length,
     waitingRetry: source.filter(row => novelFetchTaskStatus(row).status === 'waiting_retry').length,
-    failed: source.filter(row => [row.status, row.originalStatus ?? row.original_status, row.aiStatus ?? row.ai_status, row.siteSubmitStatus ?? row.site_submit_status].some(failed)).length,
+    failed: source.filter((row, index) => {
+      const versions = requested[index];
+      if (versions === null) return [row.status, row.originalStatus ?? row.original_status, row.aiStatus ?? row.ai_status, row.siteSubmitStatus ?? row.site_submit_status].some(failed);
+      const snapshot = row.meta?.processSnapshot ?? row.processSnapshot ?? {};
+      if ([row.status, row.originalStatus ?? row.original_status].some(failed)) return true;
+      if (versions.some(version => {
+        const ref = row.bodyRefs?.[version] ?? row.body_refs?.[version];
+        return failed(ref?.state ?? row.versions?.[version]?.state);
+      })) return true;
+      return snapshot.auto_submit === true && failed(row.siteSubmitStatus ?? row.site_submit_status);
+    }).length,
     submissionDone: source.length ? source.filter(row => done(row.siteSubmitStatus ?? row.site_submit_status)).length : fallbackSubmissions.filter(row => done(row.status)).length
   };
 }

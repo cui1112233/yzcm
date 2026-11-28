@@ -12,8 +12,8 @@ const Form = require('antd/lib/form').default;
 const Checkbox = require('antd/lib/checkbox').default;
 const Space = require('antd/lib/space').default;
 const componentSource = readFileSync(new URL('./novel-fetch-automation-options.js', import.meta.url), 'utf8')
-  .replaceAll('\r\n', '\n').replace(/^import .*;$/gm, '').replace('export function NovelFetchAutomationOptions', 'function NovelFetchAutomationOptions');
-const NovelFetchAutomationOptions = new Function('React', 'Form', 'Checkbox', 'Space', componentSource + '\nreturn NovelFetchAutomationOptions;')(React, Form, Checkbox, Space);
+  .replaceAll('\r\n', '\n').replace(/^import .*;$/gm, '').replaceAll('export function ', 'function ');
+const { NovelFetchAutomationOptions, NovelFetchThinkingOptions } = new Function('React', 'Form', 'Checkbox', 'Space', componentSource + '\nreturn { NovelFetchAutomationOptions, NovelFetchThinkingOptions };')(React, Form, Checkbox, Space);
 import { withNovelFetchConfigDefaults } from './novel-fetch-config-defaults.js';
 
 test('旧配置缺少自动处理开关时默认开启', () => {
@@ -89,4 +89,16 @@ test('自动处理选项把表单值绑定到真实复选框', () => {
   assert.equal((enabledMarkup.match(/type="checkbox"/g) || []).length, 5);
   assert.equal((enabledMarkup.match(/checked=""/g) || []).length, 5);
   assert.equal((disabledMarkup.match(/checked=""/g) || []).length, 0);
+});
+
+test('思考模式保存值绑定到真实复选框', () => {
+  for (const [enable, disable] of [[true, false], [false, true], [false, false]]) {
+    const html = renderToStaticMarkup(React.createElement(Form,
+      { initialValues: { ai: { enable_thinking: enable, disable_thinking: disable } } },
+      React.createElement(NovelFetchThinkingOptions)));
+    const inputs = html.match(/<input[^>]*type="checkbox"[^>]*>/g);
+    assert.equal(inputs.length, 2);
+    assert.equal(inputs[0].includes('checked=""'), enable);
+    assert.equal(inputs[1].includes('checked=""'), disable);
+  }
 });

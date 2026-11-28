@@ -31,3 +31,17 @@ test('historical rows retain their existing ready AI semantics', () => {
   assert.equal(summarizeWorkshopProgress([{ aiStatus: 'done', versions: { original: '原文' } }]).aiDone, 0);
   assert.equal(summarizeWorkshopProgress([{ aiStatus: 'done', versions: {}, ai_files: '旧字段不是数组' }]).aiDone, 0);
 });
+
+test('round failure counts exclude stale AI and upload failures', () => {
+  const originalOnly = { ...row({}, []), status: 'completed', aiStatus: 'failed', siteSubmitStatus: 'failed' };
+  originalOnly.meta.processSnapshot.auto_submit = false;
+  assert.equal(summarizeWorkshopProgress([originalOnly]).failed, 0);
+  const readyAI2 = { ...row({ ai1: { state: 'failed' }, ai2: '新正文' }), status: 'completed', aiStatus: 'failed' };
+  assert.equal(summarizeWorkshopProgress([readyAI2]).failed, 0);
+  assert.equal(summarizeWorkshopProgress([{ ...readyAI2, status: 'failed' }]).failed, 1);
+  assert.equal(summarizeWorkshopProgress([{ ...readyAI2, versions: { ai2: { state: 'failed' } } }]).failed, 1);
+  assert.equal(summarizeWorkshopProgress([{ ...originalOnly, originalStatus: 'failed' }]).failed, 1);
+  originalOnly.meta.processSnapshot.auto_submit = true;
+  assert.equal(summarizeWorkshopProgress([originalOnly]).failed, 1);
+  assert.equal(summarizeWorkshopProgress([{ aiStatus: 'failed' }]).failed, 1);
+});

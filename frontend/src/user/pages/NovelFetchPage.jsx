@@ -23,7 +23,7 @@ import {
 import { createNovelFetchIntake } from '../../shared/api/batchFactory';
 import { listAvailableModels as listAvailableTextModels, modelSelectOptions } from '../../shared/api/modelCatalog';
 import { readNovelFetchProcessSettings, writeNovelFetchProcessSettings, resolveNovelFetchTextModel, novelFetchTextModelError, resolveNovelFetchSelectedVersions } from './novel-fetch-process-settings';
-import { NovelFetchAutomationOptions } from './novel-fetch-automation-options.js';
+import { NovelFetchAutomationOptions, NovelFetchThinkingOptions } from './novel-fetch-automation-options.js';
 import { withNovelFetchConfigDefaults, withNovelFetchVersionProfiles, NOVEL_FETCH_PROFILE_VERSIONS, NOVEL_FETCH_AI_VERSION_LIMIT } from './novel-fetch-config-defaults.js';
 import { novelFetchAiVersions, novelFetchSensitiveComparisons, novelFetchSubmitDiagnostic, novelFetchTaskSummaryItems } from './novel-fetch-task-detail.js';
 import { summarizeWorkshopProgress } from './novel-fetch-progress-summary.js';
@@ -362,8 +362,7 @@ function NovelFetchConfigPanel({ form, effectiveValues, dirty, onDirty, versionP
         <Space wrap>
           <label><input type="checkbox" disabled checked={false} readOnly /> 流式响应（测书暂不支持）</label>
           <Typography.Text type="secondary">JSON 输出方式由当前改文模板决定。</Typography.Text>
-          <Form.Item name={['ai', 'enable_thinking']} valuePropName="checked" noStyle><label><input type="checkbox" /> 启用思考</label></Form.Item>
-          <Form.Item name={['ai', 'disable_thinking']} valuePropName="checked" noStyle><label><input type="checkbox" /> 禁用思考</label></Form.Item>
+          <NovelFetchThinkingOptions />
         </Space>
       </section>
       <section hidden={section !== 'catalog'}>
