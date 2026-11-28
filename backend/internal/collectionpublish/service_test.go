@@ -353,3 +353,31 @@ func TestCollectionPublishRedirectReceiptUnavailableDoesNotResubmit(t *testing.T
 		t.Fatal(done, err, creates.Load(), reads.Load())
 	}
 }
+
+func TestCollectionPublishAdoptsConfirmedReceiptForIdenticalTextCollection(t *testing.T) {
+	ctx := context.Background()
+	records := testRecords{}
+	svc := Service{Records: records}
+	req := PublishRequest{Kind: CollectionKindText, Owner: "alice", BatchID: "batch", BookID: "duplicate-book", CollectionID: "duplicate-collection", RunID: "run-2", Attempt: 2, RequestKey: "request-2"}
+	original := Record{
+		Kind: CollectionKindText, BookID: "original-book", CollectionID: "original-collection",
+		IntentID: "remote-intent", Status: "published", Phase: "confirmed", Name: "原作品",
+		ProducerAdminName: "maker", OrganizationID: "org", AudioCategoryID: 1, AudioID: 2,
+		WorkIDs: []int64{3}, CarouselID: 88, ImageIDs: []int64{101, 102}, PageCount: 2,
+	}
+
+	got, err := svc.AdoptPublished(ctx, req, original, "重复作品", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Confirmed() || !got.Reused || got.BookID != req.BookID || got.CollectionID != req.CollectionID || got.Name != "重复作品" {
+		t.Fatalf("adopted=%+v", got)
+	}
+	if got.CarouselID != original.CarouselID || got.IntentID != original.IntentID || got.LastPublished == nil || got.LastPublished.CollectionID != original.CollectionID {
+		t.Fatalf("remote receipt was not preserved: %+v", got)
+	}
+	saved, found, err := records.Load(ctx, req)
+	if err != nil || !found || saved.CollectionID != req.CollectionID || !saved.Confirmed() {
+		t.Fatalf("saved=%+v found=%v err=%v", saved, found, err)
+	}
+}

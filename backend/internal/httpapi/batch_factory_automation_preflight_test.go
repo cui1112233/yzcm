@@ -79,7 +79,15 @@ func savePreflightBatchSettings(t *testing.T, store batchfactoryv11.Store, batch
 
 func preflightComicSettingsPatch(t *testing.T, comicBody string, assetsBody string) batchfactoryv11.SettingsPatch {
 	t.Helper()
-	comic := map[string]any{"enabled": true}
+	comic := map[string]any{
+		"enabled": true,
+		"style": map[string]any{
+			"presetId":   "batch-comic-style-01",
+			"presetName": "测试画风",
+			"presetSlot": "batch.comic-style",
+			"body":       "清晰漫画线稿与柔和上色",
+		},
+	}
 	if comicBody != "" {
 		comic["presetId"] = "batch-comic-page"
 		comic["body"] = comicBody
@@ -397,6 +405,27 @@ func TestAutomationPreflightBlocksMissingComicPromptPresets(t *testing.T) {
 	}
 }
 
+func TestAutomationPreflightBlocksMissingComicStyleBeforePageGeneration(t *testing.T) {
+	store := batchfactoryv11.NewMemoryStore()
+	batch := preflightComicBatch(t, store, 1, 0)
+	patch := preflightComicSettingsPatch(t, "整本漫画页规则", "提取漫画资产")
+	patch["aiPromptConfig"] = json.RawMessage(`{"comic":{"enabled":true,"presetId":"batch-comic-page","body":"整本漫画页规则","assets":{"presetId":"batch-comic-assets","body":"提取漫画资产"}}}`)
+	batch = savePreflightBatchSettings(t, store, batch, patch)
+	coordinator := preflightCoordinator(t, store, preflightReadyStages(store))
+
+	result, err := coordinator.Preflight(context.Background(), "alice", batch.ID, map[string]any{"runMode": "full_submit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocking := preflightIssueCodes(result.Books[0].Blocking)
+	if !strings.Contains(blocking["comic_style_missing"], "请先选择画风") {
+		t.Fatalf("blocking=%#v, want missing comic style before any page generation", result.Books[0].Blocking)
+	}
+	if result.Books[0].Passed {
+		t.Fatal("book without a comic style must not pass preflight")
+	}
+}
+
 func TestAutomationPreflightBlocksUnfrozenComicPromptBody(t *testing.T) {
 	store := batchfactoryv11.NewMemoryStore()
 	batch := preflightComicBatch(t, store, 1, 0)
@@ -418,7 +447,7 @@ func TestAutomationPreflightWarnsPageCountMismatch(t *testing.T) {
 	store := batchfactoryv11.NewMemoryStore()
 	batch := preflightComicBatch(t, store, 1, 3)
 	patch := preflightComicSettingsPatch(t, "整本漫画页规则", "提取漫画资产")
-	patch["aiPromptConfig"] = json.RawMessage(`{"comic":{"enabled":true,"body":"整本漫画页规则","targetPageCount":5,"assets":{"presetId":"batch-comic-assets","body":"提取漫画资产"}}}`)
+	patch["aiPromptConfig"] = json.RawMessage(`{"comic":{"enabled":true,"body":"整本漫画页规则","targetPageCount":5,"style":{"presetId":"batch-comic-style-01","presetSlot":"batch.comic-style","body":"清晰漫画线稿与柔和上色"},"assets":{"presetId":"batch-comic-assets","body":"提取漫画资产"}}}`)
 	batch = savePreflightBatchSettings(t, store, batch, patch)
 	coordinator := preflightCoordinator(t, store, preflightReadyStages(store))
 

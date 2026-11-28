@@ -644,6 +644,23 @@ func automationBookPublishIssues(productionMode string, effective batchfactoryv1
 func automationComicPromptIssues(effective batchfactoryv11.SettingsPatch, book batchfactoryv11.Book) []automationPreflightIssue {
 	issues := []automationPreflightIssue{}
 	config := comicPromptConfig(effective)
+	styles, styleErr := batchfactoryv11.NormalizeComicStyleOutputs(config)
+	switch {
+	case styleErr != nil:
+		issues = append(issues, automationPreflightIssue{
+			Code:      "comic_style_invalid",
+			Message:   "漫画画风配置无效；请在「统一配置 → 漫画生成」重新选择画风",
+			FixTarget: automationFixBatchSettings,
+			FixLabel:  "统一配置 → 漫画生成",
+		})
+	case len(styles) == 0:
+		issues = append(issues, automationPreflightIssue{
+			Code:      "comic_style_missing",
+			Message:   "请先选择画风；请在「统一配置 → 漫画生成」选择至少一种漫画画风",
+			FixTarget: automationFixBatchSettings,
+			FixLabel:  "统一配置 → 漫画生成",
+		})
+	}
 	if strings.TrimSpace(config.ID) == "" && strings.TrimSpace(config.Body) == "" {
 		issues = append(issues, automationPreflightIssue{
 			Code:      "comic_page_preset_missing",

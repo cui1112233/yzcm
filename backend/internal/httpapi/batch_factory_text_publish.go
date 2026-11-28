@@ -324,11 +324,80 @@ func (t textCollectionPublisher) automation(ctx context.Context, r txt.EnsureReq
 	}
 	input := textPublishInput{runID: r.PublishRunID, attempt: r.PublishAttempt, Force: r.ForcePublish}
 	input.RequestKey = r.PublishRequestKey
+	if reused, found, reuseErr := t.reuseIdenticalPublished(ctx, r, c, book, b); reuseErr != nil {
+		return false, reuseErr
+	} else if found {
+		return reused.Confirmed(), nil
+	}
 	rec, err := t.publish(ctx, r.Scope, book, r.FrozenSettings, c.ID, input)
 	if err == nil && rec.Status == "failed" {
 		return false, errors.New(rec.ErrorMessage)
 	}
 	return rec.Confirmed(), err
+}
+
+func (t textCollectionPublisher) reuseIdenticalPublished(ctx context.Context, r txt.EnsureRequest, current txt.Collection, book batchfactoryv11.Book, batch batchfactoryv11.Batch) (cp.Record, bool, error) {
+	if t.n8 == nil || t.n8.Store == nil || t.repo == nil || current.ID == "" || current.Status != "ready" || len(current.Items) == 0 {
+		return cp.Record{}, false, nil
+	}
+	request := textPublishRequest(r.Scope, current.ID)
+	request.RunID, request.Attempt, request.RequestKey = r.PublishRunID, r.PublishAttempt, r.PublishRequestKey
+	if err := t.resolveMapping(ctx, &request, book, r.FrozenSettings); err != nil {
+		return cp.Record{}, false, err
+	}
+	records := textSubmissionRecords{collectionDraftRecords{t.n8.Store}}
+	for _, sibling := range batch.Books {
+		if sibling.ID == book.ID || strings.TrimSpace(sibling.Title) != strings.TrimSpace(book.Title) {
+			continue
+		}
+		collectionID := firstMetadataString(sibling.SourceMetadata, "textCollectionId")
+		if collectionID == "" || collectionID == current.ID {
+			continue
+		}
+		scope := txt.Scope{Owner: r.Owner, BatchID: r.BatchID, BookID: sibling.ID}
+		candidate, err := t.repo.GetCollection(ctx, scope, collectionID)
+		if err != nil || !sameTextCollectionContent(current, candidate) {
+			continue
+		}
+		receipt, found, err := records.Load(ctx, textPublishRequest(scope, collectionID))
+		if err != nil {
+			return cp.Record{}, false, err
+		}
+		if !found || !receipt.Confirmed() || !sameTextPublishMapping(request, receipt) {
+			continue
+		}
+		name, err := t.n8.collectionName(request.Producer, book.Title)
+		if err != nil {
+			return cp.Record{}, false, err
+		}
+		svc := t.n8.collectionService()
+		svc.Records = records
+		adopted, err := svc.AdoptPublished(ctx, request, receipt, name, len(current.Items))
+		return adopted, err == nil, err
+	}
+	return cp.Record{}, false, nil
+}
+
+func sameTextCollectionContent(left, right txt.Collection) bool {
+	if left.Status != "ready" || right.Status != "ready" || len(left.Items) == 0 || len(left.Items) != len(right.Items) {
+		return false
+	}
+	for index := range left.Items {
+		if left.Items[index].Ordinal != right.Items[index].Ordinal || strings.TrimSpace(left.Items[index].SHA256) == "" || left.Items[index].SHA256 != right.Items[index].SHA256 {
+			return false
+		}
+	}
+	return true
+}
+
+func sameTextPublishMapping(request cp.PublishRequest, receipt cp.Record) bool {
+	return receipt.ProducerAdminName == request.Producer &&
+		receipt.OrganizationID == request.OrganizationID &&
+		receipt.WebsiteProfileID == request.WebsiteProfileID &&
+		receipt.CategoryID == request.CategoryID &&
+		receipt.AudioCategoryID == request.AudioCategoryID &&
+		receipt.AudioID == request.AudioID &&
+		slices.Equal(receipt.WorkIDs, request.WorkIDs)
 }
 
 func (t textCollectionPublisher) publish(ctx context.Context, s txt.Scope, book batchfactoryv11.Book, settings batchfactoryv11.SettingsPatch, id string, in textPublishInput) (cp.Record, error) {

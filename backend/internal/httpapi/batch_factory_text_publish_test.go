@@ -28,6 +28,19 @@ type textPublishTestRepo struct {
 	artifacts  []txt.PageArtifact
 }
 
+type textPublishMultiRepo struct {
+	txt.Repository
+	collections map[txt.Scope]txt.Collection
+}
+
+func (r textPublishMultiRepo) GetCollection(_ context.Context, s txt.Scope, id string) (txt.Collection, error) {
+	c, ok := r.collections[s]
+	if !ok || c.ID != id {
+		return txt.Collection{}, txt.ErrNotFound
+	}
+	return c, nil
+}
+
 func (f textPublishTestRepo) GetCollection(_ context.Context, s txt.Scope, id string) (txt.Collection, error) {
 	if s != f.scope || id != f.collection.ID {
 		return txt.Collection{}, txt.ErrNotFound
@@ -79,6 +92,47 @@ func TestTextPublishSettingsIgnoreLegacyWebsiteMapping(t *testing.T) {
 	}
 	if err := cp.ValidateMapping(cp.PublishRequest{Kind: cp.CollectionKindText, Producer: "maker", OrganizationID: "1", AudioCategoryID: 3, AudioID: 77, WorkIDs: []int64{45}}); err != nil {
 		t.Fatalf("valid shared mapping rejected: %v", err)
+	}
+}
+
+func TestTextAutomationReusesNetworkReceiptForDuplicateBook(t *testing.T) {
+	ctx := context.Background()
+	store := batchfactoryv11.NewMemoryStore()
+	settings := batchfactoryv11.SettingsPatch{"productionMode": json.RawMessage(`"text"`), "comicPublishSettings": json.RawMessage(`{"producerAdminName":"maker","organizationId":"1","audioCategoryId":3,"audioId":77,"workIds":[45]}`)}
+	firstID, secondID := "first-collection", "second-collection"
+	batch, err := store.CreateBatch(ctx, "alice", batchfactoryv11.CreateBatchInput{Title: "批次", InitialBatchSettings: settings, Books: []batchfactoryv11.CreateBookInput{
+		{Title: "同一本书", SourceMetadata: map[string]any{"textCollectionId": firstID}},
+		{Title: "同一本书", SourceMetadata: map[string]any{"textCollectionId": secondID}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstScope := txt.Scope{Owner: "alice", BatchID: batch.ID, BookID: batch.Books[0].ID}
+	secondScope := txt.Scope{Owner: "alice", BatchID: batch.ID, BookID: batch.Books[1].ID}
+	items := []txt.CollectionItem{{Ordinal: 1, SHA256: strings.Repeat("a", 64)}, {Ordinal: 2, SHA256: strings.Repeat("b", 64)}}
+	repo := textPublishMultiRepo{collections: map[txt.Scope]txt.Collection{
+		firstScope:  {ID: firstID, Status: "ready", Items: items},
+		secondScope: {ID: secondID, Status: "ready", Items: items},
+	}}
+	records := collectionDraftRecords{store}
+	original := cp.Record{Kind: cp.CollectionKindText, BookID: firstScope.BookID, CollectionID: firstID, IntentID: "network-intent", Status: "published", Phase: "confirmed", Name: "同一本书", ProducerAdminName: "maker", OrganizationID: "1", AudioCategoryID: 3, AudioID: 77, WorkIDs: []int64{45}, CarouselID: 901, ImageIDs: []int64{11, 12}, PageCount: 2}
+	if err := records.Save(ctx, textPublishRequest(firstScope, firstID), original); err != nil {
+		t.Fatal(err)
+	}
+	client := &textPublishTestClient{}
+	directory := fakeN8ComicAudioDirectory{categories: []n8catalog.AudioCategory{{ID: 3, Name: "分类", Status: "ENABLE"}}, audios: []n8catalog.Audio{{ID: 77, OrganizationID: 1, CategoryIDs: []int64{3}, Status: "ENABLE"}}}
+	p := &BatchFactoryN8ComicPublisher{Store: store, Client: client, ProducerDirectory: directory, ProducerAccounts: []string{"maker"}}
+	publisher := textCollectionPublisher{n8: p, repo: repo}
+	confirmed, err := publisher.automation(ctx, txt.EnsureRequest{Scope: secondScope, FrozenSettings: settings, PublishRunID: "run-2", PublishAttempt: 1, PublishRequestKey: "request-2"}, repo.collections[secondScope])
+	if err != nil || !confirmed {
+		t.Fatalf("confirmed=%v err=%v", confirmed, err)
+	}
+	if client.calls != 0 {
+		t.Fatalf("duplicate book submitted to N8 again: calls=%d", client.calls)
+	}
+	got, found, err := records.Load(ctx, textPublishRequest(secondScope, secondID))
+	if err != nil || !found || !got.Confirmed() || !got.Reused || got.CarouselID != original.CarouselID || got.CollectionID != secondID {
+		t.Fatalf("reused=%+v found=%v err=%v", got, found, err)
 	}
 }
 

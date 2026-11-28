@@ -262,6 +262,54 @@ func (s *Service) Publish(ctx context.Context, r PublishRequest, prepare func(co
 	return rec, sendErr
 }
 
+// AdoptPublished records that this text collection is byte-for-byte identical
+// to an already confirmed network carousel. It does not submit anything to N8;
+// the original receipt remains attached for audit and future status checks.
+func (s *Service) AdoptPublished(ctx context.Context, r PublishRequest, receipt Record, name string, pageCount int) (Record, error) {
+	if s.Records == nil || r.Kind != CollectionKindText || r.Owner == "" || r.BatchID == "" || r.BookID == "" || r.CollectionID == "" || strings.TrimSpace(name) == "" || pageCount < 1 {
+		return Record{}, ErrInvalid
+	}
+	origin := receipt.HistoricalPublished()
+	if origin == nil || origin.Kind != CollectionKindText || !origin.Confirmed() || len(origin.ImageIDs) != pageCount {
+		return Record{}, ErrInvalid
+	}
+	lock := s.Lock
+	if s.LockFor != nil {
+		lock = s.LockFor(r)
+	}
+	if lock == nil {
+		lock = &s.localLock
+	}
+	lock.Lock()
+	defer lock.Unlock()
+	if current, found, err := s.Records.Load(ctx, r); err != nil {
+		return Record{}, err
+	} else if found && current.Kind != "" && current.Kind != r.Kind {
+		return Record{}, ErrMixedKinds
+	}
+	physical := *origin
+	physical.LastPublished = nil
+	physical.ImageIDs = slices.Clone(origin.ImageIDs)
+	physical.WorkIDs = slices.Clone(origin.WorkIDs)
+	next := physical
+	next.Reused = true
+	next.LastPublished = &physical
+	next.RunID, next.Attempt, next.RequestKey = r.RunID, r.Attempt, r.RequestKey
+	next.BookID, next.CollectionID, next.Name, next.PageCount = r.BookID, r.CollectionID, strings.TrimSpace(name), pageCount
+	next.Status, next.Phase, next.Message, next.ErrorMessage = "published", "confirmed", "", ""
+	if s.Acquire != nil {
+		release, err := s.Acquire(ctx, r)
+		if err != nil {
+			return Record{}, err
+		}
+		defer release()
+	}
+	if err := s.Records.Save(ctx, r, next); err != nil {
+		return Record{}, err
+	}
+	return next, nil
+}
+
 const pendingMessage = "等待平台返回合集回执；如长时间未更新，请到发布后台核对。"
 
 // Status polls a known pending submission without creating a new one.
