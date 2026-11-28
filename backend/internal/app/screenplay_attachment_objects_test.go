@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"qiantie/backend/internal/config"
 	"qiantie/backend/internal/screenplay"
 	"strings"
 	"testing"
@@ -50,5 +51,17 @@ func TestScreenplayAttachmentObjectsBinding(t *testing.T) {
 	a.Namespace = f.namespace
 	if e = objects.PutVerified(ctx, a, []byte("hello")); !errors.Is(e, context.Canceled) || f.puts != 1 {
 		t.Fatal(e)
+	}
+}
+
+func TestScreenplayAttachmentOptionalConfiguration(t *testing.T) {
+	for _, v := range []struct {
+		cfg    config.Config
+		reason string
+	}{{config.Config{}, "not_configured"}, {config.Config{AssistantAttachmentTOSBucket: "private"}, "incomplete_configuration"}, {config.Config{AssistantAttachmentTOSEndpoint: "http://unsafe.invalid", AssistantAttachmentTOSRegion: "r", AssistantAttachmentTOSBucket: "private", AssistantAttachmentTOSAccessKey: "fake", AssistantAttachmentTOSSecretKey: "fake"}, "invalid_configuration"}} {
+		o, reason := configuredScreenplayAttachmentObjects(v.cfg)
+		if o != nil || reason != v.reason {
+			t.Fatal("optional config must disable only attachments", reason)
+		}
 	}
 }

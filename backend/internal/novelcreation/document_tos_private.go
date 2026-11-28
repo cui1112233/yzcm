@@ -313,17 +313,27 @@ func privateOnlyKeys(m map[string]any, keys ...string) bool {
 	}
 	return true
 }
-func privateFalse(m map[string]any, key string) bool { v, ok := m[key].(bool); return ok && !v }
+
+// These three documented flags may be omitted by TOS when false. Raw JSON
+// remains necessary: explicit null, wrong types and true are not omission.
+func privateOptionalFalse(m map[string]any, key string) bool {
+	value, exists := m[key]
+	if !exists {
+		return true
+	}
+	v, ok := value.(bool)
+	return ok && !v
+}
 func validatePrivateAttachmentACL(raw []byte, object bool) (string, error) {
 	m, e := privateJSON(raw)
 	if e != nil {
 		return "", ErrAttachmentPrivacy
 	}
 	if object {
-		if !privateOnlyKeys(m, "Owner", "Grants", "BucketOwnerEntrusted", "IsDefault", "VersionId", "VersionID") || !privateFalse(m, "BucketOwnerEntrusted") || !privateFalse(m, "IsDefault") {
+		if !privateOnlyKeys(m, "Owner", "Grants", "BucketOwnerEntrusted", "IsDefault", "VersionId", "VersionID") || !privateOptionalFalse(m, "BucketOwnerEntrusted") || !privateOptionalFalse(m, "IsDefault") {
 			return "", ErrAttachmentPrivacy
 		}
-	} else if !privateOnlyKeys(m, "Owner", "Grants", "BucketAclDelivered") || !privateFalse(m, "BucketAclDelivered") {
+	} else if !privateOnlyKeys(m, "Owner", "Grants", "BucketAclDelivered") || !privateOptionalFalse(m, "BucketAclDelivered") {
 		return "", ErrAttachmentPrivacy
 	}
 	o, ok := m["Owner"].(map[string]any)

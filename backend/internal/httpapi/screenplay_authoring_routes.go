@@ -148,7 +148,7 @@ func registerScreenplayAuthoringSessionRoutes(mux *http.ServeMux, auth BridgeAut
 		}
 		return true
 	}
-	registerAssistantReferenceRoutes(svc, handle, decode)
+	registerAssistantReferenceRoutes(svc, auth, handle, decode)
 	if sessionRepo, ok := repo.(*screenplay.MySQLAuthoringRepository); ok {
 		generatorFor := func(r *http.Request, actor string) screenplay.TextGenerator {
 			if channel == nil {

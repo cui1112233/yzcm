@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"qiantie/backend/internal/config"
 	"qiantie/backend/internal/novelcreation"
 	"qiantie/backend/internal/screenplay"
+	"strings"
 )
 
 // Only the dedicated private capability can be injected here. Generic media or
@@ -61,7 +63,33 @@ func (s *screenplayAttachmentObjects) OpenVerified(ctx context.Context, a screen
 	if e := s.validate(ctx, a); e != nil {
 		return nil, e
 	}
-	return s.store.OpenVerified(ctx, a.Namespace, a.ObjectKey, a.RawBytes, a.RawSHA256)
+	raw, err := s.store.OpenVerified(ctx, a.Namespace, a.ObjectKey, a.RawBytes, a.RawSHA256)
+	if errors.Is(err, novelcreation.ErrAttachmentObjectNotFound) {
+		return nil, screenplay.ErrAssistantAttachmentObjectNotFound
+	}
+	return raw, err
 }
 
 var _ screenplay.AssistantTextAttachmentObjects = (*screenplayAttachmentObjects)(nil)
+
+// Optional configuration disables only this feature, never the application.
+func configuredScreenplayAttachmentObjects(c config.Config) (screenplay.AssistantTextAttachmentObjects, string) {
+	values := []string{c.AssistantAttachmentTOSEndpoint, c.AssistantAttachmentTOSRegion, c.AssistantAttachmentTOSBucket, c.AssistantAttachmentTOSAccessKey, c.AssistantAttachmentTOSSecretKey}
+	present := 0
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			present++
+		}
+	}
+	if present == 0 {
+		return nil, "not_configured"
+	}
+	if present != len(values) {
+		return nil, "incomplete_configuration"
+	}
+	objects, err := newScreenplayAttachmentObjects(novelcreation.DocumentTOSConfig{Endpoint: values[0], Region: values[1], Bucket: values[2], AccessKey: values[3], SecretKey: values[4]})
+	if err != nil {
+		return nil, "invalid_configuration"
+	}
+	return objects, ""
+}

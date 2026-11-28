@@ -45,8 +45,8 @@ func TestTOSPrivateACLProof(t *testing.T) {
 		}
 		missing := strings.Replace(base, field, "", 1)
 		missing = strings.Replace(missing, `,}`, `}`, 1)
-		if _, e := validatePrivateAttachmentACL([]byte(missing), isObject); e == nil {
-			t.Fatal("missing bool accepted")
+		if _, e := validatePrivateAttachmentACL([]byte(missing), isObject); e != nil {
+			t.Fatal("documented optional flag omission refused", e)
 		}
 	}
 }
@@ -189,7 +189,7 @@ func TestTOSPrivateUnknownTransportEvidence(t *testing.T) {
 				t.Fatal(e)
 			}
 			e = s.PutVerified(context.Background(), s.NamespaceID(), "assistant-text/id", []byte("hello"))
-			if (v.name == "empty-policy") != (e == nil) {
+			if (v.name == "empty-policy" || v.name == "object-missing-bool") != (e == nil) {
 				t.Fatal(v.name, e)
 			}
 		})
@@ -248,5 +248,55 @@ func TestTOSPrivateOriginalReadErrorIsSafe(t *testing.T) {
 	_, e = s.OpenVerified(context.Background(), s.NamespaceID(), "assistant-text/id", 5, fmt.Sprintf("%x", h))
 	if e == nil || strings.Contains(e.Error(), "private-object-key") {
 		t.Fatal("reader leaked", e)
+	}
+}
+
+// Official owner-only samples and the sanitized real readcheck both omit these
+// documented optional flags. Omission is different from explicit null/type error.
+func TestTOSPrivateDocumentedOptionalFlags(t *testing.T) {
+	ownerOnly := `{"Owner":{"ID":"owner"},"Grants":[{"Grantee":{"ID":"owner","Type":"CanonicalUser"},"Permission":"FULL_CONTROL"}]}`
+	for _, object := range []bool{false, true} {
+		owner, e := validatePrivateAttachmentACL([]byte(ownerOnly), object)
+		if e != nil || owner != "owner" {
+			t.Fatal("documented owner-only ACL refused", object, e)
+		}
+		flags := []string{"BucketAclDelivered"}
+		if object {
+			flags = []string{"BucketOwnerEntrusted", "IsDefault"}
+		}
+		for _, flag := range flags {
+			for _, value := range []string{"null", "true", `"false"`, `{}`, `[]`} {
+				body := strings.TrimSuffix(ownerOnly, "}") + fmt.Sprintf(`,%q:%s}`, flag, value)
+				if _, e := validatePrivateAttachmentACL([]byte(body), object); e == nil {
+					t.Fatal("explicit unsafe flag accepted", body)
+				}
+			}
+		}
+		for _, body := range []string{`{}`, `{"Owner":{"ID":"owner"}}`, `{"Grants":[]}`, strings.Replace(ownerOnly, `"Type":"CanonicalUser"`, `"Type":"Group"`, 1), strings.TrimSuffix(ownerOnly, "}") + `,"UnknownFlag":false}`} {
+			if _, e := validatePrivateAttachmentACL([]byte(body), object); e == nil {
+				t.Fatal("missing evidence accepted", body)
+			}
+		}
+	}
+	s, e := newPrivateTOSDocumentStore(privateCfg(), privateRoundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Query().Has("acl") {
+			return privateResponse(r, 200, ownerOnly), nil
+		}
+		if r.URL.Query().Has("policy") {
+			return privateResponse(r, 404, `{"Code":"NoSuchBucketPolicy"}`), nil
+		}
+		if r.Method == "PUT" {
+			if r.Header.Get("X-Tos-Acl") != "private" {
+				t.Fatal("missing private header")
+			}
+			return privateResponse(r, 200, ""), nil
+		}
+		return privateResponse(r, 200, "hello"), nil
+	}))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = s.PutVerified(context.Background(), s.NamespaceID(), "assistant-text/id", []byte("hello")); e != nil {
+		t.Fatal("official sample transport rejected", e)
 	}
 }

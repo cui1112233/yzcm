@@ -436,3 +436,24 @@ func TestFromEnvAcceptsSliceSixWithEncryptedExternalPublishConfig(t *testing.T) 
 		t.Fatalf("cfg=%+v", cfg)
 	}
 }
+
+func TestAssistantAttachmentTOSConfigurationIsIndependent(t *testing.T) {
+	keepUnstagedSlice(t)
+	t.Setenv("QIANTIE_MYSQL_DSN", "test")
+	t.Setenv("QIANTIE_BRIDGE_SECRET", "test")
+	for _, key := range []string{"ENDPOINT", "REGION", "BUCKET", "ACCESS_KEY_ID", "SECRET_ACCESS_KEY"} {
+		t.Setenv("QIANTIE_ASSISTANT_ATTACHMENT_TOS_"+key, "")
+	}
+	before, e := FromEnv()
+	if e != nil {
+		t.Fatal("fixture config")
+	}
+	t.Setenv("QIANTIE_ASSISTANT_ATTACHMENT_TOS_BUCKET", "private-only")
+	after, e := FromEnv()
+	if e != nil {
+		t.Fatal("partial optional config blocked startup")
+	}
+	if after.AssistantAttachmentTOSBucket != "private-only" || after.MergeTOSBucket != before.MergeTOSBucket || after.AgentAssetTOSBucket != before.AgentAssetTOSBucket || after.NovelFetchTOSBucket != before.NovelFetchTOSBucket {
+		t.Fatal("attachment config changed another subsystem")
+	}
+}

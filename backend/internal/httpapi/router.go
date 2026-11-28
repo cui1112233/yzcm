@@ -58,17 +58,19 @@ func readRuntimeManifest(path string) runtimeManifest {
 }
 
 type RouterOptions struct {
-	ScreenplaySessionChannel      *ScreenplaySessionChannel
-	AgentVideoWorkerContext       context.Context
-	AgentScriptSplitWorkerContext context.Context
-	AgentImageWorkerContext       context.Context
-	AgentAudioWorkerContext       context.Context
-	BridgeSecret                  string
-	ReleaseSHA                    string
-	RuntimeManifestPath           string
-	RuntimeAudit                  *runtimeaudit.Registry
-	Health                        func(context.Context) error
-	Now                           func() time.Time
+	ScreenplayAttachmentObjects           screenplay.AssistantTextAttachmentObjects
+	ScreenplayAttachmentUnavailableReason string
+	ScreenplaySessionChannel              *ScreenplaySessionChannel
+	AgentVideoWorkerContext               context.Context
+	AgentScriptSplitWorkerContext         context.Context
+	AgentImageWorkerContext               context.Context
+	AgentAudioWorkerContext               context.Context
+	BridgeSecret                          string
+	ReleaseSHA                            string
+	RuntimeManifestPath                   string
+	RuntimeAudit                          *runtimeaudit.Registry
+	Health                                func(context.Context) error
+	Now                                   func() time.Time
 	// AuthRateLimits overrides the login/registration/password-reset limits.
 	// A zero value falls back to the defaults documented in the config package.
 	AuthRateLimits                  AuthRateLimitConfig
@@ -719,6 +721,7 @@ func NewRouter(options RouterOptions) http.Handler {
 	}
 	RegisterAICutPersonalTemplateRoutes(root, auth, personalTemplates)
 	registerScreenplayWorkflow(root, auth, options, runtimeTextProviderResolver, runtimeCatalogStore)
+	RegisterScreenplayAssistantTextAttachments(root, auth, options.Screenplay, options.ScreenplayAttachmentObjects, options.ScreenplayAttachmentUnavailableReason)
 	registerScriptEditor(root, auth, options, runtimeTextProviderResolver)
 	RegisterNovelCreationRoutes(root, auth, options.NovelCreation, options.NovelCreationRunStarter)
 	RegisterProjectRetentionRoutes(root, auth, options.ProjectRetention)

@@ -80,7 +80,7 @@ func checkReferenceSession(ctx context.Context, svc screenplay.AuthoringService,
 	}
 	return nil
 }
-func registerAssistantReferenceRoutes(svc screenplay.AuthoringService, handle func(string, string, func(http.ResponseWriter, *http.Request, string, string)), decode func(http.ResponseWriter, *http.Request, any) bool) {
+func registerAssistantReferenceRoutes(svc screenplay.AuthoringService, auth BridgeAuth, handle func(string, string, func(http.ResponseWriter, *http.Request, string, string)), decode func(http.ResponseWriter, *http.Request, any) bool) {
 	registerAssistantReferenceShotRoutes(svc, handle, decode)
 	base := "/api/comic-screenplays/projects/{id}/assistant/references"
 	handle("GET "+base, "read", func(w http.ResponseWriter, r *http.Request, owner, actor string) {
@@ -104,16 +104,45 @@ func registerAssistantReferenceRoutes(svc screenplay.AuthoringService, handle fu
 		offset := 0
 		if value := r.URL.Query().Get("offset"); value != "" {
 			offset, err = strconv.Atoi(value)
-			if err != nil || offset < 0 || offset > len(filtered) {
+			if err != nil || offset < 0 {
 				authoringError(w, screenplay.ErrInvalidArgument)
 				return
 			}
 		}
-		end := offset + 100
-		if end > len(filtered) {
-			end = len(filtered)
+		total := len(filtered)
+		selected := []screenplay.AssistantReferenceSnapshot{}
+		if offset < len(filtered) {
+			end := offset + 100
+			if end > len(filtered) {
+				end = len(filtered)
+			}
+			selected = append(selected, filtered[offset:end]...)
 		}
-		writeJSON(w, 200, map[string]any{"references": filtered[offset:end], "total": len(filtered), "next_offset": end})
+		if kind == "" || kind == "attachment_text" {
+			if attachments := assistantReferenceAttachmentRepository(svc.Store); attachments != nil {
+				access, e := assistantAttachmentRequestAccess(auth, r, svc, owner, actor, r.URL.Query().Get("session_id"), false)
+				if e != nil {
+					attachmentHTTPError(w, e, nil)
+					return
+				}
+				attachmentOffset := offset - total
+				if attachmentOffset < 0 {
+					attachmentOffset = 0
+				}
+				extra, count, e := attachments.ListReferenceDirectory(r.Context(), access.Scope, attachmentOffset, 100-len(selected), access.ReadGuard)
+				if e != nil {
+					attachmentHTTPError(w, e, nil)
+					return
+				}
+				selected = append(selected, extra...)
+				total += count
+			}
+		}
+		if offset > total {
+			authoringError(w, screenplay.ErrInvalidArgument)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"references": selected, "total": total, "next_offset": offset + len(selected)})
 	})
 	handle("POST "+base+"/resolve", "read", func(w http.ResponseWriter, r *http.Request, owner, actor string) {
 		var in struct {
@@ -132,11 +161,41 @@ func registerAssistantReferenceRoutes(svc screenplay.AuthoringService, handle fu
 			authoringError(w, err)
 			return
 		}
-		refs, err := view.Resolve(in.References)
+		hasAttachment := false
+		for _, sel := range in.References {
+			if sel.Kind == "attachment_text" {
+				hasAttachment = true
+				break
+			}
+		}
+		var refs []screenplay.AssistantReferenceSnapshot
+		if hasAttachment {
+			access, e := assistantAttachmentRequestAccess(auth, r, svc, owner, actor, in.Session, false)
+			if e != nil {
+				attachmentHTTPError(w, e, nil)
+				return
+			}
+			refs, err = screenplay.ResolveAssistantReferencesScoped(r.Context(), view, assistantReferenceAttachmentRepository(svc.Store), access.Scope, in.References, access.ReadGuard)
+		} else {
+			refs, err = view.Resolve(in.References)
+		}
 		if err != nil {
-			authoringError(w, err)
+			if hasAttachment {
+				attachmentHTTPError(w, err, nil)
+			} else {
+				authoringError(w, err)
+			}
 			return
 		}
 		writeJSON(w, 200, map[string]any{"references": refs})
 	})
+}
+
+func assistantReferenceAttachmentRepository(store screenplay.Store) *screenplay.MySQLAssistantTextAttachments {
+	if provider, ok := store.(interface {
+		AssistantTextAttachments() *screenplay.MySQLAssistantTextAttachments
+	}); ok {
+		return provider.AssistantTextAttachments()
+	}
+	return nil
 }

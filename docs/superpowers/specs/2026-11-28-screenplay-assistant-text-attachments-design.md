@@ -37,7 +37,7 @@
 
 首片只支持可明确判定的保守合同，不做通用bucket policy授权引擎：bucket ACL必须仅owner（CanonicalUser ID逐项精确匹配响应Owner ID），没有AllUsers/AuthenticatedUsers或其他主体grant；bucket policy明确不存在（精确NoSuchBucketPolicy，不把一般404/403当不存在），或已解析为没有任何Statement的空policy。任何非空策略即使看起来只给可信用户，此片也标为未支持/未能确认，不能猜安全。读取无权、超时、公开bucket/策略、继承状态未知均准确不可用；不自动修改bucket ACL/policy，不把现有共享媒体桶改私有。
 
-每次实际写入前在事务外核验namespace隐私，再以ACL=enum.ACLPrivate写原件；Open核hash及GetObjectACL证实owner-only显式私有（匹配Owner ID，BucketOwnerEntrusted/继承标记不得未知或授予其他主体）后才能ready，准备阶段不发公开链接。浏览器始终只通过同源鉴权代理下载。调用时检查不能阻止存储管理员日后改桶策略，报告/界面不承诺永久绝对保证；上传/下载操作会再次检查当前私有合同，无法确认就停止原件操作。
+每次实际写入前在事务外核验namespace隐私，再以ACL=enum.ACLPrivate写原件；Open核hash及GetObjectACL证实owner-only显式私有（匹配Owner ID，三个documented optional flags允许省略；显式null/错类型/true及未知字段仍拒绝，不得授予其他主体）后才能ready，准备阶段不发公开链接。浏览器始终只通过同源鉴权代理下载。调用时检查不能阻止存储管理员日后改桶策略，报告/界面不承诺永久绝对保证；上传/下载操作会再次检查当前私有合同，无法确认就停止原件操作。
 
 availability分别返回configured、privacy_state(unknown/private/unavailable)和upload_available；未知不启用上传。可增加受权POST attachments/storage/check仅做namespace ACL/policy读取，给准备者明确“检查附件存储”入口，不调用模型、不更改桶；当前未配置时此入口也准确不可用。检查结果不是永久授权，上传前仍重核。所有ACL/policy/Put/Open/Get网络均在SQL事务外，每次上传/重试/原件下载的总deadline30秒（隐私单次检查最多10秒并受同一总deadline），无外层自动重试；SDK专用重试0，显式用户重试沿同一意图。取消/超时不能通过新一层一分钟重试拖延或复活旧ready。
 
@@ -153,3 +153,12 @@ default新增SaveAssistantReferencesScoped，校scope与AuthoringState目标一�
 7. Chrome真实文件选择→准备→验证→预览→使用→回读；关闭重开/切会话/旧上传与预览回包不串草稿、不提前共享、不重试付费模型。服务不可用显示明确原因，不能用假ready或可点击空控件验收。
 
 当前真实TOS尚未注入是运行层限制，不阻止先完成可执行合同及失败关闭测试；也不能据此把真实原件上传标完成。只有父预检通过后才写产品。DOCX/图片/OCR/Skills/Auto与D02整体继续待办。
+
+
+## 2026-11-28真实只读回验后的ACL合同更正
+
+父在同源真实只读检查中确认私有bucket响应只有Owner/Grants；policy精确404 NoSuchBucketPolicy。原实现额外要求BucketAclDelivered字段存在false，造成正常响应被拒。此为兼容错误，原失败日志保留，不改桶或凭据。
+
+[官方GetBucketACL示例](https://docs.volcengine.com/docs/torch-object-storage/get-bucket-acl?lang=en)使用Owner与Grants，不包含BucketAclDelivered；父核对[GetObjectACL](https://docs.volcengine.com/docs/torch-object-storage/get-object-acl?lang=en)的IsDefault只在true返回及private样例省略BucketOwnerEntrusted/IsDefault，与[PutBucketACL默认false合同](https://docs.volcengine.com/docs/torch-object-storage/put-bucket-acl?lang=en)一致。仅这三个documented optional flags允许省略，仍用原始JSON区分省略与显式null/错类型/true。Owner/完整Grants、owner-only CanonicalUser/FULL_CONTROL、无/空policy、对象owner一致、private写头与原件hash验证全部继续必需；未知字段、缺Owner/Grants、额外主体仍拒绝。不把任意SDK零值当私有证据。
+
+新增官方/真实脱敏Owner+Grants正向用例先RED，最小修正后GREEN；原missing-flags场景保留并改为符合API语义的正向，原null/错类型/true/未知/额外授权负向不删除。真实TOS重验由父独立负责，本实施者不获取凭据或调用TOS。
