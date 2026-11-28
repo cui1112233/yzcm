@@ -57,6 +57,14 @@ test('long personal-center settings scroll inside the fixed viewport shell', () 
   assert.match(css, /\.pc-main\s*\{[^}]*overflow-y:\s*auto/s);
 });
 
+test('personal-center glass stays neutral and responsive without zoom scaling', () => {
+  const css = read('shared/styles/account-center-pixel-parity.css');
+  assert.match(css, /--pc-glass-1:\s*rgba\(5,\s*9,\s*18,\s*\.24\)/);
+  assert.match(css, /--pc-glass-2:\s*rgba\(8,\s*13,\s*24,\s*\.34\)/);
+  assert.doesNotMatch(css, /zoom:\s*(?:1\.125|1\.5)/);
+  assert.match(css, /grid-template-columns:\s*repeat\(12,\s*minmax\(0,\s*1fr\)\)/);
+});
+
 test('all seven approved pages stay inside the common account-center page contract', () => {
   for (const file of [
     'user/pages/AccountOverviewPage.jsx',

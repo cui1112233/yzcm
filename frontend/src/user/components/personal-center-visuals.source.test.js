@@ -46,3 +46,10 @@ test('provides reusable visual primitives and the nine approved page-state contr
   }
   assert.match(css, /prefers-reduced-motion/);
 });
+
+test('energy scene exposes far, flow and near-particle depth layers', () => {
+  const visuals = read('user/components/PersonalCenterVisuals.jsx');
+  for (const layer of ['pc-energy-far', 'pc-energy-flow', 'pc-energy-near']) {
+    assert.match(visuals, new RegExp(layer));
+  }
+});

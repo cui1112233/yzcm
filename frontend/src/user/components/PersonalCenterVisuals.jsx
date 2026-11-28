@@ -4,11 +4,11 @@ import PersonalCenterIcon from './PersonalCenterIcon.jsx';
 
 export function EnergyScene({ compact = false }) {
   return <div className={`pc-energy-scene ${compact ? 'is-compact' : ''}`} aria-hidden="true">
-    <img className="pc-energy-scene-space" src={energySpace} alt="" draggable="false" />
-    <img className="pc-energy-scene-mark" src={brandEnergyMark} alt="" draggable="false" />
-    <i className="pc-energy-particle pc-energy-particle-a" />
-    <i className="pc-energy-particle pc-energy-particle-b" />
-    <i className="pc-energy-particle pc-energy-particle-c" />
+    <div className="pc-energy-far"><img className="pc-energy-scene-space" src={energySpace} alt="" draggable="false" /></div>
+    <div className="pc-energy-flow"><img className="pc-energy-scene-mark" src={brandEnergyMark} alt="" draggable="false" /></div>
+    <div className="pc-energy-near">
+      {Array.from({ length: 8 }, (_, index) => <i key={index} className={`pc-energy-particle pc-energy-particle-${index + 1}`} />)}
+    </div>
   </div>;
 }
 
