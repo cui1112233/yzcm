@@ -81,6 +81,7 @@ func checkReferenceSession(ctx context.Context, svc screenplay.AuthoringService,
 	return nil
 }
 func registerAssistantReferenceRoutes(svc screenplay.AuthoringService, handle func(string, string, func(http.ResponseWriter, *http.Request, string, string)), decode func(http.ResponseWriter, *http.Request, any) bool) {
+	registerAssistantReferenceShotRoutes(svc, handle, decode)
 	base := "/api/comic-screenplays/projects/{id}/assistant/references"
 	handle("GET "+base, "read", func(w http.ResponseWriter, r *http.Request, owner, actor string) {
 		if err := checkReferenceSession(r.Context(), svc, owner, r.PathValue("id"), actor, r.URL.Query().Get("session_id")); err != nil {
