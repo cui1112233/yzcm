@@ -66,7 +66,7 @@ func TestImpersonationTargetsRespectActorScope(t *testing.T) {
 }
 ```
 
-Add separate assertions that the actor, disabled, archived, historical-membership, cross-team, and unauthorized developer targets are absent; a member receives `403`; and an active impersonation cannot read a new target list.
+Add separate assertions that the actor, disabled, archived, cross-team, and unauthorized developer targets are absent; a member receives `403`; and an active impersonation cannot read a new target list. An active account whose old membership ended remains available to the founder as an ungrouped account, but not to the old team manager or developer.
 
 - [ ] **Step 2: Run the tests and verify the endpoint is missing**
 

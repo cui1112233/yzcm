@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -48,6 +50,19 @@ type impersonationSubject struct {
 	DisplayName string `json:"displayName"`
 }
 
+type impersonationTarget struct {
+	Username    string `json:"username"`
+	DisplayName string `json:"displayName"`
+	Role        string `json:"role"`
+	AvatarURL   string `json:"avatarUrl"`
+}
+
+type impersonationTargetGroup struct {
+	TeamID   string                `json:"teamId"`
+	TeamName string                `json:"teamName"`
+	Accounts []impersonationTarget `json:"accounts"`
+}
+
 type impersonationExpectation struct{ actor, id string }
 
 func readImpersonationExpectation(r *http.Request) (impersonationExpectation, bool) {
@@ -77,6 +92,7 @@ func readImpersonationExpectation(r *http.Request) (impersonationExpectation, bo
 func (s accountImpersonation) register(root *http.ServeMux) {
 	strict := s.auth.SessionOnly().AccountCenterMiddleware
 	root.Handle("POST "+impersonationPath, strict(http.HandlerFunc(s.start)))
+	root.Handle("GET "+impersonationPath+"/targets", strict(http.HandlerFunc(s.targets)))
 	root.Handle("GET "+impersonationCurrent, strict(http.HandlerFunc(s.status)))
 	root.Handle("DELETE "+impersonationCurrent, strict(http.HandlerFunc(s.stop)))
 }
@@ -251,6 +267,43 @@ func (s accountImpersonation) activeStatus(active authenticatedImpersonation) im
 func inactiveImpersonationStatus(actor accountcenter.Identity) impersonationStatus {
 	canSwitch := actor.Role == accountcenter.RoleFounder || actor.Role == accountcenter.RoleDeveloper || actor.Role == accountcenter.RoleManager
 	return impersonationStatus{CanSwitch: canSwitch, ActorUsername: actor.Username}
+}
+
+func (s accountImpersonation) targets(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	admin := accountCenterAdmin{auth: s.auth}
+	admin.withDirectory(w, r, false, func(_ accountcenter.AdminTx, snapshot adminSnapshot) (any, error) {
+		directory := snapshot.directory()
+		groups := make([]impersonationTargetGroup, 0, len(directory.Teams)+1)
+		appendGroup := func(teamID, teamName string, rows []accountAdminRow) {
+			accounts := make([]impersonationTarget, 0, len(rows))
+			for _, row := range rows {
+				if !row.Active || row.ArchivedAt != nil || row.Historical || !slices.Contains(row.Actions, "switch_account") {
+					continue
+				}
+				person := snapshot.person(row.Username)
+				accounts = append(accounts, impersonationTarget{
+					Username: row.Username, DisplayName: row.DisplayName, Role: row.Role, AvatarURL: person.AvatarURL,
+				})
+			}
+			if len(accounts) == 0 {
+				return
+			}
+			sort.Slice(accounts, func(i, j int) bool {
+				left, right := strings.ToLower(accounts[i].DisplayName), strings.ToLower(accounts[j].DisplayName)
+				if left == right {
+					return strings.ToLower(accounts[i].Username) < strings.ToLower(accounts[j].Username)
+				}
+				return left < right
+			})
+			groups = append(groups, impersonationTargetGroup{TeamID: teamID, TeamName: teamName, Accounts: accounts})
+		}
+		for _, team := range directory.Teams {
+			appendGroup(team.ID, team.Name, team.Accounts)
+		}
+		appendGroup("", "未分组账号", directory.Ungrouped)
+		return map[string]any{"groups": groups}, nil
+	})
 }
 
 func (s accountImpersonation) status(w http.ResponseWriter, r *http.Request) {
