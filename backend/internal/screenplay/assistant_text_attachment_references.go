@@ -1,8 +1,11 @@
 package screenplay
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"strings"
 )
 
 func ResolveAssistantReferencesScoped(ctx context.Context, view AssistantReferenceView, r *MySQLAssistantTextAttachments, scope AssistantReferenceScope, selectors []AssistantReferenceSelector, guard AssistantAttachmentGuard) ([]AssistantReferenceSnapshot, error) {
@@ -70,4 +73,71 @@ func (r *MySQLAssistantTextAttachments) ListReferenceDirectory(ctx context.Conte
 		return rows.Err()
 	})
 	return
+}
+
+// Constructed only by authenticated server chat handlers, never HTTP-decoded.
+type AssistantAttachmentMessageCommit struct {
+	OperationID, UserContent            string
+	PreviousMessages, CandidateMessages []AssistantMessage
+	References                          []AssistantReferenceSnapshot
+}
+
+func sameAssistantJSON(a, b any) bool {
+	x, e := json.Marshal(a)
+	if e != nil {
+		return false
+	}
+	y, e := json.Marshal(b)
+	return e == nil && bytes.Equal(x, y)
+}
+func ValidateAssistantAttachmentMessageCommit(scope AssistantReferenceScope, c AssistantAttachmentMessageCommit) error {
+	if scope.ValidatePrepare() != nil {
+		return ErrAccessDenied
+	}
+	if !validAssistantAttachmentID(c.OperationID) || strings.TrimSpace(c.UserContent) == "" || len(c.References) == 0 || len(c.References) > 8 {
+		return ErrInvalidArgument
+	}
+	if len(c.CandidateMessages) < len(c.PreviousMessages) {
+		return ErrInvalidArgument
+	}
+	for i, old := range c.PreviousMessages {
+		if old.ReferenceOperationID == c.OperationID || !sameAssistantJSON(old, c.CandidateMessages[i]) {
+			return ErrInvalidArgument
+		}
+	}
+	tail := c.CandidateMessages[len(c.PreviousMessages):]
+	if len(tail) < 2 || len(tail) > 3 {
+		return ErrInvalidArgument
+	}
+	user := tail[0]
+	if user.Role != "user" || user.Kind != "" || len(user.Tools) > 0 || len(user.Suggestions) > 0 || user.ReferenceOperationID != c.OperationID || user.Content != c.UserContent || !sameAssistantJSON(user.References, c.References) {
+		return ErrInvalidArgument
+	}
+	for i, m := range tail[1:] {
+		if m.Role != "assistant" || m.ReferenceOperationID != "" || len(m.References) > 0 || strings.TrimSpace(m.Content) == "" {
+			return ErrInvalidArgument
+		}
+		if i == 0 && m.Kind != "" || i == 1 && m.Kind != AssistantMessageKindQuestion {
+			return ErrInvalidArgument
+		}
+	}
+	files := map[string]bool{}
+	for _, ref := range c.References {
+		raw, e := json.Marshal(ref)
+		if e != nil || len(raw) > AssistantReferenceItemBytes || !validAttachmentHash(ref.Digest) {
+			return ErrInvalidArgument
+		}
+		if ref.Kind != "attachment_text" {
+			continue
+		}
+		if !validAssistantAttachmentID(ref.ID) || files[ref.ID] || ref.Revision < 1 || ref.Attachment == nil || len(ref.ShotIDs) > 0 {
+			return ErrInvalidArgument
+		}
+		files[ref.ID] = true
+	}
+	raw, e := json.Marshal(c.References)
+	if e != nil || len(raw) > AssistantReferenceTotalBytes || len(files) == 0 {
+		return ErrInvalidArgument
+	}
+	return nil
 }

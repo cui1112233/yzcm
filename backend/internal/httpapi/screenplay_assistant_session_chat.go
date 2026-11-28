@@ -64,7 +64,33 @@ type sessionReceiptGenerator interface {
 	GenerateSessionStage(context.Context, screenplay.AssistantSessionRequest, string, screenplay.TextRequest) (screenplay.TextResponse, error)
 }
 
-func runSessionChat(ctx context.Context, repo sessionChatRequests, svc screenplay.AuthoringService, generator screenplay.TextGenerator, owner, projectID, actor, session string, expected int64, message string, selectors ...screenplay.AssistantReferenceSelector) (out sessionChatResult, resultErr error) {
+func runSessionChat(ctx context.Context, repo sessionChatRequests, svc screenplay.AuthoringService, generator screenplay.TextGenerator, owner, projectID, actor, session string, expected int64, message string, selectors ...screenplay.AssistantReferenceSelector) (sessionChatResult, error) {
+	return runSessionChatWithAttachmentAccess(ctx, repo, svc, generator, nil, owner, projectID, actor, session, expected, message, selectors...)
+}
+func runSessionChatWithAttachmentAccess(ctx context.Context, repo sessionChatRequests, svc screenplay.AuthoringService, generator screenplay.TextGenerator, attachment *assistantAttachmentAccess, owner, projectID, actor, session string, expected int64, message string, selectors ...screenplay.AssistantReferenceSelector) (out sessionChatResult, resultErr error) {
+	hasAttachments := hasAssistantAttachmentSelectors(selectors)
+	if hasAttachments {
+		if attachment == nil || attachment.ReadGuard == nil || attachment.CommitPrepare == nil || attachment.VerifyPrepare == nil {
+			return out, screenplay.ErrAccessDenied
+		}
+		if err := checkAssistantAttachmentChatScope(ctx, attachment.Scope, owner, projectID, actor, session); err != nil {
+			return out, err
+		}
+		mysql, ok := repo.(*screenplay.MySQLAuthoringRepository)
+		if !ok {
+			return out, screenplay.ErrAccessDenied
+		}
+		channel, ok := generator.(sessionChannelGenerator)
+		if !ok || channel.repo != mysql || channel.subject != actor {
+			return out, errSessionReceiptUnavailable
+		}
+		frozen, err := freezeAssistantAttachmentSessionGenerator(channel)
+		if err != nil {
+			return out, err
+		}
+		generator = frozen
+	}
+
 	tracked, ok := generator.(sessionReceiptGenerator)
 	if !ok {
 		return out, errSessionReceiptUnavailable
@@ -86,11 +112,13 @@ func runSessionChat(ctx context.Context, repo sessionChatRequests, svc screenpla
 	if err != nil {
 		return out, err
 	}
-	if checker, ok := generator.(interface {
-		checkSessionModel(context.Context, string) error
-	}); ok {
-		if err := checker.checkSessionModel(ctx, project.ModelID); err != nil {
-			return out, err
+	if !hasAttachments {
+		if checker, ok := generator.(interface {
+			checkSessionModel(context.Context, string) error
+		}); ok {
+			if err := checker.checkSessionModel(ctx, project.ModelID); err != nil {
+				return out, err
+			}
 		}
 	}
 	active, err := screenplay.ReadAssistantActiveDocument(ctx, svc.Store, owner, projectID)
@@ -101,13 +129,19 @@ func runSessionChat(ctx context.Context, repo sessionChatRequests, svc screenpla
 	if err != nil {
 		return out, err
 	}
+	resolveReferences := func(view screenplay.AssistantReferenceView) ([]screenplay.AssistantReferenceSnapshot, error) {
+		if hasAttachments {
+			return screenplay.ResolveAssistantReferencesScoped(ctx, view, assistantReferenceAttachmentRepository(svc.Store), attachment.Scope, selectors, attachment.ReadGuard)
+		}
+		return view.Resolve(selectors)
+	}
 	var refs []screenplay.AssistantReferenceSnapshot
 	if len(selectors) > 0 {
 		view, e := screenplay.LoadAssistantReferenceView(ctx, svc.Store, svc.Repository, owner, projectID)
 		if e != nil {
 			return out, e
 		}
-		refs, e = view.Resolve(selectors)
+		refs, e = resolveReferences(view)
 		if e != nil {
 			return out, e
 		}
@@ -116,10 +150,43 @@ func runSessionChat(ctx context.Context, repo sessionChatRequests, svc screenpla
 		if e != nil {
 			return out, e
 		}
-		_, e = sessionChatPromptWithReferences(screenplay.AssistantSessionRequest{Chapters: st.Chapters}, project, active, targets, message, refs)
+		preflight := screenplay.AssistantSessionRequest{Chapters: st.Chapters}
+		if hasAttachments {
+			mysql := repo.(*screenplay.MySQLAuthoringRepository)
+			item, history, e := mysql.GetAssistantSession(ctx, owner, projectID, actor, session)
+			if e != nil {
+				return out, e
+			}
+			if !item.Active || item.Revision != expected || item.RequestStatus != "" {
+				return out, screenplay.ErrRevisionConflict
+			}
+			preflight.Mode = item.Mode
+			preflight.History = history
+		}
+		preflightRequest, e := sessionChatPromptWithReferences(preflight, project, active, targets, message, refs)
 		if e != nil {
 			return out, e
 		}
+		if hasAttachments {
+			if e = checkAssistantAttachmentSessionBudget(ctx, generator.(sessionChannelGenerator), preflightRequest); e != nil {
+				return out, e
+			}
+		}
+	}
+	// Validate the full history using frozen actual model materials before Begin.
+	// The original storage/channel admission gate still runs before any slot.
+	if hasAttachments {
+		if checker, ok := generator.(interface {
+			checkSessionModel(context.Context, string) error
+		}); ok {
+			if err := checker.checkSessionModel(ctx, project.ModelID); err != nil {
+				return out, err
+			}
+		}
+	}
+	operationID := ""
+	if hasAttachments {
+		operationID = newAgentID("reference-operation")
 	}
 	req, err := repo.BeginAssistantRequest(ctx, owner, projectID, actor, session, expected)
 	if err != nil {
@@ -148,24 +215,34 @@ func runSessionChat(ctx context.Context, repo sessionChatRequests, svc screenpla
 		}
 		resultErr = errors.Join(resultErr, repo.FinishAssistantRequest(cleanup, req, original))
 	}()
+	if hasAttachments {
+		if e := checkAssistantAttachmentChatScope(ctx, attachment.Scope, req.Owner, req.Project, req.Actor, req.SessionID); e != nil {
+			return out, e
+		}
+	}
 	if len(refs) > 0 {
 		view, e := screenplay.LoadAssistantReferenceView(ctx, svc.Store, svc.Repository, owner, projectID)
 		if e != nil {
 			return out, e
 		}
-		refs, e = view.Resolve(selectors)
+		refs, e = resolveReferences(view)
 		if e != nil {
 			return out, e
 		}
 		// Chapters used by references and the prompt must describe one version.
 		view.Chapters = req.Chapters
-		if _, e = view.Resolve(selectors); e != nil {
+		if _, e = resolveReferences(view); e != nil {
 			return out, e
 		}
 	}
 	request, err := sessionChatPromptWithReferences(req, project, active, targets, message, refs)
 	if err != nil {
 		return out, err
+	}
+	if hasAttachments {
+		if e := checkAssistantAttachmentSessionBudget(ctx, generator.(sessionChannelGenerator), request); e != nil {
+			return out, e
+		}
 	}
 	dispatched = true
 	response, err := tracked.GenerateSessionStage(ctx, req, "initial", request)
@@ -213,6 +290,11 @@ func runSessionChat(ctx context.Context, repo sessionChatRequests, svc screenpla
 			replyRequest.SystemPrompt += prompt.ScreenplayAssistantReferences
 			if err := checkReferenceRequestBudget(replyRequest); err != nil {
 				return out, err
+			}
+			if hasAttachments {
+				if e := checkAssistantAttachmentSessionBudget(ctx, generator.(sessionChannelGenerator), replyRequest); e != nil {
+					return out, e
+				}
 			}
 		}
 		reply, err := tracked.GenerateSessionStage(ctx, req, "read_reply", replyRequest)
@@ -268,7 +350,7 @@ func runSessionChat(ctx context.Context, repo sessionChatRequests, svc screenpla
 		wire.Suggestions = nil
 		history.Proposals = append(history.Proposals, screenplay.AssistantProposal{ID: newAgentID("proposal"), Summary: summary, Actions: []screenplay.AuthoringAction{action}, Status: "pending", Revision: req.Revision + 1})
 	}
-	history.Messages = append(history.Messages, screenplay.AssistantMessage{Role: "user", Content: message, References: refs}, screenplay.AssistantMessage{Role: "assistant", Content: wire.Reply, Tools: toolRuns, Suggestions: sanitizeAssistantSuggestions(wire.Suggestions)})
+	history.Messages = append(history.Messages, screenplay.AssistantMessage{Role: "user", Content: message, References: refs, ReferenceOperationID: operationID}, screenplay.AssistantMessage{Role: "assistant", Content: wire.Reply, Tools: toolRuns, Suggestions: sanitizeAssistantSuggestions(wire.Suggestions)})
 	if question := strings.TrimSpace(wire.Question); question != "" {
 		history.Messages = append(history.Messages, screenplay.AssistantMessage{Role: "assistant", Kind: screenplay.AssistantMessageKindQuestion, Content: question})
 	}
@@ -280,7 +362,7 @@ func runSessionChat(ctx context.Context, repo sessionChatRequests, svc screenpla
 		if e != nil {
 			return out, e
 		}
-		if _, e = view.Resolve(selectors); e != nil {
+		if _, e = resolveReferences(view); e != nil {
 			return out, e
 		}
 	}
@@ -292,17 +374,23 @@ func runSessionChat(ctx context.Context, repo sessionChatRequests, svc screenpla
 		if !ok || channel.commitGuard == nil {
 			return out, screenplay.ErrAccessDenied
 		}
-		guard := channel.commitGuard
-		if len(refs) > 0 {
-			guard = func(ctx context.Context, tx *sql.Tx) error {
-				if err := channel.commitGuard(ctx, tx); err != nil {
-					return err
-				}
-				return screenplay.CheckAssistantReferencesInTx(ctx, tx, owner, projectID, refs)
+		if hasAttachments {
+			if err := finishAssistantAttachmentSession(ctx, mysql, channel, *attachment, req, &history, operationID, message, refs); err != nil {
+				return out, err
 			}
-		}
-		if err := mysql.FinishAssistantRequestGuarded(ctx, req, &history, guard); err != nil {
-			return out, err
+		} else {
+			guard := channel.commitGuard
+			if len(refs) > 0 {
+				guard = func(ctx context.Context, tx *sql.Tx) error {
+					if err := channel.commitGuard(ctx, tx); err != nil {
+						return err
+					}
+					return screenplay.CheckAssistantReferencesInTx(ctx, tx, owner, projectID, refs)
+				}
+			}
+			if err := mysql.FinishAssistantRequestGuarded(ctx, req, &history, guard); err != nil {
+				return out, err
+			}
 		}
 	} else if err := repo.FinishAssistantRequest(ctx, req, &history); err != nil {
 		return out, err
@@ -320,7 +408,7 @@ func parseSessionReply(content string) (assistantWire, error) {
 	return wire, nil
 }
 
-func sessionChatHandler(sessionRepo sessionChatRequests, svc screenplay.AuthoringService, decode func(http.ResponseWriter, *http.Request, any) bool, generatorFor func(*http.Request, string) screenplay.TextGenerator) func(http.ResponseWriter, *http.Request, string, string) {
+func sessionChatHandler(sessionRepo sessionChatRequests, svc screenplay.AuthoringService, decode func(http.ResponseWriter, *http.Request, any) bool, generatorFor func(*http.Request, string) screenplay.TextGenerator, attachmentAuth ...BridgeAuth) func(http.ResponseWriter, *http.Request, string, string) {
 	return func(w http.ResponseWriter, r *http.Request, owner, actor string) {
 		var input struct {
 			Message    string                                  `json:"message"`
@@ -331,7 +419,26 @@ func sessionChatHandler(sessionRepo sessionChatRequests, svc screenplay.Authorin
 			return
 		}
 		generator := generatorFor(r, actor)
-		result, err := runSessionChat(r.Context(), sessionRepo, svc, generator, owner, r.PathValue("id"), actor, r.PathValue("session"), input.Expected, input.Message, input.References...)
+		var attachment *assistantAttachmentAccess
+		var err error
+		if hasAssistantAttachmentSelectors(input.References) {
+			channel, ok := generator.(sessionChannelGenerator)
+			if !ok || channel.channel == nil {
+				err = errSessionReceiptUnavailable
+			} else if len(attachmentAuth) != 1 {
+				err = screenplay.ErrAccessDenied
+			} else {
+				var access assistantAttachmentAccess
+				access, err = assistantAttachmentRequestAccess(attachmentAuth[0], r, svc, owner, actor, r.PathValue("session"), true)
+				if err == nil {
+					attachment = &access
+				}
+			}
+		}
+		var result sessionChatResult
+		if err == nil {
+			result, err = runSessionChatWithAttachmentAccess(r.Context(), sessionRepo, svc, generator, attachment, owner, r.PathValue("id"), actor, r.PathValue("session"), input.Expected, input.Message, input.References...)
+		}
 		if errors.Is(err, errSessionReceiptUnavailable) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 			return

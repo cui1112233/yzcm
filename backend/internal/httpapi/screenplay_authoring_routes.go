@@ -161,7 +161,7 @@ func registerScreenplayAuthoringSessionRoutes(mux *http.ServeMux, auth BridgeAut
 			return sessionChatAvailable(r.Context(), svc, generatorFor(r, actor), owner, r.PathValue("id"), actor)
 		})
 		registerSessionProposals(svc, sessionRepo, handle, decode)
-		handle("POST /api/comic-screenplays/projects/{id}/assistant/sessions/{session}/chat", "generate", sessionChatHandler(sessionRepo, svc, decode, generatorFor))
+		handle("POST /api/comic-screenplays/projects/{id}/assistant/sessions/{session}/chat", "generate", sessionChatHandler(sessionRepo, svc, decode, generatorFor, auth))
 	}
 	respond := func(w http.ResponseWriter, st screenplay.AuthoringState, e error, actor string) {
 		if e != nil {
@@ -473,8 +473,24 @@ func registerScreenplayAuthoringSessionRoutes(mux *http.ServeMux, auth BridgeAut
 				return
 			}
 			var authority sessionAuthorityCallbacks
+			var attachmentAccess assistantAttachmentAccess
+			hasAttachments := hasAssistantAttachmentSelectors(in.References)
+			textResolver := resolver
+			operationID := ""
 			if len(in.References) > 0 {
-				authority = newSessionAuthority(auth, r, a)
+				if hasAttachments {
+					var err error
+					attachmentAccess, err = assistantAttachmentRequestAccess(auth, r, svc, o, a, "default", true)
+					if err != nil {
+						authoringError(w, err)
+						return
+					}
+					authority = sessionAuthorityCallbacks{verify: attachmentAccess.VerifyPrepare, commit: attachmentAccess.CommitPrepare}
+					textResolver = freezeAssistantAttachmentResolver(resolver)
+					operationID = newAgentID("reference-operation")
+				} else {
+					authority = newSessionAuthority(auth, r, a)
+				}
 				if err := authority.verify(r.Context()); err != nil {
 					authoringError(w, err)
 					return
@@ -547,7 +563,11 @@ func registerScreenplayAuthoringSessionRoutes(mux *http.ServeMux, auth BridgeAut
 					if err != nil {
 						return err
 					}
-					references, err = view.Resolve(in.References)
+					if hasAttachments {
+						references, err = screenplay.ResolveAssistantReferencesScoped(r.Context(), view, assistantReferenceAttachmentRepository(store), attachmentAccess.Scope, in.References, attachmentAccess.ReadGuard)
+					} else {
+						references, err = view.Resolve(in.References)
+					}
 					if err != nil {
 						return err
 					}
@@ -560,19 +580,16 @@ func registerScreenplayAuthoringSessionRoutes(mux *http.ServeMux, auth BridgeAut
 				// 从未含引用的旧会话继续沿用原有持久化折叠行为。
 				hasReferenceHistory := false
 				for _, message := range st.Messages {
-					if len(message.References) > 0 {
+					if len(message.References) > 0 || message.ReferenceOperationID != "" {
 						hasReferenceHistory = true
 						break
 					}
 				}
 				conversation, compacted := screenplay.CompactAssistantMessages(st.Messages, screenplay.AssistantCompactConfig{})
-				if compacted && path == "assistant/chat" && !hasReferenceHistory {
+				if compacted && path == "assistant/chat" && !hasReferenceHistory && !hasAttachments {
 					st.Messages = conversation
 				}
-				modelConversation := append([]screenplay.AssistantMessage(nil), conversation...)
-				for i := range modelConversation {
-					modelConversation[i].References = nil
-				}
+				modelConversation := assistantReferenceModelHistory(conversation)
 				contextData := map[string]any{"project": project, "chapters": st.Chapters, "conversation": modelConversation}
 				var shots []screenplay.Shot
 				active, activeErr := screenplay.ReadAssistantActiveDocument(r.Context(), store, o, st.ProjectID)
@@ -645,7 +662,7 @@ func registerScreenplayAuthoringSessionRoutes(mux *http.ServeMux, auth BridgeAut
 				}
 				var result screenplay.TextResponse
 				if len(references) > 0 {
-					result, e = generateReferenceText(r.Context(), o, resolver, request)
+					result, e = generateReferenceText(r.Context(), o, textResolver, request)
 				} else {
 					result, e = (screenplayTextGenerator{owner: o, resolver: resolver}).Generate(r.Context(), request)
 				}
@@ -718,7 +735,7 @@ func registerScreenplayAuthoringSessionRoutes(mux *http.ServeMux, auth BridgeAut
 						var retry screenplay.TextResponse
 						var retryErr error
 						if len(references) > 0 {
-							retry, retryErr = generateReferenceText(r.Context(), o, resolver, retryRequest)
+							retry, retryErr = generateReferenceText(r.Context(), o, textResolver, retryRequest)
 						} else {
 							retry, retryErr = (screenplayTextGenerator{owner: o, resolver: resolver}).Generate(r.Context(), retryRequest)
 						}
@@ -791,12 +808,12 @@ func registerScreenplayAuthoringSessionRoutes(mux *http.ServeMux, auth BridgeAut
 					if strings.TrimSpace(parsed.Question) != "" {
 						// 主动追问落为独立消息，前端据此渲染追问卡片；不改任何作品数据。
 						st.Messages = append(st.Messages,
-							screenplay.AssistantMessage{Role: "user", Content: user, References: references},
+							screenplay.AssistantMessage{Role: "user", Content: user, References: references, ReferenceOperationID: operationID},
 							reply,
 							screenplay.AssistantMessage{Role: "assistant", Content: strings.TrimSpace(parsed.Question), Kind: screenplay.AssistantMessageKindQuestion})
 					} else {
 						st.Messages = append(st.Messages,
-							screenplay.AssistantMessage{Role: "user", Content: user, References: references},
+							screenplay.AssistantMessage{Role: "user", Content: user, References: references, ReferenceOperationID: operationID},
 							reply)
 					}
 					// 导航建议：校验入口标识后附加到最近一条普通助手消息，供前端点击跳转。
@@ -814,7 +831,11 @@ func registerScreenplayAuthoringSessionRoutes(mux *http.ServeMux, auth BridgeAut
 					if !ok {
 						return screenplay.ErrInvalidState
 					}
-					out, e = mysql.SaveAssistantReferences(r.Context(), st, a, in.Expected, references, authority.commit)
+					if hasAttachments {
+						out, e = mysql.SaveAssistantReferencesScoped(r.Context(), st, attachmentAccess.Scope, in.Expected, operationID, user, references, authority.commit)
+					} else {
+						out, e = mysql.SaveAssistantReferences(r.Context(), st, a, in.Expected, references, authority.commit)
+					}
 				} else {
 					out, e = svc.Save(r.Context(), o, st.ProjectID, st, in.Expected)
 				}

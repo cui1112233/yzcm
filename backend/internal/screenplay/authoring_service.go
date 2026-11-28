@@ -47,10 +47,12 @@ type AssistantToolRun struct {
 	Summary string `json:"summary,omitempty"`
 }
 type AssistantMessage struct {
-	References  []AssistantReferenceSnapshot `json:"references,omitempty"`
-	Role        string                       `json:"role"`
-	Content     string                       `json:"content"`
-	Suggestions []AssistantNavigate          `json:"suggestions,omitempty"`
+	// Server-generated once for the current file-bearing user message. Not a request token.
+	ReferenceOperationID string                       `json:"reference_operation_id,omitempty"`
+	References           []AssistantReferenceSnapshot `json:"references,omitempty"`
+	Role                 string                       `json:"role"`
+	Content              string                       `json:"content"`
+	Suggestions          []AssistantNavigate          `json:"suggestions,omitempty"`
 	// Tools 记录本轮助手实际读取过的只读工具，供前端展示；不改变作品数据。
 	Tools []AssistantToolRun `json:"tools,omitempty"`
 	// Kind 仅用于对话智能展示（question=助手追问 / compacted=历史折叠占位），
