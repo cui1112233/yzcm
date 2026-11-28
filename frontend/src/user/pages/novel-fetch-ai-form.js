@@ -19,3 +19,8 @@ export function novelFetchReadbackLabel(row = {}) {
   if (row.status === 'submitted' || (row.status === 'skipped' && row.reason === 'confirmed_result') || row.readback_status === 'pending') return '已接收，待核对';
   return '待核对';
 }
+
+export function novelFetchCanReadback(row = {}) {
+  return row.status === 'pending_confirmation' ||
+    (row.status === 'submitted' && row.verified !== true && row.readback_status === 'pending');
+}
