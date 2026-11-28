@@ -103,6 +103,12 @@ test('team management has the approved team hero, member workspace and real-cons
   assert.match(source, /monthConsumption/);
 });
 
+test('team summary keeps full energy values at common 1280px desktop width', () => {
+  const css = read('shared/styles/account-center-pixel-parity.css');
+  assert.match(css, /@media \(max-width: 1440px\)[\s\S]*?\.pc-team-hero\s*\{[^}]*grid-template-columns:\s*minmax\(180px,\s*1\.25fr\)\s+repeat\(3,\s*minmax\(110px,\s*\.7fr\)\)\s+auto/);
+  assert.match(css, /@media \(max-width: 1440px\)[\s\S]*?\.pc-team-hero\s*>\s*div\s*\{[^}]*padding-inline:\s*14px/);
+});
+
 test('account governance follows the approved notice, four metrics, filters and team accordion hierarchy', () => {
   const source = read('user/pages/AccountRolePage.jsx');
   for (const region of ['pc-accounts-notice', 'pc-accounts-metrics', 'pc-accounts-filters', 'pc-accounts-team']) {

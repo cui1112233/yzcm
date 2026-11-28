@@ -520,6 +520,9 @@
 @media (max-width: 1440px) {
   .pc-main > .account-center-page,
   .pc-main > .api-config-page { padding-inline: 20px; }
+  .pc-team-hero { grid-template-columns: minmax(180px, 1.25fr) repeat(3, minmax(110px, .7fr)) auto; padding-inline: 12px; }
+  .pc-team-hero > div { gap: 9px; padding-inline: 14px; }
+  .pc-team-hero > .ant-space { margin-left: 10px; }
   .pc-profile-grid,
   .pc-security-grid,
   .pc-overview-dashboard,
