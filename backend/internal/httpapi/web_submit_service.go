@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/novelfetchworkshop"
 	"qiantie/backend/internal/videomanagementconnector"
 )
@@ -303,13 +304,21 @@ func executeWebSubmit(ctx context.Context, owner, usersDir string, store novelfe
 						result.Failed++
 						manifestItem(bookID, version, "unknown", "remote_confirmation_required", message)
 					}
-					recordSuccess := func(submission, confirmed videomanagementconnector.Submission) {
+					recordSuccess := func(submission, confirmed videomanagementconnector.Submission, verified bool, readbackError string) {
+						readbackStatus, message := "pending", "网站已接收，回读核对待完成"
+						if verified {
+							readbackStatus, message = "confirmed", firstText(confirmed.Message, "视频管理系统已回读确认")
+						}
 						row["status"] = "submitted"
 						row["submissionId"] = firstText(confirmed.ID, submission.ID)
-						row["verified"] = true
+						row["verified"] = verified
+						row["content_verified"] = false
 						row["retryable"] = false
-						row["readback_status"] = "confirmed"
-						row["message"] = firstText(confirmed.Message, "视频管理系统已回读确认")
+						row["readback_status"] = readbackStatus
+						if readbackError != "" {
+							row["readback_error"] = batchfactoryv11.SafeProviderErrorText(readbackError)
+						}
+						row["message"] = message
 						row["error"] = nil
 						result.Results = append(result.Results, row)
 						result.Success++
@@ -323,11 +332,28 @@ func executeWebSubmit(ctx context.Context, owner, usersDir string, store novelfe
 							meta["siteSubmitFailedErrors"] = errors
 						}
 						if receipts := mapOrEmpty(meta["siteSubmitPendingConfirmation"]); len(receipts) > 0 {
-							delete(receipts, version)
+							if verified {
+								delete(receipts, version)
+							} else {
+								receipts[version] = firstText(submission.ID, uploadBookID)
+							}
 							meta["siteSubmitPendingConfirmation"] = receipts
 						}
-						doc.Logs = append(doc.Logs, map[string]any{"event": "site_submit", "operation_id": operationID, "version": version, "status": "submitted", "time": time.Now().UTC().Format(time.RFC3339), "externalRequested": true, "remote_receipt": map[string]any{"verified": true, "submission_id": firstText(confirmed.ID, submission.ID), "upload_success_count": 1, "remote_record": confirmed.ReadbackRaw}})
-						manifestItem(bookID, version, "submitted", "confirmed_receipt", "")
+						receipt := map[string]any{"accepted": true, "verified": verified, "readback_status": readbackStatus, "content_verified": false, "submission_id": firstText(confirmed.ID, submission.ID), "upload_success_count": 1}
+						if verified {
+							receipt["remote_record"] = confirmed.ReadbackRaw
+						} else {
+							receipt["acknowledgement"] = submission.ReadbackRaw
+						}
+						if readbackError != "" {
+							receipt["readback_error"] = batchfactoryv11.SafeProviderErrorText(readbackError)
+						}
+						doc.Logs = append(doc.Logs, map[string]any{"event": "site_submit", "operation_id": firstText(mapOrEmpty(mapOrEmpty(meta["siteSubmitAttempts"])[version])["operation_id"], operationID), "version": version, "status": "submitted", "time": time.Now().UTC().Format(time.RFC3339), "externalRequested": true, "readback_only": readbackVersions[version], "remote_receipt": receipt})
+						reason := "accepted_receipt"
+						if verified {
+							reason = "confirmed_receipt"
+						}
+						manifestItem(bookID, version, "submitted", reason, "")
 					}
 					needsReadback := readbackVersions[version]
 					if skipSubmitted && !request.Force && !needsReadback && containsVersion(done, version) {
@@ -346,24 +372,41 @@ func executeWebSubmit(ctx context.Context, owner, usersDir string, store novelfe
 						continue
 					}
 					if needsReadback {
+						acknowledged, hasAcknowledgement := workshopAcknowledgedPendingSubmission(doc, version)
 						if len(targets) == 0 || targets[0] == nil {
-							uncertainVersion("视频管理系统 Go 连接器未执行回读确认", firstText(mapOrEmpty(meta["siteSubmitPendingConfirmation"])[version]))
+							if hasAcknowledgement {
+								recordSuccess(acknowledged, videomanagementconnector.Submission{}, false, "视频管理系统 Go 连接器未执行回读确认")
+							} else {
+								uncertainVersion("视频管理系统 Go 连接器未执行回读确认", firstText(mapOrEmpty(meta["siteSubmitPendingConfirmation"])[version]))
+							}
 							continue
 						}
 						confirmed, readbackErr := targets[0].GetSubmission(ctx, targetSession, uploadBookID)
 						if readbackErr != nil {
-							uncertainVersion("上传已接收，正在等待目标站回读确认", firstText(mapOrEmpty(meta["siteSubmitPendingConfirmation"])[version]))
+							if hasAcknowledgement {
+								recordSuccess(acknowledged, videomanagementconnector.Submission{}, false, readbackErr.Error())
+							} else {
+								uncertainVersion("上传已接收，正在等待目标站回读确认", firstText(mapOrEmpty(meta["siteSubmitPendingConfirmation"])[version]))
+							}
 							if errors.Is(readbackErr, videomanagementconnector.ErrSiteContractChanged) {
 								finish(blockContract())
 								return
 							}
 							continue
 						}
-						if !workshopPendingReadbackMatches(confirmed, doc, uploadBookID, version) {
-							uncertainVersion("尚未查到能确认本版本的提交记录；不会重复上传", firstText(mapOrEmpty(meta["siteSubmitPendingConfirmation"])[version], uploadBookID))
+						matches := workshopPendingReadbackMatches(confirmed, doc, uploadBookID, version)
+						if hasAcknowledgement {
+							matches = workshopAcceptedReadbackMatches(acknowledged, confirmed, doc, uploadBookID, version)
+						}
+						if !matches {
+							if hasAcknowledgement {
+								recordSuccess(acknowledged, videomanagementconnector.Submission{}, false, "尚未查到能确认本版本的提交记录；不会重复上传")
+							} else {
+								uncertainVersion("尚未查到能确认本版本的提交记录；不会重复上传", firstText(mapOrEmpty(meta["siteSubmitPendingConfirmation"])[version], uploadBookID))
+							}
 							continue
 						}
-						recordSuccess(confirmed, confirmed)
+						recordSuccess(confirmed, confirmed, true, "")
 						continue
 					}
 					if meta["sensitiveManualRetryRequired"] == true {
@@ -564,22 +607,24 @@ func executeWebSubmit(ctx context.Context, owner, usersDir string, store novelfe
 					}
 					// 与批量原文改文系统源码对齐：上传接口返回成功即视为已提交；
 					// 回读只用来补充证据，回读失败或只有旧记录都不再阻塞任务。
-					confirmed := submission
-					if readback, readbackErr := targets[0].GetSubmission(ctx, targetSession, uploadBookID); readbackErr == nil &&
-						((submission.ID != "" && readback.ID == submission.ID) || (submission.ID == "" && workshopPendingReadbackMatches(readback, doc, uploadBookID, version))) {
-						confirmed = readback
-					} else if errors.Is(readbackErr, videomanagementconnector.ErrSiteContractChanged) {
-						clearExecuting()
-						pendingReceipts[version] = firstText(submission.ID, uploadBookID)
-						manifestItem(bookID, version, "unknown", "site_contract_changed", "接口结构变化，提交结果待回读确认")
+					confirmed := videomanagementconnector.Submission{}
+					verified := false
+					readbackError := "未找到能对应本次接收回执的远端记录"
+					readback, readbackErr := targets[0].GetSubmission(ctx, targetSession, uploadBookID)
+					if readbackErr == nil && workshopAcceptedReadbackMatches(submission, readback, doc, uploadBookID, version) {
+						confirmed, verified, readbackError = readback, true, ""
+					} else if readbackErr != nil {
+						readbackError = readbackErr.Error()
+					}
+					recordSuccess(submission, confirmed, verified, readbackError)
+					if errors.Is(readbackErr, videomanagementconnector.ErrSiteContractChanged) {
 						finish(blockContract())
 						return
 					}
-					recordSuccess(submission, confirmed)
 				}
 				if deferredStatus != "" {
 					meta["siteSubmitStatus"] = deferredStatus
-				} else if len(mapOrEmpty(meta["siteSubmitPendingConfirmation"])) > 0 {
+				} else if len(mapOrEmpty(meta["siteSubmitPendingConfirmation"])) > 0 && workshopHasUnacceptedPending(doc) {
 					meta["siteSubmitStatus"] = "pending_confirmation"
 				} else if len(anyStrings(meta["siteSubmitFailedVersions"])) > 0 {
 					meta["siteSubmitStatus"] = "pending_upload"

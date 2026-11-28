@@ -285,7 +285,7 @@ func rewriteWithinSize(result string, targetChars int) bool {
 var ErrRewritePersistence = errors.New("AI 输出保存结果未知")
 
 func rewritePersistenceFailure(err error) error {
-	return fmt.Errorf("AI 输出已返回但后续处理或保存失败，持久化结果未知，请核对后手动处理: %w", errors.Join(ErrRewritePersistence, err))
+	return batchfactoryv11.SafeProviderError(fmt.Errorf("AI 输出已返回但后续处理或保存失败，持久化结果未知，请核对后手动处理: %w", errors.Join(ErrRewritePersistence, err)))
 }
 
 // MaxAIVersions is the per-book limit for new AI text versions.
@@ -397,6 +397,7 @@ func GenerateAIRewritesForVersionsProcessed(ctx context.Context, store Store, ow
 		observed := &rewriteBudgetObserver{provider: provider}
 		result, generationErr := completeValidatedRewrite(ctx, observed, request, document.BookID, plan.ResponseMode, processCount, targetChars, sourceBlock)
 		if generationErr != nil {
+			generationErr = batchfactoryv11.SafeProviderError(generationErr)
 			document.Meta["rewriteValidationHold"] = errors.Is(generationErr, ErrRewriteValidation) && !batchfactoryv11.SingleAttempt(ctx)
 			document.Meta["aiStatus"] = "failed"
 			document.Meta["aiError"] = generationErr.Error()

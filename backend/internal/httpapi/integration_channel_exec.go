@@ -246,22 +246,22 @@ func (p *integrationTextProvider) Complete(ctx context.Context, input batchfacto
 	}
 	response, err := batchfactoryv11.SingleAttemptClient(ctx, client, request).Do(request)
 	if err != nil {
-		return "", fmt.Errorf("渠道「%s」连接失败: %v", p.Label, err)
+		return "", batchfactoryv11.SafeProviderError(fmt.Errorf("渠道「%s」连接失败: %w", p.Label, err), p.APIKey)
 	}
 	defer response.Body.Close()
 	raw, readErr := io.ReadAll(io.LimitReader(response.Body, 8<<20))
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		snippet := strings.TrimSpace(string(raw))
+		snippet := batchfactoryv11.SafeProviderErrorText(strings.TrimSpace(string(raw)), p.APIKey)
 		if len(snippet) > 300 {
 			snippet = snippet[:300]
 		}
 		if batchfactoryv11.SingleAttempt(ctx) {
-			return "", &batchfactoryv11.DirectorHTTPError{StatusCode: response.StatusCode, Model: p.Model, Body: snippet}
+			return "", batchfactoryv11.SafeProviderError(&batchfactoryv11.DirectorHTTPError{StatusCode: response.StatusCode, Model: p.Model, Body: snippet}, p.APIKey)
 		}
-		return "", fmt.Errorf("渠道「%s」请求失败（HTTP %d）：%s", p.Label, response.StatusCode, snippet)
+		return "", batchfactoryv11.SafeProviderError(fmt.Errorf("渠道「%s」请求失败（HTTP %d）：%s", p.Label, response.StatusCode, snippet), p.APIKey)
 	}
 	if readErr != nil {
-		return "", fmt.Errorf("渠道「%s」响应读取失败", p.Label)
+		return "", batchfactoryv11.SafeProviderError(fmt.Errorf("渠道「%s」响应读取失败: %w", p.Label, readErr), p.APIKey)
 	}
 	var decoded struct {
 		Choices []struct {

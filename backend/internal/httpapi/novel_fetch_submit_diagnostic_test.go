@@ -193,7 +193,7 @@ func TestSubmitReadbackSharedOperationCanUseUniqueVersionFingerprint(t *testing.
 func TestWebSubmitForceAuditsOperationAndPriorReceipt(t *testing.T) {
 	ctx := context.Background()
 	store, usersDir, doc := newSubmissionEvidenceTask(t)
-	connector := &cloneSubmissionEvidenceSpy{bookReceiptIDs: []string{"first-ai1-receipt"}}
+	connector := &cloneSubmissionEvidenceSpy{bookReceiptIDs: []string{"first-ai1-receipt"}, readback: &videomanagementconnector.Submission{ID: "cloned-ai1-receipt", Status: "submitted"}}
 	result, err := executeWebSubmit(ctx, "tester", usersDir, store, webSubmitRequest{
 		TaskIDs: []string{doc.BookID}, Versions: []string{"ai1"}, OperationID: "force-operation", Force: true,
 	}, nil, connector)
@@ -286,6 +286,7 @@ func TestWebSubmitForceDoesNotGuessPriorVersionFromHistoricalListing(t *testing.
 }
 
 type cloneSubmissionEvidenceSpy struct {
+	readback *videomanagementconnector.Submission
 	recordingSubmitConnector
 	cloneSource    string
 	content        string
@@ -355,4 +356,11 @@ func newSubmissionEvidenceTask(t *testing.T) (*novelfetchworkshop.MemoryStore, s
 		t.Fatal(err)
 	}
 	return store, usersDir, doc
+}
+
+func (c *cloneSubmissionEvidenceSpy) GetSubmission(ctx context.Context, session videomanagementconnector.Session, bookID string) (videomanagementconnector.Submission, error) {
+	if c.readback != nil {
+		return *c.readback, nil
+	}
+	return c.recordingSubmitConnector.GetSubmission(ctx, session, bookID)
 }

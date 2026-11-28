@@ -130,5 +130,5 @@ func restoreWorkshopOriginal(w http.ResponseWriter, req *http.Request, store nov
 	latest.OriginalRaw = currentRaw
 	latest.Original = currentText
 	latest.ProcessedText = currentText
-	writeJSON(w, 200, map[string]any{"task": latest})
+	writeJSON(w, 200, map[string]any{"task": safeNovelFetchDocumentErrors(latest)})
 }

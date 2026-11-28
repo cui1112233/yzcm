@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"qiantie/backend/internal/batchfactoryv11"
 	"qiantie/backend/internal/novelfetchworkshop"
 )
 
@@ -215,7 +216,7 @@ func scheduleNovelFetchTaskRetry(meta map[string]any, stage string, failure erro
 	attempt := intValue(previous["attempt"]) + 1
 	errorText := ""
 	if failure != nil {
-		errorText = strings.TrimSpace(failure.Error())
+		errorText = batchfactoryv11.SafeProviderErrorText(strings.TrimSpace(failure.Error()))
 	}
 	firstAttempt := firstText(previous["first_attempt_at"])
 	if firstAttempt == "" && intValue(previous["attempt"]) == 0 {

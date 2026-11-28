@@ -684,6 +684,7 @@ func targetConfigItems(payload map[string]any) ([]any, bool) {
 // Without this adapter the API had the data, but every visible column read an
 // empty legacy field name.
 func legacyBatchRewriteTask(document novelfetchworkshop.Document) map[string]any {
+	document = safeNovelFetchDocumentErrors(document)
 	task := map[string]any{}
 	for key, value := range document.Meta {
 		task[key] = value

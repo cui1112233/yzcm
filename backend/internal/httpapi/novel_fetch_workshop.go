@@ -1547,6 +1547,7 @@ func appendNovelFetchDocumentLog(document *novelfetchworkshop.Document, event, d
 		event = "operation"
 	}
 	detail = strings.TrimSpace(detail)
+	detail = batchfactoryv11.SafeProviderErrorText(detail)
 	detail = novelFetchBearerSecretPattern.ReplaceAllString(detail, `${1}[已隐藏]`)
 	detail = novelFetchCookieSecretPattern.ReplaceAllString(detail, `${1}[已隐藏]`)
 	detail = novelFetchNamedSecretPattern.ReplaceAllString(detail, `${1}[已隐藏]`)
@@ -3706,7 +3707,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 				return
 			}
 		}
-		writeJSON(w, http.StatusOK, verifiedWorkshopJobView(req.Context(), store, queue, identity.Username, job))
+		writeJSON(w, http.StatusOK, safeNovelFetchErrorView(verifiedWorkshopJobView(req.Context(), store, queue, identity.Username, job)))
 	})
 
 	mux.HandleFunc("GET /api/novel-fetch-workshop/runs", func(w http.ResponseWriter, req *http.Request) {
@@ -3720,6 +3721,9 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "获取执行审计失败"})
 			return
+		}
+		for i := range runs {
+			runs[i].ErrorMessage = batchfactoryv11.SafeProviderErrorText(runs[i].ErrorMessage)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
 	})
@@ -4041,7 +4045,7 @@ func registerNovelFetchWorkshopRoutes(mux *http.ServeMux, store novelfetchworksh
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存原文失败"})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"task": document})
+		writeJSON(w, http.StatusOK, map[string]any{"task": safeNovelFetchDocumentErrors(document)})
 	})
 
 	mux.HandleFunc("POST /api/novel-fetch-workshop/tasks/{bookId}/restore-original", func(w http.ResponseWriter, req *http.Request) {
@@ -5099,6 +5103,7 @@ func publicNovelFetchConfig(input map[string]any) map[string]any {
 }
 
 func novelFetchTaskDetailPayload(document novelfetchworkshop.Document) map[string]any {
+	document = safeNovelFetchDocumentErrors(document)
 	raw, _ := json.Marshal(document)
 	payload := map[string]any{}
 	_ = json.Unmarshal(raw, &payload)
@@ -5115,6 +5120,7 @@ func novelFetchTaskDetailPayload(document novelfetchworkshop.Document) map[strin
 }
 
 func legacyNovelFetchTask(document novelfetchworkshop.Document) map[string]any {
+	document = safeNovelFetchDocumentErrors(document)
 	raw, _ := json.Marshal(document)
 	result := map[string]any{}
 	_ = json.Unmarshal(raw, &result)
