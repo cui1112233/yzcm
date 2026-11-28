@@ -23,4 +23,4 @@
 
 ## 待办边界
 
-文件、图片附件、TOS原件、OCR、Skills及Auto委派尚未交付。当前模型请求仍是文字；default引用只开放能核对最终JSON的OpenAI传输，不能据此宣称全部provider可用。前端分镜选择为整份分镜；API支持镜头范围，但逐镜头勾选界面待补。D02及整体洛水对齐均未完成，原失败生产批次没有在本次重跑。
+文件、图片附件、TOS原件、OCR、Skills及Auto委派尚未交付。当前模型请求仍是文字；default引用只开放能核对最终JSON的OpenAI传输，不能据此宣称全部provider可用。逐镜头勾选界面随后已在6527b60e完成本地验收，见2026-11-28-screenplay-assistant-shot-references-local.md。D02及整体洛水对齐均未完成，原失败生产批次没有在本次重跑。
