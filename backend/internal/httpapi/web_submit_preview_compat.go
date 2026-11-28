@@ -119,7 +119,7 @@ func buildWebSubmitPlanPayload(ctx context.Context, store novelfetchworkshop.Sto
 				continue
 			}
 			profile := webSubmitProfile(web, version)
-			platform := firstText(profile["platform_id"], profile["platformId"], meta["platformId"], meta["platform_id"])
+			platform := webSubmitTaskPlatform(meta, profile)
 			if gaps := submissionClassificationGaps(platform, submissionResolvedGender(doc), submissionResolvedStyle(meta)); len(gaps) > 0 {
 				status := "waiting_config"
 				if styleNeedsResolution(meta) {

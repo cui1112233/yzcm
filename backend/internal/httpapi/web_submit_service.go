@@ -372,7 +372,7 @@ func executeWebSubmit(ctx context.Context, owner, usersDir string, store novelfe
 					}
 					profile := webSubmitProfile(web, version)
 					row["profile"] = firstText(profile["id"], profile["name"], mapOrEmpty(web["version_profiles"])[version], mapOrEmpty(web["profile_bindings"])[version], web["selected_profile"])
-					platformText := firstText(profile["platform_id"], profile["platformId"], meta["platformId"], meta["platform_id"])
+					platformText := webSubmitTaskPlatform(meta, profile)
 					if gaps := submissionClassificationGaps(platformText, submissionResolvedGender(doc), submissionResolvedStyle(meta)); len(gaps) > 0 {
 						status := "waiting_config"
 						if styleNeedsResolution(meta) {

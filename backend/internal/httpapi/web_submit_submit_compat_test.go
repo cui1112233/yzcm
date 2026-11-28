@@ -330,7 +330,7 @@ func TestWebSubmitAppliesSavedProfileAndDoesNotResendAfterUncertainSubmit(t *tes
 	if res.Code != http.StatusOK || connector.submitCalls != 1 || connector.readbackCalls != 0 {
 		t.Fatalf("status=%d submits=%d readbacks=%d body=%s", res.Code, connector.submitCalls, connector.readbackCalls, res.Body.String())
 	}
-	if fields := connector.lastInput.FormFields; fields["organization"] != "org-9" || fields["platform_id"] != "6" || fields["ziti"] != "4" {
+	if fields := connector.lastInput.FormFields; fields["organization"] != "org-9" || fields["platform_id"] != "1" || fields["ziti"] != "4" {
 		t.Fatalf("saved submit settings were not applied: %#v", fields)
 	}
 	var payload struct {
